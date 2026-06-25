@@ -44,6 +44,8 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         url: SecretString::from(url),
         pool_size: 4,
         ssl_mode: SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
     })
 }
 
@@ -2040,6 +2042,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                     source_list_hash: source_list_hash.to_string(),
                     near_status: TraceCreditSettlementNearStatus::Pending,
                     near_outbox_id: Some(near_outbox_id),
+                    near_payout_hold_reason: None,
                 }],
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: Some("trace-ranker-settlement-v3".to_string()),
@@ -2102,6 +2105,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                     "idempotency_key": idempotency_key
                 }),
                 status: TraceCreditSettlementNearStatus::Pending,
+                payout_near_account_id: Some(format!("{label}.near")),
             })
             .await
             .expect("upsert tenant NEAR outbox item");
@@ -2109,6 +2113,11 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
         assert_eq!(near_item.near_outbox_id, near_outbox_id);
         assert_eq!(near_item.credit_account_hash, account_hash);
         assert_eq!(near_item.status, TraceCreditSettlementNearStatus::Pending);
+        assert_eq!(
+            near_item.payout_near_account_id,
+            Some(format!("{label}.near")),
+            "settlement outbox round-trips the designated payout near account id"
+        );
 
         let account_near_item = backend
             .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
@@ -2126,6 +2135,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                     "idempotency_key": format!("sha256:{label}-hold-freeze")
                 }),
                 status: TraceCreditSettlementNearStatus::Pending,
+                payout_near_account_id: None,
             })
             .await
             .expect("upsert tenant NEAR account freeze outbox item");
@@ -2137,6 +2147,10 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             account_near_item.status,
             TraceCreditSettlementNearStatus::Pending
         );
+        assert_eq!(
+            account_near_item.payout_near_account_id, None,
+            "account freeze outbox carries no payout target"
+        );
     }
 
     let updated = backend
@@ -2145,6 +2159,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             near_outbox_id,
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
+            None,
             None,
         )
         .await
@@ -2165,6 +2180,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
             Some("sha256:near-confirmation-mismatch".to_string()),
+            None,
         )
         .await
         .expect("update submitted NEAR outbox item with confirmation error")
@@ -2188,6 +2204,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             account_near_outbox_id,
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
+            None,
             None,
         )
         .await

@@ -36,13 +36,41 @@ Onboarding refusals use these public labels:
 |---|---|---|
 | `InviteMalformed` | 400 | Invite schema/version/format is invalid |
 | `DeviceKeyMalformed` | 400 | Device public key is not base64 Ed25519 public-key bytes |
-| `InviteNotValid` | 403 | Invite hash is not allowlisted, revoked, or out of uses |
+| `InviteNotValid` | 403 | Invite hash is not allowlisted or revoked |
+| `InviteAlreadyConsumed` | 403 | Invite is valid but its retry budget is exhausted |
 | `OnboardAllowlistNotConfigured` | 503 | Issuer has no allowlist source |
 | `OnboardRegistryNotConfigured` | 503 | Device-key registry DB is not enabled |
 | `OnboardTenantConfigMissing` | 503 | Issuer is missing the onboarding URL config returned to clients |
 | `OnboardAllowlistStale` | 503 | Cached snapshot is stale and the source has not reloaded successfully |
 
-## Provisioning an invite code
+## Provisioning invite codes
+
+Prefer the batch helper for pilot operations. It generates unambiguous
+16-character invite codes, writes only hash-only allowlist entries, defaults
+each invite to a retry budget of three device registrations, and prints the
+shareable links for Slack/DM handoff:
+
+```bash
+sudo python3 scripts/operator/generate-pilot-invites.py \
+  --count 5 \
+  --tenant-id tenant-zaki-pilot \
+  --allowlist /etc/tracecommons/allowlist.json \
+  --write \
+  --links-out /tmp/tracecommons-invite-links.txt
+sudo systemctl restart trace-commons-upload-claim-issuer.service
+cat /tmp/tracecommons-invite-links.txt
+```
+
+Run the helper on the pilot host, or run it locally with
+`--entries-out /tmp/allowlist-entries.json` if you want to review the
+hash-only entries before applying them. The `--links-out` file contains raw
+invite links; keep it local to the operator and delete it after sending DMs.
+
+The issuer can refresh the file on its timer, but restarting only
+`trace-commons-upload-claim-issuer.service` after an operator batch makes
+new invites ready immediately and fails fast if the edited file is malformed.
+
+## Manual single-invite flow
 
 Two steps: pick a code, hash it, append to the allowlist JSON.
 
@@ -80,7 +108,7 @@ trace-commons-upload-claim-issuer --hash-invite-code INV9K3RT5FBQ72JX
       "subject_hash": "sha256:8b1a...",
       "tenant_id": "tenant-zaki-pilot",
       "note_label": "closed-alpha-batch-1",
-      "max_uses": 1
+      "max_uses": 3
     }
   ]
 }
@@ -103,9 +131,11 @@ trace-commons-upload-claim-issuer --hash-invite-code INV9K3RT5FBQ72JX
   `contributor_label` from `/v1/onboard` and never appears in logs or
   admin responses. Do not put a legal name, email, account id, Slack
   handle, or any identifying reference here.
-- `max_uses`: positive integer. Defaults to `1` when omitted. The
+- `max_uses`: positive integer. Defaults to `3` when omitted. The
   workload-claim path treats this as metadata, while `/v1/onboard`
-  enforces it through the PostgreSQL `onboarding_invites` counter.
+  enforces it through the PostgreSQL `onboarding_invites` counter. Use
+  `3` for pilot invites so ordinary client retries do not consume the only
+  chance; use `1` only for deliberately single-use tests.
 
 The issuer re-reads the file every
 `TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS` (default 60), so a
@@ -212,13 +242,13 @@ If step 3 returns 200, the allowlist source is not wired up — confirm
 
 ## Adding a contributor mid-pilot
 
-1. Send the contributor a fresh invite code through whatever recruitment
+1. Run `scripts/operator/generate-pilot-invites.py` with `--count 1` or a
+   larger batch count.
+2. Restart only `trace-commons-upload-claim-issuer.service` so the issuer
+   warm-loads the new file immediately.
+3. Confirm the service is active and the allowlist entry count increased.
+4. Send the contributor the fresh invite link through whatever recruitment
    channel the pilot uses (form, DM, signed announcement).
-2. Hash it with `--hash-invite-code`.
-3. Append a new entry to the allowlist JSON.
-4. Wait up to `TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS` (default
-   60s) — no restart, no redeploy.
-5. Confirm `entries` in `/v1/admin/allowlist-status` ticked up by one.
 
 ## Agent-driven onboarding smoke
 

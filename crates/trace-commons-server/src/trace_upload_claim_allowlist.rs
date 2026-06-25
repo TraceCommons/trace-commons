@@ -25,7 +25,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 fn default_allowlist_max_uses() -> u32 {
-    1
+    3
 }
 
 /// Canonical invite-code hashing. The `"invite:"` prefix namespaces the
@@ -103,8 +103,9 @@ pub struct AllowlistEntry {
     #[serde(default)]
     pub note_label: Option<String>,
     /// Maximum number of device registrations this invite can create.
-    /// Existing allowlist files omit the field and preserve single-use
-    /// onboarding semantics.
+    /// Existing allowlist files omit the field and get the pilot retry
+    /// budget. Operators can set this to `1` for deliberately single-use
+    /// invitations.
     #[serde(default = "default_allowlist_max_uses")]
     pub max_uses: u32,
 }
@@ -542,6 +543,25 @@ mod tests {
             Some("closed-alpha-batch-1")
         );
         assert_eq!(entry.max_uses, 3);
+    }
+
+    #[test]
+    fn snapshot_defaults_omitted_max_uses_to_retry_budget() {
+        let h = hash_invite_code("INV-1");
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1,
+                "generated_at": "2026-05-17T00:00:00Z",
+                "policy_label": "pilot",
+                "entries": [{{
+                    "subject_hash": "{h}",
+                    "tenant_id": "tenant-zaki-pilot"
+                }}]
+            }}"#
+        ))
+        .expect("allowlist JSON parses");
+        let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
+        assert_eq!(snap.entry(&h).expect("entry by hash").max_uses, 3);
     }
 
     #[test]

@@ -54,7 +54,7 @@ malformed and never falls back to a less-restricted backend.
 | `GET` | `/health` | Returns `200 {"status":"ok","checks":{...}}` when the signing key signs cleanly and the workload public key parses; `503 {"status":"degraded","checks":{...}}` otherwise. Check names are stable labels; failure detail is hash-only. |
 | `GET` | `/.well-known/trace-commons-ed25519-keyset.json` | Returns the issuer's public keyset (`kid`, `public_key_pem`). Consumers cache this through their guarded-refresh path. |
 | `POST` | `/v1/trace-upload-claim` | Mints a Bearer upload claim for either an authenticated workload JWT or a registered device key. Registered devices send `x-trace-device-key-id: sha256:<64-hex>` and `x-trace-device-signature: <base64-ed25519-signature>` over the exact JSON request body. Body schema is `ironclaw.trace_upload_claim_request.v1`. |
-| `POST` | `/v1/onboard` | Exchanges an invite code plus base64 Ed25519 device public key for tenant-scoped onboarding metadata and a registered device key. Body schema is `trace_commons.onboard_request.v1`; response schema is `trace_commons.onboard_response.v1`. |
+| `POST` | `/v1/onboard` | Exchanges an invite code plus base64 Ed25519 device public key for tenant-scoped onboarding metadata and a registered device key. Same invite plus same device key is idempotent; exhausted retry budgets return `InviteAlreadyConsumed`. Body schema is `trace_commons.onboard_request.v1`; response schema is `trace_commons.onboard_response.v1`. |
 
 ## CLI subcommands
 
@@ -67,6 +67,7 @@ starts.
 | `--generate-keypair` | Generate a fresh Ed25519 keypair and print the PKCS#8 private key PEM, SPKI public key PEM, and a suggested `kid` (UUID v4) to stdout. Output is not written to disk; the operator pipes it where they want. Exit 0 on success. |
 | `--health-check` | Load env vars, attempt to build state and exercise the signing and workload keys, then print `OK` (exit 0) or `FAIL: <reason>` (exit 1). The reason is a hash-free stable label. Does not bind a listener. |
 | `--mint-test-claim` | Mint a test upload claim for a hardcoded test tenant (`trace-upload-claim-issuer-test-tenant`) and principal (`principal:trace-upload-claim-issuer-test`) and print the JWT to stdout. For testing / deploy probes only — must not be exposed in production traffic paths. |
+| `--hash-invite-code <CODE>` | Print the canonical `sha256:` invite subject hash for a raw pilot invite code. Prefer `scripts/operator/generate-pilot-invites.py` for normal batch operations. |
 
 ## Key rotation procedure
 

@@ -287,7 +287,8 @@ ironclaw traces revoke <submission-id> \
 |---|---|---|
 | `400 InviteMalformed` from onboarding | Invite link is malformed or was copied with extra characters | Ask the operator to resend the invite link |
 | `400 DeviceKeyMalformed` from onboarding | Ironclaw generated or encoded an invalid device public key | Upgrade Ironclaw and retry onboarding |
-| `403 InviteNotValid` from onboarding | Invite hash is not allowlisted, revoked, or already consumed | Ask the operator to confirm the invite entry and `max_uses` |
+| `403 InviteNotValid` from onboarding | Invite hash is not allowlisted or was revoked before use | Ask the operator to confirm the invite entry is active and the issuer has refreshed |
+| `403 InviteAlreadyConsumed` from onboarding | The invite was valid but its retry budget was exhausted by different device keys | Retry from the same Ironclaw profile if it kept the pending device key; otherwise ask the operator for a new invite |
 | `503 OnboardRegistryNotConfigured` from onboarding | Issuer was deployed without the device-key registry DB | Operator needs to enable `TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true` |
 | `401 missing bearer token` | Workload JWT expired | Refresh `IRONCLAW_TRACE_WORKLOAD_TOKEN` and rerun |
 | `403 invite code not allowed` from issuer | Allowlist hasn't picked up your code yet (60s refresh) | Wait 60s, retry; if persistent, ask operator to confirm the hash landed |

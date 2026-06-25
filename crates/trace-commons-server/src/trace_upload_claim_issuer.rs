@@ -1652,6 +1652,12 @@ impl TraceUploadClaimIssuerState {
                     StatusCode::FORBIDDEN,
                     TraceOnboardErrorCode::InviteNotValid,
                 ),
+                crate::db::OnboardDeviceKeyError::InviteAlreadyConsumed => {
+                    IssuerError::onboard_error(
+                        StatusCode::FORBIDDEN,
+                        TraceOnboardErrorCode::InviteAlreadyConsumed,
+                    )
+                }
                 crate::db::OnboardDeviceKeyError::Database(_) => IssuerError::internal(),
             })?;
 

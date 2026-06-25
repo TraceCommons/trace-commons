@@ -41,6 +41,7 @@ pub struct TraceOnboardResponse {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TraceOnboardErrorCode {
     InviteNotValid,
+    InviteAlreadyConsumed,
     InviteMalformed,
     DeviceKeyMalformed,
     OnboardRateLimited,
@@ -54,6 +55,7 @@ impl TraceOnboardErrorCode {
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::InviteNotValid => "InviteNotValid",
+            Self::InviteAlreadyConsumed => "InviteAlreadyConsumed",
             Self::InviteMalformed => "InviteMalformed",
             Self::DeviceKeyMalformed => "DeviceKeyMalformed",
             Self::OnboardRateLimited => "OnboardRateLimited",
@@ -119,6 +121,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&TraceOnboardErrorCode::InviteNotValid).unwrap(),
             "\"InviteNotValid\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TraceOnboardErrorCode::InviteAlreadyConsumed).unwrap(),
+            "\"InviteAlreadyConsumed\""
         );
         assert_eq!(
             serde_json::from_str::<TraceOnboardErrorCode>("\"OnboardRateLimited\"").unwrap(),

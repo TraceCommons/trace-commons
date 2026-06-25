@@ -262,3 +262,31 @@ floors set from OASST2 don't apply to the pilot's domain.
 **Fix:** Re-run `analyze-calibration.sh` on **pilot** data only (filter
 the CSV to recent gate_version_hash rows). The pilot-derived floors
 will be different and are the correct values.
+
+## DB-backed `trace-commons-ingest` tests flake under parallel `cargo test`
+
+**Symptom:** Running the in-binary PostgreSQL tests
+(`cargo test -p trace-commons-server --bin trace-commons-ingest`) with
+the default thread pool intermittently fails with
+`too many outstanding login links` (HTTP 429) or
+`invalid or expired account session` (HTTP 401) — even though the same
+tests pass one at a time.
+**Root cause:** The 700+ DB-backed ingest tests (including the
+account / passkey / session / rotation suite) all operate on a **shared**
+`tenant-a` and clean it per-test via `cleanup_pg_trace_tenant`. Run
+concurrently they race: one test's cleanup deletes another's live session
+rows (401), and concurrent `mint_login_link` calls for the same principal
+trip the per-principal **DB** outstanding-link quota (429). This is a
+**DB shared-state** trait, not the in-process `ACCOUNT_RATE_LIMITER` (that
+limiter is reset at the start of every DB-backed test, so it never causes
+flakes).
+**Fix:** Run the DB-backed ingest suite **single-threaded**:
+
+```sh
+cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+```
+
+CI runs this suite serially for the same reason. The
+in-process limiter reset makes each account/passkey test independent of
+limiter state, but it does **not** remove the `--test-threads=1`
+requirement for the shared-`tenant-a` DB rows.

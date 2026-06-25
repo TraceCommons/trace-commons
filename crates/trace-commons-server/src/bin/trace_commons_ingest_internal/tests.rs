@@ -19,6 +19,8 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         url: SecretString::from(url),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -31,6 +33,19 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         eprintln!("skipping: migrations failed ({error})");
         return None;
     }
+    // Reset the process-global account-surface rate limiter at the START of every
+    // DB-backed test. The account/passkey/session/rotation tests all drive handlers
+    // that share the `ACCOUNT_RATE_LIMITER` singleton (keyed by IP / global /
+    // per-credential buckets); without this, a test inherits hit counts from
+    // whatever ran before it and flakes with spurious rate-limit denials under
+    // default parallelism (e.g. `passkey_login_binds_only_to_owning_account`). The
+    // reset is harmless for tests that don't touch the limiter (it clears empty
+    // maps) and runs before any test logic, so no test can accumulate state across
+    // this boundary. This makes each DB-backed account/passkey test independent of
+    // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
+    // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
+    // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
+    reset_account_rate_limiter_for_test();
     Some(backend)
 }
 
@@ -50,6 +65,18 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
     )
     .await
     .expect("set cleanup tenant context");
+    // `trace_audit_events` has no FK to `trace_tenants`, so deleting the tenant
+    // does NOT cascade-clear its mirrored audit chain. Left behind, a stale DB
+    // chain head collides with the next test's fresh (genesis) file chain and
+    // trips the audit-chain drift guard. Clear it explicitly (tenant-scoped under
+    // the cleanup RLS context) so DB-backed account tests are self-isolating on a
+    // reused database.
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await;
     let _ = tx
         .execute(
             "DELETE FROM trace_tenants WHERE tenant_id = $1",
@@ -57,6 +84,3138 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
         )
         .await;
     tx.commit().await.expect("commit cleanup transaction");
+}
+
+#[tokio::test]
+async fn login_resolver_role_cannot_touch_other_tables() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let row = client
+        .query_one(
+            "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'trace_login_resolver'",
+            &[],
+        )
+        .await
+        .expect("resolver role exists");
+    let bypass: bool = row.get(0);
+    assert!(!bypass, "resolver role must NOT have BYPASSRLS");
+    let can_insert: bool = client
+        .query_one(
+            "SELECT has_table_privilege('trace_login_resolver','trace_login_links','INSERT')",
+            &[],
+        )
+        .await
+        .expect("priv check")
+        .get(0);
+    assert!(!can_insert, "resolver must not write");
+}
+
+/// BLOCKER regression (Hardening D correctness): the `trace_login_resolver` role
+/// must be able to map a globally-unique `code_hash` -> `tenant_id` even though it
+/// runs with NO tenant context. `trace_login_links` has FORCE RLS with the PUBLIC
+/// `trace_corpus_tenant_isolation` policy (`tenant_id = trace_current_tenant_id()`),
+/// which alone would exclude EVERY row for a role with no tenant set — so without a
+/// resolver-scoped permissive policy the redeem path always fails closed (no tenant
+/// resolves) and every redeem 400s in production. The column GRANT does not relax
+/// RLS, and `code_hash` uniqueness is irrelevant to row visibility under forced RLS.
+///
+/// This test exercises the REAL policy path: `SET ROLE trace_login_resolver` drops
+/// the superuser RLS bypass, so the resolver role's RLS treatment is what runs even
+/// from a superuser test connection. It asserts the column-scoped read returns the
+/// correct tenant (proving the permissive policy is in effect) and that an
+/// out-of-grant column read is rejected (proving least privilege is retained).
+#[tokio::test]
+async fn login_resolver_reads_tenant_across_rls_under_set_role() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint a real login link via the normal tenant-scoped path so a row exists in
+    // trace_login_links with a known code_hash bound to tenant-a.
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let code_hash = trace_commons_server::account_session::hash_secret(&code);
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
+    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
+    // the resolver's real RLS treatment.
+    tx.execute("SET ROLE trace_login_resolver", &[])
+        .await
+        .expect("set resolver role");
+
+    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
+    // tenant despite forced RLS + no tenant context (permissive resolver policy).
+    let resolved: Option<String> = tx
+        .query_opt(
+            "SELECT tenant_id FROM trace_login_links WHERE code_hash = $1",
+            &[&code_hash],
+        )
+        .await
+        .expect("resolver SELECT runs under RLS")
+        .map(|row| row.get::<_, String>(0));
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tenant-a"),
+        "resolver must resolve the tenant for a known code_hash under forced RLS"
+    );
+
+    // Least privilege: an out-of-grant column read is rejected by the column GRANT
+    // (the resolver may read only tenant_id + code_hash). This keeps the permissive
+    // RLS policy from widening the resolver's effective surface.
+    let out_of_grant = tx
+        .query_opt(
+            "SELECT account_id FROM trace_login_links WHERE code_hash = $1",
+            &[&code_hash],
+        )
+        .await;
+    assert!(
+        out_of_grant.is_err(),
+        "resolver must NOT be able to read columns outside its (tenant_id, code_hash) grant"
+    );
+
+    // The transaction is poisoned by the rejected statement; roll it back and reset.
+    drop(tx);
+    let reset = client.batch_execute("RESET ROLE").await;
+    let _ = reset; // best-effort; connection returns to the pool either way.
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// BLOCKER regression (Slice 2 passkeys): the `trace_login_resolver` role must be
+/// able to map a globally-unique WebAuthn `credential_id` -> `tenant_id` even
+/// though an unauthenticated assertion arrives with NO tenant context.
+/// `trace_webauthn_credentials` has FORCE RLS with the PUBLIC
+/// `trace_corpus_tenant_isolation` policy (`tenant_id = trace_current_tenant_id()`),
+/// which alone excludes EVERY row for a role with no tenant set — so without the
+/// resolver-scoped permissive policy (`trace_login_resolver_credential_read`) the
+/// login path always fails closed and every assertion 400s in production. The
+/// column GRANT does not relax RLS, and `credential_id` uniqueness is irrelevant
+/// to row visibility under forced RLS.
+///
+/// This mirrors `login_resolver_reads_tenant_across_rls_under_set_role` for
+/// trace_login_links. `SET ROLE trace_login_resolver` drops the superuser RLS
+/// bypass, so the resolver role's real RLS treatment runs even from a superuser
+/// test connection. It asserts the column-scoped read returns the correct tenant
+/// (permissive policy in effect) and that an out-of-grant column read is rejected
+/// (least privilege retained).
+#[tokio::test]
+async fn credential_resolver_reads_tenant_across_rls_under_set_role() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    // Seed a tenant + account via the normal tenant-scoped path, then raw-insert a
+    // webauthn credential under tenant context (the credential FK needs the account).
+    let account_id = backend
+        .create_or_reuse_account("tenant-a", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-resolver-test-globally-unique";
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    {
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set seed tenant context");
+        let passkey_json = serde_json::json!({});
+        tx.execute(
+            "INSERT INTO trace_webauthn_credentials
+                 (tenant_id, credential_id, account_id, passkey)
+             VALUES (trace_current_tenant_id(), $1, $2, $3)",
+            &[&credential_id, &account_id, &passkey_json],
+        )
+        .await
+        .expect("seed credential row");
+        tx.commit().await.expect("commit seed");
+    }
+
+    let tx = client.transaction().await.expect("tx");
+    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
+    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
+    // the resolver's real RLS treatment.
+    tx.execute("SET ROLE trace_login_resolver", &[])
+        .await
+        .expect("set resolver role");
+
+    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
+    // tenant despite forced RLS + no tenant context (permissive resolver policy).
+    let resolved: Option<String> = tx
+        .query_opt(
+            "SELECT tenant_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+            &[&credential_id],
+        )
+        .await
+        .expect("resolver SELECT runs under RLS")
+        .map(|row| row.get::<_, String>(0));
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tenant-a"),
+        "resolver must resolve the tenant for a known credential_id under forced RLS"
+    );
+
+    // Least privilege: an out-of-grant column read is rejected by the column GRANT
+    // (the resolver may read only tenant_id + credential_id). This keeps the
+    // permissive RLS policy from widening the resolver's effective surface.
+    let out_of_grant = tx
+        .query_opt(
+            "SELECT account_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+            &[&credential_id],
+        )
+        .await;
+    assert!(
+        out_of_grant.is_err(),
+        "resolver must NOT be able to read columns outside its (tenant_id, credential_id) grant"
+    );
+
+    // The transaction is poisoned by the rejected statement; roll it back and reset.
+    drop(tx);
+    let reset = client.batch_execute("RESET ROLE").await;
+    let _ = reset; // best-effort; connection returns to the pool either way.
+
+    // Also exercise the inherent resolver method end-to-end (narrow resolver pool).
+    let via_method = backend
+        .resolve_credential_tenant(credential_id)
+        .await
+        .expect("resolver method runs");
+    assert_eq!(
+        via_method.as_deref(),
+        Some("tenant-a"),
+        "resolve_credential_tenant must return the seeded tenant via the narrow pool"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// `resolve_principals_to_accounts` returns the active principal->account map for a
+/// batch of principal refs. It must: (a) map principals with an ACTIVE link
+/// (`unlinked_at IS NULL`) to their account, including multiple principals that
+/// share one account; (b) EXCLUDE principals whose link was unlinked
+/// (`unlinked_at IS NOT NULL`); (c) EXCLUDE principals that were never linked; and
+/// (d) EXCLUDE principal refs not present in the table at all. This is the batched
+/// resolver that the credit-view and settlement re-key paths consume.
+#[tokio::test]
+async fn resolve_principals_to_accounts_maps_active_links_only() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
+
+    // Mint account A and link principal-a1 (the mint links exactly this principal).
+    let account_a = backend
+        .create_or_reuse_account("tenant-resolve-batch", "principal-a1")
+        .await
+        .expect("mint account A");
+
+    // Link a SECOND principal (principal-a2) to the SAME account A, plus an
+    // already-UNLINKED principal that must be excluded. create_or_reuse_account does
+    // NOT link additional principals to an existing account, so insert directly under
+    // the tenant's RLS context.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-resolve-batch"],
+        )
+        .await
+        .expect("set seed tenant context");
+        // Active second principal on account A.
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)",
+            &[&account_a, &"principal-a2"],
+        )
+        .await
+        .expect("link active second principal to account A");
+        // Unlinked principal on account A: must be excluded from the map.
+        tx.execute(
+            "INSERT INTO trace_account_principals
+                 (tenant_id, account_id, principal_ref, linked_at, unlinked_at)
+             VALUES (trace_current_tenant_id(), $1, $2, now() - INTERVAL '1 day', now())",
+            &[&account_a, &"principal-unlinked"],
+        )
+        .await
+        .expect("insert unlinked principal on account A");
+        tx.commit().await.expect("commit seed");
+    }
+
+    let map = backend
+        .resolve_principals_to_accounts(
+            "tenant-resolve-batch",
+            &[
+                "principal-a1".to_string(),
+                "principal-a2".to_string(),
+                "principal-unlinked".to_string(),
+                "principal-unknown".to_string(),
+            ],
+        )
+        .await
+        .expect("resolve batch");
+
+    assert_eq!(
+        map.len(),
+        2,
+        "only the two ACTIVE principals resolve; unlinked + unknown excluded"
+    );
+    assert_eq!(
+        map.get("principal-a1").copied(),
+        Some(account_a),
+        "principal-a1 maps to account A"
+    );
+    assert_eq!(
+        map.get("principal-a2").copied(),
+        Some(account_a),
+        "principal-a2 (second active link) maps to the same account A"
+    );
+    assert!(
+        !map.contains_key("principal-unlinked"),
+        "an unlinked_at IS NOT NULL row must be excluded from the map"
+    );
+    assert!(
+        !map.contains_key("principal-unknown"),
+        "a principal absent from the table must be excluded from the map"
+    );
+
+    // Empty input slice returns an empty map.
+    let empty = backend
+        .resolve_principals_to_accounts("tenant-resolve-batch", &[])
+        .await
+        .expect("resolve empty batch");
+    assert!(empty.is_empty(), "empty input slice yields an empty map");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
+}
+
+/// Slice 3b: the contributor credit surface is broadened from own-principal to
+/// ACCOUNT scope. A caller whose device principal is linked to an account sees
+/// credit for EVERY principal on that account (active links only); an UNLINKED
+/// caller still sees only its own principal.
+///
+/// Seeds account A linking P1 (token-a) and P2 (token-a-2). Each of P1, P2 owns a
+/// submission with a credit event. Authenticating the credit surface as P2 must
+/// now surface BOTH P1's and P2's credit events (P2 -> A admits all of A's
+/// principals' events), and the scalar credit sums must agree. An unlinked P3
+/// (token-a-3) with its own submission+credit must still see ONLY its own event.
+#[tokio::test]
+async fn contributor_credit_visibility_broadens_to_account_scope() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    // db_contributor_reads = true so the credit handlers read the credit view from
+    // the DB mirror (the account-linkage source of truth).
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Seed a submission + credit event owned by `token`. Returns (submission_id,
+    // credit_event_id). The credit event's auth_principal_ref is the submission
+    // owner's device principal.
+    async fn seed_submission_with_credit(state: &Arc<AppState>, token: &str) -> (Uuid, Uuid) {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
+            .await
+            .expect("submission mirrors to DB");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("training utility".to_string()),
+                external_ref: Some(format!("training-utility:{token}")),
+            }),
+        )
+        .await
+        .expect("credit event mirrors to DB");
+        (submission_id, event.event_id)
+    }
+
+    let (p1_submission, p1_event) = seed_submission_with_credit(&state, "token-a").await;
+    let (p2_submission, p2_event) = seed_submission_with_credit(&state, "token-a-2").await;
+    let (p3_submission, p3_event) = seed_submission_with_credit(&state, "token-a-3").await;
+
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+    let p3_principal = principal_storage_ref("token-a-3");
+
+    // Mint account A linked to P1, then add P2 as a second ACTIVE link to A. P3 is
+    // left UNLINKED. Mirrors Task 2's seeding shape.
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set seed tenant context");
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)",
+            &[&account_a, &p2_principal],
+        )
+        .await
+        .expect("link P2 to account A");
+        tx.commit().await.expect("commit seed");
+    }
+
+    // --- Linked caller P2 sees BOTH P1's and P2's credit events. ---
+    let Json(p2_events) = credit_events_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("P2 credit events read succeeds");
+    let p2_visible_principals = p2_events
+        .iter()
+        .map(|event| event.auth_principal_ref.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        p2_visible_principals.contains(p1_principal.as_str()),
+        "linked caller P2 must now see P1's credit events (account scope)"
+    );
+    assert!(
+        p2_visible_principals.contains(p2_principal.as_str()),
+        "linked caller P2 still sees its own credit events"
+    );
+    assert!(
+        !p2_visible_principals.contains(p3_principal.as_str()),
+        "P3 is unlinked and must NOT appear in P2's account-scoped view"
+    );
+    let p2_event_ids = p2_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        p2_event_ids.contains(&p1_event),
+        "P1's event id is visible to P2"
+    );
+    assert!(
+        p2_event_ids.contains(&p2_event),
+        "P2's event id is visible to P2"
+    );
+    assert!(
+        !p2_event_ids.contains(&p3_event),
+        "P3's event id must not leak to P2"
+    );
+
+    // The scalar credit response must agree with the per-event view: P2's
+    // account-scoped summary counts BOTH P1's and P2's accepted submissions.
+    let Json(p2_credit) = credit_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("P2 credit summary read succeeds");
+    assert_eq!(
+        p2_credit.accepted, 2,
+        "P2's account-scoped view counts BOTH P1's and P2's accepted submissions"
+    );
+
+    // --- Unlinked caller P3 sees ONLY its own credit event (unchanged). ---
+    let Json(p3_events) = credit_events_handler(State(state.clone()), auth_headers("token-a-3"))
+        .await
+        .expect("P3 credit events read succeeds");
+    let p3_event_ids = p3_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        p3_event_ids.len(),
+        1,
+        "unlinked P3 sees exactly its own event"
+    );
+    assert!(p3_event_ids.contains(&p3_event), "P3 sees its own event");
+    assert!(
+        !p3_event_ids.contains(&p1_event) && !p3_event_ids.contains(&p2_event),
+        "unlinked P3 must NOT see account A's events"
+    );
+
+    let Json(p3_credit) = credit_handler(State(state.clone()), auth_headers("token-a-3"))
+        .await
+        .expect("P3 credit summary read succeeds");
+    assert_eq!(
+        p3_credit.accepted, 1,
+        "unlinked P3 counts only its own submission"
+    );
+
+    // The scalar sums track the broadened record set: P2's account-scoped pending
+    // (2 accepted submissions across P1 + P2) is strictly greater than P3's
+    // own-principal pending (1 accepted submission), and strictly positive. The
+    // exact per-submission novelty credit is scoring-dependent, so we assert the
+    // ordering rather than a fixed value.
+    assert!(
+        p2_credit.credit_points_pending > p3_credit.credit_points_pending,
+        "P2 account-scoped pending ({}) must exceed P3 own-principal pending ({})",
+        p2_credit.credit_points_pending,
+        p3_credit.credit_points_pending,
+    );
+    assert!(
+        p2_credit.credit_points_pending > 0.0,
+        "P2 account-scoped pending must be strictly positive"
+    );
+
+    let _ = (p1_submission, p2_submission, p3_submission);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Slice 3b Task 5: settlement re-keys credit groups by durable account. Two
+/// principals (token-a, token-a-2) linked to account A each carry a credit event;
+/// A designates a payout NEAR identity. An unlinked principal (token-a-3) carries
+/// its own credit. A single finalize must (1) collapse A's two principals into ONE
+/// account-keyed line item summing both micros, hashed over `account:{A}`, with an
+/// outbox row whose `payout_near_account_id` is A's designated near account, and
+/// (2) settle the unlinked principal under its own principal hash with no payout.
+#[tokio::test]
+async fn settlement_groups_account_principals_and_routes_designated_payout() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let (_, p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
+    let (_, p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
+
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+    let p3_principal = principal_storage_ref("token-a-3");
+
+    // Account A links P1 + P2; P3 stays unlinked.
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    link_principal_to_account(backend.as_ref(), "tenant-a", account_a, &p2_principal).await;
+
+    // A designates a payout NEAR identity.
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert A payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate A payout"),
+        "designation must take effect"
+    );
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize account-keyed settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert!(!finalized.dry_run);
+    assert_eq!(finalized.settled_source_event_count, 3);
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1, "one settlement batch finalized");
+    let line_items = &batches[0].line_items;
+
+    // Account A: ONE line item summing P1 (1.0) + P2 (0.5) = 1.5 -> 1_500_000 micros,
+    // hashed over `account:{A}`.
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let account_item = line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account A line item present");
+    assert_eq!(
+        account_item.credit_account_ref,
+        format!("account:{account_a}"),
+        "account group is keyed by account:{{uuid}}"
+    );
+    assert_eq!(
+        account_item.settled_credit_delta_micros, 1_500_000,
+        "account line item sums both principals' micros"
+    );
+    let account_sources = account_item
+        .source_credit_event_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        account_sources.contains(&p1_event) && account_sources.contains(&p2_event),
+        "account line item carries both principals' credit events"
+    );
+    assert!(
+        account_item.near_payout_hold_reason.is_none(),
+        "designated account is not held"
+    );
+
+    // Unlinked P3: its own principal hash, unchanged behavior.
+    let p3_hash = sha256_prefixed(&p3_principal);
+    let p3_item = line_items
+        .iter()
+        .find(|item| item.credit_account_hash == p3_hash)
+        .expect("unlinked P3 line item present");
+    assert_eq!(p3_item.settled_credit_delta_micros, 2_000_000);
+    assert_eq!(p3_item.source_credit_event_ids, vec![p3_event]);
+    assert!(p3_item.near_payout_hold_reason.is_none());
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let account_outbox = outbox
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account A outbox row present");
+    assert_eq!(
+        account_outbox.payout_near_account_id,
+        Some("alice.near".to_string()),
+        "account outbox routes to the designated payout near account"
+    );
+    let p3_outbox = outbox
+        .iter()
+        .find(|item| item.credit_account_hash == p3_hash)
+        .expect("unlinked P3 outbox row present");
+    assert_eq!(
+        p3_outbox.payout_near_account_id, None,
+        "unlinked principal outbox carries no payout target"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Slice 3b read-side regression: after an ACCOUNT-KEYED settlement, a linked
+/// contributor's `credit_handler` must report the account's settled credit, NOT
+/// zero. Task 5 re-keys a linked account's settlement line item to
+/// `account:{uuid}`; a principal-ref set never contains that, so the
+/// credit-handler settlement filter must consult the caller's resolved
+/// `account_id` (the fix). Without it, `credit_points_settled` and
+/// `last_settlement_batch_id` zero out for exactly the accounts this slice serves.
+/// Also asserts an UNLINKED contributor's principal-keyed settled credit is
+/// unchanged.
+#[tokio::test]
+async fn linked_contributor_sees_account_keyed_settled_credit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // P1 (token-a) + P2 (token-a-2) -> account A; P3 (token-a-3) unlinked.
+    let (_, _p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let (_, _p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
+    let (_, _p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    link_principal_to_account(backend.as_ref(), "tenant-a", account_a, &p2_principal).await;
+    // Designate a payout so the account line item is not held (mirrors Task 5 test).
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert A payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate A payout"),
+        "designation must take effect"
+    );
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize account-keyed settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 3);
+
+    // --- Linked caller P1 (token-a) sees the ACCOUNT-KEYED settled credit. ---
+    // A's line item is `account:{A}` summing P1 (1.0) + P2 (0.5) = 1.5. Pre-fix
+    // this was 0.0 because the principal-ref set never contained `account:{A}`.
+    let Json(p1_credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("P1 credit summary succeeds");
+    assert!(
+        (p1_credit.credit_points_settled - 1.5).abs() < 1e-6,
+        "linked P1 must see account A's settled credit (1.5); got {}",
+        p1_credit.credit_points_settled
+    );
+    assert_eq!(
+        p1_credit.last_settlement_batch_id,
+        Some(finalized.settlement_batch_id),
+        "linked P1's last settlement batch must be the finalized account-keyed batch"
+    );
+    assert!(
+        p1_credit.credit_points_ledger >= 1.5,
+        "settled credit rolls into the ledger total"
+    );
+
+    // P2 (the OTHER linked principal) resolves to the SAME account A and sees the
+    // SAME account-keyed settled credit.
+    let Json(p2_credit) = credit_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("P2 credit summary succeeds");
+    assert!(
+        (p2_credit.credit_points_settled - 1.5).abs() < 1e-6,
+        "linked P2 sees the same account A settled credit (1.5); got {}",
+        p2_credit.credit_points_settled
+    );
+
+    // --- Unlinked caller P3 (token-a-3): its own principal-keyed line item, 2.0,
+    // unchanged behavior; A's account-keyed credit is NOT visible. ---
+    let Json(p3_credit) = credit_handler(State(state.clone()), auth_headers("token-a-3"))
+        .await
+        .expect("P3 credit summary succeeds");
+    assert!(
+        (p3_credit.credit_points_settled - 2.0).abs() < 1e-6,
+        "unlinked P3 still sees its own principal-keyed settled credit (2.0); got {}",
+        p3_credit.credit_points_settled
+    );
+    assert_eq!(
+        p3_credit.last_settlement_batch_id,
+        Some(finalized.settlement_batch_id),
+        "unlinked P3's own line item is in the same finalized batch"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An account with ZERO active NEAR identities settles internally (line item
+/// present) but its on-chain payout is HELD with `none_enrolled` and NO outbox row
+/// is enqueued.
+#[tokio::test]
+async fn settlement_holds_account_payout_when_none_enrolled() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize none-enrolled settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let item = batches[0]
+        .line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account line item present");
+    assert_eq!(item.source_credit_event_ids, vec![p1_event]);
+    assert_eq!(
+        item.near_payout_hold_reason.as_deref(),
+        Some("none_enrolled"),
+        "zero NEAR identities holds the payout as none_enrolled"
+    );
+    assert!(
+        item.near_outbox_id.is_none(),
+        "no outbox id on a held line item"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox.iter().all(|i| i.credit_account_hash != account_hash),
+        "no on-chain outbox row is enqueued for a held account"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An account with TWO active NEAR identities and NO designation settles internally
+/// but HOLDS its payout with `ambiguous_no_designation` and enqueues no outbox row.
+#[tokio::test]
+async fn settlement_holds_account_payout_when_ambiguous() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, _) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity("tenant-a", account_a, "ed25519:first", "alice.near", None)
+        .await
+        .expect("insert first identity");
+    backend
+        .insert_near_identity("tenant-a", account_a, "ed25519:second", "bob.near", None)
+        .await
+        .expect("insert second identity");
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize ambiguous settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let item = batches[0]
+        .line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account line item present");
+    assert_eq!(
+        item.near_payout_hold_reason.as_deref(),
+        Some("ambiguous_no_designation"),
+        "two active identities, none designated, holds as ambiguous_no_designation"
+    );
+    assert!(item.near_outbox_id.is_none());
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox.iter().all(|i| i.credit_account_hash != account_hash),
+        "no on-chain outbox row for an ambiguously-held account"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Seed a submission + accepted training-utility credit event owned by `token`,
+/// crediting `points`. Returns (submission_id, credit_event_id). The credit event's
+/// `auth_principal_ref` is the submitting device principal, so it groups under that
+/// principal's account once linked.
+async fn seed_settlement_credit(state: &Arc<AppState>, token: &str, points: f32) -> (Uuid, Uuid) {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
+        .await
+        .expect("submission mirrors to DB");
+    let Json(event) = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: points,
+            reason: Some("training utility".to_string()),
+            external_ref: Some(format!("training-utility:{token}:{points}")),
+        }),
+    )
+    .await
+    .expect("credit event mirrors to DB");
+    (submission_id, event.event_id)
+}
+
+/// Add `principal_ref` as a second ACTIVE link to `account_id` under tenant RLS.
+async fn link_principal_to_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+    principal_ref: &str,
+) {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("seed tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set seed tenant context");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)",
+        &[&account_id, &principal_ref],
+    )
+    .await
+    .expect("link principal to account");
+    tx.commit().await.expect("commit seed");
+}
+
+/// The NEAR public_key -> tenant_id resolver must read across forced RLS under the
+/// restricted `trace_login_resolver` role with NO tenant context, exactly as the
+/// credential resolver does. This is the load-bearing security test for Slice 3a's
+/// resolver: an unauthenticated NEAR assertion arrives before any tenant context
+/// exists, so the resolver maps a globally-UNIQUE public_key to its tenant via a
+/// role-scoped permissive policy, then the login handler re-confirms tenant inside
+/// an RLS-scoped tx before any write.
+///
+/// This mirrors `credential_resolver_reads_tenant_across_rls_under_set_role`.
+/// `SET ROLE trace_login_resolver` drops the superuser RLS bypass, so the resolver
+/// role's real RLS treatment runs even from a superuser test connection. It asserts
+/// the column-scoped read returns the correct tenant (permissive policy in effect),
+/// that an out-of-grant column read is rejected (least privilege retained), and that
+/// WITHOUT the role-scoped policy the read returns no row (proving the policy, not a
+/// superuser bypass, is what makes the resolve work).
+#[tokio::test]
+async fn near_resolver_reads_tenant_across_rls_under_set_role() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    // Seed a tenant + account via the normal tenant-scoped path, then raw-insert a
+    // NEAR identity under tenant context (the identity FK needs the account).
+    let account_id = backend
+        .create_or_reuse_account("tenant-a", "principal-a")
+        .await
+        .expect("seed account");
+    let public_key = "ed25519:near-resolver-test-globally-unique";
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    {
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set seed tenant context");
+        tx.execute(
+            "INSERT INTO trace_near_identities
+                 (tenant_id, public_key, near_account_id, account_id)
+             VALUES (trace_current_tenant_id(), $1, $2, $3)",
+            &[&public_key, &"alice.near", &account_id],
+        )
+        .await
+        .expect("seed near identity row");
+        tx.commit().await.expect("commit seed");
+    }
+
+    let tx = client.transaction().await.expect("tx");
+    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
+    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
+    // the resolver's real RLS treatment.
+    tx.execute("SET ROLE trace_login_resolver", &[])
+        .await
+        .expect("set resolver role");
+
+    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
+    // tenant despite forced RLS + no tenant context (permissive resolver policy).
+    let resolved: Option<String> = tx
+        .query_opt(
+            "SELECT tenant_id FROM trace_near_identities WHERE public_key = $1",
+            &[&public_key],
+        )
+        .await
+        .expect("resolver SELECT runs under RLS")
+        .map(|row| row.get::<_, String>(0));
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tenant-a"),
+        "resolver must resolve the tenant for a known public_key under forced RLS"
+    );
+
+    // Least privilege: an out-of-grant column read is rejected by the column GRANT
+    // (the resolver may read only tenant_id + public_key). near_account_id MUST NOT
+    // be readable by the resolver role.
+    let out_of_grant = tx
+        .query_opt(
+            "SELECT near_account_id FROM trace_near_identities WHERE public_key = $1",
+            &[&public_key],
+        )
+        .await;
+    assert!(
+        out_of_grant.is_err(),
+        "resolver must NOT be able to read columns outside its (tenant_id, public_key) grant"
+    );
+
+    // The transaction is poisoned by the rejected statement; roll it back and reset.
+    drop(tx);
+    let reset = client.batch_execute("RESET ROLE").await;
+    let _ = reset; // best-effort; connection returns to the pool either way.
+
+    // has_column_privilege confirms the grant boundary directly: tenant_id + public_key
+    // are granted; near_account_id is not.
+    let near_account_id_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_login_resolver', 'trace_near_identities', 'near_account_id', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("column privilege check runs")
+        .get(0);
+    assert!(
+        !near_account_id_priv,
+        "trace_login_resolver must NOT have SELECT on near_account_id"
+    );
+
+    // Fail-WITHOUT / pass-WITH: dropping the role-scoped permissive policy makes the
+    // forced-RLS, no-tenant-context resolve return NO row; recreating it restores the
+    // resolve. This proves the policy (not a superuser bypass) is load-bearing.
+    client
+        .batch_execute("DROP POLICY trace_login_resolver_near_read ON trace_near_identities")
+        .await
+        .expect("drop resolver policy");
+    {
+        let tx = client.transaction().await.expect("without-policy tx");
+        tx.execute("SET ROLE trace_login_resolver", &[])
+            .await
+            .expect("set resolver role");
+        let resolved_without: Option<String> = tx
+            .query_opt(
+                "SELECT tenant_id FROM trace_near_identities WHERE public_key = $1",
+                &[&public_key],
+            )
+            .await
+            .expect("resolver SELECT runs under RLS (no policy)")
+            .map(|row| row.get::<_, String>(0));
+        assert_eq!(
+            resolved_without, None,
+            "without trace_login_resolver_near_read the resolve must return NO row under forced RLS"
+        );
+        drop(tx);
+        let _ = client.batch_execute("RESET ROLE").await;
+    }
+    client
+        .batch_execute(
+            "CREATE POLICY trace_login_resolver_near_read ON trace_near_identities \
+             FOR SELECT TO trace_login_resolver USING (true)",
+        )
+        .await
+        .expect("recreate resolver policy");
+    {
+        let tx = client.transaction().await.expect("with-policy tx");
+        tx.execute("SET ROLE trace_login_resolver", &[])
+            .await
+            .expect("set resolver role");
+        let resolved_with: Option<String> = tx
+            .query_opt(
+                "SELECT tenant_id FROM trace_near_identities WHERE public_key = $1",
+                &[&public_key],
+            )
+            .await
+            .expect("resolver SELECT runs under RLS (policy restored)")
+            .map(|row| row.get::<_, String>(0));
+        assert_eq!(
+            resolved_with.as_deref(),
+            Some("tenant-a"),
+            "recreating the policy must restore the resolve"
+        );
+        drop(tx);
+        let _ = client.batch_execute("RESET ROLE").await;
+    }
+
+    // Also exercise the inherent resolver method end-to-end (narrow resolver pool).
+    let via_method = backend
+        .resolve_near_public_key_tenant(public_key)
+        .await
+        .expect("resolver method runs");
+    assert_eq!(
+        via_method.as_deref(),
+        Some("tenant-a"),
+        "resolve_near_public_key_tenant must return the seeded tenant via the narrow pool"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_migration_applies_and_enforces_rls() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    for table in [
+        "trace_accounts",
+        "trace_account_principals",
+        "trace_login_links",
+        "trace_sessions",
+        "trace_account_audit",
+    ] {
+        let row = client
+            .query_one(
+                "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+                &[&table],
+            )
+            .await
+            .expect("table exists");
+        let forced: bool = row.get(0);
+        assert!(forced, "{table} must FORCE ROW LEVEL SECURITY");
+    }
+}
+
+#[tokio::test]
+async fn webauthn_migration_applies_credentials_table_and_session_rotation_columns() {
+    // Self-skips without a DB (TRACE_COMMONS_TEST_DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The credentials table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_webauthn_credentials"],
+        )
+        .await
+        .expect("trace_webauthn_credentials exists");
+    let forced: bool = row.get(0);
+    assert!(
+        forced,
+        "trace_webauthn_credentials must FORCE ROW LEVEL SECURITY"
+    );
+
+    // trace_sessions gained the rotation columns.
+    for column in [
+        "prev_token_hash",
+        "prev_token_valid_until",
+        "auth_credential_id",
+        "token_issued_at",
+    ] {
+        let present: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'trace_sessions' AND column_name = $1
+                 )",
+                &[&column],
+            )
+            .await
+            .expect("column probe")
+            .get(0);
+        assert!(present, "trace_sessions must have column {column}");
+    }
+
+    // The widened client_kind CHECK now accepts 'passkey'.
+    let check_def: String = client
+        .query_one(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'trace_sessions'::regclass
+               AND conname = 'trace_sessions_client_kind_check'",
+            &[],
+        )
+        .await
+        .expect("client_kind check exists")
+        .get(0);
+    assert!(
+        check_def.contains("passkey"),
+        "client_kind CHECK must accept 'passkey': {check_def}"
+    );
+}
+
+#[tokio::test]
+async fn near_identities_migration_applies_table_and_widens_client_kind() {
+    // Self-skips without a DB (TRACE_COMMONS_PG_TEST_DATABASE_URL / DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The near-identities table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_near_identities"],
+        )
+        .await
+        .expect("trace_near_identities exists");
+    let forced: bool = row.get(0);
+    assert!(
+        forced,
+        "trace_near_identities must FORCE ROW LEVEL SECURITY"
+    );
+
+    // The widened client_kind CHECK now accepts 'near'.
+    let check_def: String = client
+        .query_one(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'trace_sessions'::regclass
+               AND conname = 'trace_sessions_client_kind_check'",
+            &[],
+        )
+        .await
+        .expect("client_kind check exists")
+        .get(0);
+    assert!(
+        check_def.contains("near"),
+        "client_kind CHECK must accept 'near': {check_def}"
+    );
+}
+
+#[tokio::test]
+async fn account_consolidation_migration_applies_proposals_payout_and_outbox_destination() {
+    // Self-skips without a DB (TRACE_COMMONS_PG_TEST_DATABASE_URL / DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The merge-proposals table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_account_merge_proposals"],
+        )
+        .await
+        .expect("trace_account_merge_proposals exists");
+    let forced: bool = row.get(0);
+    assert!(
+        forced,
+        "trace_account_merge_proposals must FORCE ROW LEVEL SECURITY"
+    );
+
+    // payout_designated_at is added to trace_near_identities.
+    let payout_col = client
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'trace_near_identities'
+               AND column_name = 'payout_designated_at'",
+            &[],
+        )
+        .await
+        .expect("columns query succeeds");
+    assert!(
+        payout_col.is_some(),
+        "trace_near_identities must have a payout_designated_at column"
+    );
+
+    // payout_near_account_id is added to the settlement outbox.
+    let outbox_col = client
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'trace_near_credit_outbox'
+               AND column_name = 'payout_near_account_id'",
+            &[],
+        )
+        .await
+        .expect("columns query succeeds");
+    assert!(
+        outbox_col.is_some(),
+        "trace_near_credit_outbox must have a payout_near_account_id column"
+    );
+
+    // The partial-unique payout index exists.
+    let payout_index = client
+        .query_opt(
+            "SELECT 1 FROM pg_indexes
+             WHERE indexname = 'idx_trace_near_identities_one_payout'",
+            &[],
+        )
+        .await
+        .expect("pg_indexes query succeeds");
+    assert!(
+        payout_index.is_some(),
+        "idx_trace_near_identities_one_payout partial-unique index must exist"
+    );
+}
+
+#[tokio::test]
+async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // First mint for the device token creates-or-reuses an account.
+    let Json(first) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("first mint succeeds");
+    assert!(
+        first.url.contains("/account/login?code="),
+        "url must carry the redemption code: {}",
+        first.url
+    );
+    // The raw code lives only in the url; it must not be the account id.
+    assert!(!first.url.contains(&first.account_id));
+
+    // Second mint for the SAME device token must reuse the SAME account.
+    let Json(second) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("second mint succeeds");
+    assert_eq!(
+        first.account_id, second.account_id,
+        "create-or-reuse must return a stable account id for the same principal"
+    );
+    assert!(second.url.contains("/account/login?code="));
+    // Distinct single-use codes per mint.
+    assert_ne!(first.url, second.url);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn confirm_login_issues_single_use_session_cookie() {
+    use axum::response::IntoResponse;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint a link via the Task 5 path; extract the raw code from the URL.
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+
+    // Same-origin confirm: redeem succeeds and sets the session cookie.
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    let response = confirm_login_handler(
+        State(state.clone()),
+        same_origin.clone(),
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "first redeem must succeed"
+    );
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("session cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    assert!(
+        set_cookie.starts_with("tc_account_session="),
+        "cookie name must be tc_account_session: {set_cookie}"
+    );
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(set_cookie.contains("Secure"), "cookie must be Secure");
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict"
+    );
+    assert!(
+        set_cookie.contains("Max-Age="),
+        "cookie must carry a Max-Age lifetime: {set_cookie}"
+    );
+    assert!(
+        set_cookie.contains("Path=/"),
+        "cookie must be scoped to Path=/: {set_cookie}"
+    );
+    // The raw code/secret must never appear in the cookie value beyond the
+    // server-minted secret; the login code must not leak into the session.
+    assert!(
+        !set_cookie.contains(&code),
+        "session cookie must not echo the login code"
+    );
+
+    // Second redeem of the SAME code -> uniform generic deny (single-use).
+    let reused = confirm_login_handler(
+        State(state.clone()),
+        same_origin.clone(),
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    let reused_status = reused.status();
+    let reused_body = axum::body::to_bytes(reused.into_body(), usize::MAX)
+        .await
+        .expect("reused body");
+
+    // Bogus code -> the SAME uniform generic deny (status + body identical).
+    let bogus = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "totally-bogus-code".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    let bogus_status = bogus.status();
+    let bogus_body = axum::body::to_bytes(bogus.into_body(), usize::MAX)
+        .await
+        .expect("bogus body");
+
+    assert_eq!(
+        reused_status, bogus_status,
+        "reused and bogus must share one status"
+    );
+    assert_eq!(
+        reused_status,
+        StatusCode::BAD_REQUEST,
+        "uniform deny status"
+    );
+    assert_eq!(
+        reused_body, bogus_body,
+        "reused and bogus must share one body (non-enumerating)"
+    );
+
+    // Cross-site POST -> the same uniform deny, no consume attempted.
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    let cross = confirm_login_handler(
+        State(state.clone()),
+        cross_site,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "another-code".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(cross.status(), StatusCode::BAD_REQUEST, "cross-site deny");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// --- Task 7: dual-auth AccountCtx resolver -------------------------------
+//
+// PostgreSQL-backed where a real session/link row is needed; they self-skip
+// when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor DATABASE_URL is set. The
+// both-credentials test short-circuits before any DB access and runs without a
+// database.
+
+/// Mint + redeem via the public handlers and return the raw `tc_account_session`
+/// cookie value the browser would replay (the `{b64url(tenant)}.{secret}` form).
+async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) -> String {
+    use axum::response::IntoResponse;
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers(token))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    let response = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody { code }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "redeem succeeds");
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("session cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    // `name=value; Attr; Attr` -> take the value of the first pair.
+    let first = set_cookie.split(';').next().expect("cookie pair");
+    let (name, value) = first.split_once('=').expect("cookie name=value");
+    assert_eq!(name, "tc_account_session");
+    value.to_string()
+}
+
+/// Resolve an `AccountCtx` from request headers and wrap it as the `Extension`
+/// the migrated account handlers now take. Mirrors what `account_auth_middleware`
+/// does in production, so direct handler unit tests can keep asserting handler
+/// behavior without going through the full router. Panics on auth failure (the
+/// callers always pass valid credentials).
+async fn account_ctx_ext(state: &Arc<AppState>, headers: &HeaderMap) -> Extension<AccountCtx> {
+    let ctx = resolve_account_ctx(state.as_ref(), headers)
+        .await
+        .expect("test credentials resolve to an account ctx");
+    Extension(ctx)
+}
+
+fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("{name}={value}")).expect("valid cookie header"),
+    );
+    headers
+}
+
+#[tokio::test]
+async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint creates-or-reuses the account linked to token-a's device principal.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+
+    let ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect("bearer resolves to an account ctx");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::DeviceBearer);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    let device_principal = principal_storage_ref("token-a");
+    assert_eq!(ctx.actor_ref, device_principal, "actor = device principal");
+    assert!(
+        ctx.principal_set.contains(&device_principal),
+        "principal set must contain the device principal"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // The cookie carries `{b64url(tenant)}.{secret}`.
+    assert!(cookie_value.contains('.'), "cookie must be tenant.secret");
+
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves to an account ctx");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::SessionCookie);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "cookie actor ref must be the reserved-prefix account actor: {}",
+        ctx.actor_ref
+    );
+    // Active membership expansion still carries the device principal.
+    assert!(
+        ctx.principal_set
+            .contains(&principal_storage_ref("token-a"))
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_cookie_with_forged_tenant_fails_closed() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    // Re-encode the cookie with a DIFFERENT tenant prefix but the valid secret.
+    let forged = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("tenant-evil".as_bytes()),
+        secret,
+    );
+    let headers = cookie_request_headers("tc_account_session", &forged);
+    let result = resolve_account_ctx(state.as_ref(), &headers).await;
+    let err = result.expect_err("forged tenant must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED, "forged tenant -> 401");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_session_past_idle_cap_is_denied() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let token_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate last_seen_at beyond the 3-day idle cap directly under RLS.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let updated = tx
+            .execute(
+                "UPDATE trace_sessions SET last_seen_at = now() - INTERVAL '4 days'
+                  WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1",
+                &[&token_hash],
+            )
+            .await
+            .expect("backdate");
+        assert_eq!(updated, 1, "exactly one session backdated");
+        tx.commit().await.expect("commit backdate");
+    }
+
+    // validate_session must now miss (idle-capped) -> None.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(validated.is_none(), "idle-capped session must not validate");
+
+    // And the resolver surfaces it as 401.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("idle-capped cookie must be denied");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Slice 3b Task 9: a session whose account has been closed (the absorbed side
+/// of a device-principal merge sets `trace_accounts.closed_at = now()`) must no
+/// longer validate. Normally the merge revokes B's sessions, but `validate_session`
+/// gains a belt-and-suspenders `closed_at IS NULL` gate so a closed account can
+/// never resolve to a valid session context (fail-closed).
+#[tokio::test]
+async fn validate_session_rejects_closed_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let token_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // While the account is OPEN, the session validates.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_some(),
+        "open account session must validate before closure"
+    );
+
+    // Close the session's account directly under RLS (mirrors the merge's
+    // closed_at = now() on the absorbed account).
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let updated = tx
+            .execute(
+                "UPDATE trace_accounts SET closed_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = (
+                        SELECT account_id FROM trace_sessions
+                          WHERE tenant_id = trace_current_tenant_id()
+                            AND token_hash = $1
+                    )",
+                &[&token_hash],
+            )
+            .await
+            .expect("close account");
+        assert_eq!(updated, 1, "exactly one account closed");
+        tx.commit().await.expect("commit closure");
+    }
+
+    // validate_session must now miss (closed account) -> None.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_none(),
+        "closed-account session must not validate"
+    );
+
+    // And the resolver surfaces it as 401.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("closed-account cookie must be denied");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// SECURITY regression: `validate_session` must NOT create a `trace_tenants`
+/// row for the client-supplied, pre-auth tenant decoded from a forged session
+/// cookie. Previously `validate_session` called `ensure_trace_tenant` as its
+/// first line, so any unauthenticated request bearing a forged cookie with an
+/// arbitrary tenant string UPSERTed a `trace_tenants` row before the token was
+/// validated -- letting an attacker spray arbitrary tenant ids. Auth still
+/// fails closed (the session SELECT scopes to that tenant under RLS, finds no
+/// row -> deny), but the write must not happen at all.
+#[tokio::test]
+async fn validate_session_does_not_create_tenant_for_forged_cookie() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    // High-entropy bogus tenant id that no test ever mints.
+    let bogus_tenant = "tenant-bogus-7f3a9c1e-validate-session-no-write";
+
+    async fn trace_tenant_row_count(b: &PgBackend, tenant: &str) -> i64 {
+        let client = b
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .expect("count query");
+        row.get(0)
+    }
+
+    assert_eq!(
+        trace_tenant_row_count(backend.as_ref(), bogus_tenant).await,
+        0,
+        "bogus tenant must not exist before the call"
+    );
+
+    // Directly exercise validate_session with the forged tenant + an arbitrary
+    // token hash. This is the exact pre-auth path: tenant is client-supplied.
+    let validated = backend
+        .validate_session(bogus_tenant, "deadbeef-forged-token-hash")
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_none(),
+        "forged/nonexistent tenant must deny (no session row)"
+    );
+
+    // The crux: NO trace_tenants row was written for the bogus tenant.
+    assert_eq!(
+        trace_tenant_row_count(backend.as_ref(), bogus_tenant).await,
+        0,
+        "validate_session must NOT create a trace_tenants row for a forged tenant"
+    );
+
+    // Defensive cleanup in case a regression reintroduces the write.
+    cleanup_pg_trace_tenant(backend.as_ref(), bogus_tenant).await;
+}
+
+#[tokio::test]
+async fn account_ctx_both_credentials_is_ambiguous_400() {
+    // No DB needed: the ambiguity check short-circuits before any DB access.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut headers = auth_headers("token-a");
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_static("tc_account_session=dGVuYW50LWE.somesecret"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("both credentials must be rejected");
+    assert_eq!(
+        err.0,
+        StatusCode::BAD_REQUEST,
+        "bearer + cookie -> 400 ambiguous credentials"
+    );
+}
+
+#[tokio::test]
+async fn account_ctx_no_credentials_is_401() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let err = resolve_account_ctx(state.as_ref(), &HeaderMap::new())
+        .await
+        .expect_err("no credentials must be rejected");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+// ============================================================================
+// Slice 2 Task 8: session rotation-on-use via the account auth middleware.
+//
+// These exercise the FULL middleware stack through `app(state)` so the rotated
+// `Set-Cookie` attach (which lives in `account_auth_middleware`, not the
+// handlers) is covered. Rotation eligibility is forced by backdating
+// `token_issued_at` directly under RLS (default 12h interval, parallel-safe, no
+// process-global env override); grace expiry is forced by backdating
+// `prev_token_valid_until`.
+// ============================================================================
+
+/// Run a raw UPDATE under the tenant's RLS context against the live session row,
+/// keyed by `token_hash`. Returns the number of rows affected.
+async fn rotation_test_update_session(
+    backend: &PgBackend,
+    tenant_id: &str,
+    token_hash: &str,
+    set_clause: &str,
+) -> u64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let sql = format!(
+        "UPDATE trace_sessions SET {set_clause}
+          WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1"
+    );
+    let n = tx
+        .execute(sql.as_str(), &[&token_hash])
+        .await
+        .expect("update");
+    tx.commit().await.expect("commit");
+    n
+}
+
+/// Read `(token_hash, prev_token_hash, prev_token_valid_until)` for the single
+/// live session under `tenant_id` matching either the current or prev token equal
+/// to `any_hash`. Used to assert rotation moved the hashes as specified.
+async fn rotation_test_read_session(
+    backend: &PgBackend,
+    tenant_id: &str,
+    any_hash: &str,
+) -> (
+    String,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT token_hash, prev_token_hash, prev_token_valid_until
+               FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id()
+                AND (token_hash = $1 OR prev_token_hash = $1)",
+            &[&any_hash],
+        )
+        .await
+        .expect("session row exists");
+    tx.commit().await.expect("commit");
+    (
+        row.get("token_hash"),
+        row.get("prev_token_hash"),
+        row.get("prev_token_valid_until"),
+    )
+}
+
+/// Extract the `tc_account_session` cookie VALUE from a response's `Set-Cookie`
+/// header, if present.
+fn rotation_test_set_cookie_value(response: &axum::response::Response) -> Option<String> {
+    let raw = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)?
+        .to_str()
+        .ok()?;
+    let first = raw.split(';').next()?;
+    let (name, value) = first.split_once('=')?;
+    if name.trim() == "tc_account_session" {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+/// Drive `GET /v1/account/passkeys` through the FULL app (and thus the auth
+/// middleware) with the given cookie value. Returns the response.
+async fn rotation_test_get_passkeys(
+    state: &Arc<AppState>,
+    cookie_value: &str,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn session_rotation_fires_and_attaches_set_cookie() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate token_issued_at well past the default 12h rotation interval.
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    // Drive an authenticated endpoint through the middleware.
+    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "aged session still valid"
+    );
+
+    // A NEW session cookie is attached.
+    let new_cookie =
+        rotation_test_set_cookie_value(&response).expect("rotation attaches a Set-Cookie");
+    assert_ne!(
+        new_cookie, cookie_value,
+        "rotated cookie carries a NEW value"
+    );
+    // Same tenant prefix, different secret.
+    assert_eq!(
+        new_cookie.split_once('.').unwrap().0,
+        cookie_value.split_once('.').unwrap().0,
+        "tenant prefix is unchanged"
+    );
+    let new_secret = new_cookie.split_once('.').expect("tenant.secret").1;
+    let new_hash = trace_commons_server::account_session::hash_secret(new_secret);
+
+    // DB row: token_hash changed to new, prev_token_hash = old, prev grace in future.
+    let (db_token_hash, db_prev_hash, db_prev_valid_until) =
+        rotation_test_read_session(backend.as_ref(), "tenant-a", &new_hash).await;
+    assert_eq!(
+        db_token_hash, new_hash,
+        "token_hash rotated to the new hash"
+    );
+    assert_eq!(
+        db_prev_hash.as_deref(),
+        Some(old_hash.as_str()),
+        "prev_token_hash holds the old hash"
+    );
+    let prev_valid = db_prev_valid_until.expect("prev_token_valid_until set");
+    assert!(
+        prev_valid > chrono::Utc::now(),
+        "prev_token_valid_until is in the grace future"
+    );
+
+    // Rotation is audited hash-only as account_session_rotated.
+    let audit_count = {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let row = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND action = 'account_session_rotated'",
+                &[],
+            )
+            .await
+            .expect("count query");
+        let n: i64 = row.get(0);
+        tx.commit().await.expect("commit");
+        n
+    };
+    assert_eq!(audit_count, 1, "exactly one rotation audit row");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn session_rotation_grace_lets_old_cookie_validate_then_expires() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let old_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let old_secret = old_cookie.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(old_secret);
+
+    // Force the first request to rotate.
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    let first = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let new_cookie = rotation_test_set_cookie_value(&first).expect("rotation set-cookie");
+    assert_ne!(new_cookie, old_cookie);
+
+    // Multi-tab: the OLD cookie still validates within grace, and does NOT
+    // re-rotate (no second Set-Cookie, since the prev-token path is ineligible).
+    let within_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        within_grace.status(),
+        StatusCode::OK,
+        "old cookie validates within grace"
+    );
+    assert!(
+        rotation_test_set_cookie_value(&within_grace).is_none(),
+        "a within-grace prev-token request must NOT re-rotate"
+    );
+
+    // After grace lapses, the OLD cookie is rejected.
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        // The row's CURRENT token is now the new hash; key the backdate on it.
+        &trace_commons_server::account_session::hash_secret(new_cookie.split_once('.').unwrap().1),
+        "prev_token_valid_until = now() - INTERVAL '1 minute'",
+    )
+    .await;
+    let after_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        after_grace.status(),
+        StatusCode::UNAUTHORIZED,
+        "old cookie past grace is denied"
+    );
+
+    // The NEW cookie remains valid throughout.
+    let new_still_ok = rotation_test_get_passkeys(&state, &new_cookie).await;
+    assert_eq!(new_still_ok.status(), StatusCode::OK);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn fresh_session_does_not_rotate() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // A just-minted (un-aged) session must NOT rotate -> no Set-Cookie.
+    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        rotation_test_set_cookie_value(&response).is_none(),
+        "a fresh session must not rotate (no Set-Cookie)"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_middleware_preserves_dual_auth_semantics() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    // Link the device principal to an account so the bearer path resolves.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+
+    // Cookie path -> 200.
+    let cookie_ok = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(cookie_ok.status(), StatusCode::OK, "cookie auth -> 200");
+
+    // Bearer path -> 200.
+    let bearer_ok = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bearer_ok.status(), StatusCode::OK, "bearer auth -> 200");
+
+    // Both credentials -> 400 ambiguous.
+    let both = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        both.status(),
+        StatusCode::BAD_REQUEST,
+        "both creds -> 400 ambiguous"
+    );
+
+    // Neither credential -> 401.
+    let neither = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        neither.status(),
+        StatusCode::UNAUTHORIZED,
+        "no creds -> 401"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Collect the cookie NAME of every `Set-Cookie` header on the response (one per
+/// header line). Used to assert that `.append` preserved BOTH a handler-set
+/// cookie and the rotated session cookie as distinct headers.
+fn rotation_test_all_set_cookie_names(
+    response: &axum::response::Response,
+) -> std::collections::BTreeSet<String> {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| {
+            let raw = value.to_str().ok()?;
+            let first = raw.split(';').next()?;
+            let (name, _value) = first.split_once('=')?;
+            Some(name.trim().to_string())
+        })
+        .collect()
+}
+
+/// Read `revoked_at` for the single live session row under `tenant_id` whose
+/// current or prev token matches `any_hash`. `None` row -> panics (row must
+/// exist); inner `Option` is the nullable `revoked_at`.
+async fn rotation_test_read_revoked_at(
+    backend: &PgBackend,
+    tenant_id: &str,
+    any_hash: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT revoked_at FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id()
+                AND (token_hash = $1 OR prev_token_hash = $1)",
+            &[&any_hash],
+        )
+        .await
+        .expect("session row exists");
+    tx.commit().await.expect("commit");
+    row.get("revoked_at")
+}
+
+/// POST `/v1/account/logout` through the FULL app (and thus the auth middleware)
+/// with the given session cookie value. Returns the response.
+async fn rotation_test_post_logout(
+    state: &Arc<AppState>,
+    cookie_value: &str,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/logout")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+}
+
+/// Regression (logout-vs-rotation): a logout request whose session aged past the
+/// rotation interval rotates in the middleware FIRST, so the logout handler
+/// re-derives the OLD hash (now parked in `prev_token_hash`). `revoke_current_session`
+/// must match either the current or the prev hash so the WHOLE row is revoked,
+/// leaving the rotated cookie the middleware appends dead. Before the fix, the
+/// row stayed live and the rotated cookie kept working.
+#[tokio::test]
+async fn logout_while_rotation_revokes_the_rotated_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let old_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let old_secret = old_cookie.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(old_secret);
+
+    // Backdate so the LOGOUT request itself rotates (middleware runs before the
+    // handler).
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    let response = rotation_test_post_logout(&state, &old_cookie).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "logout succeeds (204)"
+    );
+    // The logout request rotated, so the middleware appends a NEW session cookie.
+    let rotated_cookie =
+        rotation_test_set_cookie_value(&response).expect("logout request rotated -> new cookie");
+    assert_ne!(rotated_cookie, old_cookie, "rotated to a new secret");
+    let new_hash = trace_commons_server::account_session::hash_secret(
+        rotated_cookie.split_once('.').expect("tenant.secret").1,
+    );
+
+    // The row is revoked despite logout seeing only the OLD (prev) hash.
+    let revoked_at = rotation_test_read_revoked_at(backend.as_ref(), "tenant-a", &new_hash).await;
+    assert!(
+        revoked_at.is_some(),
+        "logout must revoke the whole session row (revoked_at set) even after rotation"
+    );
+
+    // The rotated cookie the middleware handed back is dead: a follow-up with the
+    // new cookie -> 401.
+    let after_new = rotation_test_get_passkeys(&state, &rotated_cookie).await;
+    assert_eq!(
+        after_new.status(),
+        StatusCode::UNAUTHORIZED,
+        "the rotated cookie lands on a revoked row -> 401"
+    );
+    // And the old cookie is dead too.
+    let after_old = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        after_old.status(),
+        StatusCode::UNAUTHORIZED,
+        "the old cookie is also dead after logout"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Regression (Set-Cookie clobber): if rotation fires during register/start, the
+/// middleware must APPEND the rotated session cookie alongside the handler's
+/// ceremony cookie, not replace it. Assert the response carries BOTH a
+/// `tc_passkey_ceremony` and a `tc_account_session` Set-Cookie.
+#[tokio::test]
+async fn register_start_while_rotation_keeps_both_set_cookies() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate so the register/start request rotates.
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    let response = {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/account/passkeys/register/start")
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("tc_account_session={cookie_value}"),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    };
+    assert_eq!(response.status(), StatusCode::OK, "register/start -> 200");
+
+    // BOTH cookies must be present as distinct Set-Cookie headers (append, not
+    // clobber). Before the fix, the rotated session cookie replaced the ceremony
+    // cookie and register/finish would then fail with no ceremony in progress.
+    let names = rotation_test_all_set_cookie_names(&response);
+    assert!(
+        names.contains("tc_passkey_ceremony"),
+        "ceremony cookie must survive rotation; got {names:?}"
+    );
+    assert!(
+        names.contains("tc_account_session"),
+        "rotated session cookie must be present; got {names:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Insert a submission row directly via the DB mirror so the account read-back
+/// surface (which reads ONLY the DB mirror) can list it. `auth_principal_ref`
+/// is the ownership key the account principal set is matched against.
+async fn insert_account_test_submission(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+) -> Uuid {
+    use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
+    let submission_id = Uuid::new_v4();
+    let mut redaction_counts = BTreeMap::new();
+    redaction_counts.insert("secret".to_string(), 1);
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: auth_principal_ref.to_string(),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: None,
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "deterministic-v1".to_string(),
+            redaction_counts,
+            redaction_hash: "sha256:redaction".to_string(),
+            canonical_summary_hash: None,
+            submission_score: Some(0.5),
+            credit_points_pending: Some(1.0),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("insert submission");
+    submission_id
+}
+
+#[tokio::test]
+async fn account_traces_list_returns_only_owned_submissions() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link token-a's device principal to a durable account under tenant-a.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+    let device_principal = principal_storage_ref("token-a");
+
+    // One owned submission (device principal) and one foreign principal under the
+    // same tenant that the account does NOT own.
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let _foreign =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else")
+            .await;
+    // And a submission under a different tenant entirely.
+    let _other_tenant =
+        insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        ext,
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("list succeeds");
+
+    let ids: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert_eq!(
+        ids,
+        vec![owned],
+        "only the device-owned submission is visible"
+    );
+    assert!(
+        page.next_cursor.is_none(),
+        "single page has no continuation"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+#[tokio::test]
+async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let mut inserted = Vec::new();
+    for _ in 0..3 {
+        inserted.push(
+            insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await,
+        );
+    }
+
+    // Page 1: limit 2.
+    let ext1 = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(page1) = account_traces_list_handler(
+        State(state.clone()),
+        ext1,
+        Query(AccountTracesListQuery {
+            limit: Some(2),
+            cursor: None,
+        }),
+    )
+    .await
+    .expect("page 1");
+    assert_eq!(page1.items.len(), 2, "first page is full");
+    let cursor = page1
+        .next_cursor
+        .clone()
+        .expect("full page yields a cursor");
+
+    // Page 2: continue from the cursor.
+    let ext2 = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(page2) = account_traces_list_handler(
+        State(state.clone()),
+        ext2,
+        Query(AccountTracesListQuery {
+            limit: Some(2),
+            cursor: Some(cursor),
+        }),
+    )
+    .await
+    .expect("page 2");
+    assert_eq!(page2.items.len(), 1, "remaining page has the last row");
+
+    let page1_ids: Vec<Uuid> = page1.items.iter().map(|item| item.submission_id).collect();
+    let page2_ids: Vec<Uuid> = page2.items.iter().map(|item| item.submission_id).collect();
+    // Disjoint.
+    for id in &page2_ids {
+        assert!(!page1_ids.contains(id), "pages must not overlap");
+    }
+    // Union covers every inserted row exactly once.
+    let mut seen: Vec<Uuid> = page1_ids.iter().chain(page2_ids.iter()).copied().collect();
+    seen.sort();
+    let mut expected = inserted.clone();
+    expected.sort();
+    assert_eq!(seen, expected, "the two pages partition all owned rows");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    // Owned id -> metadata.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(item) = account_trace_detail_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("owned detail succeeds");
+    assert_eq!(item.submission_id, owned);
+
+    // Unowned id and a random nonexistent id must produce the IDENTICAL 404
+    // (status AND body) -- no existence oracle.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_detail_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("unowned -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_detail_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        unowned_err.1.0.error, missing_err.1.0.error,
+        "not-owned and not-found must return an identical body"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// True when `body` carries a deterministic-redaction placeholder. The email
+/// redactor emits `<PRIVATE_EMAIL_n>` tokens; the leak-detector fallback emits
+/// `[REDACTED]`/`[REDACTED:label]`. Either proves content was scrubbed; this
+/// predicate accepts both so assertions track the real redactor output rather
+/// than one specific marker shape.
+fn envelope_contains_redaction_marker(body: &str) -> bool {
+    body.contains("<PRIVATE_") || body.contains("[REDACTED")
+}
+
+/// Build a privacy-scrubbed envelope whose redacted event content carries a
+/// deterministic redaction placeholder (`<PRIVATE_EMAIL_n>` for the email path),
+/// then write its serialized JSON to the on-disk object path the file-fallback
+/// read uses. Returns the marker-bearing serialized bytes so the round-trip test
+/// can assert byte-for-byte fidelity.
+async fn write_redacted_envelope_to_disk(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<u8> {
+    use trace_commons_protocol::llm::recording::{TraceResponse, TraceStep};
+    use trace_commons_protocol::trace_contribution::RawTraceContribution;
+
+    // A user-input step carrying a private email. Deterministic redaction
+    // replaces the email with `[REDACTED:private_email]` pre-encryption; this is
+    // exactly the lossy, already-scrubbed content the read-back returns.
+    let trace = TraceFile {
+        model_name: "test-model".to_string(),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::UserInput {
+                content: "please email alice@example.com about the issue".to_string(),
+            },
+            expected_tool_results: Vec::new(),
+        }],
+    };
+    let raw = RawTraceContribution::from_recorded_trace(
+        &trace,
+        RecordedTraceContributionOptions {
+            // Include message text so the email is present to be redacted.
+            include_message_text: true,
+            ..Default::default()
+        },
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction succeeds");
+
+    let body = serde_json::to_vec(&envelope).expect("serialize envelope");
+    let body_text = String::from_utf8(body.clone()).expect("utf8");
+    // The deterministic email redactor substitutes a `<PRIVATE_EMAIL_n>` placeholder
+    // (the leak-detector `[REDACTED]` fallback only fires on residual secrets), so
+    // assert the privacy invariant directly: the raw email is GONE and a redaction
+    // placeholder is present. (Earlier this asserted `[REDACTED`, which never
+    // matches the deterministic email path.)
+    assert!(
+        envelope_contains_redaction_marker(&body_text),
+        "fixture envelope must already contain a redaction marker"
+    );
+    assert!(
+        !body_text.contains("alice@example.com"),
+        "the raw private email must not survive redaction"
+    );
+
+    // Mirror the production object-key layout so `read_envelope_by_record`'s
+    // file fallback resolves the body.
+    let object_key =
+        trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, &body).expect("write envelope object");
+    body
+}
+
+#[tokio::test]
+async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    // Stage a readable, already-redacted envelope for the owned submission.
+    let stored_body = write_redacted_envelope_to_disk(state.as_ref(), "tenant-a", owned).await;
+
+    // Owned id with a readable artifact -> 200 + redacted body.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let response = account_trace_content_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("owned content read succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json; charset=utf-8"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+    );
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    // Redaction invariant: the marker survives the read-back verbatim; there is
+    // no un-scrubbing. The returned body is byte-identical to what was stored.
+    let body_text = String::from_utf8(body_bytes.to_vec()).expect("utf8 body");
+    assert!(
+        envelope_contains_redaction_marker(&body_text),
+        "the redaction marker must survive the content read-back"
+    );
+    assert_eq!(
+        body_bytes.as_ref(),
+        stored_body.as_slice(),
+        "the returned content is exactly the stored, already-redacted envelope"
+    );
+
+    // Unowned and nonexistent ids collapse to the IDENTICAL 404 the detail
+    // handler returns -- no existence oracle, and ownership is enforced before
+    // any read.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_content_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("unowned -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_content_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        unowned_err.1.0.error, missing_err.1.0.error,
+        "not-owned and not-found must return an identical body"
+    );
+
+    // Cross-check the content 404 body is byte-identical to the detail 404 body
+    // (same `not_found()` helper -> no oracle divergence across surfaces).
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let detail_missing_err =
+        account_trace_detail_handler(State(state.clone()), ext, AxumPath(random))
+            .await
+            .expect_err("detail missing -> 404");
+    assert_eq!(detail_missing_err.0, missing_err.0);
+    assert_eq!(detail_missing_err.1.0.error, missing_err.1.0.error);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Owned submission, but NO envelope is staged on disk and no artifact store
+    // is configured -> the file-fallback read fails. The handler must fail
+    // closed with a generic, label-only 500 (no object_key / path / exception
+    // detail leaked) and still audit the failed read.
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_trace_content_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect_err("missing artifact -> fail closed");
+    assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.1.0.error, "trace content unavailable");
+    // The generic message carries no path, object key, or exception detail.
+    assert!(!err.1.0.error.contains('/'));
+    assert!(!err.1.0.error.to_lowercase().contains("tenant"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[test]
@@ -702,6 +3861,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
     insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
+    insert_token(&mut tokens, "tenant-a", "token-a-3", TokenRole::Contributor);
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -787,6 +3947,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        accept_medium_risk_submissions: false,
+        community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
@@ -812,6 +3974,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         near_credit_confirmer_timeout_ms: None,
         near_credit_confirmer_auth_configured: false,
         near_credit_require_adapter_auth: false,
+        near_settlement_mode: NearSettlementMode::Http,
         near_credit_outbox_scheduler: None,
         benchmark_registry_submitter: None,
         benchmark_registry_submitter_timeout_ms: None,
@@ -865,6 +4028,10 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        account_webauthn: None,
+        account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_near_config: None,
+        near_access_key_checker_override: None,
     })
 }
 
@@ -1495,6 +4662,30 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         .expect("stored envelope reads");
     assert!(stored.contains("server-rescrub-v1"));
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+#[tokio::test]
+async fn submit_accepts_medium_risk_when_pilot_flag_enabled() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+    let envelope = sample_envelope().await;
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Medium);
+
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission succeeds");
+
+    assert_eq!(receipt.status, "accepted");
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert!(record.credit_points_pending >= 0.0);
 }
 
 #[tokio::test]
@@ -9386,6 +12577,7 @@ fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_re
         )
         .expect("freeze call builds"),
         status: StorageTraceCreditSettlementNearStatus::Failed,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(TEST_NEAR_TX_HASH_5.to_string()),
@@ -9484,6 +12676,7 @@ fn db_audit_projection_preserves_near_credit_outbox_status_hash_only_metadata() 
         )
         .expect("freeze call builds"),
         status: StorageTraceCreditSettlementNearStatus::Submitted,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(TEST_NEAR_TX_HASH_4.to_string()),
@@ -20143,6 +23336,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        accept_medium_risk_submissions: false,
+        community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
@@ -20170,6 +23365,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         near_credit_confirmer_timeout_ms: None,
         near_credit_confirmer_auth_configured: false,
         near_credit_require_adapter_auth: false,
+        near_settlement_mode: NearSettlementMode::Http,
         near_credit_outbox_scheduler: None,
         benchmark_registry_submitter: None,
         benchmark_registry_submitter_timeout_ms: None,
@@ -20223,6 +23419,10 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        account_webauthn: None,
+        account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_near_config: None,
+        near_access_key_checker_override: None,
     });
 
     let mut envelope = sample_envelope().await;
@@ -28301,6 +31501,7 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
                 source_list_hash: "sha256:settlement-item-sources".to_string(),
                 near_status: StorageTraceCreditSettlementNearStatus::Pending,
                 near_outbox_id: Some(near_outbox_id),
+                near_payout_hold_reason: None,
             }],
             near_contract_id: Some("trace-credits.testnet".to_string()),
             ranking_model_version: None,
@@ -28336,6 +31537,7 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
                 .expect("NEAR call builds"),
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -28608,6 +31810,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
             source_list_hash: "sha256:settlement-item-sources".to_string(),
             near_status: StorageTraceCreditSettlementNearStatus::Pending,
             near_outbox_id: Some(near_outbox_id),
+            near_payout_hold_reason: None,
         }],
         near_contract_id: Some("trace-credits.testnet".to_string()),
         ranking_model_version: None,
@@ -28634,6 +31837,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
             .expect("NEAR call builds"),
         status: StorageTraceCreditSettlementNearStatus::Pending,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: None,
         near_transaction_hash: None,
@@ -28654,6 +31858,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         Some(TEST_NEAR_TX_HASH_1.to_string()),
         None,
         Utc::now(),
+        None,
     )
     .expect("file status update succeeds")
     .expect("file outbox item exists");
@@ -34606,6 +37811,7 @@ async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
             source_list_hash: first_item_source_hash,
             near_status: StorageTraceCreditSettlementNearStatus::Disabled,
             near_outbox_id: None,
+            near_payout_hold_reason: None,
         }],
         near_contract_id: None,
         ranking_model_version: None,
@@ -35237,6 +38443,7 @@ fn submitted_near_credit_outbox_item(
         near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
             .expect("NEAR call builds"),
         status: StorageTraceCreditSettlementNearStatus::Submitted,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(near_transaction_hash.to_string()),
@@ -38004,6 +41211,7 @@ async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_re
             credit_account_hash: receipt.credit_account_hash,
             near_call,
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -38076,6 +41284,7 @@ async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
             near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
                 .expect("NEAR call builds"),
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -48083,6 +51292,7 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         source_list_hash: line_source_hash,
         near_status: StorageTraceCreditSettlementNearStatus::Pending,
         near_outbox_id: Some(Uuid::new_v4()),
+        near_payout_hold_reason: None,
     };
     let source_event = StorageTraceCreditEventRecord {
         credit_event_id,
@@ -60362,4 +63572,6843 @@ async fn community_profile_put_returns_503_when_flag_on_but_no_db() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ----------------------------------------------------------------------------
+// Account-scoped visibility predicate (Task 8).
+//
+// `visible_submission_records_for_account` is pure set-membership over an
+// `AccountPrincipalSet`: NO `can_review()` short-circuit, NO
+// `legacy_principal_ref()` wildcard. These tests verify that behaviour and the
+// inertness of `account-actor:{uuid}` refs as ownership keys (Hardening B).
+// ----------------------------------------------------------------------------
+
+/// Build a minimal `TraceCommonsSubmissionRecord` whose ownership key is
+/// `auth_principal_ref`. All fields other than the ones set here fall back to
+/// the struct's serde defaults; the rest are filled with inert placeholders.
+/// This is the cheapest way to obtain a record value (the struct has many
+/// required fields and no constructor), and it keeps the test focused on the
+/// only field the predicate inspects.
+fn submission_record_with_principal(auth_principal_ref: &str) -> TraceCommonsSubmissionRecord {
+    let value = serde_json::json!({
+        "tenant_id": "tenant-a",
+        "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+        "auth_principal_ref": auth_principal_ref,
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "accepted",
+        "privacy_risk": "low",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": "2026-06-22T00:00:00Z",
+        "object_key": "obj/placeholder",
+    });
+    serde_json::from_value(value).expect("submission record fixture deserializes")
+}
+
+/// (a) An account set of {principal_a} sees ONLY principal_a's record — not
+/// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
+/// the legacy reviewer/contributor surface honours. Pure set membership.
+#[test]
+fn visible_for_account_is_set_membership_only_no_legacy_wildcard() {
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
+    let records = vec![
+        submission_record_with_principal("principal_a"),
+        submission_record_with_principal("principal_b"),
+        submission_record_with_principal(&legacy_principal_ref()),
+    ];
+
+    let visible = visible_submission_records_for_account(&set, records);
+
+    let refs: Vec<String> = visible
+        .iter()
+        .map(|r| r.auth_principal_ref.clone())
+        .collect();
+    assert_eq!(refs, vec!["principal_a".to_string()]);
+    assert!(
+        !refs.iter().any(|r| r == &legacy_principal_ref()),
+        "legacy wildcard must NOT be visible to an account surface"
+    );
+    assert!(
+        !refs.iter().any(|r| r == "principal_b"),
+        "a principal not in the set must NOT be visible"
+    );
+}
+
+/// (e) An `account-actor:{uuid}` ref (the cookie-path actor/audit label) used as
+/// a record's `auth_principal_ref` is INERT as an ownership key: a set that does
+/// not contain that exact literal does not match it (Hardening B). The set here
+/// holds the same account's real device principal, which must NOT leak access to
+/// a record keyed by the account-actor label.
+#[test]
+fn account_actor_ref_is_inert_as_ownership_key() {
+    let account = AccountId::from_uuid(Uuid::new_v4());
+    let actor_label = account_actor_ref(&account);
+
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_real_device".to_string()]);
+    let records = vec![submission_record_with_principal(&actor_label)];
+
+    let visible = visible_submission_records_for_account(&set, records);
+    assert!(
+        visible.is_empty(),
+        "account-actor label must not be matched by a set lacking that exact literal"
+    );
+
+    // And it IS matched only by a set that literally contains it (sanity: the
+    // predicate is plain membership, not a prefix/shape rule).
+    let exact_set = AccountPrincipalSet::from_iter_for_test_only([actor_label.clone()]);
+    let records = vec![submission_record_with_principal(&actor_label)];
+    assert_eq!(
+        visible_submission_records_for_account(&exact_set, records).len(),
+        1
+    );
+}
+
+/// (d) The unlinked-principal exclusion is enforced at the DB layer:
+/// `expand_account_principals` filters `unlinked_at IS NULL` (see
+/// `db/postgres.rs`), so an unlinked principal never reaches an
+/// `AccountPrincipalSet`. The membership predicate above therefore never has to
+/// re-check link state. A dedicated DB-backed test for the exclusion is not
+/// added in this slice because no membership/unlink write path is exposed yet
+/// (it arrives in a later slice); the filter is covered by the Task 7 expand SQL
+/// and asserted here only structurally via the membership tests above.
+#[test]
+fn unlinked_exclusion_is_a_db_layer_guarantee() {
+    // A set produced by the lib never contains an unlinked principal; this test
+    // documents the invariant the predicate relies on. The predicate itself is
+    // membership-only, so an absent (unlinked) principal is simply not matched.
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_active".to_string()]);
+    let records = vec![submission_record_with_principal("principal_unlinked")];
+    assert!(
+        visible_submission_records_for_account(&set, records).is_empty(),
+        "a principal absent from the (active-only) set is not visible"
+    );
+}
+
+/// Hardening C, runtime witness. `trybuild` is not a dev-dependency of this
+/// crate (dependency policy), so the type-level separation is documented as
+/// `compile_fail` doctests on `visible_submission_records_for_account` and
+/// asserted indirectly here: the two surfaces take distinct, non-convertible
+/// argument types. This test exercises BOTH correct calls; the illegal calls
+/// (`visible_submission_records(&set, ..)` /
+/// `visible_submission_records_for_account(&auth, ..)`) are rejected by the
+/// compiler because there is no `From`/`Into`/`Deref`/`AsRef` between
+/// `AccountPrincipalSet`/`AccountCtx` and `TenantAuth`.
+#[test]
+fn account_and_tenant_surfaces_take_distinct_types() {
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
+    let account_visible = visible_submission_records_for_account(
+        &set,
+        vec![submission_record_with_principal("principal_a")],
+    );
+    assert_eq!(account_visible.len(), 1);
+
+    // The legacy surface still works on its own `&TenantAuth` type, unchanged.
+    // A contributor (no review capability) sees only its own principal's record,
+    // exercising the principal-match path distinct from the account surface.
+    let auth = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "principal_a".to_string(),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let tenant_visible = visible_submission_records(
+        &auth,
+        vec![submission_record_with_principal(&auth.principal_ref)],
+    );
+    assert_eq!(tenant_visible.len(), 1);
+}
+
+// --- Task 11: rate limiting, redeem timing floor, session revocation --------
+
+/// The in-process limiter admits up to `limit` hits per window, then denies.
+#[test]
+fn account_rate_limiter_caps_per_key() {
+    let limiter = AccountRateLimiter::new();
+    let key = "unit-key";
+    for _ in 0..CONFIRM_PER_CODE_LIMIT {
+        assert!(
+            limiter.check(key, CONFIRM_PER_CODE_LIMIT),
+            "within ceiling allowed"
+        );
+    }
+    assert!(
+        !limiter.check(key, CONFIRM_PER_CODE_LIMIT),
+        "the (limit+1)th hit must be denied"
+    );
+    // A different key is independent.
+    assert!(limiter.check("other-key", CONFIRM_PER_CODE_LIMIT));
+}
+
+/// The concurrency guard caps in-flight slots and releases on drop.
+#[test]
+fn account_rate_limiter_concurrency_cap_and_release() {
+    let limiter = AccountRateLimiter::new();
+    let key = "conc-key";
+    let g1 = limiter.acquire(key, 2).expect("slot 1");
+    let g2 = limiter.acquire(key, 2).expect("slot 2");
+    assert!(limiter.acquire(key, 2).is_none(), "cap reached");
+    drop(g1);
+    let _g3 = limiter.acquire(key, 2).expect("slot freed after drop");
+    drop(g2);
+}
+
+/// Hardening G: a cross-origin confirm (which denies BEFORE any DB access) must
+/// still take at least the redeem timing floor. No database required: the
+/// same-origin gate short-circuits to the uniform deny inside the floored body.
+#[tokio::test]
+async fn confirm_deny_respects_timing_floor() {
+    use axum::response::IntoResponse;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    // Cross-site POST -> uniform deny, short-circuits before any DB.
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    let start = std::time::Instant::now();
+    let response = confirm_login_handler(
+        State(state.clone()),
+        cross_site,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "bogus".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    let elapsed = start.elapsed();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uniform deny");
+    assert!(
+        elapsed >= REDEEM_MIN_LATENCY,
+        "every confirm response (incl. early deny) must take >= the floor: {elapsed:?}"
+    );
+}
+
+/// Hardening F: the per-`code_hash` ceiling denies after a few attempts for one
+/// code. No DB needed: it is checked before `resolve_login_link_tenant`. We pass
+/// a same-origin header so the same-origin gate does not short-circuit first.
+#[tokio::test]
+async fn confirm_per_code_ceiling_exhausts_a_code() {
+    use axum::response::IntoResponse;
+    let temp = tempfile::tempdir().expect("temp dir");
+    // No db_mirror: after the per-code check passes, account_db() denies, but the
+    // limiter increment has already happened. A unique code_hash per test run
+    // keeps the process-global limiter isolated from other tests.
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let code = format!("per-code-test-{}", uuid::Uuid::new_v4());
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    // The first CONFIRM_PER_CODE_LIMIT attempts pass the ceiling (and then fail
+    // downstream at account_db -> uniform deny); the (limit+1)th is denied by the
+    // ceiling itself. All return the SAME uniform deny status (non-enumerating).
+    for _ in 0..CONFIRM_PER_CODE_LIMIT {
+        let resp = confirm_login_handler(
+            State(state.clone()),
+            same_origin.clone(),
+            ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    let exhausted = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        exhausted.status(),
+        StatusCode::BAD_REQUEST,
+        "exhausted code -> same uniform deny"
+    );
+}
+
+/// Part 1: logout revokes the CURRENT session — the same cookie then 401s on a
+/// guarded endpoint. PostgreSQL-backed; self-skips without a database.
+#[tokio::test]
+async fn logout_revokes_current_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    // The cookie resolves before logout.
+    resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves before logout");
+
+    // Logout the current session.
+    let logout_ext = account_ctx_ext(&state, &headers).await;
+    let status = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
+        .await
+        .expect("logout succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The same cookie now fails closed (revoked).
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("revoked session must 401");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Part 1: revoke-all invalidates EVERY session for the account and returns the
+/// count. Two sessions for one account both 401 after revoke-all.
+#[tokio::test]
+async fn revoke_all_invalidates_every_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Two redeems for the SAME device principal -> same account, two sessions.
+    let cookie_one = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let cookie_two = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers_one = cookie_request_headers("tc_account_session", &cookie_one);
+    let headers_two = cookie_request_headers("tc_account_session", &cookie_two);
+
+    // Both resolve before revoke-all.
+    resolve_account_ctx(state.as_ref(), &headers_one)
+        .await
+        .expect("session one resolves");
+    resolve_account_ctx(state.as_ref(), &headers_two)
+        .await
+        .expect("session two resolves");
+
+    // Revoke-all via either session.
+    let revoke_ext = account_ctx_ext(&state, &headers_one).await;
+    let Json(body) = account_revoke_all_handler(State(state.clone()), revoke_ext)
+        .await
+        .expect("revoke-all succeeds");
+    let revoked = body
+        .get("revoked")
+        .and_then(|v| v.as_u64())
+        .expect("revoked count");
+    assert!(revoked >= 2, "at least the two sessions revoked: {revoked}");
+
+    // BOTH cookies now fail closed.
+    let err_one = resolve_account_ctx(state.as_ref(), &headers_one)
+        .await
+        .expect_err("session one revoked");
+    assert_eq!(err_one.0, StatusCode::UNAUTHORIZED);
+    let err_two = resolve_account_ctx(state.as_ref(), &headers_two)
+        .await
+        .expect_err("session two revoked");
+    assert_eq!(err_two.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ============================================================================
+// Task 12: cross-account isolation regression suite (spec §Testing a-e).
+//
+// These exercise the ACTUAL `/v1/account/*` handlers end-to-end against real
+// PostgreSQL (self-skipping without a database). Each test inserts submissions
+// directly via the DB mirror, links device principals to accounts via the mint
+// handler, then drives the list / detail / content handlers under one account's
+// auth and asserts the other account's (or the legacy / unlinked / account-actor)
+// submissions are NEVER returned. The handlers are reached through the dual-auth
+// `resolve_account_ctx`, so this covers the whole stack, not just the predicate.
+// ============================================================================
+
+/// Stage a readable, serialized envelope on disk for `submission_id` under
+/// `tenant_id` so the content handler's file-fallback read resolves it. Unlike
+/// `write_redacted_envelope_to_disk`, this does NOT assert any redaction marker:
+/// the isolation property under test is ownership-gating (own → 200, foreign →
+/// 404), which is independent of redaction-marker fidelity. Returns the stored
+/// bytes so callers can assert byte-identical read-back.
+async fn stage_account_content_envelope(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<u8> {
+    use trace_commons_protocol::trace_contribution::RawTraceContribution;
+
+    let trace = TraceFile {
+        model_name: "test-model".to_string(),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::UserInput {
+                content: "benign user input with no private data".to_string(),
+            },
+            expected_tool_results: Vec::new(),
+        }],
+    };
+    let raw = RawTraceContribution::from_recorded_trace(
+        &trace,
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..Default::default()
+        },
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction succeeds");
+    let body = serde_json::to_vec(&envelope).expect("serialize envelope");
+
+    let object_key =
+        trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, &body).expect("write envelope object");
+    body
+}
+
+/// Drive all three account read endpoints under `token`'s bearer auth and assert
+/// `target` (a submission owned by a DIFFERENT account / legacy / unlinked /
+/// account-actor principal) is invisible: absent from the list, and a uniform
+/// `404` on both detail and content. `own_ids` (if any) are asserted present in
+/// the list so we also prove the caller still sees its own rows.
+async fn assert_target_invisible_across_all_three_reads(
+    state: &Arc<AppState>,
+    token: &str,
+    target: Uuid,
+    own_ids: &[Uuid],
+) {
+    // List: target absent; own ids present.
+    let list_ext = account_ctx_ext(state, &auth_headers(token)).await;
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        list_ext,
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("list succeeds");
+    let listed: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert!(
+        !listed.contains(&target),
+        "target submission must NOT appear in the account list"
+    );
+    for owned in own_ids {
+        assert!(
+            listed.contains(owned),
+            "the account's OWN submission {owned} must appear in its list"
+        );
+    }
+
+    // Detail: uniform 404 (byte-identical to a random nonexistent id).
+    let random = Uuid::new_v4();
+    let target_detail_ext = account_ctx_ext(state, &auth_headers(token)).await;
+    let target_detail_err =
+        account_trace_detail_handler(State(state.clone()), target_detail_ext, AxumPath(target))
+            .await
+            .expect_err("foreign detail -> 404");
+    let random_detail_ext = account_ctx_ext(state, &auth_headers(token)).await;
+    let random_detail_err =
+        account_trace_detail_handler(State(state.clone()), random_detail_ext, AxumPath(random))
+            .await
+            .expect_err("missing detail -> 404");
+    assert_eq!(target_detail_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        target_detail_err.1.0.error, random_detail_err.1.0.error,
+        "foreign and nonexistent detail must be byte-identical (no existence oracle)"
+    );
+
+    // Content: uniform 404, byte-identical to the detail 404 (same not_found()).
+    let target_content_ext = account_ctx_ext(state, &auth_headers(token)).await;
+    let target_content_err =
+        account_trace_content_handler(State(state.clone()), target_content_ext, AxumPath(target))
+            .await
+            .expect_err("foreign content -> 404");
+    assert_eq!(target_content_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        target_content_err.1.0.error, random_detail_err.1.0.error,
+        "foreign content 404 must be byte-identical to the detail 404"
+    );
+}
+
+/// (a) Two accounts in one tenant. Account A (device principal of `token-a`) and
+/// account B (device principal of `token-a-2`) each own a submission. A's auth on
+/// all three read endpoints returns ONLY A's: B's submission is absent from the
+/// list and 404 on detail AND content (byte-identical to A's own not-found). A's
+/// own content read-back returns 200 with the staged body.
+#[tokio::test]
+async fn isolation_a_two_accounts_one_tenant_cannot_cross_read() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link two DISTINCT device principals under the same tenant to two accounts.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links account A");
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("mint links account B");
+    let principal_a = principal_storage_ref("token-a");
+    let principal_b = principal_storage_ref("token-a-2");
+
+    let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
+    let b_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_b).await;
+
+    // Stage readable content for BOTH so a missing-artifact 500 cannot masquerade
+    // as the ownership 404 we are asserting for the foreign row.
+    let a_body = stage_account_content_envelope(state.as_ref(), "tenant-a", a_owned).await;
+    let _ = stage_account_content_envelope(state.as_ref(), "tenant-a", b_owned).await;
+
+    // A cannot see B across list + detail + content; A still sees its own row.
+    assert_target_invisible_across_all_three_reads(&state, "token-a", b_owned, &[a_owned]).await;
+
+    // And A's OWN content read-back succeeds (proves the 404 above is ownership,
+    // not a blanket read failure).
+    let own_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let response = account_trace_content_handler(State(state.clone()), own_ext, AxumPath(a_owned))
+        .await
+        .expect("A's own content read succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read A body");
+    assert_eq!(
+        body_bytes.as_ref(),
+        a_body.as_slice(),
+        "A reads back exactly its own stored envelope"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (b) A submission whose `auth_principal_ref == legacy_principal_ref()` is NEVER
+/// returned on the account surface (list + detail 404 + content 404), proving the
+/// account surface dropped the legacy wildcard that the reviewer/contributor
+/// `/v1/traces` surface still honors.
+#[tokio::test]
+async fn isolation_b_legacy_principal_never_returned_on_account_surface() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links account A");
+    let principal_a = principal_storage_ref("token-a");
+
+    let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
+    // A legacy-wildcard-owned submission under the same tenant.
+    let legacy =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &legacy_principal_ref()).await;
+
+    assert_target_invisible_across_all_three_reads(&state, "token-a", legacy, &[a_owned]).await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (c) A Reviewer-role bearer token, used on `/v1/account/traces`, sees ONLY its
+/// own account's submissions — NOT every submission in the tenant. This proves
+/// the account surface ignores `can_review` (which on `/v1/traces` would expose
+/// the whole tenant). The reviewer's own device principal is linked to its own
+/// account via mint; a foreign-principal submission under the same tenant must
+/// stay invisible to it on the account surface.
+#[tokio::test]
+async fn isolation_c_reviewer_token_confined_to_own_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // `review-token-a` is a Reviewer-role token under tenant-a (default token set).
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("review-token-a"))
+        .await
+        .expect("mint links the reviewer's account");
+    let reviewer_principal = principal_storage_ref("review-token-a");
+
+    let reviewer_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &reviewer_principal).await;
+    // A submission owned by a DIFFERENT principal in the SAME tenant. On the legacy
+    // reviewer surface a reviewer would see this; on the account surface it must be
+    // invisible (can_review is not consulted).
+    let foreign =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_other_contributor")
+            .await;
+
+    assert_target_invisible_across_all_three_reads(
+        &state,
+        "review-token-a",
+        foreign,
+        &[reviewer_owned],
+    )
+    .await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (d) An UNLINKED principal (a `trace_account_principals` row with `unlinked_at`
+/// set) is excluded from the active-membership expansion: submissions under the
+/// unlinked principal are absent from the account's list AND 404 on detail/content,
+/// while the SAME account's active principal's submissions remain visible. There
+/// is no unlink endpoint in this slice, so the unlinked row is inserted via raw
+/// SQL under the tenant's RLS context.
+#[tokio::test]
+async fn isolation_d_unlinked_principal_excluded_active_principal_visible() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint links token-a's principal (ACTIVE) to an account; capture that account.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the active principal");
+    let active_principal = principal_storage_ref("token-a");
+
+    // Resolve the account_id for token-a's principal so we can attach an UNLINKED
+    // sibling principal to the SAME account.
+    let account_id: Uuid = {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let row = tx
+            .query_one(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1 AND unlinked_at IS NULL",
+                &[&active_principal],
+            )
+            .await
+            .expect("active principal row exists");
+        let account_id: Uuid = row.get(0);
+        // Attach an already-UNLINKED sibling principal to the same account.
+        let unlinked_principal = "principal_unlinked_sibling";
+        let inserted = tx
+            .execute(
+                "INSERT INTO trace_account_principals
+                    (tenant_id, account_id, principal_ref, linked_at, unlinked_at)
+                  VALUES (trace_current_tenant_id(), $1, $2, now() - INTERVAL '1 day', now())",
+                &[&account_id, &unlinked_principal],
+            )
+            .await
+            .expect("insert unlinked sibling principal");
+        assert_eq!(inserted, 1, "exactly one unlinked principal row inserted");
+        tx.commit().await.expect("commit unlinked principal");
+        account_id
+    };
+    let _ = account_id; // captured for clarity; ownership flows through the set.
+
+    let active_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
+    // A submission owned by the UNLINKED principal must NOT be visible.
+    let unlinked_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_unlinked_sibling")
+            .await;
+
+    assert_target_invisible_across_all_three_reads(
+        &state,
+        "token-a",
+        unlinked_owned,
+        &[active_owned],
+    )
+    .await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (e) A submission whose `auth_principal_ref` is literally `account-actor:{uuid}`
+/// is NEVER matched for that account: the account-actor ref is an audit label, not
+/// an ownership key. Even though the cookie path sets the actor ref to exactly this
+/// literal, the principal SET (which carries ownership) holds only the device
+/// principal, so an account-actor-keyed submission is invisible across all three
+/// reads. End-to-end via the cookie session (so the actor ref really is the
+/// account-actor literal at request time).
+#[tokio::test]
+async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Cookie session for token-a's account; the resolved actor ref will be
+    // `account-actor:{account_id}`.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "cookie path actor ref must be the account-actor literal"
+    );
+    let active_principal = principal_storage_ref("token-a");
+
+    let active_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
+    // A submission keyed by the EXACT account-actor literal must be inert: it is an
+    // audit label, never an ownership key, so it is not in the principal set.
+    let actor_keyed =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &ctx.actor_ref).await;
+
+    // Sanity: the actor ref is structurally NOT a sha-shaped principal and is NOT
+    // in the ownership set.
+    assert!(!ctx.actor_ref.starts_with("principal_"));
+    assert!(!ctx.principal_set.contains(&ctx.actor_ref));
+
+    // List under the COOKIE session: actor-keyed row absent, active row present.
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        Extension(ctx.clone()),
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("cookie list succeeds");
+    let listed: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert!(
+        listed.contains(&active_owned),
+        "the account's active-principal submission is visible"
+    );
+    assert!(
+        !listed.contains(&actor_keyed),
+        "an account-actor-keyed submission must be INERT (never returned)"
+    );
+
+    // Detail + content 404 for the actor-keyed row under the cookie session.
+    let detail_err = account_trace_detail_handler(
+        State(state.clone()),
+        Extension(ctx.clone()),
+        AxumPath(actor_keyed),
+    )
+    .await
+    .expect_err("actor-keyed detail -> 404");
+    assert_eq!(detail_err.0, StatusCode::NOT_FOUND);
+    let content_err = account_trace_content_handler(
+        State(state.clone()),
+        Extension(ctx.clone()),
+        AxumPath(actor_keyed),
+    )
+    .await
+    .expect_err("actor-keyed content -> 404");
+    assert_eq!(content_err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 (passkeys) Task 4: webauthn credential DB operations.
+//
+// DB-backed: self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor
+// DATABASE_URL is set. Each test cleans tenant-a first so it is self-isolating
+// on a reused database, and seeds accounts via the normal tenant-scoped path so
+// the credential FK (tenant_id, account_id) -> trace_accounts is satisfied.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn webauthn_credential_insert_load_round_trips() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-roundtrip", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-roundtrip-globally-unique";
+    let passkey = serde_json::json!({"counter": 7, "aaguid": "abc", "nested": {"k": [1, 2, 3]}});
+
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-roundtrip",
+            account_id,
+            credential_id,
+            &passkey,
+            Some("My Key"),
+        )
+        .await
+        .expect("insert credential");
+
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-wa-roundtrip", credential_id)
+        .await
+        .expect("load credential")
+        .expect("credential present");
+    assert_eq!(loaded.account_id, account_id);
+    assert_eq!(loaded.passkey, passkey, "passkey JSON preserved exactly");
+
+    // Unknown credential -> None.
+    let missing = backend
+        .load_webauthn_credential_for_login("tenant-wa-roundtrip", "cred-does-not-exist")
+        .await
+        .expect("load missing");
+    assert!(missing.is_none(), "unknown credential resolves to None");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_update_after_login_persists_passkey() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-update", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-update-globally-unique";
+    let passkey = serde_json::json!({"counter": 1});
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-update",
+            account_id,
+            credential_id,
+            &passkey,
+            None,
+        )
+        .await
+        .expect("insert credential");
+
+    let bumped = serde_json::json!({"counter": 42, "post_finish": true});
+    backend
+        .update_webauthn_credential_after_login("tenant-wa-update", credential_id, &bumped)
+        .await
+        .expect("update credential");
+
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-wa-update", credential_id)
+        .await
+        .expect("load credential")
+        .expect("credential present");
+    assert_eq!(
+        loaded.passkey, bumped,
+        "post-finish passkey (new sign count) persisted"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_list_excludes_revoked_and_orders_by_created_at() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-list", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-list",
+            account_id,
+            "cred-1",
+            &passkey,
+            Some("first"),
+        )
+        .await
+        .expect("insert cred-1");
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-list",
+            account_id,
+            "cred-2",
+            &passkey,
+            Some("second"),
+        )
+        .await
+        .expect("insert cred-2");
+
+    let listed = backend
+        .list_account_credentials("tenant-wa-list", account_id)
+        .await
+        .expect("list credentials");
+    assert_eq!(listed.len(), 2, "both active credentials listed");
+    let ids: Vec<&str> = listed.iter().map(|c| c.credential_id.as_str()).collect();
+    assert_eq!(ids, vec!["cred-1", "cred-2"], "ordered by created_at");
+    assert_eq!(listed[0].label.as_deref(), Some("first"));
+
+    // Revoke one -> excluded from the list.
+    let revoke = backend
+        .revoke_account_credential("tenant-wa-list", account_id, "cred-1")
+        .await
+        .expect("revoke cred-1");
+    assert!(revoke.removed, "revoke affected a row");
+    assert_eq!(revoke.remaining, 1, "one credential remains active");
+
+    let after = backend
+        .list_account_credentials("tenant-wa-list", account_id)
+        .await
+        .expect("list after revoke");
+    assert_eq!(after.len(), 1, "revoked credential excluded");
+    assert_eq!(after[0].credential_id, "cred-2");
+
+    // load_for_login no longer resolves the revoked credential.
+    let revoked_load = backend
+        .load_webauthn_credential_for_login("tenant-wa-list", "cred-1")
+        .await
+        .expect("load revoked");
+    assert!(
+        revoked_load.is_none(),
+        "revoked credential not loadable for login"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_rename_updates_label_and_reports_match() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-rename", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-rename",
+            account_id,
+            "cred-rename",
+            &passkey,
+            Some("old"),
+        )
+        .await
+        .expect("insert credential");
+
+    let renamed = backend
+        .rename_account_credential(
+            "tenant-wa-rename",
+            account_id,
+            "cred-rename",
+            Some("new label"),
+        )
+        .await
+        .expect("rename credential");
+    assert!(renamed, "rename of owned active credential returns true");
+
+    let listed = backend
+        .list_account_credentials("tenant-wa-rename", account_id)
+        .await
+        .expect("list credentials");
+    assert_eq!(
+        listed[0].label.as_deref(),
+        Some("new label"),
+        "label updated"
+    );
+
+    // Unknown credential id -> false (no row affected).
+    let unknown = backend
+        .rename_account_credential("tenant-wa-rename", account_id, "cred-unknown", Some("x"))
+        .await
+        .expect("rename unknown");
+    assert!(!unknown, "rename of unknown credential returns false");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_revoke_is_idempotent_and_counts_remaining() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-revoke", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-a", &passkey, None)
+        .await
+        .expect("insert cred-a");
+    backend
+        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-b", &passkey, None)
+        .await
+        .expect("insert cred-b");
+
+    let first = backend
+        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
+        .await
+        .expect("revoke cred-a");
+    assert!(first.removed);
+    assert_eq!(first.remaining, 1, "one credential left after first revoke");
+
+    // Idempotent: revoking an already-revoked credential affects no row.
+    let again = backend
+        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
+        .await
+        .expect("revoke cred-a again");
+    assert!(
+        !again.removed,
+        "already-revoked credential is not removed again"
+    );
+    assert_eq!(again.remaining, 1, "remaining count unchanged");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
+
+    // Two distinct accounts in the SAME tenant.
+    let account_a = backend
+        .create_or_reuse_account("tenant-wa-scope", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-wa-scope", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    let passkey = serde_json::json!({"owner": "a"});
+    backend
+        .insert_webauthn_credential(
+            "tenant-wa-scope",
+            account_a,
+            "cred-owned-by-a",
+            &passkey,
+            Some("A's key"),
+        )
+        .await
+        .expect("insert A's credential");
+
+    // Account B's list must NOT see account A's credential.
+    let b_list = backend
+        .list_account_credentials("tenant-wa-scope", account_b)
+        .await
+        .expect("list B");
+    assert!(
+        b_list.is_empty(),
+        "account B sees none of account A's credentials"
+    );
+
+    // Account B cannot rename account A's credential.
+    let b_rename = backend
+        .rename_account_credential(
+            "tenant-wa-scope",
+            account_b,
+            "cred-owned-by-a",
+            Some("hijack"),
+        )
+        .await
+        .expect("rename attempt by B");
+    assert!(!b_rename, "account B cannot rename account A's credential");
+
+    // Account B cannot revoke account A's credential; remaining counts only B's.
+    let b_revoke = backend
+        .revoke_account_credential("tenant-wa-scope", account_b, "cred-owned-by-a")
+        .await
+        .expect("revoke attempt by B");
+    assert!(
+        !b_revoke.removed,
+        "account B cannot revoke account A's credential"
+    );
+    assert_eq!(
+        b_revoke.remaining, 0,
+        "account B has no active credentials of its own"
+    );
+
+    // Account A's credential is untouched: still listable, still original label.
+    let a_list = backend
+        .list_account_credentials("tenant-wa-scope", account_a)
+        .await
+        .expect("list A");
+    assert_eq!(
+        a_list.len(),
+        1,
+        "account A's credential survived B's attempts"
+    );
+    assert_eq!(
+        a_list[0].label.as_deref(),
+        Some("A's key"),
+        "label not hijacked"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3a (login-with-NEAR) Task 5: NEAR identity DB operations and the
+// strong-authenticator count.
+//
+// DB-backed: self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor
+// DATABASE_URL is set. Each test uses a distinct tenant and cleans it first so it
+// is self-isolating on a reused database; accounts are seeded via the normal
+// tenant-scoped path so the FK (tenant_id, account_id) -> trace_accounts holds.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn near_identity_insert_load_round_trips() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-roundtrip").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-roundtrip", "principal-a")
+        .await
+        .expect("seed account");
+    let public_key = "ed25519:roundtrip-globally-unique";
+
+    backend
+        .insert_near_identity(
+            "tenant-near-roundtrip",
+            account_id,
+            public_key,
+            "alice.near",
+            Some("My Wallet"),
+        )
+        .await
+        .expect("insert identity");
+
+    let loaded = backend
+        .load_near_identity_for_login("tenant-near-roundtrip", public_key)
+        .await
+        .expect("load identity")
+        .expect("identity present");
+    assert_eq!(loaded.account_id, account_id);
+    assert_eq!(
+        loaded.near_account_id, "alice.near",
+        "near_account_id preserved"
+    );
+
+    // Unknown key -> None.
+    let missing = backend
+        .load_near_identity_for_login("tenant-near-roundtrip", "ed25519:does-not-exist")
+        .await
+        .expect("load missing");
+    assert!(missing.is_none(), "unknown public_key resolves to None");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-roundtrip").await;
+}
+
+#[tokio::test]
+async fn near_identity_touch_last_used_updates_timestamp() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-touch").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-touch", "principal-a")
+        .await
+        .expect("seed account");
+    let public_key = "ed25519:touch-key";
+    backend
+        .insert_near_identity(
+            "tenant-near-touch",
+            account_id,
+            public_key,
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert identity");
+
+    let before = backend
+        .list_account_near_identities("tenant-near-touch", account_id)
+        .await
+        .expect("list before");
+    assert_eq!(before.len(), 1);
+    assert!(before[0].last_used_at.is_none(), "last_used_at starts NULL");
+
+    backend
+        .touch_near_identity_last_used("tenant-near-touch", public_key)
+        .await
+        .expect("touch identity");
+
+    let after = backend
+        .list_account_near_identities("tenant-near-touch", account_id)
+        .await
+        .expect("list after");
+    assert!(
+        after[0].last_used_at.is_some(),
+        "last_used_at stamped after touch"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-touch").await;
+}
+
+#[tokio::test]
+async fn near_identity_list_excludes_revoked_and_orders_by_created_at() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-list").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-list", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity(
+            "tenant-near-list",
+            account_id,
+            "ed25519:key-1",
+            "alice.near",
+            Some("first"),
+        )
+        .await
+        .expect("insert key-1");
+    backend
+        .insert_near_identity(
+            "tenant-near-list",
+            account_id,
+            "ed25519:key-2",
+            "bob.near",
+            Some("second"),
+        )
+        .await
+        .expect("insert key-2");
+
+    let listed = backend
+        .list_account_near_identities("tenant-near-list", account_id)
+        .await
+        .expect("list identities");
+    assert_eq!(listed.len(), 2, "both active identities listed");
+    let keys: Vec<&str> = listed.iter().map(|i| i.public_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["ed25519:key-1", "ed25519:key-2"],
+        "ordered by created_at"
+    );
+    assert_eq!(listed[0].label.as_deref(), Some("first"));
+    assert_eq!(listed[0].near_account_id, "alice.near");
+
+    // Revoke one -> excluded from list and from load_for_login.
+    let revoke = backend
+        .revoke_account_near_identity("tenant-near-list", account_id, "ed25519:key-1")
+        .await
+        .expect("revoke key-1");
+    assert!(revoke.removed, "revoke affected a row");
+    assert_eq!(revoke.remaining_strong, 1, "one identity remains active");
+
+    let after = backend
+        .list_account_near_identities("tenant-near-list", account_id)
+        .await
+        .expect("list after revoke");
+    assert_eq!(after.len(), 1, "revoked identity excluded");
+    assert_eq!(after[0].public_key, "ed25519:key-2");
+
+    let revoked_load = backend
+        .load_near_identity_for_login("tenant-near-list", "ed25519:key-1")
+        .await
+        .expect("load revoked");
+    assert!(
+        revoked_load.is_none(),
+        "revoked identity not loadable for login"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-list").await;
+}
+
+#[tokio::test]
+async fn near_identity_rename_updates_label_and_reports_match() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-rename").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-rename", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity(
+            "tenant-near-rename",
+            account_id,
+            "ed25519:rename-key",
+            "alice.near",
+            Some("old"),
+        )
+        .await
+        .expect("insert identity");
+
+    let renamed = backend
+        .rename_account_near_identity(
+            "tenant-near-rename",
+            account_id,
+            "ed25519:rename-key",
+            Some("new label"),
+        )
+        .await
+        .expect("rename identity");
+    assert!(renamed, "rename of owned active identity returns true");
+
+    let listed = backend
+        .list_account_near_identities("tenant-near-rename", account_id)
+        .await
+        .expect("list identities");
+    assert_eq!(
+        listed[0].label.as_deref(),
+        Some("new label"),
+        "label updated"
+    );
+
+    let unknown = backend
+        .rename_account_near_identity(
+            "tenant-near-rename",
+            account_id,
+            "ed25519:unknown",
+            Some("x"),
+        )
+        .await
+        .expect("rename unknown");
+    assert!(!unknown, "rename of unknown key returns false");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-rename").await;
+}
+
+#[tokio::test]
+async fn near_identity_account_scoping_blocks_cross_account_access() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-scope").await;
+
+    // Two distinct accounts in the SAME tenant.
+    let account_a = backend
+        .create_or_reuse_account("tenant-near-scope", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-near-scope", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    backend
+        .insert_near_identity(
+            "tenant-near-scope",
+            account_a,
+            "ed25519:owned-by-a",
+            "alice.near",
+            Some("A's wallet"),
+        )
+        .await
+        .expect("insert A's identity");
+
+    // Account B's list must NOT see account A's identity.
+    let b_list = backend
+        .list_account_near_identities("tenant-near-scope", account_b)
+        .await
+        .expect("list B");
+    assert!(
+        b_list.is_empty(),
+        "account B sees none of account A's identities"
+    );
+
+    // Account B cannot rename account A's identity.
+    let b_rename = backend
+        .rename_account_near_identity(
+            "tenant-near-scope",
+            account_b,
+            "ed25519:owned-by-a",
+            Some("hijack"),
+        )
+        .await
+        .expect("rename attempt by B");
+    assert!(!b_rename, "account B cannot rename account A's identity");
+
+    // Account B cannot revoke account A's identity; remaining counts only B's.
+    let b_revoke = backend
+        .revoke_account_near_identity("tenant-near-scope", account_b, "ed25519:owned-by-a")
+        .await
+        .expect("revoke attempt by B");
+    assert!(
+        !b_revoke.removed,
+        "account B cannot revoke account A's identity"
+    );
+    assert_eq!(
+        b_revoke.remaining_strong, 0,
+        "account B has no strong authenticators of its own"
+    );
+
+    // Account A's identity is untouched: still listable, still original label.
+    let a_list = backend
+        .list_account_near_identities("tenant-near-scope", account_a)
+        .await
+        .expect("list A");
+    assert_eq!(
+        a_list.len(),
+        1,
+        "account A's identity survived B's attempts"
+    );
+    assert_eq!(
+        a_list[0].label.as_deref(),
+        Some("A's wallet"),
+        "label not hijacked"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-scope").await;
+}
+
+#[tokio::test]
+async fn strong_authenticator_count_sums_webauthn_and_near() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-strong-count").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-strong-count", "principal-a")
+        .await
+        .expect("seed account");
+
+    // Start with no strong authenticators.
+    let zero = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count empty");
+    assert_eq!(zero, 0, "no strong authenticators initially");
+
+    // Enroll one webauthn credential AND one NEAR identity -> 2.
+    let passkey = serde_json::json!({"counter": 1});
+    backend
+        .insert_webauthn_credential("tenant-strong-count", account_id, "cred-x", &passkey, None)
+        .await
+        .expect("insert webauthn credential");
+    backend
+        .insert_near_identity(
+            "tenant-strong-count",
+            account_id,
+            "ed25519:strong-key",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert near identity");
+
+    let two = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count two");
+    assert_eq!(two, 2, "webauthn + near summed");
+
+    // Revoke the NEAR identity -> 1, and remaining_strong reported in the SAME tx.
+    let revoke_near = backend
+        .revoke_account_near_identity("tenant-strong-count", account_id, "ed25519:strong-key")
+        .await
+        .expect("revoke near");
+    assert!(revoke_near.removed);
+    assert_eq!(
+        revoke_near.remaining_strong, 1,
+        "webauthn credential still counts as strong"
+    );
+    let one = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count one");
+    assert_eq!(one, 1, "one strong authenticator after near revoke");
+
+    // Revoke the webauthn credential -> 0.
+    let revoke_cred = backend
+        .revoke_account_credential("tenant-strong-count", account_id, "cred-x")
+        .await
+        .expect("revoke webauthn");
+    assert!(revoke_cred.removed);
+    let zero_again = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count zero again");
+    assert_eq!(zero_again, 0, "no strong authenticators after both revoked");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-strong-count").await;
+}
+
+// ============================================================================
+// Slice 3b Task 4: NEAR payout designation DB ops + fail-closed resolution.
+// ============================================================================
+
+#[tokio::test]
+async fn near_payout_designate_sets_flag_and_clears_prior() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-designate").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-payout-designate", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity(
+            "tenant-payout-designate",
+            account_id,
+            "ed25519:pay-1",
+            "alice.near",
+            Some("first"),
+        )
+        .await
+        .expect("insert key-1");
+    backend
+        .insert_near_identity(
+            "tenant-payout-designate",
+            account_id,
+            "ed25519:pay-2",
+            "bob.near",
+            Some("second"),
+        )
+        .await
+        .expect("insert key-2");
+
+    // No designation yet -> is_payout false on both.
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list identities");
+    assert!(
+        listed.iter().all(|i| !i.is_payout),
+        "no payout designated initially"
+    );
+
+    // Designate key-1.
+    let ok = backend
+        .designate_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-1")
+        .await
+        .expect("designate key-1");
+    assert!(ok, "designating an owned active key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after designate");
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|i| i.is_payout)
+        .map(|i| i.public_key.as_str())
+        .collect();
+    assert_eq!(
+        designated,
+        vec!["ed25519:pay-1"],
+        "exactly key-1 designated"
+    );
+
+    // Designate key-2 -> clears key-1 (partial-unique index never violated).
+    let ok2 = backend
+        .designate_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("designate key-2");
+    assert!(ok2, "designating second key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after re-designate");
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|i| i.is_payout)
+        .map(|i| i.public_key.as_str())
+        .collect();
+    assert_eq!(
+        designated,
+        vec!["ed25519:pay-2"],
+        "prior designation cleared; only key-2 active"
+    );
+
+    // Clear key-2 -> none designated.
+    let cleared = backend
+        .clear_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("clear key-2");
+    assert!(cleared, "clearing an active designated key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after clear");
+    assert!(
+        listed.iter().all(|i| !i.is_payout),
+        "no payout designated after clear"
+    );
+
+    // Clearing again -> no row changed.
+    let cleared_again = backend
+        .clear_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("clear again");
+    assert!(
+        !cleared_again,
+        "clearing a non-designated key returns false"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-designate").await;
+}
+
+#[tokio::test]
+async fn near_payout_designate_rejects_unknown_revoked_and_cross_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-reject").await;
+
+    let account_a = backend
+        .create_or_reuse_account("tenant-payout-reject", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-payout-reject", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    backend
+        .insert_near_identity(
+            "tenant-payout-reject",
+            account_a,
+            "ed25519:a-key",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert A's identity");
+    backend
+        .insert_near_identity(
+            "tenant-payout-reject",
+            account_a,
+            "ed25519:a-revoked",
+            "alice2.near",
+            None,
+        )
+        .await
+        .expect("insert A's revoked identity");
+    backend
+        .revoke_account_near_identity("tenant-payout-reject", account_a, "ed25519:a-revoked")
+        .await
+        .expect("revoke A's identity");
+
+    // Unknown key -> false.
+    let unknown = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_a, "ed25519:unknown")
+        .await
+        .expect("designate unknown");
+    assert!(!unknown, "designating an unknown key returns false");
+
+    // Revoked key -> false.
+    let revoked = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_a, "ed25519:a-revoked")
+        .await
+        .expect("designate revoked");
+    assert!(!revoked, "designating a revoked key returns false");
+
+    // Cross-account: B designating A's key under B's id -> false.
+    let cross = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_b, "ed25519:a-key")
+        .await
+        .expect("designate cross-account");
+    assert!(!cross, "designating another account's key returns false");
+
+    // A's key remains undesignated.
+    let listed = backend
+        .list_account_near_identities("tenant-payout-reject", account_a)
+        .await
+        .expect("list A");
+    assert!(
+        listed.iter().all(|i| !i.is_payout),
+        "no spurious designation occurred"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-reject").await;
+}
+
+#[tokio::test]
+async fn near_payout_resolution_is_fail_closed() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-resolve").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-payout-resolve", "principal-a")
+        .await
+        .expect("seed account");
+
+    // Zero active -> Hold(NoneEnrolled).
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve empty");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Hold(
+            trace_commons_server::db::PayoutHoldReason::NoneEnrolled
+        ),
+        "zero active identities holds with NoneEnrolled"
+    );
+
+    // Exactly one active, none designated -> SoleActive.
+    backend
+        .insert_near_identity(
+            "tenant-payout-resolve",
+            account_id,
+            "ed25519:sole",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert sole");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve sole");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::SoleActive("alice.near".to_string()),
+        "single active identity resolves SoleActive"
+    );
+
+    // Two active, none designated -> Hold(AmbiguousNoDesignation).
+    backend
+        .insert_near_identity(
+            "tenant-payout-resolve",
+            account_id,
+            "ed25519:second",
+            "bob.near",
+            None,
+        )
+        .await
+        .expect("insert second");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve ambiguous");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Hold(
+            trace_commons_server::db::PayoutHoldReason::AmbiguousNoDesignation
+        ),
+        "two active none designated holds with AmbiguousNoDesignation"
+    );
+
+    // Designate one -> Designated(that near_account_id).
+    backend
+        .designate_payout_near_identity("tenant-payout-resolve", account_id, "ed25519:second")
+        .await
+        .expect("designate second");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve designated");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Designated("bob.near".to_string()),
+        "designated identity resolves Designated"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-resolve").await;
+}
+
+// ============================================================================
+// Slice 2 Task 5: passkey enrollment ceremony handlers.
+//
+// Coverage:
+//   * Full happy path is driven end-to-end against real PostgreSQL using the
+//     dev-only `webauthn-authenticator-rs` SoftPasskey software authenticator:
+//     authenticated ctx -> register/start -> SoftPasskey produces a real
+//     attestation -> register/finish -> a `trace_webauthn_credentials` row
+//     exists for the account with the expected credential_id + passkey JSON, and
+//     the `account_passkey_enrolled` audit row is written.
+//   * `register/start` also asserted in isolation: returns WebAuthn options, sets
+//     the `tc_passkey_ceremony` cookie, stashes `CeremonyState::Registration`,
+//     and (after one credential is enrolled) carries that credential in the
+//     options' `exclude_credentials`.
+//   * `register/finish` ceremony-binding gate: a missing ceremony cookie and an
+//     unknown/expired/already-consumed ceremony id both yield 400 with no row
+//     written. (A wrong-variant ceremony shares the exact same
+//     `Some(_) | None => 400` arm; it cannot be constructed in a test because
+//     `DiscoverableAuthentication` is only producible by a live ceremony.)
+// ============================================================================
+
+/// Build a test `AppState` with a real WebAuthn relying party injected. The
+/// state is freshly constructed (refcount 1) so `Arc::get_mut` can set the
+/// otherwise-`None` `account_webauthn` field before any clone escapes.
+fn test_state_with_webauthn(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
+    let mut state = test_state_with_options(root, db_mirror, None, false, false, false, false);
+    let webauthn = build_webauthn(&WebauthnConfig {
+        rp_id: "localhost".to_string(),
+        rp_origin: "http://localhost".to_string(),
+        rp_name: "TraceCommons Test".to_string(),
+    })
+    .expect("test relying party builds");
+    Arc::get_mut(&mut state)
+        .expect("fresh state is uniquely owned")
+        .account_webauthn = Some(Arc::new(webauthn));
+    state
+}
+
+/// A syntactically-valid but cryptographically-meaningless
+/// `RegisterPublicKeyCredential` JSON body. Deserializes fine (so the `Json`
+/// extractor and the ceremony-gate path are reachable) but would never pass
+/// attestation verification — which is irrelevant here because the ceremony-gate
+/// rejection happens BEFORE `finish_passkey_registration` is ever called.
+fn dummy_register_finish_body() -> AccountPasskeyRegisterFinishBody {
+    serde_json::from_value(serde_json::json!({
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "response": {
+            "attestationObject": "AAAA",
+            "clientDataJSON": "AAAA"
+        },
+        "type": "public-key"
+    }))
+    .expect("dummy register body deserializes")
+}
+
+/// Origin the test relying party (`test_state_with_webauthn`) is configured for.
+/// The SoftPasskey driver must present this exact origin; webauthn-rs only allows
+/// an `http://` scheme for `localhost`.
+fn test_passkey_origin() -> webauthn_rs::prelude::Url {
+    webauthn_rs::prelude::Url::parse("http://localhost").expect("test origin parses")
+}
+
+/// Drive the dev-only SoftPasskey software authenticator through a REGISTRATION
+/// ceremony: given the server's `register/start` challenge JSON (the
+/// `CreationChallengeResponse`), produce the `RegisterPublicKeyCredential`
+/// attestation the browser would POST to `register/finish`.
+///
+/// Each call uses a FRESH `SoftPasskey` (its credential state is per-instance),
+/// which is what we want for enrollment: a brand-new authenticator. `falsify_uv`
+/// is true because our relying party requests user-verification-required and the
+/// software authenticator has no real UV gesture to perform.
+///
+/// Reusable by Task 6: pair this with [`softpasskey_authenticate`] (below) to
+/// drive a full register-then-login round trip against the same `SoftPasskey`
+/// instance (hold the authenticator across both calls so the enrolled credential
+/// is available to assert).
+fn softpasskey_register(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+) -> webauthn_rs::prelude::RegisterPublicKeyCredential {
+    let options: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(challenge.clone()).expect("creation challenge deserializes");
+    authenticator
+        .do_registration(test_passkey_origin(), options)
+        .expect("software authenticator completes registration")
+}
+
+/// Drive the SoftPasskey through an AUTHENTICATION (assertion) ceremony. Kept
+/// here (test-only) so Task 6's login test can reuse the same authenticator
+/// instance that enrolled the credential. Currently unused by Task 5 itself; it
+/// is `#[allow(dead_code)]` until Task 6 wires the login handler.
+#[allow(dead_code)]
+fn softpasskey_authenticate(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+) -> webauthn_rs::prelude::PublicKeyCredential {
+    let options: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(challenge.clone()).expect("request challenge deserializes");
+    authenticator
+        .do_authentication(test_passkey_origin(), options)
+        .expect("software authenticator completes authentication")
+}
+
+/// Construct a fresh SoftPasskey-backed authenticator. UV is falsified because
+/// the test relying party requests user-verification-required.
+fn new_software_authenticator() -> webauthn_authenticator_rs::WebauthnAuthenticator<
+    webauthn_authenticator_rs::softpasskey::SoftPasskey,
+> {
+    webauthn_authenticator_rs::WebauthnAuthenticator::new(
+        webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+    )
+}
+
+/// Call `register/start` for an already-authenticated cookie session and return
+/// `(challenge_json, ceremony_cookie_header_value)`. The returned cookie value is
+/// the full `name=value` first pair, ready to feed into a `Cookie:` header for
+/// `register/finish`.
+async fn passkey_register_start(
+    state: &Arc<AppState>,
+    session_cookie: &str,
+) -> (serde_json::Value, String) {
+    use axum::response::IntoResponse;
+    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let ext = account_ctx_ext(state, &headers).await;
+    let response = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("register/start succeeds")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let challenge: serde_json::Value =
+        serde_json::from_slice(&body).expect("challenge json deserializes");
+    (challenge, ceremony_pair)
+}
+
+/// `register/start` returns WebAuthn options, sets the ceremony cookie, and
+/// stashes the server-side registration state in the ceremony store.
+#[tokio::test]
+async fn passkey_register_start_returns_options_and_stashes_ceremony() {
+    use axum::response::IntoResponse;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    let start_ext = account_ctx_ext(&state, &headers).await;
+    let response = account_passkey_register_start_handler(State(state.clone()), start_ext)
+        .await
+        .expect("start succeeds")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The ceremony cookie is set: Secure + HttpOnly + SameSite=Strict, carrying
+    // the opaque ceremony id.
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("Secure"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+
+    // Recover the opaque ceremony id from the cookie before consuming the body.
+    let first = set_cookie.split(';').next().expect("cookie pair");
+    let (_name, ceremony_id) = first.split_once('=').expect("cookie name=value");
+    let ceremony_id = ceremony_id.to_string();
+
+    // The body deserializes as a WebAuthn creation challenge (has a publicKey
+    // member with a challenge).
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("challenge json");
+    assert!(
+        json.get("publicKey")
+            .and_then(|pk| pk.get("challenge"))
+            .is_some(),
+        "challenge response carries publicKey.challenge: {json}"
+    );
+
+    // The server-side ceremony state was stashed under the cookie's ceremony id:
+    // a same-id `take` recovers a Registration variant.
+    let stashed = account_ceremony_store(state.as_ref()).take(&ceremony_id);
+    assert!(
+        matches!(stashed, Some(CeremonyState::Registration(_))),
+        "registration state stashed under ceremony id"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// `register/finish` with NO ceremony cookie is rejected 400 before any
+/// attestation verification, and writes no credential row.
+#[tokio::test]
+async fn passkey_register_finish_without_ceremony_cookie_is_400() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Only the session cookie; no `tc_passkey_ceremony`.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    let finish_ext = account_ctx_ext(&state, &headers).await;
+    let err = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_ext,
+        headers,
+        Json(dummy_register_finish_body()),
+    )
+    .await
+    .expect_err("missing ceremony must 400");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// `register/finish` with a ceremony cookie that does not resolve to a stored
+/// ceremony (unknown / expired / already-consumed) is rejected 400. This is the
+/// same `Some(_) | None => 400` arm that also rejects a wrong-variant ceremony.
+#[tokio::test]
+async fn passkey_register_finish_with_unknown_ceremony_is_400() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Present BOTH the session cookie and a bogus ceremony cookie. The ceremony
+    // id was never `put` into the store, so `take` returns None -> 400.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={session_cookie}; tc_passkey_ceremony=never-issued-ceremony-id"
+        ))
+        .expect("valid cookie header"),
+    );
+
+    let finish_ext = account_ctx_ext(&state, &headers).await;
+    let err = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_ext,
+        headers,
+        Json(dummy_register_finish_body()),
+    )
+    .await
+    .expect_err("unknown ceremony must 400");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Resolve the account id linked to a device principal under a tenant, via the
+/// raw test pool under that tenant's RLS context.
+async fn account_id_for_principal(
+    backend: &PgBackend,
+    tenant_id: &str,
+    principal_ref: &str,
+) -> Uuid {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id() AND principal_ref = $1",
+            &[&principal_ref],
+        )
+        .await
+        .expect("principal linked to account");
+    tx.commit().await.expect("commit");
+    row.get("account_id")
+}
+
+/// Count `trace_account_audit` rows for a tenant + action, under that tenant's
+/// RLS context (raw test pool).
+async fn account_audit_count(backend: &PgBackend, tenant_id: &str, action: &str) -> i64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_account_audit
+              WHERE tenant_id = trace_current_tenant_id() AND action = $1",
+            &[&action],
+        )
+        .await
+        .expect("audit count query");
+    tx.commit().await.expect("commit");
+    row.get(0)
+}
+
+/// Full enrollment round trip driven by the dev-only SoftPasskey authenticator:
+/// register/start -> software attestation -> register/finish -> a credential row
+/// exists with the expected credential_id + passkey JSON, and the
+/// `account_passkey_enrolled` audit row is written. Also asserts that a SECOND
+/// register/start now carries the enrolled credential in `exclude_credentials`.
+#[tokio::test]
+async fn passkey_enroll_round_trip_persists_credential_and_audit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+
+    // No credentials and no enroll audit yet.
+    assert!(
+        backend
+            .list_account_credentials("tenant-a", account_id)
+            .await
+            .expect("list before")
+            .is_empty()
+    );
+    assert_eq!(
+        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
+        0
+    );
+
+    // register/start -> drive SoftPasskey -> register/finish.
+    let (challenge, ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+
+    // The finish request carries BOTH the session cookie and the ceremony cookie.
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={session_cookie}; {ceremony_pair}"
+        ))
+        .expect("valid cookie header"),
+    );
+    // Serialize the authenticator's attestation exactly as the browser would
+    // (the RegisterPublicKeyCredential shape), then attach a label.
+    let mut finish_json =
+        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
+    finish_json
+        .as_object_mut()
+        .expect("attestation is a JSON object")
+        .insert("label".to_string(), serde_json::json!("My laptop"));
+    let finish_body: AccountPasskeyRegisterFinishBody =
+        serde_json::from_value(finish_json).expect("finish body builds from attestation");
+
+    let finish_ext = account_ctx_ext(&state, &finish_headers).await;
+    let Json(finish_out) = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_ext,
+        finish_headers,
+        Json(finish_body),
+    )
+    .await
+    .expect("register/finish succeeds");
+    let returned_credential_id = finish_out
+        .get("credential_id")
+        .and_then(|v| v.as_str())
+        .expect("credential_id returned")
+        .to_string();
+
+    // The returned id matches the canonical encoding of the authenticator's
+    // credential id.
+    let expected_credential_id = credential_id_to_string(
+        &webauthn_rs::prelude::CredentialID::from(attestation.raw_id.as_ref()),
+    );
+    assert_eq!(returned_credential_id, expected_credential_id);
+
+    // A credential row exists for the account, with the expected id and label.
+    let creds = backend
+        .list_account_credentials("tenant-a", account_id)
+        .await
+        .expect("list after");
+    assert_eq!(creds.len(), 1, "exactly one credential enrolled");
+    assert_eq!(creds[0].credential_id, expected_credential_id);
+    assert_eq!(creds[0].label.as_deref(), Some("My laptop"));
+
+    // The stored passkey JSON is present and loadable for the login path (Task 6
+    // consumes this), confirming we persisted real serialized key material.
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-a", &expected_credential_id)
+        .await
+        .expect("load query")
+        .expect("credential row loadable");
+    assert_eq!(loaded.account_id, account_id);
+    assert!(loaded.passkey.is_object(), "passkey stored as JSON object");
+
+    // The enroll audit row was written (hash-only; we only count it here).
+    assert_eq!(
+        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
+        1
+    );
+
+    // A SECOND register/start now excludes the enrolled credential. The first
+    // passkey makes the account strong, so this second start must come from a
+    // STRONG session (Slice 3a Task 8 authenticator-change gate): log in with the
+    // just-enrolled credential and drive register/start from the passkey session.
+    let strong_cookie = passkey_login_cookie_value(
+        &state,
+        &mut authenticator,
+        &returned_credential_id,
+        account_id,
+    )
+    .await;
+    let (challenge2, _ceremony2) = passkey_register_start(&state, &strong_cookie).await;
+    let excluded = challenge2
+        .get("publicKey")
+        .and_then(|pk| pk.get("excludeCredentials"))
+        .and_then(|e| e.as_array())
+        .expect("excludeCredentials present after first enroll");
+    let excluded_ids: Vec<String> = excluded
+        .iter()
+        .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        excluded_ids.contains(&expected_credential_id),
+        "second start excludes the already-enrolled credential: {excluded_ids:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ============================================================================
+// Slice 2 Task 6: discoverable passkey login (unauthenticated surface).
+//
+// All tests are DB-backed against real PostgreSQL and drive a real WebAuthn
+// ceremony end-to-end with the dev-only SoftPasskey software authenticator.
+// Coverage:
+//   * Round-trip: enroll -> login/start -> SoftPasskey assertion -> login/finish
+//     mints a `tc_account_session` cookie (client_kind='passkey',
+//     auth_credential_id set) and 303s.
+//   * Sign-counter / clone defense: a stale (replayed) assertion is rejected
+//     with the uniform deny and mints no session.
+//   * Cross-account binding: a login only ever mints a session for the account
+//     the credential belongs to.
+//   * No-write regression: a forged/unknown credential id (resolver miss) denies
+//     AND creates no bogus trace_tenants row.
+//   * Uniform deny: unknown credential / missing ceremony / malformed body all
+//     return byte-identical status + body.
+// ============================================================================
+
+/// Count `trace_tenants` rows via the raw test pool.
+async fn trace_tenants_count(backend: &PgBackend) -> i64 {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let row = client
+        .query_one("SELECT COUNT(*) FROM trace_tenants", &[])
+        .await
+        .expect("tenant count query");
+    row.get(0)
+}
+
+/// Load a session row's `(client_kind, auth_credential_id)` by its `token_hash`,
+/// under the tenant's RLS context (raw test pool). `None` when no row matches.
+async fn session_kind_and_credential(
+    backend: &PgBackend,
+    tenant_id: &str,
+    token_hash: &str,
+) -> Option<(String, Option<String>)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_opt(
+            "SELECT client_kind, auth_credential_id FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1",
+            &[&token_hash],
+        )
+        .await
+        .expect("session query");
+    tx.commit().await.expect("commit");
+    row.map(|row| (row.get("client_kind"), row.get("auth_credential_id")))
+}
+
+/// Enroll a fresh passkey for the account linked to `token`'s device principal
+/// under tenant-a, driving the Task 5 register ceremony end to end. Returns the
+/// `(authenticator, credential_id)` so the caller can then drive a login ceremony
+/// against the SAME authenticator instance (which holds the enrolled credential).
+async fn enroll_passkey_for_token(
+    state: &Arc<AppState>,
+    session_cookie: &str,
+) -> (
+    webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    String,
+) {
+    let (challenge, ceremony_pair) = passkey_register_start(state, session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={session_cookie}; {ceremony_pair}"
+        ))
+        .expect("valid cookie header"),
+    );
+    let finish_json =
+        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
+    let finish_body: AccountPasskeyRegisterFinishBody =
+        serde_json::from_value(finish_json).expect("finish body builds from attestation");
+    let finish_ext = account_ctx_ext(state, &finish_headers).await;
+    let Json(finish_out) = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_ext,
+        finish_headers,
+        Json(finish_body),
+    )
+    .await
+    .expect("register/finish succeeds");
+    let credential_id = finish_out
+        .get("credential_id")
+        .and_then(|v| v.as_str())
+        .expect("credential_id returned")
+        .to_string();
+    (authenticator, credential_id)
+}
+
+/// Drive the dev-only SoftPasskey through a DISCOVERABLE-login assertion.
+///
+/// The SoftPasskey is a non-resident U2F-style software authenticator: it selects
+/// a credential by matching the request's `allowCredentials` (it cannot "discover"
+/// a credential from an empty allow-list) and it never returns a `userHandle`. A
+/// real discoverable/resident authenticator does both. To exercise the server's
+/// discoverable path with this stand-in we faithfully reproduce what a real
+/// authenticator returns: (1) inject the enrolled `credential_id` into the
+/// challenge's `allowCredentials` so the SoftPasskey can find and sign with the
+/// right key, then (2) set the assertion's `response.userHandle` to the account's
+/// uuid bytes (base64url), which is exactly the resident-key user handle a real
+/// authenticator stores at enrollment and replays here. The signature, RP-id hash,
+/// and sign counter in the assertion are produced by the SoftPasskey for real and
+/// are verified for real by the server; only these two transport details (which
+/// the SoftPasskey omits) are supplied by the test. Passing `user_handle = None`
+/// reproduces the broken-client case where the authenticator returns no handle.
+fn softpasskey_authenticate_discoverable(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+    credential_id: &str,
+    user_handle: Option<Uuid>,
+) -> webauthn_rs::prelude::PublicKeyCredential {
+    // (1) Inject the enrolled credential id into allowCredentials so the
+    // non-resident SoftPasskey has a credential to select. The server's
+    // DiscoverableAuthentication state ignores the client allow-list; it verifies
+    // the asserted credential id against the DiscoverableKey we pass to finish.
+    let mut patched = challenge.clone();
+    let public_key = patched
+        .get_mut("publicKey")
+        .and_then(|pk| pk.as_object_mut())
+        .expect("challenge has publicKey object");
+    public_key.insert(
+        "allowCredentials".to_string(),
+        serde_json::json!([{ "type": "public-key", "id": credential_id }]),
+    );
+    let options: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(patched).expect("patched request challenge deserializes");
+    let assertion = authenticator
+        .do_authentication(test_passkey_origin(), options)
+        .expect("software authenticator completes authentication");
+
+    // (2) Replay the resident-key user handle the way a discoverable authenticator
+    // would. Serialize, set response.userHandle (base64url of the uuid bytes), and
+    // re-deserialize into a PublicKeyCredential.
+    let mut assertion_json =
+        serde_json::to_value(&assertion).expect("assertion serializes to JSON");
+    let response = assertion_json
+        .get_mut("response")
+        .and_then(|r| r.as_object_mut())
+        .expect("assertion has response object");
+    match user_handle {
+        Some(handle) => {
+            let encoded =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(handle.as_bytes());
+            response.insert("userHandle".to_string(), serde_json::json!(encoded));
+        }
+        None => {
+            response.insert("userHandle".to_string(), serde_json::Value::Null);
+        }
+    }
+    serde_json::from_value(assertion_json).expect("assertion re-deserializes with user handle")
+}
+
+/// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
+async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
+    let response =
+        account_passkey_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "login/start returns options"
+    );
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let challenge: serde_json::Value =
+        serde_json::from_slice(&body).expect("challenge json deserializes");
+    (challenge, ceremony_pair)
+}
+
+/// Drive a discoverable passkey login with `authenticator`/`credential_id` for
+/// `account_id` and return the minted STRONG (`client_kind='passkey'`) session
+/// cookie value. Used by the Task 8 gate tests (and the tightened management
+/// tests) to obtain a strong session that may freely change authenticators.
+async fn passkey_login_cookie_value(
+    state: &Arc<AppState>,
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    credential_id: &str,
+    account_id: Uuid,
+) -> String {
+    let (challenge, ceremony_pair) = passkey_login_start(state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        authenticator,
+        &challenge,
+        credential_id,
+        Some(account_id),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "passkey login 303s"
+    );
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("passkey session cookie value")
+}
+
+/// Full enroll -> discoverable login round trip: a `tc_account_session` cookie is
+/// minted with `client_kind='passkey'` and `auth_credential_id` set, and the
+/// response is a 303 to the account view.
+#[tokio::test]
+async fn passkey_login_round_trip_mints_passkey_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge,
+        &credential_id,
+        Some(account_id),
+    );
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "login/finish 303s on success"
+    );
+    let set_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii cookie").to_string())
+        .collect::<Vec<_>>();
+    let session_set = set_cookie
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie set on login");
+    assert!(session_set.contains("HttpOnly"));
+    assert!(session_set.contains("Secure"));
+    assert!(session_set.contains("SameSite=Strict"));
+    let first = session_set.split(';').next().expect("cookie pair");
+    let (_name, value) = first.split_once('=').expect("name=value");
+    let secret = value.split_once('.').expect("tenant.secret").1;
+    let token_hash = hash_secret(secret);
+    let (kind, stored_cred) =
+        session_kind_and_credential(backend.as_ref(), "tenant-a", &token_hash)
+            .await
+            .expect("passkey session row exists");
+    assert_eq!(kind, "passkey", "session client_kind is passkey");
+    assert_eq!(
+        stored_cred.as_deref(),
+        Some(credential_id.as_str()),
+        "auth_credential_id records the asserting credential"
+    );
+
+    let headers = cookie_request_headers("tc_account_session", value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("passkey session cookie resolves");
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Sign-counter / clone defense: a STALE assertion (captured, then re-finished
+/// after the credential's counter has advanced via a later login) is rejected
+/// with the uniform deny and mints no session. The SoftPasskey increments its
+/// counter on every assertion, so replaying an earlier assertion regresses the
+/// counter relative to the stored credential, which finish rejects.
+#[tokio::test]
+async fn passkey_login_rejects_stale_counter_assertion() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    let (challenge1, ceremony_pair1) = passkey_login_start(&state).await;
+    let stale_assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge1,
+        &credential_id,
+        Some(account_id),
+    );
+
+    let (challenge2, ceremony_pair2) = passkey_login_start(&state).await;
+    let fresh_assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge2,
+        &credential_id,
+        Some(account_id),
+    );
+    let mut finish2 = HeaderMap::new();
+    finish2.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair2).expect("cookie header"),
+    );
+    let ok = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish2,
+        PasskeyAssertionBody(fresh_assertion),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "second login succeeds");
+
+    let mut finish1 = HeaderMap::new();
+    finish1.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair1).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish1,
+        PasskeyAssertionBody(stale_assertion),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "stale-counter assertion is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie is set on a clone-defense denial"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Cross-account binding: a credential enrolled under account A only ever mints a
+/// session for A. The asserted user-handle equals A's account id, and the session
+/// resolves to A. (The step-8 handle/account check would deny any mismatch.)
+#[tokio::test]
+async fn passkey_login_binds_only_to_owning_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    // Positive control: a login asserting the REAL owning account binds to A.
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge,
+        &credential_id,
+        Some(account_id),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let value = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("session cookie value");
+    let headers = cookie_request_headers("tc_account_session", &value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("session resolves");
+    assert_eq!(
+        ctx.account_id.as_uuid(),
+        account_id,
+        "session is bound ONLY to the credential's owning account"
+    );
+
+    // Negative: a login asserting a DIFFERENT user handle for the SAME credential
+    // is caught by the step-8 handle/account binding check and denied with no
+    // session minted. This is the defense against rebinding a credential to
+    // another account via a forged user handle.
+    let (challenge_mm, ceremony_mm) = passkey_login_start(&state).await;
+    let foreign_handle = Uuid::new_v4();
+    assert_ne!(foreign_handle, account_id);
+    let mismatched = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge_mm,
+        &credential_id,
+        Some(foreign_handle),
+    );
+    let mut mm_headers = HeaderMap::new();
+    mm_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_mm).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        mm_headers,
+        PasskeyAssertionBody(mismatched),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "a foreign user handle for the credential is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie on a handle-mismatch deny"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// No-write regression (the Slice 1 Codex bug): a `login/finish` whose assertion
+/// carries a credential id the resolver does not know returns the uniform deny
+/// AND creates no bogus `trace_tenants` row. Driven with an authenticator that
+/// produced a credential we never persisted, so the resolver misses.
+#[tokio::test]
+async fn passkey_login_unknown_credential_denies_and_writes_no_tenant() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Drive register/start to get well-formed options + a SoftPasskey credential,
+    // but never call register/finish -> the DB has never seen this credential.
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (challenge, _ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+    let orphan_credential_id = credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
+        attestation.raw_id.as_ref(),
+    ));
+
+    let tenants_before = trace_tenants_count(backend.as_ref()).await;
+
+    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &login_challenge,
+        &orphan_credential_id,
+        Some(Uuid::new_v4()),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown credential is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie on unknown-credential deny"
+    );
+
+    let tenants_after = trace_tenants_count(backend.as_ref()).await;
+    assert_eq!(
+        tenants_before, tenants_after,
+        "an unknown credential must NOT create any trace_tenants row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Uniform deny: unknown credential, missing ceremony cookie, and a malformed
+/// body all return byte-identical status + body.
+#[tokio::test]
+async fn passkey_login_denials_are_byte_identical() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    async fn as_status_body(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes")
+            .to_vec();
+        (status, body)
+    }
+
+    // (a) Unknown credential: a never-persisted authenticator + a real ceremony.
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (reg_challenge, _p) = passkey_register_start(&state, &session_cookie).await;
+    let mut orphan = new_software_authenticator();
+    let orphan_attestation = softpasskey_register(&mut orphan, &reg_challenge);
+    let orphan_credential_id = credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
+        orphan_attestation.raw_id.as_ref(),
+    ));
+    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut orphan,
+        &login_challenge,
+        &orphan_credential_id,
+        Some(Uuid::new_v4()),
+    );
+    let mut h_unknown = HeaderMap::new();
+    h_unknown.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let unknown = as_status_body(
+        account_passkey_login_finish_handler(
+            State(state.clone()),
+            h_unknown,
+            PasskeyAssertionBody(assertion),
+        )
+        .await,
+    )
+    .await;
+
+    // (b) Missing ceremony cookie: a well-formed assertion but no ceremony stored.
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut enrolled, enrolled_cred) = enroll_passkey_for_token(&state, &session_cookie).await;
+    let (login_challenge2, _ceremony2) = passkey_login_start(&state).await;
+    let assertion2 = softpasskey_authenticate_discoverable(
+        &mut enrolled,
+        &login_challenge2,
+        &enrolled_cred,
+        Some(account_id),
+    );
+    let missing_ceremony = as_status_body(
+        account_passkey_login_finish_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            PasskeyAssertionBody(assertion2),
+        )
+        .await,
+    )
+    .await;
+
+    // (c) Malformed body: route junk JSON through the real extractor, whose
+    // rejection IS the uniform deny.
+    let malformed_rejection = {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/account/passkey/login/finish")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{not valid json"))
+            .expect("request builds");
+        match <PasskeyAssertionBody as axum::extract::FromRequest<()>>::from_request(request, &())
+            .await
+        {
+            Ok(_) => panic!("malformed body must be rejected"),
+            Err(response) => as_status_body(response).await,
+        }
+    };
+
+    assert_eq!(
+        unknown, missing_ceremony,
+        "unknown-credential and missing-ceremony denies are byte-identical"
+    );
+    assert_eq!(
+        unknown, malformed_rejection,
+        "unknown-credential and malformed-body denies are byte-identical"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ============================================================================
+// Slice 2 Task 7: passkey credential management endpoints.
+// ============================================================================
+
+/// Decode the `passkeys` array from a `GET /v1/account/passkeys` response value
+/// into `(credential_id, label, this_device)` tuples for assertion.
+fn decode_passkey_list(body: &serde_json::Value) -> Vec<(String, Option<String>, bool)> {
+    body.get("passkeys")
+        .and_then(|v| v.as_array())
+        .expect("passkeys array present")
+        .iter()
+        .map(|item| {
+            let credential_id = item
+                .get("credential_id")
+                .and_then(|v| v.as_str())
+                .expect("credential_id present")
+                .to_string();
+            let label = item
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let this_device = item
+                .get("this_device")
+                .and_then(|v| v.as_bool())
+                .expect("this_device present");
+            (credential_id, label, this_device)
+        })
+        .collect()
+}
+
+/// List the caller's passkeys via the GET handler under a given header set,
+/// returning the decoded tuples.
+async fn list_passkeys(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+) -> Vec<(String, Option<String>, bool)> {
+    let ext = account_ctx_ext(state, &headers).await;
+    let Json(body) = account_passkeys_list_handler(State(state.clone()), ext)
+        .await
+        .expect("passkeys list succeeds");
+    decode_passkey_list(&body)
+}
+
+/// Enroll two passkeys for account A (via the Task 5 register path), list them
+/// under a bearer session (this_device always false), then log in via passkey
+/// (Task 6) with ONE credential and assert that exact credential shows
+/// this_device=true on a cookie-session list while the other stays false.
+#[tokio::test]
+async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut auth1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
+    // Task 8 gate: the first passkey makes the account strong, so the SECOND
+    // enrollment must come from a strong session. Log in with cred1, then enroll
+    // cred2 from the resulting `client_kind='passkey'` cookie.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth1, &cred1, account_id).await;
+    let (_auth2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
+    assert_ne!(
+        cred1, cred2,
+        "the two enrollments produce distinct credentials"
+    );
+
+    // (1) Bearer session lists BOTH with this_device=false (no passkey authed it).
+    let bearer = list_passkeys(&state, auth_headers("token-a")).await;
+    assert_eq!(bearer.len(), 2, "both credentials listed");
+    assert!(
+        bearer.iter().all(|(_, _, this_device)| !*this_device),
+        "bearer session never flags this_device"
+    );
+    let listed: std::collections::BTreeSet<&str> =
+        bearer.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert!(listed.contains(cred1.as_str()) && listed.contains(cred2.as_str()));
+
+    // (2) Log in via passkey with cred1 -> cookie session carries auth_credential_id.
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion =
+        softpasskey_authenticate_discoverable(&mut auth1, &challenge, &cred1, Some(account_id));
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let passkey_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("passkey session cookie value");
+
+    // (3) Cookie-session list flags cred1 as this_device, cred2 false.
+    let cookie_list = list_passkeys(
+        &state,
+        cookie_request_headers("tc_account_session", &passkey_cookie),
+    )
+    .await;
+    assert_eq!(cookie_list.len(), 2);
+    for (id, _label, this_device) in &cookie_list {
+        if *id == cred1 {
+            assert!(
+                *this_device,
+                "authenticating credential flagged this_device"
+            );
+        } else {
+            assert!(!*this_device, "non-authenticating credential not flagged");
+        }
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Rename updates the label (reflected in the list); rename of an unknown (or
+/// already-revoked) credential is a uniform 404.
+#[tokio::test]
+async fn passkey_rename_updates_label_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_auth, cred) = enroll_passkey_for_token(&state, &session_cookie).await;
+
+    // Rename succeeds and is reflected in the list.
+    let rename_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let status = account_passkey_rename_handler(
+        State(state.clone()),
+        rename_ext,
+        AxumPath(cred.clone()),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "  Work laptop  " }))
+                .expect("rename body"),
+        ),
+    )
+    .await
+    .expect("rename succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let entry = listed
+        .iter()
+        .find(|(id, _, _)| *id == cred)
+        .expect("renamed credential listed");
+    assert_eq!(
+        entry.1.as_deref(),
+        Some("Work laptop"),
+        "label is trimmed and stored"
+    );
+
+    // Rename of an UNKNOWN credential -> 404.
+    let rename_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_passkey_rename_handler(
+        State(state.clone()),
+        rename_ext,
+        AxumPath("unknown-credential-id".to_string()),
+        Json(serde_json::from_value(serde_json::json!({ "label": "x" })).expect("rename body")),
+    )
+    .await
+    .expect_err("unknown credential rename 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Remove soft-deletes (excluded from the list afterward) and reports the correct
+/// remaining count; remove of an unknown / already-revoked credential -> 404.
+#[tokio::test]
+async fn passkey_remove_soft_deletes_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        "tenant-a",
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
+    // Task 8 gate: the account is now strong, so the second enroll AND the removes
+    // must run from a strong (passkey-login) session. Log in with cred1.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut a1, &cred1, account_id).await;
+    let (_a2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    // Remove cred1 from the STRONG session: removed=true, one remaining.
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(body) =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred1.clone()))
+            .await
+            .expect("remove succeeds");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        body.get("remaining_credentials").and_then(|v| v.as_i64()),
+        Some(1),
+        "one credential remains after removing one of two"
+    );
+
+    // cred1 excluded from the list; cred2 still present.
+    let listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let ids: std::collections::BTreeSet<&str> =
+        listed.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert!(!ids.contains(cred1.as_str()), "removed credential excluded");
+    assert!(ids.contains(cred2.as_str()), "remaining credential listed");
+
+    // Re-removing cred1 (already revoked) -> 404. Still one strong credential
+    // (cred2) remains, so this MUST run from the strong session to pass the gate.
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
+    let err =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred1.clone()))
+            .await
+            .expect_err("already-revoked credential 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Remove of an UNKNOWN credential -> 404 (strong session, gate satisfied).
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_passkey_remove_handler(
+        State(state.clone()),
+        remove_ext,
+        AxumPath("unknown-credential-id".to_string()),
+    )
+    .await
+    .expect_err("unknown credential 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Cross-account isolation: account B never lists A's credentials; PATCH/DELETE of
+/// A's credential by B is a uniform 404; A's credential is unaffected. Account B
+/// is `token-a-2` — a SECOND contributor in the SAME tenant, so this exercises the
+/// account_id predicate (not merely tenant RLS).
+#[tokio::test]
+async fn passkey_management_is_cross_account_isolated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a passkey.
+    let a_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_a_auth, a_cred) = enroll_passkey_for_token(&state, &a_cookie).await;
+
+    // Account B (token-a-2, same tenant) gets an account but no passkeys.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+
+    // B lists NONE of A's credentials.
+    let b_listed = list_passkeys(&state, auth_headers("token-a-2")).await;
+    assert!(
+        b_listed.iter().all(|(id, _, _)| *id != a_cred),
+        "account B never sees account A's credential"
+    );
+
+    // B's PATCH of A's credential -> 404.
+    let b_rename_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err = account_passkey_rename_handler(
+        State(state.clone()),
+        b_rename_ext,
+        AxumPath(a_cred.clone()),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "stolen" })).expect("rename body"),
+        ),
+    )
+    .await
+    .expect_err("B cannot rename A's credential");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // B's DELETE of A's credential -> 404.
+    let b_remove_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err = account_passkey_remove_handler(
+        State(state.clone()),
+        b_remove_ext,
+        AxumPath(a_cred.clone()),
+    )
+    .await
+    .expect_err("B cannot remove A's credential");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // A's credential is unaffected: still listed, with no label set by B.
+    let a_listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let entry = a_listed
+        .iter()
+        .find(|(id, _, _)| *id == a_cred)
+        .expect("A's credential still active");
+    assert_eq!(entry.1, None, "B's forged rename never touched A's label");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ============================================================================
+// Slice 3a Task 6: login-with-NEAR ENROLL ceremony (authenticated).
+//
+// DB-backed (real PG): self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL
+// nor DATABASE_URL is set. Each test uses a DISTINCT tenant and cleans it first
+// so the suite is self-isolating on a reused database.
+//
+// A `ring` Ed25519 keypair stands in for the wallet, producing a REAL NEP-413
+// signature over the server-issued challenge. The NEAR access-key binding RPC is
+// replaced by the `#[cfg(test)]` `near_access_key_checker_override` seam so no
+// live NEAR node is required.
+// ============================================================================
+
+/// The NEP-413 recipient the test NEAR config binds challenges to.
+const NEAR_TEST_RECIPIENT: &str = "app.tracecommons.test";
+
+/// Stub `NearAccessKeyChecker` that returns a fixed verdict (or an error) for the
+/// binding check, so the enroll-finish handler is exercisable without a live RPC.
+struct StubNearAccessKeyChecker {
+    /// `Ok(true)`/`Ok(false)` model a FullAccess / non-FullAccess key; `Err`
+    /// models an RPC/parse failure (which the handler must treat as fail-closed).
+    result: Result<bool, ()>,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::account_near::NearAccessKeyChecker for StubNearAccessKeyChecker {
+    async fn has_full_access_key(
+        &self,
+        _cfg: &trace_commons_server::config::NearConfig,
+        _account_id: &str,
+        _public_key: &str,
+    ) -> anyhow::Result<bool> {
+        match self.result {
+            Ok(v) => Ok(v),
+            Err(()) => Err(anyhow::anyhow!("stub RPC failure")),
+        }
+    }
+}
+
+/// Build a test `AppState` with NEAR sign-in configured and the access-key
+/// binding RPC replaced by `checker`. Freshly constructed (refcount 1) so
+/// `Arc::get_mut` can set the otherwise-`None` fields before any clone escapes.
+fn test_state_with_near(
+    root: PathBuf,
+    db_mirror: Option<Arc<dyn Database>>,
+    checker: Option<Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker>>,
+) -> Arc<AppState> {
+    let mut state = test_state_with_options(root, db_mirror, None, false, false, false, false);
+    let near_cfg = trace_commons_server::config::NearConfig {
+        rpc_url: "http://near-rpc.invalid".to_string(),
+        network: "testnet".to_string(),
+        recipient: NEAR_TEST_RECIPIENT.to_string(),
+    };
+    let mutable = Arc::get_mut(&mut state).expect("fresh state is uniquely owned");
+    mutable.account_near_config = Some(Arc::new(near_cfg));
+    mutable.near_access_key_checker_override = checker;
+    state
+}
+
+/// A `ring` Ed25519 keypair acting as the test wallet.
+fn near_test_keypair() -> ring::signature::Ed25519KeyPair {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+    ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair")
+}
+
+/// `ed25519:<base58>` public-key string for a test keypair.
+fn near_test_pubkey_string(kp: &ring::signature::Ed25519KeyPair) -> String {
+    use ring::signature::KeyPair as _;
+    format!(
+        "ed25519:{}",
+        bs58::encode(kp.public_key().as_ref()).into_string()
+    )
+}
+
+/// Reconstruct the exact NEP-413 byte layout (pinned by `account_near`) and sign
+/// its SHA-256 digest, returning the base64 signature the wallet would POST.
+fn near_test_sign(
+    kp: &ring::signature::Ed25519KeyPair,
+    message: &str,
+    nonce: &[u8; 32],
+    recipient: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    // tag (u32 LE) || borsh(String message) || nonce(32) || borsh(String recipient) || None(0)
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(&2_147_484_061u32.to_le_bytes());
+    payload.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    payload.extend_from_slice(message.as_bytes());
+    payload.extend_from_slice(nonce);
+    payload.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
+    payload.extend_from_slice(recipient.as_bytes());
+    payload.push(0x00);
+    let digest = Sha256::digest(&payload);
+    base64::engine::general_purpose::STANDARD.encode(kp.sign(digest.as_slice()).as_ref())
+}
+
+/// Drive `near/enroll/start` for an authenticated cookie session. Returns
+/// `(message, nonce_bytes, recipient, ceremony_cookie_pair)`.
+async fn near_enroll_start(
+    state: &Arc<AppState>,
+    session_cookie: &str,
+) -> (String, [u8; 32], String, String) {
+    use axum::response::IntoResponse;
+    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let ext = account_ctx_ext(state, &headers).await;
+    let response = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect("enroll/start succeeds")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let message = json["message"].as_str().expect("message").to_string();
+    let recipient = json["recipient"].as_str().expect("recipient").to_string();
+    let nonce_hex = json["nonce"].as_str().expect("nonce hex");
+    let nonce_vec = hex::decode(nonce_hex).expect("nonce decodes from hex");
+    let nonce: [u8; 32] = nonce_vec.try_into().expect("32-byte nonce");
+    (message, nonce, recipient, ceremony_pair)
+}
+
+/// Return the stored `near_account_id` for a `(tenant, public_key)`, or `None`.
+async fn near_identity_row(
+    backend: &PgBackend,
+    tenant_id: &str,
+    public_key: &str,
+) -> Option<String> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_opt(
+            "SELECT near_account_id FROM trace_near_identities WHERE public_key = $1",
+            &[&public_key],
+        )
+        .await
+        .expect("query near identity");
+    row.map(|r| r.get::<_, String>(0))
+}
+
+/// Count `account_near_enrolled` audit rows for a tenant.
+async fn near_enrolled_audit_count(backend: &PgBackend, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id = trace_current_tenant_id()
+                AND action = 'account_near_enrolled'",
+            &[],
+        )
+        .await
+        .expect("count audit");
+    row.get::<_, i64>(0)
+}
+
+/// `enroll/start` returns `{message, nonce, recipient}`, sets the ceremony cookie,
+/// and stashes a `NearChallenge` keyed by the cookie's ceremony id.
+#[tokio::test]
+async fn near_enroll_start_returns_challenge_and_stashes_ceremony() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), None);
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (message, nonce, recipient, ceremony_pair) = near_enroll_start(&state, &cookie_value).await;
+
+    assert_eq!(message, "Trace Commons account link");
+    assert_eq!(recipient, NEAR_TEST_RECIPIENT);
+    assert_ne!(nonce, [0u8; 32], "nonce is a real CSPRNG value");
+    assert!(ceremony_pair.starts_with("tc_near_ceremony="));
+
+    // The ceremony state was stashed under the cookie's id as a NearChallenge.
+    let (_name, ceremony_id) = ceremony_pair.split_once('=').expect("name=value");
+    let stashed = account_ceremony_store(state.as_ref()).take(ceremony_id);
+    match stashed {
+        Some(CeremonyState::NearChallenge {
+            nonce: stashed_nonce,
+            recipient: stashed_recipient,
+        }) => {
+            assert_eq!(stashed_nonce, nonce, "wire nonce matches stashed nonce");
+            assert_eq!(stashed_recipient, NEAR_TEST_RECIPIENT);
+        }
+        _ => panic!("expected a stashed NearChallenge"),
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// `enroll/start` fails closed (503) when NEAR sign-in is unconfigured.
+#[tokio::test]
+async fn near_enroll_start_fails_closed_without_config() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    // No NEAR config: plain options state leaves account_near_config = None.
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ext = account_ctx_ext(&state, &headers).await;
+    let err = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("unconfigured NEAR sign-in fails closed");
+    assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Happy path: a valid NEP-413 signature over the stashed challenge AND a
+/// FullAccess binding (mock RPC = true) writes the identity row and an audit row.
+#[tokio::test]
+async fn near_enroll_finish_persists_identity_when_binding_holds() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (message, nonce, recipient, ceremony_pair) = near_enroll_start(&state, &cookie_value).await;
+
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    let near_account_id = "alice.testnet";
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
+    // reads only the first such header, so the session + ceremony cookies MUST be
+    // combined into a single value (mirrors the passkey-finish test threading).
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={cookie_value}; {ceremony_pair}"
+        ))
+        .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(&state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: near_account_id.to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: Some("my ledger".to_string()),
+    };
+    let Json(out) =
+        account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+            .await
+            .expect("enroll/finish succeeds");
+    assert_eq!(out["public_key"], public_key);
+    assert_eq!(out["near_account_id"], near_account_id);
+
+    // The identity row exists with the right public_key -> near_account_id.
+    let stored = near_identity_row(backend.as_ref(), tenant, &public_key).await;
+    assert_eq!(stored.as_deref(), Some(near_account_id));
+    // Exactly one enroll audit row.
+    assert_eq!(near_enrolled_audit_count(backend.as_ref(), tenant).await, 1);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Binding check: a valid signature but a NON-FullAccess key (mock RPC = false)
+/// is rejected 400 and writes NO identity row.
+#[tokio::test]
+async fn near_enroll_finish_rejects_when_key_not_full_access() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(false) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (message, nonce, recipient, ceremony_pair) = near_enroll_start(&state, &cookie_value).await;
+
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
+    // reads only the first such header, so the session + ceremony cookies MUST be
+    // combined into a single value (mirrors the passkey-finish test threading).
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={cookie_value}; {ceremony_pair}"
+        ))
+        .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(&state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: "mallory.testnet".to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: None,
+    };
+    let err = account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+        .await
+        .expect_err("non-FullAccess key is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    // No identity row was written (the binding check fired before the insert).
+    assert_eq!(
+        near_identity_row(backend.as_ref(), tenant, &public_key).await,
+        None
+    );
+    assert_eq!(near_enrolled_audit_count(backend.as_ref(), tenant).await, 0);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// An RPC error in the binding check (mock = Err) is fail-closed: rejected 400,
+/// no row.
+#[tokio::test]
+async fn near_enroll_finish_fails_closed_on_rpc_error() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Err(()) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (message, nonce, recipient, ceremony_pair) = near_enroll_start(&state, &cookie_value).await;
+
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
+    // reads only the first such header, so the session + ceremony cookies MUST be
+    // combined into a single value (mirrors the passkey-finish test threading).
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={cookie_value}; {ceremony_pair}"
+        ))
+        .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(&state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: "alice.testnet".to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: None,
+    };
+    let err = account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+        .await
+        .expect_err("RPC error is fail-closed");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        near_identity_row(backend.as_ref(), tenant, &public_key).await,
+        None
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A bad signature (wrong keypair) is rejected 400 before the binding check, so
+/// no row is written even though the mock RPC would have said FullAccess.
+#[tokio::test]
+async fn near_enroll_finish_rejects_bad_signature() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (message, nonce, recipient, ceremony_pair) = near_enroll_start(&state, &cookie_value).await;
+
+    // Sign with one keypair but PRESENT a different keypair's public key: the
+    // signature will not verify against the presented key.
+    let signing_kp = near_test_keypair();
+    let presented_kp = near_test_keypair();
+    let presented_pubkey = near_test_pubkey_string(&presented_kp);
+    let signature = near_test_sign(&signing_kp, &message, &nonce, &recipient);
+
+    // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
+    // reads only the first such header, so the session + ceremony cookies MUST be
+    // combined into a single value (mirrors the passkey-finish test threading).
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={cookie_value}; {ceremony_pair}"
+        ))
+        .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(&state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: "alice.testnet".to_string(),
+        public_key: presented_pubkey.clone(),
+        signature,
+        label: None,
+    };
+    let err = account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+        .await
+        .expect_err("bad signature is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        near_identity_row(backend.as_ref(), tenant, &presented_pubkey).await,
+        None
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A missing ceremony cookie -> 400 (an expired/consumed ceremony shares the same
+/// `Some(_) | None` arm). No row written.
+#[tokio::test]
+async fn near_enroll_finish_without_ceremony_is_400() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Only the session cookie; no tc_near_ceremony.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ext = account_ctx_ext(&state, &headers).await;
+
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    // Sign over an arbitrary nonce; verification is never reached because the
+    // ceremony gate fires first.
+    let signature = near_test_sign(
+        &kp,
+        "Trace Commons account link",
+        &[9u8; 32],
+        NEAR_TEST_RECIPIENT,
+    );
+    let body = AccountNearEnrollFinishBody {
+        account_id: "alice.testnet".to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: None,
+    };
+    let err = account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+        .await
+        .expect_err("missing ceremony cookie is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        near_identity_row(backend.as_ref(), tenant, &public_key).await,
+        None
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// ============================================================================
+// Slice 3a Task 7: discoverable NEAR login + tenant bootstrap + session.
+//
+// These DB-backed tests drive the real PG backend (skipped when no PG is
+// available). They seed an account + NEAR identity through the Task 6 enroll
+// round-trip (mock RPC = FullAccess), then exercise `near/login/start` +
+// `near/login/finish`. The wallet is a `ring` Ed25519 keypair; the NEP-413
+// signature is reconstructed with the same `near_test_sign` byte layout the
+// enroll tests use. Per CRITICAL invariants we assert: a `client_kind='near'`
+// session with `auth_credential_id` = the public key; every failure collapses
+// to ONE byte-identical uniform deny behind the timing floor; NO `trace_tenants`
+// row is ever written for a forged/unknown key; a consumed (replayed) ceremony
+// is refused; and an ENROLL-message signature presented to login is refused
+// (distinct `NEAR_LOGIN_MESSAGE`).
+// ============================================================================
+
+/// Drive `near/login/start`. Returns `(message, nonce_bytes, recipient,
+/// ceremony_cookie_pair)`. UNAUTHENTICATED — no session cookie needed.
+async fn near_login_start(state: &Arc<AppState>) -> (String, [u8; 32], String, String) {
+    let response = account_near_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "login/start returns the challenge"
+    );
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    assert!(set_cookie.starts_with("tc_near_ceremony="));
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let message = json["message"].as_str().expect("message").to_string();
+    let recipient = json["recipient"].as_str().expect("recipient").to_string();
+    let nonce_hex = json["nonce"].as_str().expect("nonce hex");
+    let nonce_vec = hex::decode(nonce_hex).expect("nonce decodes from hex");
+    let nonce: [u8; 32] = nonce_vec.try_into().expect("32-byte nonce");
+    (message, nonce, recipient, ceremony_pair)
+}
+
+/// Seed an account + ACTIVE NEAR identity under `tenant` by driving the Task 6
+/// enroll round-trip (mock RPC = FullAccess) for `token`'s device principal.
+/// Returns `(account_id, keypair, public_key)`. The enroll path creates the
+/// `trace_accounts` row (via redeem) AND the `trace_near_identities` row, so the
+/// resolver + RLS loader the login path depends on have real rows to find.
+async fn seed_near_login_identity(
+    state: &Arc<AppState>,
+    backend: &PgBackend,
+    tenant: &str,
+    token: &str,
+    near_account_id: &str,
+) -> (Uuid, ring::signature::Ed25519KeyPair, String) {
+    let session_cookie = mint_redeem_session_cookie_value(state, token).await;
+    let account_id = account_id_for_principal(backend, tenant, &principal_storage_ref(token)).await;
+
+    let (message, nonce, recipient, ceremony_pair) =
+        near_enroll_start(state, &session_cookie).await;
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={session_cookie}; {ceremony_pair}"
+        ))
+        .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: near_account_id.to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: Some("login-seed".to_string()),
+    };
+    let Json(out) =
+        account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+            .await
+            .expect("enroll/finish seeds the identity");
+    assert_eq!(out["public_key"], public_key);
+
+    (account_id, kp, public_key)
+}
+
+/// Collect ALL `Set-Cookie` header values from a response as owned strings.
+fn all_set_cookies(response: &axum::response::Response) -> Vec<String> {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii cookie").to_string())
+        .collect()
+}
+
+/// Snapshot `(status, body_bytes)` of a uniform-deny response so two denies can
+/// be compared byte-for-byte (non-enumeration invariant).
+async fn deny_status_and_body(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes")
+        .to_vec();
+    (status, body)
+}
+
+/// Round-trip: enroll a NEAR identity, then `login/start` -> sign -> `login/finish`
+/// mints a `tc_account_session` cookie with `client_kind='near'` and
+/// `auth_credential_id` = the public key, and 303s to the account view.
+#[tokio::test]
+async fn near_login_round_trip_mints_near_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    // login/start -> sign the LOGIN message over the fresh challenge -> login/finish.
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    assert_eq!(
+        message, "Trace Commons sign-in",
+        "login uses the LOGIN message"
+    );
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "login/finish 303s on success"
+    );
+    let set_cookies = all_set_cookies(&response);
+    let session_set = set_cookies
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie set on login");
+    assert!(session_set.contains("HttpOnly"));
+    assert!(session_set.contains("Secure"));
+    assert!(session_set.contains("SameSite=Strict"));
+
+    let first = session_set.split(';').next().expect("cookie pair");
+    let (_name, value) = first.split_once('=').expect("name=value");
+    let secret = value.split_once('.').expect("tenant.secret").1;
+    let token_hash = hash_secret(secret);
+    let (kind, stored_cred) = session_kind_and_credential(backend.as_ref(), tenant, &token_hash)
+        .await
+        .expect("near session row exists");
+    assert_eq!(kind, "near", "session client_kind is near");
+    assert_eq!(
+        stored_cred.as_deref(),
+        Some(public_key.as_str()),
+        "auth_credential_id records the asserting NEAR public key"
+    );
+
+    // The minted cookie resolves to the SAME tenant + account.
+    let headers = cookie_request_headers("tc_account_session", value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("near session cookie resolves");
+    assert_eq!(ctx.tenant_id, tenant);
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Security: a forged/unknown public key (valid self-consistent signature, but no
+/// enrolled identity) -> uniform deny AND NO `trace_tenants` row is written. Also
+/// pins that the unknown-key deny is byte-identical to the malformed-body deny and
+/// the missing-ceremony deny (non-enumeration).
+#[tokio::test]
+async fn near_login_unknown_key_denies_without_tenant_write_and_is_uniform() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let tenants_before = trace_tenants_count(backend.as_ref()).await;
+
+    // A fresh, NEVER-enrolled wallet. Its signature verifies against its own key,
+    // but the resolver finds no tenant -> uniform deny, no tenant row.
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let unknown_resp = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "ghost.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+    let unknown_deny = deny_status_and_body(unknown_resp).await;
+    assert_eq!(unknown_deny.0, StatusCode::BAD_REQUEST);
+
+    // CRUX: no trace_tenants row was created by a forged/unknown login attempt.
+    let tenants_after = trace_tenants_count(backend.as_ref()).await;
+    assert_eq!(
+        tenants_before, tenants_after,
+        "an unknown NEAR key must NOT create any trace_tenants row"
+    );
+
+    // Missing-ceremony deny: a fresh start but NO ceremony cookie sent.
+    let kp2 = near_test_keypair();
+    let pk2 = near_test_pubkey_string(&kp2);
+    let (msg2, nonce2, rec2, _pair2) = near_login_start(&state).await;
+    let sig2 = near_test_sign(&kp2, &msg2, &nonce2, &rec2);
+    let no_ceremony_resp = account_near_login_finish_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "ghost.testnet".to_string(),
+            public_key: pk2,
+            signature: sig2,
+        }),
+    )
+    .await;
+    let missing_deny = deny_status_and_body(no_ceremony_resp).await;
+
+    // Malformed-body deny: the custom extractor rejects non-JSON with the SAME deny.
+    let malformed_req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/account/near/login/finish")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from("{ not json"))
+        .expect("request builds");
+    let malformed_rej = match <NearAssertionBody as axum::extract::FromRequest<()>>::from_request(
+        malformed_req,
+        &(),
+    )
+    .await
+    {
+        Ok(_) => panic!("malformed body must be rejected by the extractor"),
+        Err(rejection) => rejection,
+    };
+    let malformed_deny = deny_status_and_body(malformed_rej).await;
+
+    assert_eq!(
+        unknown_deny, missing_deny,
+        "unknown-key and missing-ceremony denies must be byte-identical"
+    );
+    assert_eq!(
+        unknown_deny, malformed_deny,
+        "unknown-key and malformed-body denies must be byte-identical"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A replayed (already-consumed) ceremony is refused: `login/finish` does a
+/// single-use `take`, so re-presenting the SAME ceremony cookie with a fresh
+/// signature over the SAME (now-stale) nonce yields the uniform deny.
+#[tokio::test]
+async fn near_login_rejects_replayed_ceremony() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (_account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    // First finish consumes the ceremony and succeeds.
+    let mut headers1 = HeaderMap::new();
+    headers1.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let ok = account_near_login_finish_handler(
+        State(state.clone()),
+        headers1,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature: signature.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "first finish succeeds");
+
+    // Replaying the SAME ceremony cookie + signature is now refused (consumed).
+    let mut headers2 = HeaderMap::new();
+    headers2.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let replay = account_near_login_finish_handler(
+        State(state.clone()),
+        headers2,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(
+        replay.status(),
+        StatusCode::BAD_REQUEST,
+        "a replayed/consumed ceremony is refused"
+    );
+    let replay_set = all_set_cookies(&replay);
+    assert!(
+        !replay_set
+            .iter()
+            .any(|c| c.starts_with("tc_account_session=")),
+        "a refused replay mints no session cookie"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Distinct-message guarantee: a signature produced over the ENROLL message
+/// (`NEAR_ENROLL_MESSAGE`) presented to `login/finish` (which verifies against
+/// `NEAR_LOGIN_MESSAGE`) is refused — an enroll signature can never be replayed
+/// as a login, and no session is minted.
+#[tokio::test]
+async fn near_login_rejects_enroll_message_signature() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (_account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    let (login_message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    // Sign the ENROLL message (NOT the login message) over the login challenge.
+    assert_ne!(
+        login_message, "Trace Commons account link",
+        "login and enroll messages are distinct"
+    );
+    let enroll_signature = near_test_sign(&kp, "Trace Commons account link", &nonce, &recipient);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature: enroll_signature,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an enroll-message signature is refused at login (distinct message)"
+    );
+    assert!(
+        !all_set_cookies(&response)
+            .iter()
+            .any(|c| c.starts_with("tc_account_session=")),
+        "the refused enroll-replay mints no session cookie"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Cross-account isolation: an identity enrolled under tenant T mints ONLY T's
+/// session. A second tenant U with its own enrolled identity is unaffected — U's
+/// key cannot mint a session that resolves to T (and vice versa). This pins that
+/// the resolved tenant is the one bound to the asserting key.
+#[tokio::test]
+async fn near_login_binds_session_to_owning_tenant() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    // token-a maps to tenant-a, token-b maps to tenant-b (distinct device tokens).
+    let (account_a, kp_a, pk_a) = seed_near_login_identity(
+        &state,
+        backend.as_ref(),
+        "tenant-a",
+        "token-a",
+        "alice.testnet",
+    )
+    .await;
+    let (_account_b, _kp_b, _pk_b) = seed_near_login_identity(
+        &state,
+        backend.as_ref(),
+        "tenant-b",
+        "token-b",
+        "bob.testnet",
+    )
+    .await;
+
+    // Log in with tenant-a's key. The minted session must resolve to tenant-a.
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp_a, &message, &nonce, &recipient);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: pk_a.clone(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie = all_set_cookies(&response)
+        .into_iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie");
+    let value = cookie
+        .split(';')
+        .next()
+        .and_then(|p| p.split_once('='))
+        .expect("name=value")
+        .1
+        .to_string();
+    let resolve_headers = cookie_request_headers("tc_account_session", &value);
+    let ctx = resolve_account_ctx(state.as_ref(), &resolve_headers)
+        .await
+        .expect("session resolves");
+    assert_eq!(
+        ctx.tenant_id, "tenant-a",
+        "session binds to the owning tenant"
+    );
+    assert_eq!(ctx.account_id.as_uuid(), account_a);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+/// Hardening: an over-long / wrong-prefix `publicKey` is refused with the uniform
+/// deny BEFORE it is interpolated into the per-key rate-limit map key (so garbage
+/// keys cannot bloat the limiter). The shape/length gate fires ahead of the
+/// ceremony lookup, so a valid ceremony cookie is still refused, and no session
+/// is minted.
+#[tokio::test]
+async fn near_login_rejects_malformed_public_key_shape() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    // A real, enrolled wallet exists; we just present a malformed public key.
+    let (_account_id, kp, _public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    // Each case carries a fresh, VALID ceremony so the only thing that can deny is
+    // the shape/length gate (which fires before the ceremony lookup).
+    let cases = [
+        // Wrong prefix (no `ed25519:`).
+        "secp256k1:abcdefabcdefabcdefabcdefabcdefabcdefabcdef".to_string(),
+        // Over-long: `ed25519:` + 200 base58-ish chars, well past the 120 cap.
+        format!("ed25519:{}", "1".repeat(200)),
+    ];
+    for bogus_pk in cases {
+        let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+        // Sign with the real key over the challenge; the signature is well-formed,
+        // proving the gate is what denies (not a bad signature).
+        let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+        );
+        let response = account_near_login_finish_handler(
+            State(state.clone()),
+            headers,
+            NearAssertionBody(NearLoginFinishBody {
+                account_id: "alice.testnet".to_string(),
+                public_key: bogus_pk.clone(),
+                signature,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a malformed public key ({bogus_pk}) is refused with the uniform deny"
+        );
+        assert!(
+            !all_set_cookies(&response)
+                .iter()
+                .any(|c| c.starts_with("tc_account_session=")),
+            "the refused malformed-key attempt mints no session cookie"
+        );
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// ============================================================================
+// Slice 3a Task 8: the strong-authenticator change gate.
+//
+// DB-backed (real PG): self-skip when no PG URL is set; each test uses a DISTINCT
+// tenant and cleans it first. The gate (`require_authenticator_change_allowed`)
+// is applied at the top of passkey register start/finish, NEAR enroll
+// start/finish, and passkey remove. A STRONG session (`client_kind='passkey'` or
+// `'near'`) may always change authenticators; a WEAK session (a device-link
+// `'web'` cookie or a `'device'` bearer) may add/remove only while the account
+// holds ZERO strong authenticators (the bootstrapping carve-out). Rename/list are
+// NOT gated (label-only) and are not exercised here.
+// ============================================================================
+
+/// Count `account_authenticator_gate_denied` audit rows for a tenant.
+async fn gate_denied_audit_count(backend: &PgBackend, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id = trace_current_tenant_id()
+                AND action = 'account_authenticator_gate_denied'",
+            &[],
+        )
+        .await
+        .expect("count audit");
+    tx.commit().await.expect("commit");
+    row.get::<_, i64>(0)
+}
+
+/// Build an `AppState` wired with BOTH a WebAuthn relying party and a NEAR config
+/// (mock RPC = FullAccess), so a single test can drive passkey and NEAR ceremonies
+/// against the same backend.
+fn test_state_with_webauthn_and_near(
+    root: std::path::PathBuf,
+    db_mirror: Option<Arc<dyn Database>>,
+) -> Arc<AppState> {
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let mut state = test_state_with_near(root, db_mirror, Some(checker));
+    let webauthn = build_webauthn(&WebauthnConfig {
+        rp_id: "localhost".to_string(),
+        rp_origin: "http://localhost".to_string(),
+        rp_name: "TraceCommons Test".to_string(),
+    })
+    .expect("test relying party builds");
+    Arc::get_mut(&mut state)
+        .expect("fresh state is uniquely owned")
+        .account_webauthn = Some(Arc::new(webauthn));
+    state
+}
+
+/// CARVE-OUT: an account with ZERO strong authenticators, on a WEAK device-link
+/// (`client_kind='web'`) session, CAN start adding its FIRST authenticator —
+/// passkey register/start AND NEAR enroll/start both return 200, not 403.
+#[tokio::test]
+async fn gate_allows_first_authenticator_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // passkey register/start from the weak session -> 200 (carve-out).
+    let ext = account_ctx_ext(&state, &headers).await;
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("first passkey enrollment is allowed from a weak session");
+    use axum::response::IntoResponse;
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // NEAR enroll/start from the weak session -> 200 (still zero strong).
+    let ext = account_ctx_ext(&state, &headers).await;
+    let near = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect("first NEAR enrollment is allowed from a weak session");
+    assert_eq!(near.into_response().status(), StatusCode::OK);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        0,
+        "no gate-denied audit when carve-out applies"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// GATE BLOCKS 2nd FROM WEAK: an account that already holds one strong
+/// authenticator (an enrolled passkey) is, on a WEAK session, BLOCKED (403) from
+/// BOTH passkey register/start and NEAR enroll/start, and a hash-only
+/// `account_authenticator_gate_denied` audit row is written for each refusal.
+#[tokio::test]
+async fn gate_blocks_second_authenticator_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Enroll the first passkey (carve-out) -> account now holds 1 strong.
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+
+    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // passkey register/start from the weak session -> 403.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let err = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("second passkey enrollment is blocked from a weak session");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // NEAR enroll/start from the weak session -> 403.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let err = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("NEAR enrollment is blocked from a weak session");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        2,
+        "each weak-session refusal writes one gate-denied audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// STRONG SESSION ALWAYS ALLOWED: from a `client_kind='passkey'` session the
+/// account may add ANOTHER authenticator (passkey register/start AND NEAR
+/// enroll/start both 200), even though it already holds a strong authenticator.
+#[tokio::test]
+async fn gate_allows_any_authenticator_from_strong_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    use axum::response::IntoResponse;
+    // passkey register/start from the strong session -> 200.
+    let ext = account_ctx_ext(&state, &headers).await;
+    assert!(
+        ext.0.is_strong_session(),
+        "the login cookie is a strong session"
+    );
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("strong session may add another passkey");
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // NEAR enroll/start from the strong session -> 200.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let near = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect("strong session may add a NEAR key");
+    assert_eq!(near.into_response().status(), StatusCode::OK);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        0,
+        "a strong session never trips the gate"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// REMOVE GATED: removing an authenticator from a WEAK session is blocked (403)
+/// while >=1 strong authenticator exists, and ALLOWED once the account is back at
+/// zero strong (bootstrapping). Drives the gate through passkey remove.
+#[tokio::test]
+async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    // Enroll the only passkey (carve-out) -> 1 strong.
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // Removing it from the WEAK session is blocked: 1 strong still present.
+    let remove_ext = account_ctx_ext(&state, &weak_headers).await;
+    let err =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
+            .await
+            .expect_err("weak-session remove is blocked while a strong authenticator exists");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        1,
+        "the blocked remove wrote one gate-denied audit"
+    );
+
+    // From a STRONG (passkey-login) session the remove is allowed; this returns the
+    // account to zero strong authenticators.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(out) =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
+            .await
+            .expect("strong-session remove succeeds");
+    assert_eq!(out.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(tenant, account_id)
+            .await
+            .expect("count"),
+        0,
+        "account is back at zero strong authenticators"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// BEARER = WEAK: a device-bearer-authenticated request is treated as a WEAK
+/// session (`client_kind='device'`), so it is gated exactly like a device-link
+/// cookie when the account already holds a strong authenticator (403), and the
+/// carve-out lets it add the FIRST authenticator (200).
+#[tokio::test]
+async fn gate_treats_device_bearer_as_weak() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Mint links token-gate-bearer's device principal to a fresh account.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+
+    use axum::response::IntoResponse;
+    // The bearer session resolves to a WEAK ctx.
+    let bearer_ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect("bearer resolves");
+    assert_eq!(bearer_ctx.client_kind, "device");
+    assert!(
+        !bearer_ctx.is_strong_session(),
+        "a device bearer is a weak session"
+    );
+
+    // Carve-out: with zero strong authenticators the bearer may add the first
+    // passkey -> register/start 200.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("bearer may add the first authenticator (carve-out)");
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // Now enroll a passkey end-to-end so the account holds 1 strong, then the
+    // bearer's next register/start is gated -> 403.
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("a device bearer is gated once a strong authenticator exists");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// ============================================================================
+// Slice 3a Task 9: NEAR identity management endpoints (list / rename / remove).
+//
+// DB-backed (real PG): self-skip when no PG URL is set; each test uses a DISTINCT
+// tenant and cleans it first. Exercises the three authenticated handlers directly
+// (the auth middleware is mirrored by `account_ctx_ext`). `this_session` is true
+// ONLY on a NEAR-login cookie session whose `auth_credential_id` is the asserting
+// public key; removal shares the Task 8 strong-authenticator gate; rename/list
+// are not gated.
+// ============================================================================
+
+/// Decode the `near_identities` array from a `GET /v1/account/near-identities`
+/// response value into `(public_key, near_account_id, label, this_session,
+/// is_payout)`.
+fn decode_near_identity_list(
+    body: &serde_json::Value,
+) -> Vec<(String, String, Option<String>, bool, bool)> {
+    body.get("near_identities")
+        .and_then(|v| v.as_array())
+        .expect("near_identities array present")
+        .iter()
+        .map(|item| {
+            let public_key = item
+                .get("public_key")
+                .and_then(|v| v.as_str())
+                .expect("public_key present")
+                .to_string();
+            let near_account_id = item
+                .get("near_account_id")
+                .and_then(|v| v.as_str())
+                .expect("near_account_id present")
+                .to_string();
+            let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
+            let this_session = item
+                .get("this_session")
+                .and_then(|v| v.as_bool())
+                .expect("this_session present");
+            let is_payout = item
+                .get("is_payout")
+                .and_then(|v| v.as_bool())
+                .expect("is_payout present");
+            (public_key, near_account_id, label, this_session, is_payout)
+        })
+        .collect()
+}
+
+/// List the caller's NEAR identities via the GET handler under a given header
+/// set, returning the decoded tuples.
+async fn list_near_identities(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+) -> Vec<(String, String, Option<String>, bool, bool)> {
+    let ext = account_ctx_ext(state, &headers).await;
+    let Json(body) = account_near_identities_list_handler(State(state.clone()), ext)
+        .await
+        .expect("near-identities list succeeds");
+    decode_near_identity_list(&body)
+}
+
+/// Drive `near/login/start` -> sign -> `near/login/finish` for an already-enrolled
+/// `(kp, public_key)` under `near_account_id`, returning the minted
+/// `tc_account_session` cookie VALUE (a `client_kind='near'` strong session whose
+/// `auth_credential_id` is `public_key`).
+async fn near_login_cookie_value(
+    state: &Arc<AppState>,
+    kp: &ring::signature::Ed25519KeyPair,
+    public_key: &str,
+    near_account_id: &str,
+) -> String {
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(state).await;
+    let signature = near_test_sign(kp, &message, &nonce, &recipient);
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: near_account_id.to_string(),
+            public_key: public_key.to_string(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "near login 303s");
+    all_set_cookies(&response)
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("near session cookie value")
+}
+
+// ============================================================================
+// Slice 3b Task 8: merge start + strong-auth-gated confirm HTTP handlers.
+//
+// These drive the two handlers directly (via `account_ctx_ext`) over real PG,
+// the same shape as the gate tests above. Device B presents its RAW login-link
+// code as `merge_code`; the handler hashes it with `hash_secret` (the SAME
+// helper the login redeem path uses), so the seeded link is found and consumed.
+// ============================================================================
+
+/// Mint device B's login-link via the real `mint_login_link_handler` and return
+/// `(raw_code, account_b_id)` WITHOUT redeeming it. The raw code is device B's
+/// `merge_code`; leaving the link unconsumed is exactly what `stage_merge_proposal`
+/// expects to find. `mint_login_link_handler` create-or-reuses B's durable account
+/// for the bearer principal, so the returned id is the account the link binds to.
+async fn mint_device_login_code(
+    state: &Arc<AppState>,
+    backend: &PgBackend,
+    tenant_id: &str,
+    token: &str,
+) -> (String, Uuid) {
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers(token))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let account_id =
+        account_id_for_principal(backend, tenant_id, &principal_storage_ref(token)).await;
+    (code, account_id)
+}
+
+/// Account id currently linking `principal_ref` (active link only), or None.
+async fn merge_principal_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+    principal_ref: &str,
+) -> Option<Uuid> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_opt(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .expect("principal lookup");
+    tx.commit().await.expect("commit");
+    row.map(|r| r.get("account_id"))
+}
+
+/// True iff `account_id` is closed (`closed_at IS NOT NULL`).
+async fn merge_account_closed(backend: &PgBackend, tenant_id: &str, account_id: Uuid) -> bool {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND closed_at IS NOT NULL",
+            &[&account_id],
+        )
+        .await
+        .expect("closed count");
+    tx.commit().await.expect("commit");
+    let n: i64 = row.get(0);
+    n > 0
+}
+
+/// ROUND TRIP: account A with a STRONG passkey session stages a merge by
+/// consuming device B's raw login-link, then confirms it. B's principal moves
+/// under A, B's webauthn credential moves under A, and B is closed.
+#[tokio::test]
+async fn merge_start_then_confirm_folds_device_b_into_a() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A: weak redeem cookie, then enroll a passkey and log in -> STRONG.
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_a =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    // Device B: its own account + a webauthn credential + an UNREDEEMED login-link.
+    let (merge_code, account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+    assert_ne!(account_a, account_b, "A and B are distinct accounts");
+    backend
+        .insert_webauthn_credential(
+            tenant,
+            account_b,
+            "cred-device-b",
+            &serde_json::json!({ "fake": "passkey" }),
+            Some("b-key"),
+        )
+        .await
+        .expect("seed webauthn for B");
+
+    // start (strong session OK) -> 200 with proposal_id + absorbed_principal_count.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("start stages a proposal");
+    let proposal_id = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+    assert_eq!(
+        started
+            .get("absorbed_principal_count")
+            .and_then(|v| v.as_i64()),
+        Some(1),
+        "B contributes one principal"
+    );
+    assert_eq!(
+        account_audit_count(backend.as_ref(), tenant, "account_merge_started").await,
+        1,
+        "start writes one hash-only merge_started audit"
+    );
+
+    // confirm (strong session) -> 200 merged:true with counts.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(confirmed) = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id }),
+    )
+    .await
+    .expect("confirm executes the merge");
+    assert_eq!(
+        confirmed.get("merged").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        confirmed.get("principals_moved").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    assert_eq!(
+        confirmed
+            .get("authenticators_moved")
+            .and_then(|v| v.as_i64()),
+        Some(1),
+        "B's single webauthn credential moved"
+    );
+
+    // B's principal now sits under A; B is closed.
+    assert_eq!(
+        merge_principal_account(
+            backend.as_ref(),
+            tenant,
+            &principal_storage_ref("token-a-2")
+        )
+        .await,
+        Some(account_a),
+        "B's principal re-keyed onto A"
+    );
+    assert!(
+        merge_account_closed(backend.as_ref(), tenant, account_b).await,
+        "absorbed account B is closed"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// GATE: `/merge/confirm` from a WEAK session (a device-link / web cookie) is
+/// refused with 403 while the account holds a strong authenticator. Staging from
+/// the weak session is allowed (only confirm is gated), so the proposal exists;
+/// it is the confirm that the gate blocks.
+#[tokio::test]
+async fn merge_confirm_is_blocked_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A: weak redeem cookie, plus a passkey enrolled so a strong
+    // authenticator EXISTS (so the gate is armed for the weak session).
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Enroll a passkey so a strong authenticator EXISTS (arming the gate); the
+    // account id is not needed since enrollment binds to the session cookie.
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // Device B with an unredeemed login-link.
+    let (merge_code, account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+
+    // Start from the WEAK session is allowed (only confirm is gated).
+    let ext = account_ctx_ext(&state, &weak_headers).await;
+    assert!(
+        !ext.0.is_strong_session(),
+        "redeem cookie is a weak session"
+    );
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("weak session may stage a proposal");
+    let proposal_id = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+
+    // Confirm from the WEAK session is refused: a strong authenticator exists.
+    let ext = account_ctx_ext(&state, &weak_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id }),
+    )
+    .await
+    .expect_err("weak-session confirm is gated");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // The merge did NOT execute: B is still open with its own principal.
+    assert!(
+        !merge_account_closed(backend.as_ref(), tenant, account_b).await,
+        "blocked confirm left B open"
+    );
+    assert_eq!(
+        merge_principal_account(
+            backend.as_ref(),
+            tenant,
+            &principal_storage_ref("token-a-2")
+        )
+        .await,
+        Some(account_b),
+        "B's principal stayed under B"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// UNIFORM REJECT: a bogus/unknown merge_code on start -> 400; an unknown
+/// proposal_id on confirm -> 400; and a proposal_id NOT owned by the caller's
+/// account on confirm -> 400. All collapse to the same uniform body.
+#[tokio::test]
+async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Caller account A, strong session (so confirm reaches execute_merge, not the gate).
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_a =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    // (1) start with a bogus code -> 400 (no matching login-link).
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody {
+            merge_code: "this-code-does-not-exist".to_string(),
+        }),
+    )
+    .await
+    .expect_err("bogus merge code is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    // (2) confirm with an unknown proposal_id -> 400.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody {
+            proposal_id: Uuid::new_v4(),
+        }),
+    )
+    .await
+    .expect_err("unknown proposal is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    // (3) A FOREIGN proposal: account C stages a real proposal absorbing device B,
+    // then account A tries to confirm it -> 400 (not owned by A).
+    let c_weak = mint_redeem_session_cookie_value(&state, "token-a-3").await;
+    let account_c = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &principal_storage_ref("token-a-3"),
+    )
+    .await;
+    let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
+    let c_strong = passkey_login_cookie_value(&state, &mut c_auth, &c_cred, account_c).await;
+    let c_headers = cookie_request_headers("tc_account_session", &c_strong);
+
+    let (merge_code, _account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+    let ext = account_ctx_ext(&state, &c_headers).await;
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("C stages a real proposal");
+    let foreign_proposal = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+
+    // A tries to confirm C's proposal -> 400 (tenant- + account-scoped: not A's).
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody {
+            proposal_id: foreign_proposal,
+        }),
+    )
+    .await
+    .expect_err("a proposal not owned by the caller is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// List flags `this_session` ONLY for the NEAR identity that authenticated the
+/// current session: bearer/device sessions see all false; a NEAR-login cookie
+/// session flags exactly the asserting identity; a passkey session sees all
+/// false.
+#[tokio::test]
+async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 is enrolled via the real Task 6 path (returns a usable keypair).
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+    // Identity #2 inserted directly for the SAME account (a second wallet).
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", Some("second"))
+        .await
+        .expect("insert second identity");
+
+    // (1) Bearer session: BOTH listed, all this_session=false.
+    let bearer = list_near_identities(&state, auth_headers("token-a")).await;
+    assert_eq!(bearer.len(), 2, "both identities listed");
+    assert!(
+        bearer.iter().all(|(_, _, _, this, _)| !*this),
+        "bearer session never flags this_session"
+    );
+    let keys: std::collections::BTreeSet<&str> =
+        bearer.iter().map(|(pk, _, _, _, _)| pk.as_str()).collect();
+    assert!(keys.contains(pk1.as_str()) && keys.contains(pk2));
+
+    // (2) NEAR-login with identity #1 -> that exact key flags this_session=true.
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let near_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let near_listed = list_near_identities(&state, near_headers).await;
+    assert_eq!(near_listed.len(), 2);
+    let flagged: Vec<&str> = near_listed
+        .iter()
+        .filter(|(_, _, _, this, _)| *this)
+        .map(|(pk, _, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![pk1.as_str()],
+        "only the authenticating NEAR identity flags this_session"
+    );
+
+    // (3) A passkey session sees all false (its auth_credential_id is a credential
+    // id, never a NEAR public key). Enroll a passkey from the NEAR (strong) session,
+    // then log in via passkey.
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &near_cookie).await;
+    let passkey_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let passkey_headers = cookie_request_headers("tc_account_session", &passkey_cookie);
+    let passkey_listed = list_near_identities(&state, passkey_headers).await;
+    assert!(
+        passkey_listed.iter().all(|(_, _, _, this, _)| !*this),
+        "a passkey session never flags a NEAR identity as this_session"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Rename updates the label (reflected in the list); rename of an unknown key is
+/// a uniform 404.
+#[tokio::test]
+async fn near_identity_rename_endpoint_updates_label_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let (_account_id, _kp, pk) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    // Rename (not gated): a blank-padded label is trimmed and stored.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let status = account_near_identity_rename_handler(
+        State(state.clone()),
+        ext,
+        AxumPath(pk.clone()),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "  Ledger  " }))
+                .expect("rename body"),
+        ),
+    )
+    .await
+    .expect("rename succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let entry = listed
+        .iter()
+        .find(|(p, _, _, _, _)| *p == pk)
+        .expect("renamed identity listed");
+    assert_eq!(
+        entry.2.as_deref(),
+        Some("Ledger"),
+        "label trimmed and stored"
+    );
+
+    // Rename of an unknown key -> uniform 404.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_near_identity_rename_handler(
+        State(state.clone()),
+        ext,
+        AxumPath("ed25519:does-not-exist".to_string()),
+        Json(serde_json::from_value(serde_json::json!({ "label": "x" })).expect("body")),
+    )
+    .await
+    .expect_err("unknown key rename 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Remove from a STRONG session soft-deletes (excluded from the list) and reports
+/// the correct remaining-strong count; remove of an unknown key -> 404; a WEAK
+/// session is gated (403) while a strong authenticator remains, but allowed once
+/// the account is back to zero strong (the bootstrapping carve-out).
+#[tokio::test]
+async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 (enrolled, gives a keypair for the NEAR-login session) plus a
+    // directly-inserted identity #2 -> the account holds 2 strong authenticators.
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", None)
+        .await
+        .expect("insert second identity");
+
+    // A WEAK (bearer) session is BLOCKED (403) from removing while >=1 strong remains.
+    let weak_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        weak_ext,
+        AxumPath(pk2.to_string()),
+    )
+    .await
+    .expect_err("weak remove is gated while a strong authenticator remains");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // From a STRONG (NEAR-login) session: remove identity #2 -> removed, one strong
+    // (identity #1) remains.
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(body) = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath(pk2.to_string()),
+    )
+    .await
+    .expect("strong-session remove succeeds");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        body.get("remaining_strong_authenticators")
+            .and_then(|v| v.as_i64()),
+        Some(1),
+        "one strong authenticator (identity #1) remains"
+    );
+
+    // Identity #2 excluded from the list; identity #1 still present.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let keys: std::collections::BTreeSet<&str> =
+        listed.iter().map(|(p, _, _, _, _)| p.as_str()).collect();
+    assert!(!keys.contains(pk2), "removed identity excluded");
+    assert!(keys.contains(pk1.as_str()), "remaining identity listed");
+
+    // Remove of an unknown key from the strong session -> uniform 404.
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath("ed25519:does-not-exist".to_string()),
+    )
+    .await
+    .expect_err("unknown key remove 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Bootstrapping carve-out: remove the LAST strong authenticator (identity #1)
+    // from the NEAR (strong) session, dropping the account to zero strong.
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(last) = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath(pk1.clone()),
+    )
+    .await
+    .expect("remove last strong from strong session");
+    assert_eq!(
+        last.get("remaining_strong_authenticators")
+            .and_then(|v| v.as_i64()),
+        Some(0),
+        "account is now at zero strong authenticators"
+    );
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(tenant, account_id)
+            .await
+            .expect("count"),
+        0,
+        "account is back at bootstrap (zero strong authenticators)"
+    );
+
+    // With zero strong authenticators the carve-out applies: a WEAK (bearer)
+    // DELETE is no longer gated (it would have 403'd a moment ago) and instead
+    // PASSES the gate to reach the DB op, which yields a uniform 404 since pk1 is
+    // already revoked. The 404 (not 403) is the observable proof the carve-out let
+    // the weak request through.
+    let denied_before = gate_denied_audit_count(backend.as_ref(), tenant).await;
+    let weak_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err =
+        account_near_identity_remove_handler(State(state.clone()), weak_ext, AxumPath(pk1.clone()))
+            .await
+            .expect_err("already-revoked key 404s even under the carve-out");
+    assert_eq!(
+        err.0,
+        StatusCode::NOT_FOUND,
+        "weak remove passes the gate (carve-out) and 404s at the DB, not 403 at the gate"
+    );
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        denied_before,
+        "the carve-out wrote NO new gate-denied audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Cross-account isolation: account B never lists A's NEAR identity; PATCH/DELETE
+/// of A's identity by B is a uniform 404; A's identity is unaffected. Account B is
+/// `token-a-2`, a SECOND contributor in the SAME tenant, exercising the account_id
+/// predicate (not merely tenant RLS).
+#[tokio::test]
+async fn near_identity_management_is_cross_account_isolated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a NEAR identity.
+    let (_account_a, _kp_a, pk_a) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    // Account B (token-a-2, same tenant) gets an account but no NEAR identities.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+
+    // B lists NONE of A's identities.
+    let b_listed = list_near_identities(&state, auth_headers("token-a-2")).await;
+    assert!(
+        b_listed.iter().all(|(pk, _, _, _, _)| *pk != pk_a),
+        "account B never sees account A's NEAR identity"
+    );
+
+    // B's PATCH of A's identity -> 404.
+    let b_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err = account_near_identity_rename_handler(
+        State(state.clone()),
+        b_ext,
+        AxumPath(pk_a.clone()),
+        Json(serde_json::from_value(serde_json::json!({ "label": "stolen" })).expect("body")),
+    )
+    .await
+    .expect_err("B cannot rename A's identity");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // B's DELETE of A's identity -> 404. (B has zero strong of its own, so the gate
+    // permits the attempt; the DB scoping yields the 404.)
+    let b_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err =
+        account_near_identity_remove_handler(State(state.clone()), b_ext, AxumPath(pk_a.clone()))
+            .await
+            .expect_err("B cannot remove A's identity");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // A's identity is unaffected: still listed, with no label set by B.
+    let a_listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let entry = a_listed
+        .iter()
+        .find(|(pk, _, _, _, _)| *pk == pk_a)
+        .expect("A's identity still active");
+    assert_eq!(
+        entry.2.as_deref(),
+        Some("login-seed"),
+        "B's forged rename never touched A's label"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// ============================================================================
+// Slice 3b Task 6: NEAR payout designation endpoint
+// (`PATCH /v1/account/near-identities/{public_key}/payout`).
+//
+// DB-backed (real PG): self-skip when no PG URL is set; distinct tenant; runs
+// under --test-threads=1 like the other account suites. The payout change is
+// money-sensitive, so it shares the Task 8 strong-authenticator gate: a STRONG
+// session may designate/clear; a WEAK session is 403'd while a strong
+// authenticator remains. Cross-account / unknown keys collapse to a uniform 404.
+// Audit is hash-only `account_payout_designated` with `{"payout": bool}` only.
+// ============================================================================
+
+/// Helper: drive the payout PATCH handler under a given header set, returning the
+/// `Result` so callers can assert success or the error status.
+async fn payout_patch(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+    public_key: &str,
+    payout: bool,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ext = account_ctx_ext(state, &headers).await;
+    account_near_identity_payout_handler(
+        State(state.clone()),
+        ext,
+        AxumPath(public_key.to_string()),
+        Json(serde_json::from_value(serde_json::json!({ "payout": payout })).expect("payout body")),
+    )
+    .await
+}
+
+/// From a STRONG (NEAR-login) session: designate flips `is_payout` true in the
+/// list, designating a SECOND identity flips the first off (exactly one true),
+/// clearing returns the account to none, and each successful change writes a
+/// hash-only `account_payout_designated` audit row.
+#[tokio::test]
+async fn near_payout_endpoint_designates_clears_and_flips_prior() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 (enrolled, gives the keypair for a STRONG NEAR-login session)
+    // plus a directly-inserted identity #2 for the same account.
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", None)
+        .await
+        .expect("insert second identity");
+
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let strong_headers = || cookie_request_headers("tc_account_session", &near_cookie);
+
+    // Nothing designated initially.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no payout designated initially"
+    );
+
+    let audit_before =
+        account_audit_count(backend.as_ref(), tenant, "account_payout_designated").await;
+
+    // Designate identity #1 -> 200 is_payout:true, list shows exactly #1 true.
+    let Json(body) = payout_patch(&state, strong_headers(), &pk1, true)
+        .await
+        .expect("designate pk1 succeeds");
+    assert_eq!(
+        body.get("public_key").and_then(|v| v.as_str()),
+        Some(pk1.as_str())
+    );
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(true));
+
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|(_, _, _, _, is_payout)| *is_payout)
+        .map(|(pk, _, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(designated, vec![pk1.as_str()], "exactly pk1 designated");
+
+    // Designate identity #2 -> flips #1 off; list shows exactly #2 true.
+    let Json(body) = payout_patch(&state, strong_headers(), pk2, true)
+        .await
+        .expect("designate pk2 succeeds");
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(true));
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|(_, _, _, _, is_payout)| *is_payout)
+        .map(|(pk, _, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(
+        designated,
+        vec![pk2],
+        "prior designation flipped off; only pk2 designated"
+    );
+
+    // Clear identity #2 -> 200 is_payout:false; list shows none.
+    let Json(body) = payout_patch(&state, strong_headers(), pk2, false)
+        .await
+        .expect("clear pk2 succeeds");
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(false));
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no payout designated after clear"
+    );
+
+    // Three successful changes -> three hash-only audit rows.
+    assert_eq!(
+        account_audit_count(backend.as_ref(), tenant, "account_payout_designated").await,
+        audit_before + 3,
+        "each successful payout change wrote one audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A WEAK (bearer/device) session is 403'd from changing the payout while a
+/// strong authenticator remains (money-sensitive gate), and the refusal does not
+/// designate anything.
+#[tokio::test]
+async fn near_payout_endpoint_gated_for_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // The account holds one strong authenticator (the enrolled NEAR identity).
+    let (_account_id, _kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+
+    // A WEAK (bearer) session attempting to designate is 403'd by the gate.
+    let err = payout_patch(&state, auth_headers("token-a"), &pk1, true)
+        .await
+        .expect_err("weak payout change is gated while a strong authenticator remains");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // Nothing was designated.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "gated weak request designated nothing"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Unknown / not-owned keys collapse to a uniform 404: an unknown key from the
+/// owner's STRONG session, and account B targeting account A's key (B has zero
+/// strong of its own, so the gate permits the attempt; DB scoping yields the 404).
+#[tokio::test]
+async fn near_payout_endpoint_unknown_and_cross_account_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a NEAR identity (strong session available).
+    let (_account_a, kp_a, pk_a) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+    let near_cookie = near_login_cookie_value(&state, &kp_a, &pk_a, "alice.testnet").await;
+    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+
+    // Unknown key from A's strong session -> uniform 404.
+    let err = payout_patch(&state, strong_headers, "ed25519:does-not-exist", true)
+        .await
+        .expect_err("unknown key payout 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Account B (token-a-2, same tenant, zero strong of its own) targeting A's key
+    // passes the gate (carve-out) and 404s at the DB (account-scoped), never a 403.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+    let err = payout_patch(&state, auth_headers("token-a-2"), &pk_a, true)
+        .await
+        .expect_err("B cannot designate A's key");
+    assert_eq!(
+        err.0,
+        StatusCode::NOT_FOUND,
+        "cross-account payout 404s at the DB, not 403 at the gate"
+    );
+
+    // A's identity remains undesignated.
+    let a_listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        a_listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no spurious cross-account designation"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// --- Slice 3b Task 10: mockable NEAR settlement modes + dry-run submitter + hold recovery ---
+
+#[test]
+fn near_settlement_mode_from_env_parses_known_values_and_defaults_disabled() {
+    // Serialize env mutation: these tests run with --test-threads=1, but keep the
+    // set/remove paired so a value never leaks across cases.
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "disabled");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "dry_run");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::DryRun);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "  HTTP  ");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Http);
+    // Blank, garbage, and unset all fail safe to Disabled.
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "garbage");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE);
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+}
+
+#[test]
+fn dry_run_near_transaction_hash_is_deterministic_and_normalizer_accepts_it() {
+    let a = dry_run_near_transaction_hash("sha256:idem-key-a");
+    let a_again = dry_run_near_transaction_hash("sha256:idem-key-a");
+    let b = dry_run_near_transaction_hash("sha256:idem-key-b");
+    assert_eq!(
+        a, a_again,
+        "same idempotency key yields the same synthetic hash"
+    );
+    assert_ne!(a, b, "different keys yield different hashes");
+    // The synthetic hash must pass the production tx-hash normalizer unchanged.
+    assert_eq!(
+        normalize_near_transaction_hash(&a).expect("dry-run hash normalizes"),
+        a
+    );
+}
+
+/// Seed one finalized settlement with a single pending NEAR outbox row for
+/// `tenant-a`/`token-a`, returning the temp dir and state. Mirrors the canonical
+/// submit-worker fixture but leaves the submitter unset so the caller wires the
+/// mode-specific submitter/confirmer.
+async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("submission succeeds");
+    let _ = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: 1.0,
+            reason: Some("utility for settlement mode test".to_string()),
+            external_ref: Some("settlement-mode:near-outbox".to_string()),
+        }),
+    )
+    .await
+    .expect("credit event succeeds");
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for mode test".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+}
+
+#[tokio::test]
+async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    // Disabled mode == no submitter configured. The worker refuses (cannot advance)
+    // and the pending row stays pending; credit is never marked submitted.
+    let state = test_state(temp.path().to_path_buf());
+    assert!(
+        state.near_credit_submitter.is_none(),
+        "disabled-equivalent state has no submitter"
+    );
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let result = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("disabled-mode submit attempt".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "submit worker must refuse when no submitter is configured (disabled mode no-op)"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "disabled mode leaves the row pending"
+    );
+    assert!(outbox[0].near_transaction_hash.is_none());
+}
+
+#[tokio::test]
+async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    // DryRun mode wires the in-process deterministic submitter + confirmer.
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    Arc::make_mut(&mut state).near_credit_confirmer =
+        Some(Arc::new(DryRunTraceNearCreditConfirmer));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let outbox_before =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let expected_hash = normalize_near_transaction_hash(&dry_run_near_transaction_hash(
+        &outbox_before[0].near_call.idempotency_key,
+    ))
+    .expect("expected dry-run hash normalizes");
+
+    // Submit: pending -> submitted with the deterministic synthetic hash.
+    let Json(submit) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("dry-run submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run submit succeeds");
+    assert_eq!(submit.submitted, 1);
+    assert_eq!(submit.failed, 0);
+    let after_submit =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_submit[0].status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+    );
+    assert_eq!(
+        after_submit[0].near_transaction_hash.as_deref(),
+        Some(expected_hash.as_str()),
+        "submitted row carries the deterministic synthetic hash"
+    );
+
+    // Idempotency: a re-run does not re-submit the already-submitted row.
+    let Json(resubmit) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("dry-run re-submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run re-submit succeeds");
+    assert_eq!(resubmit.checked, 0, "no submit candidates remain");
+    assert_eq!(resubmit.submitted, 0, "submitted row is not re-submitted");
+    let after_resubmit =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_resubmit[0].near_transaction_hash.as_deref(),
+        Some(expected_hash.as_str()),
+        "re-run leaves the same hash"
+    );
+
+    // Confirm: submitted -> confirmed.
+    let Json(confirm) = near_credit_outbox_confirm_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxConfirmWorkerRequest {
+            purpose: Some("dry-run confirm".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run confirm succeeds");
+    assert_eq!(confirm.confirmed, 1);
+    let after_confirm =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_confirm[0].status,
+        StorageTraceCreditSettlementNearStatus::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    // Per-request dry_run=true is a PREVIEW: it must never mutate outbox state,
+    // even though the deployment mode would otherwise advance it.
+    let Json(preview) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("preview only".to_string()),
+            dry_run: true,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("preview submit succeeds");
+    assert!(preview.dry_run, "response echoes the preview flag");
+    assert_eq!(preview.submitted, 0, "preview submits nothing");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "request dry_run preview leaves the row pending"
+    );
+    assert!(outbox[0].near_transaction_hash.is_none());
+}
+
+#[tokio::test]
+async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        failure: Some("relayer down".to_string()),
+    }));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let Json(response) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("failing submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker returns summary even on per-item failure");
+    assert_eq!(response.failed, 1);
+    assert_eq!(response.submitted, 0);
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Failed,
+        "submitter error marks the row failed"
+    );
+    let error_hash = outbox[0]
+        .last_error_hash
+        .as_deref()
+        .expect("failed row carries a last_error_hash");
+    assert!(error_hash.starts_with("sha256:"), "error is hash-only");
+    assert!(
+        !error_hash.contains("relayer down"),
+        "raw error string is not stored"
+    );
+}
+
+#[tokio::test]
+async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Finalize a settlement for an account with NO enrolled payout -> HELD line item,
+    // no outbox row.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+
+    let _ = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize none-enrolled for hold recovery".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin finalizes settlement");
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let outbox_before =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox_before
+            .iter()
+            .all(|i| i.credit_account_hash != account_hash),
+        "held account has no outbox row before recovery"
+    );
+
+    // Now designate a payout for the account.
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+
+    let admin_auth = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Admin,
+        principal_ref: principal_storage_ref("admin-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        &state,
+        &admin_auth,
+        &batches,
+    )
+    .await
+    .expect("hold recovery runs");
+    assert_eq!(repaired, 1, "exactly one held line item is re-emitted");
+
+    let outbox_after =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let recovered = outbox_after
+        .iter()
+        .find(|i| i.credit_account_hash == account_hash)
+        .expect("held account now has an outbox row");
+    assert_eq!(
+        recovered.status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "recovered row is pending"
+    );
+    assert_eq!(
+        recovered.payout_near_account_id,
+        Some("alice.near".to_string()),
+        "recovered row carries the designated payout target"
+    );
+
+    // Idempotent: re-running recovery does not create a duplicate row.
+    let batches_again =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let repaired_again = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        &state,
+        &admin_auth,
+        &batches_again,
+    )
+    .await
+    .expect("hold recovery re-run");
+    assert_eq!(repaired_again, 0, "no new rows on re-run");
+    let outbox_final =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox_final
+            .iter()
+            .filter(|i| i.credit_account_hash == account_hash)
+            .count(),
+        1,
+        "exactly one outbox row for the account after re-run"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// --- Slice 3b race fix: NEAR settlement submit worker must not double-submit ---
+
+/// Blocking, call-counting NEAR credit submitter for the concurrent-worker
+/// regression. On first `submit` it signals `entered` and then parks on `proceed`,
+/// so the test can deterministically overlap a second submit-worker run while the
+/// first holds the per-tenant submit advisory lock. Counts total `submit` calls so
+/// the test can assert the external submitter fires EXACTLY ONCE for the shared row.
+#[derive(Clone)]
+struct BlockingCountingNearCreditSubmitter {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl TraceNearCreditSubmitter for BlockingCountingNearCreditSubmitter {
+    async fn submit(
+        &self,
+        _request: TraceNearCreditSubmitterRequest,
+    ) -> anyhow::Result<TraceNearCreditSubmitterResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            // First (and only legitimate) submit: announce entry, then block until
+            // the test has driven the competing run and released us.
+            self.entered.notify_one();
+            self.proceed.notified().await;
+        }
+        Ok(TraceNearCreditSubmitterResponse {
+            near_transaction_hash: TEST_NEAR_TX_HASH_1.to_string(),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(BlockingCountingNearCreditSubmitter {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            proceed: proceed.clone(),
+        }));
+
+    // Designate a payout for the account BEFORE settlement so the finalize enqueues
+    // exactly one `pending` outbox row routed to the payout target.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for concurrent submit race".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Run A: acquires the submit lock, enters the (blocking) submitter, parks.
+    let state_a = state.clone();
+    let run_a = tokio::spawn(async move {
+        near_credit_outbox_submit_worker_handler(
+            State(state_a),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("race run A".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+    });
+
+    // Wait until A is inside the external submitter (lock held, mid-submit).
+    entered.notified().await;
+
+    // Run B overlaps while A holds the lock: it must yield (lock not acquired) and
+    // NOT call the external submitter for the same row.
+    let Json(b) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("race run B".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("run B returns (yields on contended lock)");
+    assert_eq!(
+        b.submitted, 0,
+        "contended run B must not submit the row held by run A"
+    );
+
+    // Release A; it completes its single submit.
+    proceed.notify_one();
+    let Json(a) = run_a
+        .await
+        .expect("run A task joins")
+        .expect("run A succeeds");
+    assert_eq!(a.submitted, 1, "run A submits the row exactly once");
+
+    // The external submitter was invoked EXACTLY ONCE for the shared row.
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "external submitter must be called exactly once across both runs"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let submitted: Vec<_> = outbox
+        .iter()
+        .filter(|i| i.status == StorageTraceCreditSettlementNearStatus::Submitted)
+        .collect();
+    assert_eq!(submitted.len(), 1, "exactly one row ends submitted");
+    assert_eq!(
+        submitted[0].near_transaction_hash.as_deref(),
+        Some(TEST_NEAR_TX_HASH_1),
+        "submitted row carries the single submit's tx hash"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Sequential interleaving (Codex's scenario): run B captures a STALE `pending`
+/// snapshot before the lock, run A fully submits+commits+releases, then run B
+/// acquires the lock AFTER A released. Because the worker re-reads candidates UNDER
+/// the held lock, B observes the row as already `submitted` and skips it — the
+/// external submitter fires EXACTLY ONCE total for the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(BlockingCountingNearCreditSubmitter {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            proceed: proceed.clone(),
+        }));
+
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for sequential submit race".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Run A: acquires lock, enters blocking submitter, parks holding the lock.
+    let state_a = state.clone();
+    let run_a = tokio::spawn(async move {
+        near_credit_outbox_submit_worker_handler(
+            State(state_a),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("seq run A".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+    });
+    entered.notified().await;
+
+    // Release A: it commits `pending -> submitted` and releases the lock.
+    proceed.notify_one();
+    let Json(a) = run_a.await.expect("run A joins").expect("run A succeeds");
+    assert_eq!(a.submitted, 1, "run A submits exactly once");
+
+    // Run B now acquires the lock (A released) and re-reads UNDER the lock. The row
+    // is already `submitted`, so B finds no candidate and never calls the submitter.
+    let Json(b) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("seq run B".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("run B succeeds");
+    assert_eq!(
+        b.checked, 0,
+        "B's under-lock re-read sees no submit candidate"
+    );
+    assert_eq!(
+        b.submitted, 0,
+        "B does not re-submit the already-submitted row"
+    );
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "external submitter called exactly once across the sequential interleaving"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let submitted: Vec<_> = outbox
+        .iter()
+        .filter(|i| i.status == StorageTraceCreditSettlementNearStatus::Submitted)
+        .collect();
+    assert_eq!(submitted.len(), 1, "exactly one row ends submitted");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Defense-in-depth: the optimistic prior-status guard on the status write refuses
+/// to advance an already-`submitted` row even when a stale caller asks to set it
+/// `submitted` again. The guarded update returns `None` (no write); a `None`
+/// allow-list still writes unconditionally.
+#[tokio::test]
+async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let near_outbox_id = outbox[0].near_outbox_id;
+    let tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Admin,
+        principal_ref: principal_storage_ref("admin-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    // First guarded write: pending -> submitted succeeds (current status pending).
+    let updated = update_near_credit_outbox_item_status_with_db_mirror(
+        &state,
+        &tenant,
+        near_outbox_id,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        Some(TEST_NEAR_TX_HASH_1.to_string()),
+        None,
+        Some(&[
+            StorageTraceCreditSettlementNearStatus::Pending,
+            StorageTraceCreditSettlementNearStatus::Failed,
+        ]),
+    )
+    .await
+    .expect("guarded write succeeds")
+    .expect("row updated to submitted");
+    assert_eq!(
+        updated.status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+    );
+
+    // Second guarded write with a STALE tx hash: the row is already submitted, so
+    // the prior-status guard refuses the write and returns None — no clobber.
+    let blocked = update_near_credit_outbox_item_status_with_db_mirror(
+        &state,
+        &tenant,
+        near_outbox_id,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        Some(TEST_NEAR_TX_HASH_2.to_string()),
+        None,
+        Some(&[
+            StorageTraceCreditSettlementNearStatus::Pending,
+            StorageTraceCreditSettlementNearStatus::Failed,
+        ]),
+    )
+    .await
+    .expect("guarded write returns Ok");
+    assert!(
+        blocked.is_none(),
+        "guard blocks advancing an already-submitted row"
+    );
+
+    let after = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after[0].near_transaction_hash.as_deref(),
+        Some(TEST_NEAR_TX_HASH_1),
+        "the original submit's tx hash is preserved (no stale overwrite)"
+    );
+}
+
+/// Cross-store freshness (Finding 2): the DB outbox row is `submitted` (committed
+/// by a prior run) while the FILE still shows `pending` (the prior run crashed
+/// before rewriting the file). The under-lock submit candidate read is
+/// DB-authoritative when a mirror is present, so the worker must observe the
+/// committed `submitted` status, EXCLUDE the row as a candidate, and NOT call the
+/// external submitter for it — the external submitter fires zero times here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+    // Settlement enqueues exactly one `pending` outbox row in BOTH stores.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for cross-store freshness".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    let outbox_file =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(outbox_file.len(), 1);
+    let near_outbox_id = outbox_file[0].near_outbox_id;
+
+    // Simulate a prior run that committed DB `submitted` but crashed before the
+    // file rewrite: advance ONLY the DB row, leaving the file at `pending`.
+    backend
+        .update_trace_near_credit_outbox_status(
+            "tenant-a",
+            near_outbox_id,
+            StorageTraceCreditSettlementNearStatus::Submitted,
+            Some(TEST_NEAR_TX_HASH_1.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("DB-only status advance")
+        .expect("row updated in DB");
+
+    // Confirm the cross-store skew is real: DB says submitted, file says pending.
+    let db_items = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("DB list");
+    assert_eq!(
+        db_items
+            .iter()
+            .find(|i| i.near_outbox_id == near_outbox_id)
+            .expect("DB row")
+            .status,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        "DB row is submitted"
+    );
+    let file_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(
+        file_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "file row is still stale pending"
+    );
+
+    // Run the submit worker. The under-lock read is DB-authoritative, so the row is
+    // seen as `submitted` and excluded; the external submitter is never called.
+    let Json(response) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("cross-store freshness run".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker runs");
+    assert_eq!(
+        response.checked, 0,
+        "DB-authoritative read excludes the already-submitted row"
+    );
+    assert_eq!(response.submitted, 0);
+    assert_eq!(
+        calls.lock().expect("calls lock").len(),
+        0,
+        "external submitter is never called for a DB-submitted row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Config-edge fail-closed: a DB mirror is present but DB-mirror writes are NOT
+/// required (`require_db_mirror_writes=false`, best-effort dual write). In that mode
+/// neither store is guaranteed authoritative — a submit can write the FILE
+/// `submitted` then fail the best-effort DB write, leaving the DB stale `pending`,
+/// so a DB-authoritative read could re-fire the external submitter. The live submit
+/// worker must REFUSE (503 missing-control) and mutate nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    // Seed with required mirror writes so the pending row lands in BOTH stores; the
+    // submit attempt below flips into the unsafe best-effort mode the gate refuses.
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+    // Seed one pending outbox row (with require=true so the mirror write lands), then
+    // flip the worker into the unsafe best-effort mode for the submit attempt.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for fail-closed config edge".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Drop into best-effort dual-write mode (the unsafe config the gate refuses).
+    Arc::make_mut(&mut state).require_db_mirror_writes = false;
+
+    let submit_error = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("best-effort submit attempt".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect_err("live submit must fail closed without required DB mirror writes");
+    assert_eq!(submit_error.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        submit_error
+            .1
+            .0
+            .error
+            .contains("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"),
+        "fail-closed names the missing control"
+    );
+
+    // No external submit and no status mutation: the row stays pending in both stores.
+    assert!(
+        calls.lock().expect("calls lock").is_empty(),
+        "external submitter is never called in the refused config"
+    );
+    let file_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(file_items.len(), 1);
+    assert_eq!(
+        file_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "file row remains pending (no mutation)"
+    );
+    let db_items = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("DB list");
+    assert_eq!(
+        db_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "DB row remains pending (no mutation)"
+    );
+
+    // The dry_run PREVIEW path stays available (it never mutates) even in this mode.
+    let Json(preview) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("best-effort preview".to_string()),
+            dry_run: true,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry_run preview is allowed in best-effort mode");
+    assert!(preview.dry_run);
+    assert_eq!(preview.submitted, 0);
+    assert!(
+        calls.lock().expect("calls lock").is_empty(),
+        "preview does not call the external submitter"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
