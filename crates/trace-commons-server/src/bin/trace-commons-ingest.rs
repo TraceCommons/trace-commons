@@ -22263,6 +22263,7 @@ async fn mark_near_credit_outbox_status_handler(
         status,
         near_transaction_hash,
         last_error_hash,
+        None,
     )
     .await
     .map_err(internal_error)?
@@ -23086,24 +23087,27 @@ async fn run_near_credit_outbox_submit_worker(
     let limit = request
         .limit
         .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT) as usize;
-    let items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
-    let pending_total = items
+    // Preview snapshot, used ONLY for the dry_run report. The live submit path
+    // re-reads candidates UNDER the advisory lock below so a run that waited on the
+    // lock observes the prior run's committed writes (never a stale pre-lock read).
+    let preview_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let preview_pending_total = preview_items
         .iter()
         .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
         .count();
-    let candidates: Vec<_> = items
-        .into_iter()
-        .filter(near_credit_outbox_item_is_submit_candidate)
+    let preview_candidate_count = preview_items
+        .iter()
+        .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
         .take(limit)
-        .collect();
+        .count();
     let mut response = TraceNearCreditOutboxSubmitWorkerResponse {
         purpose,
         dry_run: request.dry_run,
-        checked: candidates.len(),
+        checked: preview_candidate_count,
         submitted: 0,
         failed: 0,
-        skipped: pending_total.saturating_sub(candidates.len()),
-        pending: pending_total,
+        skipped: preview_pending_total.saturating_sub(preview_candidate_count),
+        pending: preview_pending_total,
     };
     if request.dry_run {
         append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
@@ -23147,6 +23151,25 @@ async fn run_near_credit_outbox_submit_worker(
         None => None,
     };
 
+    // Re-read candidates UNDER the held lock. This is the core of the fix: a run
+    // that waited on the advisory lock now reads AFTER the prior holder committed
+    // its `pending -> submitted` writes, so an already-submitted row is no longer a
+    // candidate and is never re-submitted. (The status predicate on the update
+    // below is the defense-in-depth second layer.)
+    let locked_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let pending_total = locked_items
+        .iter()
+        .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
+        .count();
+    let candidates: Vec<_> = locked_items
+        .into_iter()
+        .filter(near_credit_outbox_item_is_submit_candidate)
+        .take(limit)
+        .collect();
+    response.checked = candidates.len();
+    response.skipped = pending_total.saturating_sub(candidates.len());
+    response.pending = pending_total;
+
     // Run the submit loop under the held lock, capturing the result so the lock is
     // always released explicitly before returning (success OR error).
     let pass_result: anyhow::Result<()> = async {
@@ -23168,6 +23191,10 @@ async fn run_near_credit_outbox_submit_worker(
                     StorageTraceCreditSettlementNearStatus::Failed,
                     None,
                     Some(last_error_hash),
+                    Some(&[
+                        StorageTraceCreditSettlementNearStatus::Pending,
+                        StorageTraceCreditSettlementNearStatus::Failed,
+                    ]),
                 )
                 .await?
                 .with_context(|| {
@@ -23191,6 +23218,10 @@ async fn run_near_credit_outbox_submit_worker(
                         StorageTraceCreditSettlementNearStatus::Submitted,
                         Some(near_transaction_hash),
                         None,
+                        Some(&[
+                            StorageTraceCreditSettlementNearStatus::Pending,
+                            StorageTraceCreditSettlementNearStatus::Failed,
+                        ]),
                     )
                     .await?
                     .with_context(|| {
@@ -23221,6 +23252,10 @@ async fn run_near_credit_outbox_submit_worker(
                         StorageTraceCreditSettlementNearStatus::Failed,
                         None,
                         Some(last_error_hash),
+                        Some(&[
+                            StorageTraceCreditSettlementNearStatus::Pending,
+                            StorageTraceCreditSettlementNearStatus::Failed,
+                        ]),
                     )
                     .await?
                     .with_context(|| {
@@ -23314,6 +23349,7 @@ async fn run_near_credit_outbox_confirm_worker(
                     StorageTraceCreditSettlementNearStatus::Failed,
                     near_transaction_hash,
                     Some(last_error_hash),
+                    None,
                 )
                 .await?
                 .with_context(|| {
@@ -23339,6 +23375,7 @@ async fn run_near_credit_outbox_confirm_worker(
                                 item.near_outbox_id,
                                 StorageTraceCreditSettlementNearStatus::Confirmed,
                                 Some(near_transaction_hash),
+                                None,
                                 None,
                             )
                             .await?
@@ -23376,6 +23413,7 @@ async fn run_near_credit_outbox_confirm_worker(
                                 StorageTraceCreditSettlementNearStatus::Submitted,
                                 Some(near_transaction_hash),
                                 Some(last_error_hash),
+                                None,
                             )
                             .await?
                             .with_context(|| {
@@ -23413,6 +23451,7 @@ async fn run_near_credit_outbox_confirm_worker(
                                 StorageTraceCreditSettlementNearStatus::Submitted,
                                 near_transaction_hash,
                                 Some(last_error_hash),
+                                None,
                             )
                             .await?
                             .with_context(|| {
@@ -23444,6 +23483,7 @@ async fn run_near_credit_outbox_confirm_worker(
                             .map(normalize_near_transaction_hash)
                             .transpose()?,
                         Some(last_error_hash),
+                        None,
                     )
                     .await?
                     .with_context(|| {
@@ -24194,6 +24234,7 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
     status: StorageTraceCreditSettlementNearStatus,
     near_transaction_hash: Option<String>,
     last_error_hash: Option<String>,
+    expected_prior_statuses: Option<&[StorageTraceCreditSettlementNearStatus]>,
 ) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
     let now = Utc::now();
     if state.require_db_mirror_writes {
@@ -24204,6 +24245,7 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
             status,
             near_transaction_hash.clone(),
             last_error_hash.clone(),
+            expected_prior_statuses,
         )
         .await
         .context("required Trace Commons DB mirror write failed: NEAR credit outbox status")?;
@@ -24220,6 +24262,7 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
             near_transaction_hash,
             last_error_hash,
             now,
+            expected_prior_statuses,
         )?;
         return Ok(file_updated.or(db_updated));
     }
@@ -24232,6 +24275,7 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
         near_transaction_hash.clone(),
         last_error_hash.clone(),
         now,
+        expected_prior_statuses,
     )?;
     let mirror_result = mirror_near_credit_outbox_item_status_to_db(
         state,
@@ -24240,6 +24284,7 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
         status,
         near_transaction_hash,
         last_error_hash,
+        expected_prior_statuses,
     )
     .await;
     if let Err(error) = &mirror_result {
@@ -24414,6 +24459,7 @@ async fn mirror_near_credit_outbox_item_status_to_db(
     status: StorageTraceCreditSettlementNearStatus,
     near_transaction_hash: Option<String>,
     last_error_hash: Option<String>,
+    expected_prior_statuses: Option<&[StorageTraceCreditSettlementNearStatus]>,
 ) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(None);
@@ -24424,6 +24470,7 @@ async fn mirror_near_credit_outbox_item_status_to_db(
         status,
         near_transaction_hash,
         last_error_hash,
+        expected_prior_statuses.map(|allowed| allowed.to_vec()),
     )
     .await
     .context("failed to mirror NEAR credit outbox status to DB")?
@@ -53833,6 +53880,7 @@ fn read_all_benchmark_registry_outbox_items(
     Ok(items)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_near_credit_outbox_item_status(
     root: &Path,
     tenant_id: &str,
@@ -53841,6 +53889,7 @@ fn update_near_credit_outbox_item_status(
     near_transaction_hash: Option<String>,
     last_error_hash: Option<String>,
     now: DateTime<Utc>,
+    expected_prior_statuses: Option<&[StorageTraceCreditSettlementNearStatus]>,
 ) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
     let path = near_credit_outbox_path(root, tenant_id);
     if !path.exists() {
@@ -53851,6 +53900,15 @@ fn update_near_credit_outbox_item_status(
     for item in &mut items {
         if item.near_outbox_id != near_outbox_id {
             continue;
+        }
+        // Optional optimistic-status guard: when a prior-status allow-list is
+        // supplied (the submit path passes `[pending, failed]`), refuse to advance
+        // a row whose current status is not in it. Defense-in-depth against a
+        // re-submit of an already-`submitted`/`confirmed` row.
+        if let Some(allowed) = expected_prior_statuses {
+            if !allowed.contains(&item.status) {
+                return Ok(None);
+            }
         }
         item.status = status;
         if near_transaction_hash.is_some() {
@@ -57041,6 +57099,7 @@ async fn backfill_db_mirror_from_files(
                     item.status,
                     item.near_transaction_hash.clone(),
                     item.last_error_hash.clone(),
+                    None,
                 )
                 .await?;
             }

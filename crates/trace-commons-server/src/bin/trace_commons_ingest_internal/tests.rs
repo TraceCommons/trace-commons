@@ -31858,6 +31858,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         Some(TEST_NEAR_TX_HASH_1.to_string()),
         None,
         Utc::now(),
+        None,
     )
     .expect("file status update succeeds")
     .expect("file outbox item exists");
@@ -69921,4 +69922,214 @@ async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submi
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Sequential interleaving (Codex's scenario): run B captures a STALE `pending`
+/// snapshot before the lock, run A fully submits+commits+releases, then run B
+/// acquires the lock AFTER A released. Because the worker re-reads candidates UNDER
+/// the held lock, B observes the row as already `submitted` and skips it — the
+/// external submitter fires EXACTLY ONCE total for the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(BlockingCountingNearCreditSubmitter {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            proceed: proceed.clone(),
+        }));
+
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for sequential submit race".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Run A: acquires lock, enters blocking submitter, parks holding the lock.
+    let state_a = state.clone();
+    let run_a = tokio::spawn(async move {
+        near_credit_outbox_submit_worker_handler(
+            State(state_a),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("seq run A".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+    });
+    entered.notified().await;
+
+    // Release A: it commits `pending -> submitted` and releases the lock.
+    proceed.notify_one();
+    let Json(a) = run_a.await.expect("run A joins").expect("run A succeeds");
+    assert_eq!(a.submitted, 1, "run A submits exactly once");
+
+    // Run B now acquires the lock (A released) and re-reads UNDER the lock. The row
+    // is already `submitted`, so B finds no candidate and never calls the submitter.
+    let Json(b) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("seq run B".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("run B succeeds");
+    assert_eq!(
+        b.checked, 0,
+        "B's under-lock re-read sees no submit candidate"
+    );
+    assert_eq!(
+        b.submitted, 0,
+        "B does not re-submit the already-submitted row"
+    );
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "external submitter called exactly once across the sequential interleaving"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let submitted: Vec<_> = outbox
+        .iter()
+        .filter(|i| i.status == StorageTraceCreditSettlementNearStatus::Submitted)
+        .collect();
+    assert_eq!(submitted.len(), 1, "exactly one row ends submitted");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Defense-in-depth: the optimistic prior-status guard on the status write refuses
+/// to advance an already-`submitted` row even when a stale caller asks to set it
+/// `submitted` again. The guarded update returns `None` (no write); a `None`
+/// allow-list still writes unconditionally.
+#[tokio::test]
+async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let near_outbox_id = outbox[0].near_outbox_id;
+    let tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Admin,
+        principal_ref: principal_storage_ref("admin-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    // First guarded write: pending -> submitted succeeds (current status pending).
+    let updated = update_near_credit_outbox_item_status_with_db_mirror(
+        &state,
+        &tenant,
+        near_outbox_id,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        Some(TEST_NEAR_TX_HASH_1.to_string()),
+        None,
+        Some(&[
+            StorageTraceCreditSettlementNearStatus::Pending,
+            StorageTraceCreditSettlementNearStatus::Failed,
+        ]),
+    )
+    .await
+    .expect("guarded write succeeds")
+    .expect("row updated to submitted");
+    assert_eq!(
+        updated.status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+    );
+
+    // Second guarded write with a STALE tx hash: the row is already submitted, so
+    // the prior-status guard refuses the write and returns None — no clobber.
+    let blocked = update_near_credit_outbox_item_status_with_db_mirror(
+        &state,
+        &tenant,
+        near_outbox_id,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        Some(TEST_NEAR_TX_HASH_2.to_string()),
+        None,
+        Some(&[
+            StorageTraceCreditSettlementNearStatus::Pending,
+            StorageTraceCreditSettlementNearStatus::Failed,
+        ]),
+    )
+    .await
+    .expect("guarded write returns Ok");
+    assert!(
+        blocked.is_none(),
+        "guard blocks advancing an already-submitted row"
+    );
+
+    let after = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after[0].near_transaction_hash.as_deref(),
+        Some(TEST_NEAR_TX_HASH_1),
+        "the original submit's tx hash is preserved (no stale overwrite)"
+    );
 }

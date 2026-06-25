@@ -4083,10 +4083,24 @@ impl TraceCorpusStore for PgBackend {
         status: TraceCreditSettlementNearStatus,
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
+        expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_storage = enum_to_storage(status)?;
+        // Optimistic prior-status allow-list (text[] or NULL). When NULL the write
+        // is unconditional; when present the UPDATE only matches a row whose current
+        // status is in the list, so the submit path can never re-advance an already
+        // `submitted`/`confirmed` row.
+        let expected_prior_storage: Option<Vec<String>> = match expected_prior_statuses {
+            Some(statuses) => Some(
+                statuses
+                    .into_iter()
+                    .map(enum_to_storage)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => None,
+        };
         let row = tx
             .query_opt(
                 &format!(
@@ -4110,6 +4124,7 @@ impl TraceCorpusStore for PgBackend {
                             ELSE last_error_hash
                          END
                      WHERE tenant_id = $1 AND near_outbox_id = $2
+                       AND ($6::text[] IS NULL OR status = ANY($6))
                      RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
                 ),
                 &[
@@ -4118,6 +4133,7 @@ impl TraceCorpusStore for PgBackend {
                     &status_storage,
                     &near_transaction_hash,
                     &last_error_hash,
+                    &expected_prior_storage,
                 ],
             )
             .await
@@ -4147,6 +4163,7 @@ impl TraceCorpusStore for PgBackend {
                             ELSE last_error_hash
                          END
                      WHERE tenant_id = $1 AND near_outbox_id = $2
+                       AND ($6::text[] IS NULL OR status = ANY($6))
                      RETURNING {TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS}"
                 ),
                 &[
@@ -4155,6 +4172,7 @@ impl TraceCorpusStore for PgBackend {
                     &status_storage,
                     &near_transaction_hash,
                     &last_error_hash,
+                    &expected_prior_storage,
                 ],
             )
             .await

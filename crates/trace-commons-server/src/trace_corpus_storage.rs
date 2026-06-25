@@ -2144,6 +2144,10 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError>;
 
+    /// Update an outbox row's status. When `expected_prior_statuses` is `Some`,
+    /// the write only applies if the row's CURRENT status is in that allow-list
+    /// (optimistic guard the submit path uses to never advance an already
+    /// `submitted`/`confirmed` row); `None` writes unconditionally.
     async fn update_trace_near_credit_outbox_status(
         &self,
         tenant_id: &str,
@@ -2151,6 +2155,7 @@ pub trait TraceCorpusStore: Send + Sync {
         status: TraceCreditSettlementNearStatus,
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
+        expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
 
     async fn upsert_trace_benchmark_registry_outbox_item(

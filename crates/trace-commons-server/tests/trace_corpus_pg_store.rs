@@ -2160,6 +2160,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
             None,
+            None,
         )
         .await
         .expect("update NEAR outbox item")
@@ -2179,6 +2180,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
             Some("sha256:near-confirmation-mismatch".to_string()),
+            None,
         )
         .await
         .expect("update submitted NEAR outbox item with confirmation error")
@@ -2202,6 +2204,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             account_near_outbox_id,
             TraceCreditSettlementNearStatus::Submitted,
             Some(TEST_NEAR_TX_HASH.to_string()),
+            None,
             None,
         )
         .await
