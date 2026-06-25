@@ -290,10 +290,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// 3. Registers the device key (`ON CONFLICT (device_key_id) DO NOTHING`).
     ///
     /// The operation is fully idempotent: re-running with the same inputs is safe.
-    async fn enroll_instance_user(
-        &self,
-        p: InstanceUserProvision,
-    ) -> Result<(), DatabaseError>;
+    async fn enroll_instance_user(&self, p: InstanceUserProvision) -> Result<(), DatabaseError>;
 
     /// Atomically deduplicate a user enrollment against `trace_instance_enrollments`
     /// and enforce a per-instance cap.

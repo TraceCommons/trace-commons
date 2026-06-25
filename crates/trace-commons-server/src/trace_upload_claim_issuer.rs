@@ -398,11 +398,15 @@ impl TraceUploadClaimIssuerConfig {
             onboarding_leaderboard_url: self.onboarding_leaderboard_url.clone(),
             denial_counter,
             instance_replay_cache: Arc::new(crate::instance_enroll_guard::ReplayCache::new()),
-            instance_rate_limiter: Arc::new(crate::instance_enroll_guard::InstanceRateLimiter::new()),
-            instance_enroll_default_rate_per_min: std::env::var("TRACE_COMMONS_INSTANCE_ENROLL_RATE_PER_MIN")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(60),
+            instance_rate_limiter: Arc::new(
+                crate::instance_enroll_guard::InstanceRateLimiter::new(),
+            ),
+            instance_enroll_default_rate_per_min: std::env::var(
+                "TRACE_COMMONS_INSTANCE_ENROLL_RATE_PER_MIN",
+            )
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(60),
         }))
     }
 }
@@ -1897,8 +1901,8 @@ impl TraceUploadClaimIssuerState {
         }
 
         // Provision the user tenant + device key (idempotent).
-        let client_info = serde_json::to_value(&request.client_info)
-            .map_err(|_| IssuerError::internal())?;
+        let client_info =
+            serde_json::to_value(&request.client_info).map_err(|_| IssuerError::internal())?;
         let policy_tmpl = &entry.policy_template;
         db.enroll_instance_user(crate::db::InstanceUserProvision {
             device_key_id: device_key_id.clone(),
@@ -3698,20 +3702,24 @@ mod tests {
             .enroll(request)
             .await
             .expect_err("bad sig must be rejected");
-        assert_eq!(err.status, StatusCode::FORBIDDEN, "must map to 403 FORBIDDEN");
+        assert_eq!(
+            err.status,
+            StatusCode::FORBIDDEN,
+            "must map to 403 FORBIDDEN"
+        );
     }
 
     #[tokio::test]
     async fn enroll_happy_path_provisions_user_tenant() {
+        use crate::config::SslMode;
         use crate::trace_upload_claim_allowlist::hash_instance_subject;
         use ring::signature::KeyPair;
+        use secrecy::SecretString;
         use trace_commons_protocol::onboarding::{
             TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
             TraceInstanceEnrollRequest, TraceOnboardClientInfo, derive_user_tenant_id,
             device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
         };
-        use secrecy::SecretString;
-        use crate::config::SslMode;
 
         // Skip if no DB available.
         let pg_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
@@ -3719,9 +3727,7 @@ mod tests {
         {
             Ok(u) => u,
             Err(_) => {
-                eprintln!(
-                    "skipping enroll_happy_path_provisions_user_tenant: no DB configured"
-                );
+                eprintln!("skipping enroll_happy_path_provisions_user_tenant: no DB configured");
                 return;
             }
         };
@@ -4031,10 +4037,10 @@ mod tests {
         String,
         deadpool_postgres::Pool,
     )> {
+        use crate::config::SslMode;
         use crate::trace_upload_claim_allowlist::hash_instance_subject;
         use ring::signature::KeyPair;
         use secrecy::SecretString;
-        use crate::config::SslMode;
 
         let pg_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -4173,21 +4179,21 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let dev_a_pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev A keypair");
-        let dev_a = ring::signature::Ed25519KeyPair::from_pkcs8(dev_a_pkcs8.as_ref())
-            .expect("parse dev A");
+        let dev_a =
+            ring::signature::Ed25519KeyPair::from_pkcs8(dev_a_pkcs8.as_ref()).expect("parse dev A");
         use ring::signature::KeyPair;
         let dev_a_pk = dev_a.public_key().as_ref().to_vec();
 
         let dev_b_pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev B keypair");
-        let dev_b = ring::signature::Ed25519KeyPair::from_pkcs8(dev_b_pkcs8.as_ref())
-            .expect("parse dev B");
+        let dev_b =
+            ring::signature::Ed25519KeyPair::from_pkcs8(dev_b_pkcs8.as_ref()).expect("parse dev B");
         let dev_b_pk = dev_b.public_key().as_ref().to_vec();
 
         let dev_c_pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev C keypair");
-        let dev_c = ring::signature::Ed25519KeyPair::from_pkcs8(dev_c_pkcs8.as_ref())
-            .expect("parse dev C");
+        let dev_c =
+            ring::signature::Ed25519KeyPair::from_pkcs8(dev_c_pkcs8.as_ref()).expect("parse dev C");
         let dev_c_pk = dev_c.public_key().as_ref().to_vec();
 
         // Enroll user-1 with device A.
@@ -4253,10 +4259,7 @@ mod tests {
             .ok();
         for tid in [&tenant1, &tenant2] {
             client
-                .execute(
-                    "DELETE FROM trace_tenants WHERE tenant_id = $1",
-                    &[tid],
-                )
+                .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[tid])
                 .await
                 .ok();
         }
@@ -4352,8 +4355,7 @@ mod tests {
         write_allowlist_file(&path, "pilot-2026-05", &["INVOK001INVOK001"]);
         let config = config_with_file_allowlist(path);
         // An invite that is NOT in the allowlist must still return InviteNotValid.
-        let (status, body) =
-            post_onboard(config, onboard_request("MISS0001MISS0001")).await;
+        let (status, body) = post_onboard(config, onboard_request("MISS0001MISS0001")).await;
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,

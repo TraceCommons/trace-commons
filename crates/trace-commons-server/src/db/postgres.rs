@@ -1935,7 +1935,10 @@ impl Database for PgBackend {
         max_enrollments: i64,
     ) -> Result<crate::db::InstanceEnrollmentOutcome, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
-        let tx = client.transaction().await.map_err(DatabaseError::Postgres)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
         tx.execute(
             "SELECT set_config('trace_commons.instance_subject', $1, true)",
             &[&instance_subject_hash],

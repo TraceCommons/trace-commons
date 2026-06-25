@@ -12,7 +12,9 @@ pub struct ReplayCache {
 
 impl ReplayCache {
     pub fn new() -> Self {
-        Self { seen: Mutex::new(HashMap::new()) }
+        Self {
+            seen: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Returns true if `key` is fresh (and records it until `now + ttl`);
@@ -47,7 +49,9 @@ impl ReplayCache {
 }
 
 impl Default for ReplayCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct Bucket {
@@ -61,7 +65,9 @@ pub struct InstanceRateLimiter {
 
 impl InstanceRateLimiter {
     pub fn new() -> Self {
-        Self { buckets: Mutex::new(HashMap::new()) }
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Token bucket: capacity = `rate_per_min`, refill = `rate_per_min`/60 per
@@ -73,7 +79,10 @@ impl InstanceRateLimiter {
         let cap = rate_per_min as f64;
         let refill_per_sec = cap / 60.0;
         let mut buckets = self.buckets.lock().expect("InstanceRateLimiter poisoned");
-        let bucket = buckets.entry(subject.to_string()).or_insert(Bucket { tokens: cap, last: now });
+        let bucket = buckets.entry(subject.to_string()).or_insert(Bucket {
+            tokens: cap,
+            last: now,
+        });
         let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * refill_per_sec).min(cap);
         bucket.last = now;
@@ -87,7 +96,9 @@ impl InstanceRateLimiter {
 }
 
 impl Default for InstanceRateLimiter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

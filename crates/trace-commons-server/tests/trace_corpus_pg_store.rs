@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, InstanceEnrollmentOutcome, InstanceUserProvision, postgres::PgBackend};
+use trace_commons_server::db::{
+    Database, InstanceEnrollmentOutcome, InstanceUserProvision, postgres::PgBackend,
+};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
     TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,

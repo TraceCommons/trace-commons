@@ -243,11 +243,7 @@ impl AllowlistSnapshot {
                         "instance_id must be non-empty".into(),
                     ));
                 }
-                let pk_b64 = entry
-                    .instance_public_key
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
+                let pk_b64 = entry.instance_public_key.as_deref().unwrap_or("").trim();
                 let pk = base64::engine::general_purpose::STANDARD
                     .decode(pk_b64)
                     .map_err(|_| {
@@ -265,9 +261,7 @@ impl AllowlistSnapshot {
                     ));
                 }
                 let tmpl = entry.policy_template.as_ref().ok_or_else(|| {
-                    AllowlistError::Malformed(
-                        "instance entry requires policy_template".into(),
-                    )
+                    AllowlistError::Malformed("instance entry requires policy_template".into())
                 })?;
                 if tmpl.policy_version.trim().is_empty() {
                     return Err(AllowlistError::Malformed(
@@ -314,22 +308,14 @@ impl AllowlistSnapshot {
                 // silently fixing uppercase would mask the operator generating
                 // hashes with the wrong tool. Trim leading/trailing whitespace
                 // only.
-                let trimmed = entry
-                    .subject_hash
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("");
+                let trimmed = entry.subject_hash.as_deref().map(str::trim).unwrap_or("");
                 if trimmed.is_empty() {
                     return Err(AllowlistError::Malformed(
                         "subject_hash must be non-empty".to_string(),
                     ));
                 }
                 validate_subject_hash(trimmed)?;
-                let tenant_id = entry
-                    .tenant_id
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("");
+                let tenant_id = entry.tenant_id.as_deref().map(str::trim).unwrap_or("");
                 if tenant_id.is_empty() {
                     return Err(AllowlistError::Malformed(
                         "tenant_id must be non-empty".to_string(),
@@ -905,7 +891,9 @@ mod tests {
         .expect("instance allowlist JSON parses");
         let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
         let subject = hash_instance_subject(&[3u8; 32]);
-        let entry = snap.instance_entry(&subject).expect("instance entry by hash");
+        let entry = snap
+            .instance_entry(&subject)
+            .expect("instance entry by hash");
         assert_eq!(entry.instance_id, "ironclaw-acme-prod");
         assert_eq!(entry.max_enrollments, 5000);
         assert_eq!(entry.rate_per_min, Some(60));

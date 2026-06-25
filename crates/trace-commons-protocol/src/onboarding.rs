@@ -106,9 +106,7 @@ pub fn device_key_id_from_public_key_bytes(public_key_bytes: &[u8]) -> String {
 /// field is length-prefixed (u64-le) so no field-boundary shift can collide.
 /// This is the single source of truth shared by the Ironclaw signer and the
 /// issuer verifier — keep it the only encoder.
-pub fn instance_enroll_attestation_signing_bytes(
-    a: &TraceInstanceEnrollAttestation,
-) -> Vec<u8> {
+pub fn instance_enroll_attestation_signing_bytes(a: &TraceInstanceEnrollAttestation) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"trace_commons.instance_enroll.v1\n");
     for field in [
@@ -285,7 +283,10 @@ mod tests {
                 exp: 100,
             },
             attestation_sig: "c2ln".into(),
-            client_info: TraceOnboardClientInfo { agent: "ironclaw".into(), version: "0.x".into() },
+            client_info: TraceOnboardClientInfo {
+                agent: "ironclaw".into(),
+                version: "0.x".into(),
+            },
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: TraceInstanceEnrollRequest = serde_json::from_str(&encoded).unwrap();
