@@ -564,7 +564,6 @@ struct TraceUploadClaimRequest {
     #[serde(default)]
     allowed_uses: Vec<TraceAllowedUse>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed by Task 2 (principal derivation)
     subject: Option<String>,
     requested_at: DateTime<Utc>,
 }
@@ -1453,8 +1452,21 @@ impl TraceUploadClaimIssuerState {
         let public_key_bytes =
             device_public_key_bytes(&device_key.public_key, &auth.device_key_id)?;
         verify_device_claim_signature(&public_key_bytes, body, &auth.signature)?;
-        let actor = auth.device_key_id;
-        let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        let device_key_id = auth.device_key_id;
+        // Grants are governed at the device level regardless of per-user subject.
+        let grant_principal_ref =
+            principal_storage_ref(&format!("device:{tenant_id}:{device_key_id}"));
+        // When the instance asserts a per-user subject, the issued principal is
+        // namespaced under the device so subjects cannot collide across
+        // instances/tenants and the blast radius stays inside this tenant. Absent a
+        // subject, behavior is unchanged (principal == raw device_key_id).
+        let actor = match request.subject.as_deref() {
+            Some(raw) => {
+                let subject = normalize_subject(raw)?;
+                format!("instance:{tenant_id}:{device_key_id}:user:{subject}")
+            }
+            None => device_key_id,
+        };
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
@@ -2452,7 +2464,6 @@ fn principal_storage_ref(value: &str) -> String {
 }
 
 /// Maximum accepted byte length for a client-supplied subject.
-#[allow(dead_code)] // consumed by Task 2 (principal derivation)
 const MAX_SUBJECT_LEN: usize = 128;
 
 /// Validate and normalize an opaque per-user subject. The subject is a
@@ -2460,7 +2471,6 @@ const MAX_SUBJECT_LEN: usize = 128;
 /// shape so it is safe to embed in a derived principal string. We never trust a
 /// client-supplied principal prefix — the namespaced principal is built in
 /// `issue_claim_for_device_key`.
-#[allow(dead_code)] // consumed by Task 2 (principal derivation)
 fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_SUBJECT_LEN {
@@ -4410,6 +4420,284 @@ mod tests {
             body.get("error").and_then(|v| v.as_str()),
             Some("InviteNotValid"),
             "error code must be InviteNotValid"
+        );
+    }
+
+    // ---- Task 2: per-user subject tests ----
+
+    use crate::trace_corpus_storage::*;
+    use crate::error::DatabaseError;
+    use crate::db::{DeviceKeyRecord, InstanceEnrollmentOutcome, InstanceUserProvision};
+
+    struct StubDeviceKeyDb {
+        device_keys: std::sync::RwLock<
+            std::collections::HashMap<(String, String), crate::db::DeviceKeyRecord>,
+        >,
+    }
+
+    impl StubDeviceKeyDb {
+        fn new() -> Self {
+            Self {
+                device_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn insert_test_device_key(
+            &self,
+            tenant_id: &str,
+            device_key_id: &str,
+            record: crate::db::DeviceKeyRecord,
+        ) {
+            self.device_keys
+                .write()
+                .unwrap()
+                .insert((tenant_id.to_string(), device_key_id.to_string()), record);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace_corpus_storage::TraceCorpusStore for StubDeviceKeyDb {
+        async fn upsert_trace_submission(&self, _: TraceSubmissionWrite) -> Result<TraceSubmissionRecord, DatabaseError> { todo!("stub") }
+        async fn get_trace_submission(&self, _: &str, _: Uuid) -> Result<Option<TraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+        async fn list_trace_submissions(&self, _: &str) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+        async fn list_account_trace_submissions_keyset(&self, _: &str, _: &[String], _: Option<TraceSubmissionKeysetCursor>, _: i64) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_tenant_policy(&self, _: TraceTenantPolicyWrite) -> Result<TraceTenantPolicyRecord, DatabaseError> { todo!("stub") }
+        async fn get_trace_tenant_policy(&self, _: &str) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_tenant_access_grant(&self, _: TraceTenantAccessGrantWrite) -> Result<TraceTenantAccessGrantRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_tenant_access_grants(&self, _: &str) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> { todo!("stub") }
+        async fn list_active_trace_tenant_access_grants_for_principal(&self, _: &str, _: &str, _: DateTime<Utc>) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> { todo!("stub") }
+        async fn list_trace_credit_events(&self, _: &str) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> { todo!("stub") }
+        async fn update_trace_submission_status(&self, _: &str, _: Uuid, _: TraceCorpusStatus, _: &str, _: Option<&str>) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn claim_trace_review_lease(&self, _: &str, _: Uuid, _: &str, _: DateTime<Utc>, _: Option<DateTime<Utc>>, _: DateTime<Utc>) -> Result<Option<TraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+        async fn release_trace_review_lease(&self, _: &str, _: Uuid, _: &str) -> Result<Option<TraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+        async fn append_trace_object_ref(&self, _: TraceObjectRefWrite) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn list_trace_object_refs(&self, _: &str, _: Uuid) -> Result<Vec<TraceObjectRefRecord>, DatabaseError> { todo!("stub") }
+        async fn get_latest_active_trace_object_ref(&self, _: &str, _: Uuid, _: TraceObjectArtifactKind) -> Result<Option<TraceObjectRefRecord>, DatabaseError> { todo!("stub") }
+        async fn append_trace_derived_record(&self, _: TraceDerivedRecordWrite) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn list_trace_derived_records(&self, _: &str) -> Result<Vec<TraceDerivedRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_vector_entry(&self, _: TraceVectorEntryWrite) -> Result<TraceVectorEntryRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_vector_entries(&self, _: &str) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_model_version(&self, _: TraceRankingModelVersionWrite) -> Result<TraceRankingModelVersionRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_model_versions(&self, _: &str) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_calibration_dataset(&self, _: TraceRankingCalibrationDatasetWrite) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
+        async fn update_trace_ranking_calibration_dataset_status(&self, _: TraceRankingCalibrationDatasetStatusUpdate) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_calibration_datasets(&self, _: &str) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_feature(&self, _: TraceRankingFeatureWrite) -> Result<TraceRankingFeatureRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_features(&self, _: &str) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_prediction(&self, _: TraceRankingPredictionWrite) -> Result<TraceRankingPredictionRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_predictions(&self, _: &str) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_label(&self, _: TraceRankingLabelWrite) -> Result<TraceRankingLabelRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_labels(&self, _: &str) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_preference_label(&self, _: TraceRankingPreferenceLabelWrite) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_preference_labels(&self, _: &str) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_calibration_run(&self, _: TraceRankingCalibrationRunWrite) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_calibration_runs(&self, _: &str) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_ranking_worker_run(&self, _: TraceRankingWorkerRunWrite) -> Result<TraceRankingWorkerRunRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_ranking_worker_runs(&self, _: &str) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_export_manifest(&self, _: TraceExportManifestWrite) -> Result<TraceExportManifestRecord, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_export_manifest_mirror(&self, _: TraceExportManifestMirrorWrite) -> Result<TraceExportManifestRecord, DatabaseError> { todo!("stub") }
+        async fn delete_trace_export_manifest_mirror(&self, _: &str, _: Uuid) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn list_trace_export_manifests(&self, _: &str) -> Result<Vec<TraceExportManifestRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_export_manifest_item(&self, _: TraceExportManifestItemWrite) -> Result<TraceExportManifestItemRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_export_manifest_items(&self, _: &str, _: Uuid) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError> { todo!("stub") }
+        async fn invalidate_trace_export_manifests_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+        async fn invalidate_trace_export_manifest_items_for_submission(&self, _: &str, _: Uuid, _: TraceExportManifestItemInvalidationReason) -> Result<u64, DatabaseError> { todo!("stub") }
+        async fn invalidate_trace_vector_entries_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+        async fn invalidate_trace_vector_entry_for_submission(&self, _: &str, _: Uuid, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+        async fn append_trace_audit_event(&self, _: TraceAuditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn list_trace_audit_events(&self, _: &str) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+        async fn list_recent_trace_audit_events(&self, _: &str, _: usize) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+        async fn get_trace_audit_event_by_id(&self, _: &str, _: Uuid) -> Result<Option<TraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+        async fn append_trace_credit_event(&self, _: TraceCreditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn upsert_trace_utility_attestation(&self, _: TraceUtilityAttestationWrite) -> Result<TraceUtilityAttestationRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_utility_attestations(&self, _: &str) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_credit_settlement_batch(&self, _: TraceCreditSettlementBatchWrite) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_credit_settlement_batches(&self, _: &str) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_credit_hold(&self, _: TraceCreditHoldWrite) -> Result<TraceCreditHoldRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_credit_holds(&self, _: &str) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_near_credit_outbox_item(&self, _: TraceNearCreditOutboxItemWrite) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_near_credit_outbox_items(&self, _: &str) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
+        async fn update_trace_near_credit_outbox_status(&self, _: &str, _: Uuid, _: TraceCreditSettlementNearStatus, _: Option<String>, _: Option<String>, _: Option<Vec<TraceCreditSettlementNearStatus>>) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_benchmark_registry_outbox_item(&self, _: TraceBenchmarkRegistryOutboxItemWrite) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_benchmark_registry_outbox_items(&self, _: &str) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
+        async fn update_trace_benchmark_registry_outbox_status(&self, _: &str, _: Uuid, _: TraceBenchmarkRegistryOutboxStatus, _: Option<String>, _: Option<String>) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
+        async fn write_trace_tombstone(&self, _: TraceTombstoneWrite) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn list_trace_tombstones(&self, _: &str) -> Result<Vec<TraceTombstoneRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_retention_job(&self, _: TraceRetentionJobWrite) -> Result<TraceRetentionJobRecord, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_retention_job_item(&self, _: TraceRetentionJobItemWrite) -> Result<TraceRetentionJobItemRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_retention_jobs(&self, _: &str) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError> { todo!("stub") }
+        async fn list_trace_retention_job_items(&self, _: &str, _: Uuid) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_export_access_grant(&self, _: TraceExportAccessGrantWrite) -> Result<TraceExportAccessGrantRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_export_access_grants(&self, _: &str) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_export_job(&self, _: TraceExportJobWrite) -> Result<TraceExportJobRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_export_jobs(&self, _: &str) -> Result<Vec<TraceExportJobRecord>, DatabaseError> { todo!("stub") }
+        async fn update_trace_export_job_status(&self, _: &str, _: Uuid, _: TraceExportJobStatusUpdate) -> Result<Option<TraceExportJobRecord>, DatabaseError> { todo!("stub") }
+        async fn claim_next_trace_export_job(&self, _: &str, _: Option<&str>, _: DateTime<Utc>, _: &str) -> Result<Option<TraceExportJobRecord>, DatabaseError> { todo!("stub") }
+        async fn recover_stale_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: TraceExportJobStatusUpdate) -> Result<Option<TraceExportJobRecord>, DatabaseError> { todo!("stub") }
+        async fn retry_failed_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: TraceExportJobStatusUpdate) -> Result<Option<TraceExportJobRecord>, DatabaseError> { todo!("stub") }
+        async fn upsert_trace_revocation_propagation_item(&self, _: TraceRevocationPropagationItemWrite) -> Result<TraceRevocationPropagationItemRecord, DatabaseError> { todo!("stub") }
+        async fn list_trace_revocation_propagation_items(&self, _: &str, _: Uuid) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+        async fn list_due_trace_revocation_propagation_items(&self, _: &str, _: DateTime<Utc>, _: u32) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+        async fn update_trace_revocation_propagation_item_status(&self, _: &str, _: Uuid, _: TraceRevocationPropagationItemStatusUpdate) -> Result<Option<TraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+        async fn invalidate_trace_submission_artifacts(&self, _: &str, _: Uuid, _: TraceDerivedStatus) -> Result<TraceArtifactInvalidationCounts, DatabaseError> { todo!("stub") }
+        async fn mark_trace_object_ref_deleted(&self, _: &str, _: Uuid, _: &str, _: &str) -> Result<u64, DatabaseError> { todo!("stub") }
+        async fn insert_trace_gate_decision(&self, _: &str, _: TraceGateDecisionRow) -> Result<(), DatabaseError> { todo!("stub") }
+        async fn stream_trace_gate_decisions_for_replay(&self, _: &str, _: u32, _: Option<(DateTime<Utc>, Uuid)>) -> Result<Vec<TraceGateDecisionRow>, DatabaseError> { todo!("stub") }
+        async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> { todo!("stub") }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::Database for StubDeviceKeyDb {
+        async fn run_migrations(&self) -> Result<(), DatabaseError> {
+            Ok(())
+        }
+
+        async fn enroll_instance_user(
+            &self,
+            _p: InstanceUserProvision,
+        ) -> Result<(), DatabaseError> {
+            Err(DatabaseError::Pool("stub".into()))
+        }
+
+        async fn reserve_instance_enrollment(
+            &self,
+            _instance_subject_hash: &str,
+            _user_subject_hash: &str,
+            _tenant_id: &str,
+            _max_enrollments: i64,
+        ) -> Result<InstanceEnrollmentOutcome, DatabaseError> {
+            Err(DatabaseError::Pool("stub".into()))
+        }
+
+        async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+            Ok(false)
+        }
+
+        async fn get_device_key(
+            &self,
+            tenant_id: &str,
+            device_key_id: &str,
+        ) -> Result<Option<DeviceKeyRecord>, DatabaseError> {
+            Ok(self
+                .device_keys
+                .read()
+                .unwrap()
+                .get(&(tenant_id.to_string(), device_key_id.to_string()))
+                .cloned())
+        }
+    }
+
+    fn device_claim_request_body(tenant_id: &str, subject: Option<&str>) -> serde_json::Value {
+        let mut body = json!({
+            "schema_version": TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION,
+            "tenant_id": tenant_id,
+            "audience": "trace-commons-upload",
+            "trace_id": Uuid::new_v4(),
+            "submission_id": Uuid::new_v4(),
+            "consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["debugging"],
+            "requested_at": Utc::now(),
+        });
+        if let Some(s) = subject {
+            body["subject"] = serde_json::Value::String(s.to_string());
+        }
+        body
+    }
+
+    async fn post_signed_device_claim_for_tenant(
+        tenant_id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value, String) {
+        use ring::signature::KeyPair;
+        use std::sync::Arc;
+        use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keypair generates");
+        let kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair parses");
+        let pk = kp.public_key().as_ref();
+        let device_key_id = device_key_id_from_public_key_bytes(pk);
+        let pk_b64 = base64::engine::general_purpose::STANDARD.encode(pk);
+
+        let stub = Arc::new(StubDeviceKeyDb::new());
+        stub.insert_test_device_key(
+            tenant_id,
+            &device_key_id,
+            DeviceKeyRecord {
+                device_key_id: device_key_id.clone(),
+                tenant_id: tenant_id.to_string(),
+                public_key: pk_b64,
+                invite_subject_hash: "sha256:stub".to_string(),
+                client_info: serde_json::json!({}),
+                created_at: Utc::now(),
+                revoked_at: None,
+            },
+        );
+
+        let config = TraceUploadClaimIssuerConfig {
+            onboarding_device_key_db: Some(stub as Arc<dyn crate::db::Database>),
+            ..test_config()
+        };
+
+        let body_str = body.to_string();
+        let sig = kp.sign(body_str.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+
+        let (status, response) =
+            post_device_claim(config, &device_key_id, &sig_b64, body).await;
+        (status, response, device_key_id)
+    }
+
+    fn decode_issued_claims(body: &serde_json::Value) -> serde_json::Value {
+        let token = body["access_token"].as_str().expect("access_token field");
+        let payload = token.split('.').nth(1).expect("jwt has 3 parts");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("payload is base64url");
+        serde_json::from_slice(&decoded).expect("payload is json")
+    }
+
+    #[tokio::test]
+    async fn device_claim_without_subject_uses_raw_device_key_id() {
+        let tenant_id = "test-device-tenant";
+        let body = device_claim_request_body(tenant_id, None);
+        let (status, response, device_key_id) =
+            post_signed_device_claim_for_tenant(tenant_id, body).await;
+        assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
+        let claims = decode_issued_claims(&response);
+        assert_eq!(
+            claims["sub"].as_str(),
+            Some(device_key_id.as_str()),
+            "sub must be raw device_key_id when no subject"
+        );
+        assert_eq!(
+            claims["principal_ref"].as_str(),
+            Some(device_key_id.as_str()),
+            "principal_ref must be raw device_key_id when no subject"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_claim_with_subject_yields_namespaced_principal() {
+        let tenant_id = "test-device-tenant";
+        let subject = "user-abc123";
+        let body = device_claim_request_body(tenant_id, Some(subject));
+        let (status, response, device_key_id) =
+            post_signed_device_claim_for_tenant(tenant_id, body).await;
+        assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
+        let claims = decode_issued_claims(&response);
+        let expected = format!("instance:{tenant_id}:{device_key_id}:user:{subject}");
+        assert_eq!(
+            claims["sub"].as_str(),
+            Some(expected.as_str()),
+            "sub must be namespaced with subject"
+        );
+        assert_eq!(
+            claims["principal_ref"].as_str(),
+            Some(expected.as_str()),
+            "principal_ref must be namespaced with subject"
         );
     }
 }
