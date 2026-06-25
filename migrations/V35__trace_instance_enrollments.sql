@@ -1,4 +1,4 @@
--- V31: instance-enrollment ledger (control plane above per-user tenants).
+-- V35: instance-enrollment ledger (control plane above per-user tenants).
 -- Isolated on a parallel INSTANCE predicate, not the tenant predicate: this
 -- table is intentionally cross-tenant (an instance maps to many per-user
 -- tenants), so tenant RLS would defeat its purpose. Hash-only columns.
