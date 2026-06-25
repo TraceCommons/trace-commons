@@ -20,12 +20,47 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 fn default_allowlist_max_uses() -> u32 {
     3
+}
+
+fn default_entry_kind() -> String {
+    "invite".to_string()
+}
+
+/// File shape for an instance policy template (kind = "instance" entries).
+#[derive(Debug, Deserialize)]
+pub struct InstancePolicyTemplate {
+    pub policy_version: String,
+    #[serde(default)]
+    pub allowed_consent_scopes: Vec<String>,
+    #[serde(default)]
+    pub allowed_uses: Vec<String>,
+}
+
+/// Owned snapshot of an instance's policy template (after parsing).
+#[derive(Debug, Clone)]
+pub struct InstancePolicyTemplateSnapshot {
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+}
+
+/// Parsed instance entry stored in the snapshot.
+#[derive(Debug, Clone)]
+pub struct InstanceSnapshotEntry {
+    pub instance_subject_hash: String,
+    pub instance_id: String,
+    pub instance_public_key: Vec<u8>,
+    pub max_enrollments: u32,
+    pub rate_per_min: Option<u32>,
+    pub policy_template: InstancePolicyTemplateSnapshot,
+    pub contributor_label: Option<String>,
 }
 
 /// Canonical invite-code hashing. The `"invite:"` prefix namespaces the
@@ -35,6 +70,17 @@ fn default_allowlist_max_uses() -> u32 {
 /// Used at two places only: the operator's `--hash-invite-code` helper and
 /// the issuance handler's allowlist check. Keep these the only callers —
 /// drift between them is the most likely way to break the pilot.
+/// Canonical instance-subject hashing. The `"instance:"` prefix namespaces
+/// the digest so an instance public key can never collide with an
+/// invite-code subject hash. Single source of truth for ledger keys, denial
+/// accounting, and audit actor labels.
+pub fn hash_instance_subject(public_key_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"instance:");
+    hasher.update(public_key_bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 pub fn hash_invite_code(code: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"invite:");
@@ -89,16 +135,23 @@ impl AllowlistSourceSpec {
     }
 }
 
-/// Single-entry shape inside an allowlist file.
+/// Single-entry shape inside an allowlist file. Supports two kinds:
+/// - `"invite"` (default): contributor invite-code entries.
+/// - `"instance"`: TEE instance allowlist entries.
 #[derive(Debug, Deserialize)]
 pub struct AllowlistEntry {
-    pub subject_hash: String,
+    #[serde(default = "default_entry_kind")]
+    pub kind: String,
+    // Invite fields (kind = "invite").
+    #[serde(default)]
+    pub subject_hash: Option<String>,
     /// Tenant the contributor will be attributed to once their claim is
     /// minted. The issuance handler does not currently force tenant equality
     /// against this field — the existing workload-claim flow already
     /// resolves the minted tenant. Stored for future cross-checks and for
     /// operator-side auditing of "who is allowed where".
-    pub tenant_id: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     /// Operator-facing free text. Never returned to clients, never logged.
     #[serde(default)]
     pub note_label: Option<String>,
@@ -108,6 +161,18 @@ pub struct AllowlistEntry {
     /// invitations.
     #[serde(default = "default_allowlist_max_uses")]
     pub max_uses: u32,
+    // Instance fields (kind = "instance").
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    /// Base64-encoded Ed25519 public key (32 bytes).
+    #[serde(default)]
+    pub instance_public_key: Option<String>,
+    #[serde(default)]
+    pub max_enrollments: Option<u32>,
+    #[serde(default)]
+    pub rate_per_min: Option<u32>,
+    #[serde(default)]
+    pub policy_template: Option<InstancePolicyTemplate>,
 }
 
 /// Top-level file schema. Version 1 only; anything else is rejected.
@@ -137,6 +202,7 @@ pub struct AllowlistSnapshot {
     pub generated_at: DateTime<Utc>,
     pub subject_hashes: HashSet<String>,
     entries_by_hash: HashMap<String, AllowlistSnapshotEntry>,
+    instances_by_hash: HashMap<String, InstanceSnapshotEntry>,
     pub loaded_at: Instant,
     pub source_label: String,
 }
@@ -146,6 +212,13 @@ impl AllowlistSnapshot {
     /// `subject_hash` is canonical `sha256:<64 lower-hex>`; rejects the
     /// whole snapshot if any entry is malformed. Dedupes hashes silently
     /// (operator typo recovery).
+    ///
+    /// Supports two entry kinds:
+    /// - `"invite"` (default when `kind` is absent): the original invite-code
+    ///   hash entries. Requires `subject_hash` and `tenant_id`.
+    /// - `"instance"`: TEE instance entries. Requires `instance_id`,
+    ///   `instance_public_key` (base64, 32 bytes), `max_enrollments > 0`, and
+    ///   `policy_template`.
     pub fn from_file(
         file: AllowlistFile,
         source_label: String,
@@ -159,46 +232,123 @@ impl AllowlistSnapshot {
         }
         let mut subject_hashes = HashSet::with_capacity(file.entries.len());
         let mut entries_by_hash = HashMap::with_capacity(file.entries.len());
+        let mut instances_by_hash: HashMap<String, InstanceSnapshotEntry> = HashMap::new();
+
         for entry in &file.entries {
-            // Strict: the file's hashes must already be canonical
-            // sha256:<64 lower-hex>. We don't lowercase on read because
-            // silently fixing uppercase would mask the operator generating
-            // hashes with the wrong tool. Trim leading/trailing whitespace
-            // only.
-            let trimmed = entry.subject_hash.trim();
-            validate_subject_hash(trimmed)?;
-            let tenant_id = entry.tenant_id.trim();
-            if tenant_id.is_empty() {
-                return Err(AllowlistError::Malformed(
-                    "tenant_id must be non-empty".to_string(),
-                ));
+            if entry.kind == "instance" {
+                // --- Instance entry ---
+                let instance_id = entry.instance_id.as_deref().map(str::trim).unwrap_or("");
+                if instance_id.is_empty() {
+                    return Err(AllowlistError::Malformed(
+                        "instance_id must be non-empty".into(),
+                    ));
+                }
+                let pk_b64 = entry.instance_public_key.as_deref().unwrap_or("").trim();
+                let pk = base64::engine::general_purpose::STANDARD
+                    .decode(pk_b64)
+                    .map_err(|_| {
+                        AllowlistError::Malformed("instance_public_key not base64".into())
+                    })?;
+                if pk.len() != 32 {
+                    return Err(AllowlistError::Malformed(
+                        "instance_public_key must be 32 bytes".into(),
+                    ));
+                }
+                let max_enrollments = entry.max_enrollments.unwrap_or(0);
+                if max_enrollments == 0 {
+                    return Err(AllowlistError::Malformed(
+                        "max_enrollments must be > 0".into(),
+                    ));
+                }
+                let tmpl = entry.policy_template.as_ref().ok_or_else(|| {
+                    AllowlistError::Malformed("instance entry requires policy_template".into())
+                })?;
+                if tmpl.policy_version.trim().is_empty() {
+                    return Err(AllowlistError::Malformed(
+                        "policy_version must be non-empty".into(),
+                    ));
+                }
+                let subject = hash_instance_subject(&pk);
+                let contributor_label = entry
+                    .note_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(ToString::to_string);
+                // Reject duplicate instance public keys outright (unlike invites,
+                // which dedupe silently). Two instance entries for the same key
+                // with diverging instance_id / cap / rate / policy_template is an
+                // operator mistake we must surface, not silently resolve to the
+                // first-seen entry.
+                if instances_by_hash.contains_key(&subject) {
+                    return Err(AllowlistError::Malformed(format!(
+                        "duplicate instance entry for subject {subject}"
+                    )));
+                }
+                instances_by_hash.insert(
+                    subject.clone(),
+                    InstanceSnapshotEntry {
+                        instance_subject_hash: subject,
+                        instance_id: instance_id.to_string(),
+                        instance_public_key: pk,
+                        max_enrollments,
+                        rate_per_min: entry.rate_per_min,
+                        policy_template: InstancePolicyTemplateSnapshot {
+                            policy_version: tmpl.policy_version.trim().to_string(),
+                            allowed_consent_scopes: tmpl.allowed_consent_scopes.clone(),
+                            allowed_uses: tmpl.allowed_uses.clone(),
+                        },
+                        contributor_label,
+                    },
+                );
+            } else {
+                // --- Invite entry (default kind) ---
+                // Strict: the file's hashes must already be canonical
+                // sha256:<64 lower-hex>. We don't lowercase on read because
+                // silently fixing uppercase would mask the operator generating
+                // hashes with the wrong tool. Trim leading/trailing whitespace
+                // only.
+                let trimmed = entry.subject_hash.as_deref().map(str::trim).unwrap_or("");
+                if trimmed.is_empty() {
+                    return Err(AllowlistError::Malformed(
+                        "subject_hash must be non-empty".to_string(),
+                    ));
+                }
+                validate_subject_hash(trimmed)?;
+                let tenant_id = entry.tenant_id.as_deref().map(str::trim).unwrap_or("");
+                if tenant_id.is_empty() {
+                    return Err(AllowlistError::Malformed(
+                        "tenant_id must be non-empty".to_string(),
+                    ));
+                }
+                if entry.max_uses == 0 {
+                    return Err(AllowlistError::Malformed(
+                        "max_uses must be greater than zero".to_string(),
+                    ));
+                }
+                let contributor_label = entry
+                    .note_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(ToString::to_string);
+                subject_hashes.insert(trimmed.to_string());
+                entries_by_hash
+                    .entry(trimmed.to_string())
+                    .or_insert_with(|| AllowlistSnapshotEntry {
+                        subject_hash: trimmed.to_string(),
+                        tenant_id: tenant_id.to_string(),
+                        contributor_label,
+                        max_uses: entry.max_uses,
+                    });
             }
-            if entry.max_uses == 0 {
-                return Err(AllowlistError::Malformed(
-                    "max_uses must be greater than zero".to_string(),
-                ));
-            }
-            let contributor_label = entry
-                .note_label
-                .as_deref()
-                .map(str::trim)
-                .filter(|label| !label.is_empty())
-                .map(ToString::to_string);
-            subject_hashes.insert(trimmed.to_string());
-            entries_by_hash
-                .entry(trimmed.to_string())
-                .or_insert_with(|| AllowlistSnapshotEntry {
-                    subject_hash: trimmed.to_string(),
-                    tenant_id: tenant_id.to_string(),
-                    contributor_label,
-                    max_uses: entry.max_uses,
-                });
         }
         Ok(Self {
             policy_label: file.policy_label,
             generated_at: file.generated_at,
             subject_hashes,
             entries_by_hash,
+            instances_by_hash,
             loaded_at,
             source_label,
         })
@@ -210,6 +360,10 @@ impl AllowlistSnapshot {
 
     pub fn entry(&self, subject_hash: &str) -> Option<&AllowlistSnapshotEntry> {
         self.entries_by_hash.get(subject_hash)
+    }
+
+    pub fn instance_entry(&self, instance_subject_hash: &str) -> Option<&InstanceSnapshotEntry> {
+        self.instances_by_hash.get(instance_subject_hash)
     }
 }
 
@@ -463,10 +617,16 @@ mod tests {
             generated_at: Utc::now(),
             policy_label: "pilot".into(),
             entries: vec![AllowlistEntry {
-                subject_hash: "not-a-sha256".into(),
-                tenant_id: "t".into(),
+                kind: "invite".into(),
+                subject_hash: Some("not-a-sha256".into()),
+                tenant_id: Some("t".into()),
                 note_label: None,
                 max_uses: 1,
+                instance_id: None,
+                instance_public_key: None,
+                max_enrollments: None,
+                rate_per_min: None,
+                policy_template: None,
             }],
         };
         assert!(matches!(
@@ -479,10 +639,16 @@ mod tests {
             generated_at: Utc::now(),
             policy_label: "pilot".into(),
             entries: vec![AllowlistEntry {
-                subject_hash: format!("sha256:{}", "A".repeat(64)),
-                tenant_id: "t".into(),
+                kind: "invite".into(),
+                subject_hash: Some(format!("sha256:{}", "A".repeat(64))),
+                tenant_id: Some("t".into()),
                 note_label: None,
                 max_uses: 1,
+                instance_id: None,
+                instance_public_key: None,
+                max_enrollments: None,
+                rate_per_min: None,
+                policy_template: None,
             }],
         };
         assert!(matches!(
@@ -500,16 +666,28 @@ mod tests {
             policy_label: "pilot".into(),
             entries: vec![
                 AllowlistEntry {
-                    subject_hash: h.clone(),
-                    tenant_id: "t".into(),
+                    kind: "invite".into(),
+                    subject_hash: Some(h.clone()),
+                    tenant_id: Some("t".into()),
                     note_label: None,
                     max_uses: 1,
+                    instance_id: None,
+                    instance_public_key: None,
+                    max_enrollments: None,
+                    rate_per_min: None,
+                    policy_template: None,
                 },
                 AllowlistEntry {
-                    subject_hash: h.clone(),
-                    tenant_id: "t2".into(),
+                    kind: "invite".into(),
+                    subject_hash: Some(h.clone()),
+                    tenant_id: Some("t2".into()),
                     note_label: Some("dup".into()),
                     max_uses: 1,
+                    instance_id: None,
+                    instance_public_key: None,
+                    max_enrollments: None,
+                    rate_per_min: None,
+                    policy_template: None,
                 },
             ],
         };
@@ -674,5 +852,117 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         let mut f = std::fs::File::create(path).expect("create");
         f.write_all(content.as_bytes()).expect("write");
+    }
+
+    #[test]
+    fn hash_instance_subject_is_namespaced_against_invites() {
+        let pk = [7u8; 32];
+        let h = hash_instance_subject(&pk);
+        assert!(h.starts_with("sha256:"));
+        assert_eq!(h.len(), "sha256:".len() + 64);
+        // "instance:" prefix cannot collide with "invite:"-prefixed codes.
+        assert_ne!(h, hash_invite_code(&String::from_utf8_lossy(&pk)));
+    }
+
+    #[test]
+    fn snapshot_parses_instance_entry_with_policy_template() {
+        use base64::Engine as _;
+        let pk_b64 = base64::engine::general_purpose::STANDARD.encode([3u8; 32]);
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1,
+                "generated_at": "2026-06-24T00:00:00Z",
+                "policy_label": "pilot",
+                "entries": [{{
+                    "kind": "instance",
+                    "instance_id": "ironclaw-acme-prod",
+                    "instance_public_key": "{pk_b64}",
+                    "max_enrollments": 5000,
+                    "rate_per_min": 60,
+                    "policy_template": {{
+                        "policy_version": "ironclaw-pilot-v1",
+                        "allowed_consent_scopes": ["pilot_research"],
+                        "allowed_uses": ["model_training"]
+                    }},
+                    "note_label": "ironclaw-acme-prod"
+                }}]
+            }}"#
+        ))
+        .expect("instance allowlist JSON parses");
+        let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
+        let subject = hash_instance_subject(&[3u8; 32]);
+        let entry = snap
+            .instance_entry(&subject)
+            .expect("instance entry by hash");
+        assert_eq!(entry.instance_id, "ironclaw-acme-prod");
+        assert_eq!(entry.max_enrollments, 5000);
+        assert_eq!(entry.rate_per_min, Some(60));
+        assert_eq!(entry.policy_template.policy_version, "ironclaw-pilot-v1");
+        assert_eq!(entry.instance_public_key, vec![3u8; 32]);
+    }
+
+    #[test]
+    fn existing_invite_only_file_still_parses_without_kind() {
+        let h = hash_invite_code("INV-1");
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1,
+                "generated_at": "2026-05-17T00:00:00Z",
+                "policy_label": "pilot",
+                "entries": [{{"subject_hash": "{h}", "tenant_id": "t"}}]
+            }}"#
+        ))
+        .expect("legacy invite JSON parses");
+        let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
+        assert!(snap.contains(&h));
+        assert!(snap.instance_entry(&h).is_none());
+    }
+
+    #[test]
+    fn instance_entry_rejects_bad_pubkey_len() {
+        use base64::Engine as _;
+        let short = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1, "generated_at": "2026-06-24T00:00:00Z", "policy_label": "p",
+                "entries": [{{
+                    "kind": "instance", "instance_id": "i", "instance_public_key": "{short}",
+                    "max_enrollments": 1,
+                    "policy_template": {{"policy_version": "v", "allowed_consent_scopes": [], "allowed_uses": []}}
+                }}]
+            }}"#
+        ))
+        .unwrap();
+        assert!(matches!(
+            AllowlistSnapshot::from_file(file, "test".into(), Instant::now()),
+            Err(AllowlistError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_instance_entries() {
+        use base64::Engine as _;
+        // Same public key in two instance entries with diverging config is an
+        // operator mistake; reject the whole snapshot rather than silently
+        // keeping the first (unlike invite entries, which dedupe).
+        let pk = base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1, "generated_at": "2026-06-24T00:00:00Z", "policy_label": "p",
+                "entries": [
+                    {{"kind": "instance", "instance_id": "i-one", "instance_public_key": "{pk}",
+                      "max_enrollments": 10,
+                      "policy_template": {{"policy_version": "v1", "allowed_consent_scopes": [], "allowed_uses": []}}}},
+                    {{"kind": "instance", "instance_id": "i-two", "instance_public_key": "{pk}",
+                      "max_enrollments": 999,
+                      "policy_template": {{"policy_version": "v2", "allowed_consent_scopes": [], "allowed_uses": []}}}}
+                ]
+            }}"#
+        ))
+        .unwrap();
+        assert!(matches!(
+            AllowlistSnapshot::from_file(file, "test".into(), Instant::now()),
+            Err(AllowlistError::Malformed(_))
+        ));
     }
 }
