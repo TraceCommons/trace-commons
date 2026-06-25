@@ -1913,6 +1913,17 @@ impl Database for PgBackend {
         upsert_onboarding_device_tenant_access_grant(&tx, &p.tenant_id, &p.device_key_id).await?;
 
         tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // Create-or-reuse the contributor account and bind the device principal so
+        // instance-enrolled users get account-scoped trace read-back immediately,
+        // without waiting for a first login-link mint. The principal_ref is the one
+        // the device authenticates as (and the login-link mint path passes), so
+        // this converges idempotently with that path. `create_or_reuse_account`
+        // runs its own self-contained tenant transaction.
+        let principal_ref = onboarding_device_principal_ref(&p.tenant_id, &p.device_key_id);
+        self.create_or_reuse_account(&p.tenant_id, &principal_ref)
+            .await?;
+
         Ok(())
     }
 

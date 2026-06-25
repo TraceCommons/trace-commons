@@ -3811,6 +3811,32 @@ async fn enroll_instance_user_provisions_tenant_and_device_key() {
         "instance-enrolled device must have an active contributor grant"
     );
 
+    // Account creation: exactly one account and one active principal link must
+    // exist (and the idempotent second enroll call must NOT create a second).
+    let account_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_accounts WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count accounts")
+        .get(0);
+    assert_eq!(account_count, 1, "exactly one account must exist");
+
+    let active_principal_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_account_principals
+              WHERE tenant_id = $1 AND unlinked_at IS NULL",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count active principal links")
+        .get(0);
+    assert_eq!(
+        active_principal_count, 1,
+        "exactly one active principal link must bind the device to its account"
+    );
+
     tx.commit().await.expect("commit verification transaction");
 
     // Clean up: cascade-delete via trace_tenants to avoid FK violations.
