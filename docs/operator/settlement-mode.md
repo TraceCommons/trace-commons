@@ -90,6 +90,31 @@ Designating one identity clears any prior designation on the same account (the
 single-active-designation invariant). Unknown / revoked / cross-account public
 keys are rejected (`404` for cross-account — no existence oracle).
 
+## Submit-worker concurrency (no double-submit)
+
+The `http`-mode submit worker must never externally submit an outbox row twice.
+It is serialized so two overlapping runs (a manual `POST`, a scheduler tick, and
+the credit-cycle step all route through the same handler) cannot double-fire:
+
+- A session-level Postgres advisory lock (`pg_try_advisory_lock`, keyed per
+  tenant) wraps the submit pass; a contended run no-ops and leaves rows
+  `pending`. Candidate rows are read **under** the held lock from the **committed
+  DB** outbox state (DB-authoritative), so a serialized later run sees a prior
+  run's `submitted` writes and skips them. The `pending -> submitted` write also
+  carries a `status IN ('pending','failed')` guard.
+- Because that correctness depends on DB-authoritative writes, the submit worker
+  **fail-closes (503)** when a DB mirror is present but
+  `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` is not `true`. The pilot sets it `true`.
+
+**Known limitation (non-production, tracked for 3b-2):** the advisory lock is a
+Postgres lock, so a hypothetical **file-only** deployment (no DB mirror at all)
+would not serialize concurrent live submits. This repo is **PostgreSQL-only**, so
+file-only is a test shape that does not occur in production or the pilot — and the
+pilot additionally runs settlement `disabled`. Hardening the file-only path (or
+simply forbidding live `http` submit without a DB mirror) is folded into the
+deferred **3b-2** work that wires real in-process NEAR transaction signing; until
+then, never run `http`-mode settlement without a Postgres mirror.
+
 ## See also
 
 - [`account-merge.md`](./account-merge.md) — merging devices; a merge clears the
