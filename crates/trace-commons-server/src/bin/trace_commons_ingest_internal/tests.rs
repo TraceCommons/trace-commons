@@ -70412,3 +70412,114 @@ async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+// ============================================================================
+// Slice 0 Task 3: per-user subjects under one device key resolve to distinct
+// accounts via the login-link handler.
+// ============================================================================
+
+/// Mint an upload-claim-shaped EdDSA bearer for the given (tenant, device_key_id,
+/// subject) triple — mirroring exactly what the issuer now produces in Task 2 —
+/// then POST to `mint_login_link_handler` and return the durable `account_id`.
+///
+/// When `subject` is `Some(s)`, the principal embedded in the JWT is
+/// `instance:{tenant_id}:{device_key_id}:user:{s}`, matching the
+/// `normalize_subject`-namespaced form from Task 2.  When `None`, the principal
+/// is the raw `device_key_id`, reproducing legacy device-level behavior.
+async fn mint_login_link_account_for_subject(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    device_key_id: &str,
+    subject: Option<&str>,
+) -> Uuid {
+    let principal_ref = match subject {
+        Some(s) => format!("instance:{tenant_id}:{device_key_id}:user:{s}"),
+        None => device_key_id.to_string(),
+    };
+    let now = Utc::now();
+    let claims = serde_json::json!({
+        "sub": principal_ref,
+        "principal_ref": principal_ref,
+        "tenant_id": tenant_id,
+        "role": "contributor",
+        "iat": now.timestamp(),
+        "exp": (now + Duration::minutes(5)).timestamp(),
+        "allowed_consent_scopes": ["debugging_evaluation"],
+        "allowed_uses": ["debugging"],
+    });
+    let token = eddsa_signed_tenant_token(claims);
+    let Json(response) = mint_login_link_handler(State(state.clone()), auth_headers(&token))
+        .await
+        .expect("mint_login_link_handler must succeed for per-user subject bearer");
+    Uuid::parse_str(&response.account_id)
+        .expect("account_id in MintLoginLinkResponse must be a UUID")
+}
+
+/// Slice 0 payoff: a per-user device-key claim (Task 2) authenticates on
+/// `POST /v1/account/login-links` and resolves a DISTINCT per-user account, so
+/// one instance device key fans out to many accounts.
+///
+/// Asserts:
+/// - Two distinct subjects under one device key → two distinct accounts.
+/// - No-subject bearer → device-level account (backward-compat).
+/// - Device-level account differs from both per-user accounts.
+/// - Idempotent reuse: same subject → same account on re-mint.
+///
+/// Requires `TRACE_COMMONS_PG_TEST_DATABASE_URL` or `DATABASE_URL`; self-skips
+/// when neither is set. Run with `--test-threads=1`.
+#[tokio::test]
+async fn per_user_subjects_resolve_to_distinct_accounts() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = format!("per-user-{}", Uuid::new_v4());
+    cleanup_pg_trace_tenant(backend.as_ref(), &tenant).await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    // Wire in the EdDSA verifier so signed bearer tokens are accepted.
+    Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+        test_eddsa_signed_token_verifier(),
+    ));
+
+    let device_key_id = "device-per-user-test-key";
+
+    let alice_account =
+        mint_login_link_account_for_subject(&state, &tenant, device_key_id, Some("alice")).await;
+    let bob_account =
+        mint_login_link_account_for_subject(&state, &tenant, device_key_id, Some("bob")).await;
+    let device_account =
+        mint_login_link_account_for_subject(&state, &tenant, device_key_id, None).await;
+
+    assert_ne!(
+        alice_account, bob_account,
+        "distinct subjects must resolve to distinct accounts"
+    );
+    assert_ne!(
+        alice_account, device_account,
+        "per-user account must differ from device-level account"
+    );
+    assert_ne!(
+        bob_account, device_account,
+        "per-user account must differ from device-level account"
+    );
+
+    // Idempotent reuse: same subject → same account.
+    let alice_again =
+        mint_login_link_account_for_subject(&state, &tenant, device_key_id, Some("alice")).await;
+    assert_eq!(
+        alice_account, alice_again,
+        "same subject under same device key must reuse the same account"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), &tenant).await;
+}
