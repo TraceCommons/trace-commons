@@ -134,7 +134,11 @@ impl WebauthnConfig {
                 let any_set = rp_id.is_some() || rp_origin.is_some() || rp_name.is_some();
                 if any_set {
                     let name_state = |label: &str, value: &Option<String>| {
-                        format!("{}={}", label, if value.is_some() { "set" } else { "unset" })
+                        format!(
+                            "{}={}",
+                            label,
+                            if value.is_some() { "set" } else { "unset" }
+                        )
                     };
                     tracing::warn!(
                         target: "trace_commons::passkey",
@@ -206,7 +210,11 @@ impl NearConfig {
                 let any_set = rpc_url.is_some() || network.is_some() || recipient.is_some();
                 if any_set {
                     let name_state = |label: &str, value: &Option<String>| {
-                        format!("{}={}", label, if value.is_some() { "set" } else { "unset" })
+                        format!(
+                            "{}={}",
+                            label,
+                            if value.is_some() { "set" } else { "unset" }
+                        )
                     };
                     tracing::warn!(
                         target: "trace_commons::near_login",

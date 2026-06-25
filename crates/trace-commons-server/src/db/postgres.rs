@@ -174,11 +174,14 @@ impl PgBackend {
         // `trace_login_resolver` role and is never aliased to the runtime pool.
         let login_resolver_pool = match config.login_resolver_url() {
             Some(resolver_url) => {
-                let resolver_config = resolver_url
-                    .parse::<tokio_postgres::Config>()
-                    .map_err(|e| {
-                        DatabaseError::Pool(format!("invalid login-resolver PostgreSQL URL: {e}"))
-                    })?;
+                let resolver_config =
+                    resolver_url
+                        .parse::<tokio_postgres::Config>()
+                        .map_err(|e| {
+                            DatabaseError::Pool(format!(
+                                "invalid login-resolver PostgreSQL URL: {e}"
+                            ))
+                        })?;
                 let resolver_manager =
                     deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
                 let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
@@ -2017,10 +2020,9 @@ impl Database for PgBackend {
         // consumed account_id (reserved-prefix, never sha-shaped). If any of these
         // fail the whole redeem rolls back: link stays reusable, no orphaned
         // session, no un-audited state change.
-        let actor_ref =
-            crate::account_session::account_actor_ref(&crate::account_session::AccountId::from_uuid(
-                account_id,
-            ));
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
         tx.execute(
             "INSERT INTO trace_account_audit (
                 tenant_id, action, actor_ref, outcome, safe_metadata
@@ -2423,10 +2425,9 @@ impl Database for PgBackend {
 
         // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
         // back the session (no un-audited session, no orphaned audit).
-        let actor_ref =
-            crate::account_session::account_actor_ref(&crate::account_session::AccountId::from_uuid(
-                account_id,
-            ));
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
         tx.execute(
             "INSERT INTO trace_account_audit (
                 tenant_id, action, actor_ref, outcome, safe_metadata
@@ -2483,10 +2484,9 @@ impl Database for PgBackend {
         // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
         // back the session (no un-audited session, no orphaned audit). Never the
         // NEAR public key, account id, or any signature material.
-        let actor_ref =
-            crate::account_session::account_actor_ref(&crate::account_session::AccountId::from_uuid(
-                account_id,
-            ));
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
         tx.execute(
             "INSERT INTO trace_account_audit (
                 tenant_id, action, actor_ref, outcome, safe_metadata
@@ -3180,12 +3180,7 @@ impl Database for PgBackend {
             "INSERT INTO trace_account_audit (
                 tenant_id, action, actor_ref, outcome, safe_metadata
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
-            &[
-                &"account_merged",
-                &actor_ref,
-                &"success",
-                &safe_metadata,
-            ],
+            &[&"account_merged", &actor_ref, &"success", &safe_metadata],
         )
         .await
         .map_err(DatabaseError::Postgres)?;

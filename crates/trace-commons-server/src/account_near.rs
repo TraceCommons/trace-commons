@@ -13,7 +13,7 @@
 //! `CeremonyState::NearChallenge` variant that this module consumes already
 //! exist.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 
 use crate::config::NearConfig;
@@ -225,7 +225,10 @@ mod tests {
     }
 
     fn pubkey_string(kp: &ring::signature::Ed25519KeyPair) -> String {
-        format!("ed25519:{}", bs58::encode(kp.public_key().as_ref()).into_string())
+        format!(
+            "ed25519:{}",
+            bs58::encode(kp.public_key().as_ref()).into_string()
+        )
     }
 
     #[test]
@@ -334,7 +337,8 @@ mod tests {
         wrong_payload.extend_from_slice(recipient.as_bytes());
         wrong_payload.push(0x00);
         let digest = Sha256::digest(&wrong_payload);
-        let sig = base64::engine::general_purpose::STANDARD.encode(kp.sign(digest.as_slice()).as_ref());
+        let sig =
+            base64::engine::general_purpose::STANDARD.encode(kp.sign(digest.as_slice()).as_ref());
 
         assert!(verify_nep413(&pk, message, &nonce, recipient, None, &sig).is_err());
     }
@@ -359,7 +363,13 @@ mod tests {
         assert!(key_list_has_full_access(&json, "ed25519:full"));
         assert!(!key_list_has_full_access(&json, "ed25519:fc"));
         assert!(!key_list_has_full_access(&json, "ed25519:absent"));
-        assert!(!key_list_has_full_access(&serde_json::json!({}), "ed25519:full"));
-        assert!(!key_list_has_full_access(&serde_json::Value::Null, "ed25519:full"));
+        assert!(!key_list_has_full_access(
+            &serde_json::json!({}),
+            "ed25519:full"
+        ));
+        assert!(!key_list_has_full_access(
+            &serde_json::Value::Null,
+            "ed25519:full"
+        ));
     }
 }

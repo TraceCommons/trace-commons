@@ -33,19 +33,19 @@ use trace_commons_protocol::trace_contribution::{
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
     rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
 };
+use trace_commons_server::account_session::{
+    AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
+    generate_login_code, generate_session_secret, hash_secret,
+};
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
-};
-use trace_commons_server::account_session::{
-    account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountAuthMethod,
-    AccountCtx, AccountId, AccountPrincipalSet,
 };
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
 use trace_commons_server::account_passkey::{
-    build_webauthn, credential_id_from_string, credential_id_to_string, CeremonyState,
-    CeremonyStore,
+    CeremonyState, CeremonyStore, build_webauthn, credential_id_from_string,
+    credential_id_to_string,
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
@@ -148,8 +148,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceSubmissionKeysetCursor,
-    TraceSubmissionRecord as StorageTraceSubmissionRecord,
+    TraceSubmissionKeysetCursor, TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
@@ -6057,10 +6056,7 @@ fn app(state: Arc<AppState>) -> Router {
         //    `authenticate_ctx_with_tenant_access_grant` (NOT a cookie/account ctx).
         //  - The redeem + passkey-login flows are the credential themselves (the
         //    single-use code / the WebAuthn assertion).
-        .route(
-            "/v1/account/login-links",
-            post(mint_login_link_handler),
-        )
+        .route("/v1/account/login-links", post(mint_login_link_handler))
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -11714,9 +11710,10 @@ async fn credit_handler(
         .map_err(internal_error)?;
     let account_principals = account_scope.as_ref().map(CreditAccountScope::principals);
     let account_id = account_scope.as_ref().map(CreditAccountScope::account_id);
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
-        .await
-        .map_err(internal_error)?;
+    let credit_view =
+        read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
+            .await
+            .map_err(internal_error)?;
     let item_count = credit_view.records.len();
     append_control_plane_read_audit(
         state.as_ref(),
@@ -11753,9 +11750,10 @@ async fn credit_events_handler(
         .await
         .map_err(internal_error)?;
     let account_principals = account_scope.as_ref().map(CreditAccountScope::principals);
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
-        .await
-        .map_err(internal_error)?;
+    let credit_view =
+        read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
+            .await
+            .map_err(internal_error)?;
     append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
@@ -12097,8 +12095,12 @@ async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
 ) -> ApiResult<(AccountCtx, Option<String>)> {
-    let invalid =
-        || api_error(StatusCode::UNAUTHORIZED, "invalid or expired account session");
+    let invalid = || {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired account session",
+        )
+    };
 
     let (tenant_id, token_hash) = account_session_cookie_parts(cookie).ok_or_else(invalid)?;
 
@@ -12440,22 +12442,14 @@ async fn account_trace_content_handler(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
-        return Err(api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate limited",
-        ));
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _content_slot = match ACCOUNT_RATE_LIMITER.acquire(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_CONCURRENCY,
     ) {
         Some(guard) => guard,
-        None => {
-            return Err(api_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate limited",
-            ))
-        }
+        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
     };
 
     let audit_tenant = account_audit_tenant(&ctx);
@@ -12472,10 +12466,12 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
-            return Err(
-                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
-                    .await,
-            );
+            return Err(audit_account_content_read_failure(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+            )
+            .await);
         }
     };
 
@@ -12489,10 +12485,12 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
-            return Err(
-                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
-                    .await,
-            );
+            return Err(audit_account_content_read_failure(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+            )
+            .await);
         }
     };
 
@@ -12637,10 +12635,7 @@ where
 {
     type Rejection = axum::response::Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         let is_json = req
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
@@ -12792,10 +12787,12 @@ impl AccountRateLimiter {
         // Opportunistic GC: drop entries whose window has fully elapsed so the
         // map cannot grow unbounded across many distinct keys.
         windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
-        let entry = windows.entry(key.to_string()).or_insert_with(|| RateWindow {
-            count: 0,
-            window_start: now,
-        });
+        let entry = windows
+            .entry(key.to_string())
+            .or_insert_with(|| RateWindow {
+                count: 0,
+                window_start: now,
+            });
         if now.duration_since(entry.window_start) >= ACCOUNT_RATE_WINDOW {
             entry.count = 0;
             entry.window_start = now;
@@ -12917,11 +12914,7 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
-    let mut response = (
-        StatusCode::BAD_REQUEST,
-        "login link invalid or expired",
-    )
-        .into_response();
+    let mut response = (StatusCode::BAD_REQUEST, "login link invalid or expired").into_response();
     let headers = response.headers_mut();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -12949,7 +12942,10 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
     // Fallback for browsers without fetch metadata: if an `Origin` header is
     // present it MUST match the request `Host`. A cross-site form post carries a
     // foreign `Origin`; reject it.
-    if let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
         let host = headers
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok());
@@ -13310,10 +13306,7 @@ const ACCOUNT_PASSKEY_USER_LABEL: &str = "TraceCommons contributor";
 /// Fail-closed: a strong session short-circuits to `Ok`; otherwise the count is
 /// read under RLS and a non-zero count denies with a 403 plus a hash-only
 /// `account_authenticator_gate_denied` audit row (actor-only, no identifiers).
-async fn require_authenticator_change_allowed(
-    state: &AppState,
-    ctx: &AccountCtx,
-) -> ApiResult<()> {
+async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx) -> ApiResult<()> {
     if ctx.is_strong_session() {
         return Ok(());
     }
@@ -14065,7 +14058,9 @@ async fn account_near_identities_list_handler(
         })
         .collect();
 
-    Ok(Json(serde_json::json!({ "near_identities": near_identities })))
+    Ok(Json(
+        serde_json::json!({ "near_identities": near_identities }),
+    ))
 }
 
 /// Request body for `PATCH /v1/account/near-identities/{public_key}`. A blank /
@@ -14101,12 +14096,7 @@ async fn account_near_identity_rename_handler(
         .filter(|s| !s.is_empty());
 
     let renamed = db
-        .rename_account_near_identity(
-            &ctx.tenant_id,
-            ctx.account_id.as_uuid(),
-            &public_key,
-            label,
-        )
+        .rename_account_near_identity(&ctx.tenant_id, ctx.account_id.as_uuid(), &public_key, label)
         .await
         .map_err(internal_error)?;
 
@@ -14393,7 +14383,8 @@ async fn account_merge_confirm_handler(
 /// the login surface has a single, self-contained deny site.
 fn passkey_login_generic_deny() -> axum::response::Response {
     use axum::response::IntoResponse;
-    let mut response = (StatusCode::BAD_REQUEST, "passkey login invalid or expired").into_response();
+    let mut response =
+        (StatusCode::BAD_REQUEST, "passkey login invalid or expired").into_response();
     let headers = response.headers_mut();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -14418,11 +14409,9 @@ where
 {
     type Rejection = axum::response::Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        match axum::Json::<webauthn_rs::prelude::PublicKeyCredential>::from_request(req, state).await
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<webauthn_rs::prelude::PublicKeyCredential>::from_request(req, state)
+            .await
         {
             Ok(axum::Json(assertion)) => Ok(PasskeyAssertionBody(assertion)),
             Err(_) => Err(passkey_login_generic_deny()),
@@ -14570,9 +14559,8 @@ async fn account_passkey_login_finish_inner(
             Ok(parts) => parts,
             Err(_) => return passkey_login_generic_deny(),
         };
-    let credential_id = credential_id_to_string(
-        &webauthn_rs::prelude::CredentialID::from(cred_id_bytes),
-    );
+    let credential_id =
+        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
 
     // Per-credential hard ceiling (replay/brute bound on one specific credential,
     // IP-independent). Same uniform deny.
@@ -14805,10 +14793,7 @@ where
 {
     type Rejection = axum::response::Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<NearLoginFinishBody>::from_request(req, state).await {
             Ok(axum::Json(body)) => Ok(NearAssertionBody(body)),
             Err(_) => Err(near_login_generic_deny()),
@@ -14955,8 +14940,7 @@ async fn account_near_login_finish_inner(
     //     spraying over-long/garbage `publicKey` values to bloat the limiter map
     //     keys, and short-circuits malformed keys before any further work. (The
     //     passkey path needs no analogue: webauthn-rs parses the assertion first.)
-    if !body.public_key.starts_with("ed25519:")
-        || body.public_key.len() > NEAR_LOGIN_PUBKEY_MAX_LEN
+    if !body.public_key.starts_with("ed25519:") || body.public_key.len() > NEAR_LOGIN_PUBKEY_MAX_LEN
     {
         return near_login_generic_deny();
     }
@@ -15011,7 +14995,10 @@ async fn account_near_login_finish_inner(
     // 7. Under the resolved tenant's RLS, load the ACTIVE identity. None (unknown /
     //    revoked) -> uniform deny. Then stamp last_used_at; a touch failure is not
     //    fatal to the verified login, but we fail closed to the uniform deny.
-    let identity = match db.load_near_identity_for_login(&tenant, &body.public_key).await {
+    let identity = match db
+        .load_near_identity_for_login(&tenant, &body.public_key)
+        .await
+    {
         Ok(Some(identity)) => identity,
         Ok(None) | Err(_) => return near_login_generic_deny(),
     };
@@ -20721,9 +20708,10 @@ async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
     let has_repairable = settlement_batches.iter().any(|batch| {
         batch.status == StorageTraceCreditSettlementBatchStatus::Finalized
             && batch.near_contract_id.is_some()
-            && batch.line_items.iter().any(|item| {
-                item.near_outbox_id.is_some() || item.near_payout_hold_reason.is_some()
-            })
+            && batch
+                .line_items
+                .iter()
+                .any(|item| item.near_outbox_id.is_some() || item.near_payout_hold_reason.is_some())
     });
     if !has_repairable {
         return Ok(0);
@@ -47414,10 +47402,7 @@ async fn caller_credit_account_scope(
     };
     let caller_principal = &tenant.principal_ref;
     let resolved = db
-        .resolve_principals_to_accounts(
-            &tenant.tenant_id,
-            std::slice::from_ref(caller_principal),
-        )
+        .resolve_principals_to_accounts(&tenant.tenant_id, std::slice::from_ref(caller_principal))
         .await
         .context("failed to resolve contributor principal to account for credit visibility")?;
     let Some(account_id) = resolved.get(caller_principal).copied() else {

@@ -375,8 +375,14 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
     assert_eq!(executed.authenticators_moved, 2);
 
     // P2 now links to A; A holds both principals.
-    assert_eq!(active_principal_count(&backend, &tenant, account_a).await, 2);
-    assert_eq!(active_principal_count(&backend, &tenant, account_b).await, 0);
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_a).await,
+        2
+    );
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_b).await,
+        0
+    );
     // B's webauthn + NEAR identity now belong to A.
     assert_eq!(
         credential_account(&backend, &tenant, &cred_id).await,
@@ -545,7 +551,10 @@ async fn execute_rejects_expired_proposal_without_mutating() {
     );
     // No mutation: B still open, B's principal still on B.
     assert!(!account_closed(&backend, &tenant, account_b).await);
-    assert_eq!(active_principal_count(&backend, &tenant, account_b).await, 1);
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_b).await,
+        1
+    );
     assert_eq!(merge_audit_count(&backend, &tenant).await, 0);
 }
 
@@ -595,8 +604,14 @@ async fn execute_rejects_when_surviving_closed() {
     );
     // No mutation: B still open with its own principal; nothing folded onto A.
     assert!(!account_closed(&backend, &tenant, account_b).await);
-    assert_eq!(active_principal_count(&backend, &tenant, account_b).await, 1);
-    assert_eq!(active_principal_count(&backend, &tenant, account_a).await, 1);
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_b).await,
+        1
+    );
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_a).await,
+        1
+    );
     assert_eq!(merge_audit_count(&backend, &tenant).await, 0);
 }
 
@@ -638,7 +653,10 @@ async fn execute_rejects_proposal_owned_by_different_surviving_account() {
         "a different surviving account must not execute the proposal"
     );
     assert!(!account_closed(&backend, &tenant, account_b).await);
-    assert_eq!(active_principal_count(&backend, &tenant, account_b).await, 1);
+    assert_eq!(
+        active_principal_count(&backend, &tenant, account_b).await,
+        1
+    );
 
     // The legitimate owner can still execute it.
     let executed = backend
