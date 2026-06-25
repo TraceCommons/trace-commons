@@ -1494,6 +1494,55 @@ impl Database for PgBackend {
         })
     }
 
+    async fn enroll_instance_user(
+        &self,
+        p: crate::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        // ensure_trace_tenant runs in its own transaction and is idempotent.
+        self.ensure_trace_tenant(&p.tenant_id).await?;
+
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &p.tenant_id).await?;
+
+        // Stamp the contribution policy once; never overwrite an existing row.
+        tx.execute(
+            "INSERT INTO trace_tenant_policies
+                 (tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                  updated_by_principal_ref)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[
+                &p.tenant_id,
+                &p.policy_version,
+                &p.allowed_consent_scopes,
+                &p.allowed_uses,
+                &format!("instance-enroll:{}", p.instance_subject_hash),
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Register the device key (the principal). Idempotent on device_key_id.
+        tx.execute(
+            "INSERT INTO device_keys
+                 (device_key_id, tenant_id, public_key, invite_subject_hash, client_info)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (device_key_id) DO NOTHING",
+            &[
+                &p.device_key_id,
+                &p.tenant_id,
+                &p.public_key,
+                &p.instance_subject_hash,
+                &p.client_info,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn reserve_instance_enrollment(
         &self,
         instance_subject_hash: &str,

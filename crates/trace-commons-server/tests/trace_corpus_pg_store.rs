@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, InstanceEnrollmentOutcome, postgres::PgBackend};
+use trace_commons_server::db::{Database, InstanceEnrollmentOutcome, InstanceUserProvision, postgres::PgBackend};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
     TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
@@ -3688,4 +3688,98 @@ async fn reserve_instance_enrollment_dedups_and_caps() {
         .expect("delete test enrollment rows");
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn enroll_instance_user_provisions_tenant_and_device_key() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    // Use a test-name-embedded tenant id so reruns against the shared
+    // persistent DB are safe.
+    let tenant_id = "enroll-instance-user-test";
+    let device_key_id = format!("sha256:{}", "d".repeat(64));
+    let instance_subject_hash = format!("sha256:{}", "e".repeat(64));
+
+    let p = InstanceUserProvision {
+        device_key_id: device_key_id.clone(),
+        tenant_id: tenant_id.to_string(),
+        public_key: "ZGV2a2V5".to_string(),
+        instance_subject_hash: instance_subject_hash.clone(),
+        client_info: serde_json::json!({"agent": "ironclaw", "version": "0.x"}),
+        policy_version: "ironclaw-pilot-v1".to_string(),
+        allowed_consent_scopes: serde_json::json!(["pilot_research"]),
+        allowed_uses: serde_json::json!(["model_training"]),
+    };
+
+    // First call provisions tenant, policy, and device key.
+    backend
+        .enroll_instance_user(p.clone())
+        .await
+        .expect("first enroll_instance_user call should succeed");
+
+    // Second call is idempotent: policy must NOT be overwritten, device key
+    // insert silently skipped.
+    backend
+        .enroll_instance_user(p.clone())
+        .await
+        .expect("second enroll_instance_user call should be idempotent");
+
+    // Verify: tenant row, policy row (with correct version), and device key
+    // all exist under an explicit tenant context.
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get verification connection");
+    let tx = client
+        .transaction()
+        .await
+        .expect("start verification transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set verification tenant context");
+
+    let tenant_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count tenant rows")
+        .get(0);
+    assert_eq!(tenant_count, 1, "tenant row must exist after enrollment");
+
+    let policy_version: String = tx
+        .query_one(
+            "SELECT policy_version FROM trace_tenant_policies WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("policy row must exist")
+        .get(0);
+    assert_eq!(
+        policy_version, "ironclaw-pilot-v1",
+        "policy_version must match the provisioned value"
+    );
+
+    let device_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM device_keys WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count device key rows")
+        .get(0);
+    assert_eq!(device_count, 1, "exactly one device key row must exist");
+
+    tx.commit().await.expect("commit verification transaction");
+
+    // Clean up: cascade-delete via trace_tenants to avoid FK violations.
+    cleanup_tenant(&backend, tenant_id).await;
 }

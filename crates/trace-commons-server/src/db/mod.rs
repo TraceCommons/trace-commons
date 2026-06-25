@@ -223,6 +223,20 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         )))
     }
 
+    /// Provision a tenant for an instance user (no-account fallback path).
+    ///
+    /// In a single tenant-scoped transaction, this op:
+    /// 1. Ensures the `trace_tenants` row exists.
+    /// 2. Stamps the contribution policy from the supplied template
+    ///    (`ON CONFLICT (tenant_id) DO NOTHING` — never overwrites an existing policy).
+    /// 3. Registers the device key (`ON CONFLICT (device_key_id) DO NOTHING`).
+    ///
+    /// The operation is fully idempotent: re-running with the same inputs is safe.
+    async fn enroll_instance_user(
+        &self,
+        p: InstanceUserProvision,
+    ) -> Result<(), DatabaseError>;
+
     /// Atomically deduplicate a user enrollment against `trace_instance_enrollments`
     /// and enforce a per-instance cap.
     ///
@@ -366,6 +380,22 @@ pub enum OnboardDeviceKeyError {
     InviteAlreadyConsumed,
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
+}
+
+/// Input to [`Database::enroll_instance_user`].
+#[derive(Debug, Clone)]
+pub struct InstanceUserProvision {
+    pub device_key_id: String,
+    pub tenant_id: String,
+    pub public_key: String,
+    /// The `sha256:…` hash identifying the instance subject; used as
+    /// `invite_subject_hash` on the device key row and embedded in the
+    /// `updated_by_principal_ref` audit column of the policy row.
+    pub instance_subject_hash: String,
+    pub client_info: serde_json::Value,
+    pub policy_version: String,
+    pub allowed_consent_scopes: serde_json::Value,
+    pub allowed_uses: serde_json::Value,
 }
 
 pub async fn connect_from_config(
