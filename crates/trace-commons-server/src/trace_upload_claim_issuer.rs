@@ -4700,4 +4700,49 @@ mod tests {
             "principal_ref must be namespaced with subject"
         );
     }
+
+    #[tokio::test]
+    async fn distinct_subjects_yield_distinct_device_key_principals() {
+        let tenant_id = "test-device-tenant-distinct";
+
+        let subject_alice = "user-alice-hash";
+        let body_alice = device_claim_request_body(tenant_id, Some(subject_alice));
+        let (status_alice, response_alice, device_key_id_alice) =
+            post_signed_device_claim_for_tenant(tenant_id, body_alice).await;
+        assert_eq!(
+            status_alice,
+            StatusCode::OK,
+            "alice claim must succeed: {:?}",
+            response_alice
+        );
+        let claims_alice = decode_issued_claims(&response_alice);
+        let expected_alice = format!(
+            "instance:{tenant_id}:{device_key_id_alice}:user:{subject_alice}"
+        );
+        assert_eq!(
+            claims_alice["principal_ref"].as_str(),
+            Some(expected_alice.as_str()),
+            "alice principal_ref must be namespaced with subject"
+        );
+        let p1 = claims_alice["principal_ref"]
+            .as_str()
+            .expect("alice principal_ref");
+
+        let subject_bob = "user-bob-hash";
+        let body_bob = device_claim_request_body(tenant_id, Some(subject_bob));
+        let (status_bob, response_bob, _device_key_id_bob) =
+            post_signed_device_claim_for_tenant(tenant_id, body_bob).await;
+        assert_eq!(
+            status_bob,
+            StatusCode::OK,
+            "bob claim must succeed: {:?}",
+            response_bob
+        );
+        let claims_bob = decode_issued_claims(&response_bob);
+        let p2 = claims_bob["principal_ref"]
+            .as_str()
+            .expect("bob principal_ref");
+
+        assert_ne!(p1, p2, "distinct subjects must yield distinct principals");
+    }
 }
