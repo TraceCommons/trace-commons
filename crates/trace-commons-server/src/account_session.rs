@@ -143,7 +143,10 @@ mod tests {
         let b = generate_login_code();
         assert_ne!(a, b);
         assert!(a.len() >= 27); // >=160 bits base64url, unpadded
-        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        assert!(
+            a.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        );
     }
     #[test]
     fn hash_is_sha256_prefixed_shape() {

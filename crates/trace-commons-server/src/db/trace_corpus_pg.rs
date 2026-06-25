@@ -42,12 +42,12 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
-    TraceSubmissionWrite,
-    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
-    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
-    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceSubmissionWrite, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
+    TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite, TraceTenantPolicyRecord,
+    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
+    TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\

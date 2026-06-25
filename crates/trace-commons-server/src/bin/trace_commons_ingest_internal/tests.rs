@@ -308,10 +308,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
 
     // Same-origin confirm: redeem succeeds and sets the session cookie.
     let mut same_origin = HeaderMap::new();
-    same_origin.insert(
-        "sec-fetch-site",
-        HeaderValue::from_static("same-origin"),
-    );
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
     let response = confirm_login_handler(
         State(state.clone()),
         same_origin.clone(),
@@ -538,7 +535,10 @@ async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
         ctx.actor_ref
     );
     // Active membership expansion still carries the device principal.
-    assert!(ctx.principal_set.contains(&principal_storage_ref("token-a")));
+    assert!(
+        ctx.principal_set
+            .contains(&principal_storage_ref("token-a"))
+    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -816,9 +816,11 @@ async fn account_traces_list_returns_only_owned_submissions() {
 
     // One owned submission (device principal) and one foreign principal under the
     // same tenant that the account does NOT own.
-    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
     let _foreign =
-        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else").await;
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else")
+            .await;
     // And a submission under a different tenant entirely.
     let _other_tenant =
         insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
@@ -832,8 +834,15 @@ async fn account_traces_list_returns_only_owned_submissions() {
     .expect("list succeeds");
 
     let ids: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
-    assert_eq!(ids, vec![owned], "only the device-owned submission is visible");
-    assert!(page.next_cursor.is_none(), "single page has no continuation");
+    assert_eq!(
+        ids,
+        vec![owned],
+        "only the device-owned submission is visible"
+    );
+    assert!(
+        page.next_cursor.is_none(),
+        "single page has no continuation"
+    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
@@ -864,7 +873,9 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
 
     let mut inserted = Vec::new();
     for _ in 0..3 {
-        inserted.push(insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await);
+        inserted.push(
+            insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await,
+        );
     }
 
     // Page 1: limit 2.
@@ -879,7 +890,10 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
     .await
     .expect("page 1");
     assert_eq!(page1.items.len(), 2, "first page is full");
-    let cursor = page1.next_cursor.clone().expect("full page yields a cursor");
+    let cursor = page1
+        .next_cursor
+        .clone()
+        .expect("full page yields a cursor");
 
     // Page 2: continue from the cursor.
     let Json(page2) = account_traces_list_handler(
@@ -933,7 +947,8 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
         .expect("mint");
     let device_principal = principal_storage_ref("token-a");
 
-    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
     let unowned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
     let random = Uuid::new_v4();
@@ -967,7 +982,7 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
     assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
     assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
     assert_eq!(
-        unowned_err.1 .0.error, missing_err.1 .0.error,
+        unowned_err.1.0.error, missing_err.1.0.error,
         "not-owned and not-found must return an identical body"
     );
 
@@ -1042,7 +1057,8 @@ async fn write_redacted_envelope_to_disk(
 
     // Mirror the production object-key layout so `read_envelope_by_record`'s
     // file fallback resolves the body.
-    let object_key = trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
+    let object_key =
+        trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
     let path = state.root.join(&object_key);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create object dir");
@@ -1074,7 +1090,8 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
         .expect("mint");
     let device_principal = principal_storage_ref("token-a");
 
-    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
     let unowned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
     let random = Uuid::new_v4();
@@ -1148,7 +1165,7 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
     assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
     assert_eq!(
-        unowned_err.1 .0.error, missing_err.1 .0.error,
+        unowned_err.1.0.error, missing_err.1.0.error,
         "not-owned and not-found must return an identical body"
     );
 
@@ -1162,7 +1179,7 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     .await
     .expect_err("detail missing -> 404");
     assert_eq!(detail_missing_err.0, missing_err.0);
-    assert_eq!(detail_missing_err.1 .0.error, missing_err.1 .0.error);
+    assert_eq!(detail_missing_err.1.0.error, missing_err.1.0.error);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -1194,7 +1211,8 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     // is configured -> the file-fallback read fails. The handler must fail
     // closed with a generic, label-only 500 (no object_key / path / exception
     // detail leaked) and still audit the failed read.
-    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
 
     let err = account_trace_content_handler(
         State(state.clone()),
@@ -1204,10 +1222,10 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     .await
     .expect_err("missing artifact -> fail closed");
     assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(err.1 .0.error, "trace content unavailable");
+    assert_eq!(err.1.0.error, "trace content unavailable");
     // The generic message carries no path, object key, or exception detail.
-    assert!(!err.1 .0.error.contains('/'));
-    assert!(!err.1 .0.error.to_lowercase().contains("tenant"));
+    assert!(!err.1.0.error.contains('/'));
+    assert!(!err.1.0.error.to_lowercase().contains("tenant"));
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -61705,7 +61723,10 @@ fn account_rate_limiter_caps_per_key() {
     let limiter = AccountRateLimiter::new();
     let key = "unit-key";
     for _ in 0..CONFIRM_PER_CODE_LIMIT {
-        assert!(limiter.check(key, CONFIRM_PER_CODE_LIMIT), "within ceiling allowed");
+        assert!(
+            limiter.check(key, CONFIRM_PER_CODE_LIMIT),
+            "within ceiling allowed"
+        );
     }
     assert!(
         !limiter.check(key, CONFIRM_PER_CODE_LIMIT),
@@ -62007,37 +62028,28 @@ async fn assert_target_invisible_across_all_three_reads(
 
     // Detail: uniform 404 (byte-identical to a random nonexistent id).
     let random = Uuid::new_v4();
-    let target_detail_err = account_trace_detail_handler(
-        State(state.clone()),
-        auth_headers(token),
-        AxumPath(target),
-    )
-    .await
-    .expect_err("foreign detail -> 404");
-    let random_detail_err = account_trace_detail_handler(
-        State(state.clone()),
-        auth_headers(token),
-        AxumPath(random),
-    )
-    .await
-    .expect_err("missing detail -> 404");
+    let target_detail_err =
+        account_trace_detail_handler(State(state.clone()), auth_headers(token), AxumPath(target))
+            .await
+            .expect_err("foreign detail -> 404");
+    let random_detail_err =
+        account_trace_detail_handler(State(state.clone()), auth_headers(token), AxumPath(random))
+            .await
+            .expect_err("missing detail -> 404");
     assert_eq!(target_detail_err.0, StatusCode::NOT_FOUND);
     assert_eq!(
-        target_detail_err.1 .0.error, random_detail_err.1 .0.error,
+        target_detail_err.1.0.error, random_detail_err.1.0.error,
         "foreign and nonexistent detail must be byte-identical (no existence oracle)"
     );
 
     // Content: uniform 404, byte-identical to the detail 404 (same not_found()).
-    let target_content_err = account_trace_content_handler(
-        State(state.clone()),
-        auth_headers(token),
-        AxumPath(target),
-    )
-    .await
-    .expect_err("foreign content -> 404");
+    let target_content_err =
+        account_trace_content_handler(State(state.clone()), auth_headers(token), AxumPath(target))
+            .await
+            .expect_err("foreign content -> 404");
     assert_eq!(target_content_err.0, StatusCode::NOT_FOUND);
     assert_eq!(
-        target_content_err.1 .0.error, random_detail_err.1 .0.error,
+        target_content_err.1.0.error, random_detail_err.1.0.error,
         "foreign content 404 must be byte-identical to the detail 404"
     );
 }
@@ -62137,12 +62149,8 @@ async fn isolation_b_legacy_principal_never_returned_on_account_surface() {
 
     let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
     // A legacy-wildcard-owned submission under the same tenant.
-    let legacy = insert_account_test_submission(
-        backend.as_ref(),
-        "tenant-a",
-        &legacy_principal_ref(),
-    )
-    .await;
+    let legacy =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &legacy_principal_ref()).await;
 
     assert_target_invisible_across_all_three_reads(&state, "token-a", legacy, &[a_owned]).await;
 
@@ -62274,12 +62282,9 @@ async fn isolation_d_unlinked_principal_excluded_active_principal_visible() {
     let active_owned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
     // A submission owned by the UNLINKED principal must NOT be visible.
-    let unlinked_owned = insert_account_test_submission(
-        backend.as_ref(),
-        "tenant-a",
-        "principal_unlinked_sibling",
-    )
-    .await;
+    let unlinked_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_unlinked_sibling")
+            .await;
 
     assert_target_invisible_across_all_three_reads(
         &state,
@@ -62361,21 +62366,15 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     );
 
     // Detail + content 404 for the actor-keyed row under the cookie session.
-    let detail_err = account_trace_detail_handler(
-        State(state.clone()),
-        headers.clone(),
-        AxumPath(actor_keyed),
-    )
-    .await
-    .expect_err("actor-keyed detail -> 404");
+    let detail_err =
+        account_trace_detail_handler(State(state.clone()), headers.clone(), AxumPath(actor_keyed))
+            .await
+            .expect_err("actor-keyed detail -> 404");
     assert_eq!(detail_err.0, StatusCode::NOT_FOUND);
-    let content_err = account_trace_content_handler(
-        State(state.clone()),
-        headers.clone(),
-        AxumPath(actor_keyed),
-    )
-    .await
-    .expect_err("actor-keyed content -> 404");
+    let content_err =
+        account_trace_content_handler(State(state.clone()), headers.clone(), AxumPath(actor_keyed))
+            .await
+            .expect_err("actor-keyed content -> 404");
     assert_eq!(content_err.0, StatusCode::NOT_FOUND);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;

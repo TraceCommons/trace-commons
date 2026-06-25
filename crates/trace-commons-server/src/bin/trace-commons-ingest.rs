@@ -30,12 +30,12 @@ use trace_commons_protocol::trace_contribution::{
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
     rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
 };
+use trace_commons_server::account_session::{
+    AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
+    generate_login_code, generate_session_secret, hash_secret,
+};
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
-};
-use trace_commons_server::account_session::{
-    account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountAuthMethod,
-    AccountCtx, AccountId, AccountPrincipalSet,
 };
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
@@ -139,8 +139,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceSubmissionKeysetCursor,
-    TraceSubmissionRecord as StorageTraceSubmissionRecord,
+    TraceSubmissionKeysetCursor, TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
@@ -5881,10 +5880,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
         )
-        .route(
-            "/v1/account/login-links",
-            post(mint_login_link_handler),
-        )
+        .route("/v1/account/login-links", post(mint_login_link_handler))
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
             "/v1/account/traces/{submission_id}",
@@ -11749,8 +11745,12 @@ async fn resolve_account_ctx_bearer(
 /// is globally UNIQUE, so a forged/mismatched tenant scopes the RLS lookup to a
 /// tenant where this hash does not exist → no row → 401. See `validate_session`.
 async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult<AccountCtx> {
-    let invalid =
-        || api_error(StatusCode::UNAUTHORIZED, "invalid or expired account session");
+    let invalid = || {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired account session",
+        )
+    };
 
     let (tenant_id, token_hash) = account_session_cookie_parts(cookie).ok_or_else(invalid)?;
 
@@ -12073,22 +12073,14 @@ async fn account_trace_content_handler(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
-        return Err(api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate limited",
-        ));
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _content_slot = match ACCOUNT_RATE_LIMITER.acquire(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_CONCURRENCY,
     ) {
         Some(guard) => guard,
-        None => {
-            return Err(api_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate limited",
-            ))
-        }
+        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
     };
 
     let audit_tenant = account_audit_tenant(&ctx);
@@ -12105,10 +12097,12 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
-            return Err(
-                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
-                    .await,
-            );
+            return Err(audit_account_content_read_failure(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+            )
+            .await);
         }
     };
 
@@ -12122,10 +12116,12 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
-            return Err(
-                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
-                    .await,
-            );
+            return Err(audit_account_content_read_failure(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+            )
+            .await);
         }
     };
 
@@ -12270,10 +12266,7 @@ where
 {
     type Rejection = axum::response::Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         let is_json = req
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
@@ -12394,10 +12387,12 @@ impl AccountRateLimiter {
         // Opportunistic GC: drop entries whose window has fully elapsed so the
         // map cannot grow unbounded across many distinct keys.
         windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
-        let entry = windows.entry(key.to_string()).or_insert_with(|| RateWindow {
-            count: 0,
-            window_start: now,
-        });
+        let entry = windows
+            .entry(key.to_string())
+            .or_insert_with(|| RateWindow {
+                count: 0,
+                window_start: now,
+            });
         if now.duration_since(entry.window_start) >= ACCOUNT_RATE_WINDOW {
             entry.count = 0;
             entry.window_start = now;
@@ -12490,11 +12485,7 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
-    let mut response = (
-        StatusCode::BAD_REQUEST,
-        "login link invalid or expired",
-    )
-        .into_response();
+    let mut response = (StatusCode::BAD_REQUEST, "login link invalid or expired").into_response();
     let headers = response.headers_mut();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -12522,7 +12513,10 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
     // Fallback for browsers without fetch metadata: if an `Origin` header is
     // present it MUST match the request `Host`. A cross-site form post carries a
     // foreign `Origin`; reject it.
-    if let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
         let host = headers
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok());
