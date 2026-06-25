@@ -70133,3 +70133,141 @@ async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row()
         "the original submit's tx hash is preserved (no stale overwrite)"
     );
 }
+
+/// Cross-store freshness (Finding 2): the DB outbox row is `submitted` (committed
+/// by a prior run) while the FILE still shows `pending` (the prior run crashed
+/// before rewriting the file). The under-lock submit candidate read is
+/// DB-authoritative when a mirror is present, so the worker must observe the
+/// committed `submitted` status, EXCLUDE the row as a candidate, and NOT call the
+/// external submitter for it — the external submitter fires zero times here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+    // Settlement enqueues exactly one `pending` outbox row in BOTH stores.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for cross-store freshness".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    let outbox_file =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(outbox_file.len(), 1);
+    let near_outbox_id = outbox_file[0].near_outbox_id;
+
+    // Simulate a prior run that committed DB `submitted` but crashed before the
+    // file rewrite: advance ONLY the DB row, leaving the file at `pending`.
+    backend
+        .update_trace_near_credit_outbox_status(
+            "tenant-a",
+            near_outbox_id,
+            StorageTraceCreditSettlementNearStatus::Submitted,
+            Some(TEST_NEAR_TX_HASH_1.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("DB-only status advance")
+        .expect("row updated in DB");
+
+    // Confirm the cross-store skew is real: DB says submitted, file says pending.
+    let db_items = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("DB list");
+    assert_eq!(
+        db_items
+            .iter()
+            .find(|i| i.near_outbox_id == near_outbox_id)
+            .expect("DB row")
+            .status,
+        StorageTraceCreditSettlementNearStatus::Submitted,
+        "DB row is submitted"
+    );
+    let file_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(
+        file_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "file row is still stale pending"
+    );
+
+    // Run the submit worker. The under-lock read is DB-authoritative, so the row is
+    // seen as `submitted` and excluded; the external submitter is never called.
+    let Json(response) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("cross-store freshness run".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker runs");
+    assert_eq!(
+        response.checked, 0,
+        "DB-authoritative read excludes the already-submitted row"
+    );
+    assert_eq!(response.submitted, 0);
+    assert_eq!(
+        calls.lock().expect("calls lock").len(),
+        0,
+        "external submitter is never called for a DB-submitted row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

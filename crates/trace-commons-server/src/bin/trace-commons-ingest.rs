@@ -23151,28 +23151,25 @@ async fn run_near_credit_outbox_submit_worker(
         None => None,
     };
 
-    // Re-read candidates UNDER the held lock. This is the core of the fix: a run
-    // that waited on the advisory lock now reads AFTER the prior holder committed
-    // its `pending -> submitted` writes, so an already-submitted row is no longer a
-    // candidate and is never re-submitted. (The status predicate on the update
-    // below is the defense-in-depth second layer.)
-    let locked_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
-    let pending_total = locked_items
-        .iter()
-        .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
-        .count();
-    let candidates: Vec<_> = locked_items
-        .into_iter()
-        .filter(near_credit_outbox_item_is_submit_candidate)
-        .take(limit)
-        .collect();
-    response.checked = candidates.len();
-    response.skipped = pending_total.saturating_sub(candidates.len());
-    response.pending = pending_total;
-
-    // Run the submit loop under the held lock, capturing the result so the lock is
-    // always released explicitly before returning (success OR error).
+    // Run the entire pass UNDER the held lock, capturing the result so the lock is
+    // always released (success OR error) before propagation. Critically, the
+    // candidate read lives INSIDE this guarded block: a read error must not escape
+    // between acquire and release, or the session lock would leak (Drop only warns)
+    // and wedge future runs.
     let pass_result: anyhow::Result<()> = async {
+        // Re-read candidates UNDER the held lock, DB-authoritatively when a mirror
+        // is present. A run that waited on the lock now reads AFTER the prior holder
+        // committed its `pending -> submitted` writes, so an already-submitted row is
+        // no longer a candidate and is never re-submitted. (The status predicate on
+        // the update below is the defense-in-depth second layer.)
+        let mut candidates =
+            read_near_credit_outbox_submit_candidates_authoritative(state, tenant).await?;
+        let pending_total = candidates.len();
+        candidates.truncate(limit);
+        response.checked = candidates.len();
+        response.skipped = pending_total.saturating_sub(candidates.len());
+        response.pending = pending_total;
+
         for item in candidates {
             let submit_request = match near_credit_submitter_request_from_outbox_item(&item) {
                 Ok(request) => request,
@@ -23268,6 +23265,7 @@ async fn run_near_credit_outbox_submit_worker(
                 }
             }
         }
+        response.pending = pending_total.saturating_sub(response.submitted);
         Ok(())
     }
     .await;
@@ -23279,7 +23277,6 @@ async fn run_near_credit_outbox_submit_worker(
     }
     pass_result?;
 
-    response.pending = pending_total.saturating_sub(response.submitted);
     append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
     log_near_credit_outbox_submit_worker_summary(tenant, &response);
     Ok(response)
@@ -24619,6 +24616,37 @@ async fn read_near_credit_outbox_items_for_admin(
             .collect();
     }
     read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+}
+
+/// Read submit candidates (`pending`/`failed` rows) for the under-lock submit pass.
+///
+/// When a DB mirror is configured the DB is the transactional authority for outbox
+/// status, so we read DIRECTLY from it rather than the config-dependent
+/// file-or-DB reader. This closes a cross-store freshness hole: in a DB-write /
+/// file-read config a prior run can commit DB `submitted` but crash before the file
+/// rewrite; a file read would then surface a STALE `pending` candidate and the
+/// external submitter would fire again (the status guard runs only AFTER
+/// `submitter.submit`, too late to stop the external call). Reading committed DB
+/// status here keeps a candidate's freshness ahead of any external submit. When no
+/// mirror is present (file-only / test shape) the file remains the source.
+async fn read_near_credit_outbox_submit_candidates_authoritative(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    let items = if let Some(db) = state.db_mirror.as_ref() {
+        db.list_trace_near_credit_outbox_items(&tenant.tenant_id)
+            .await
+            .context("failed to read DB-authoritative NEAR credit outbox candidates")?
+            .into_iter()
+            .map(near_credit_outbox_item_from_storage)
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+    };
+    Ok(items
+        .into_iter()
+        .filter(near_credit_outbox_item_is_submit_candidate)
+        .collect())
 }
 
 async fn read_benchmark_registry_outbox_items_for_admin(
