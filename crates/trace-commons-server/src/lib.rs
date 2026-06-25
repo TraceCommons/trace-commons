@@ -4,6 +4,7 @@ pub mod audit_chain;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod instance_enroll_guard;
 pub mod near_credit;
 pub mod secrets;
 pub mod trace_artifact_gcs;
