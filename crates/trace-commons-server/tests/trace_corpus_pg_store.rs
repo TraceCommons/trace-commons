@@ -3611,11 +3611,29 @@ async fn reserve_instance_enrollment_dedups_and_caps() {
         return;
     };
 
-    // Use test-name-derived hashes so reruns against the shared persistent DB
-    // don't collide with prior rows.
     let inst = format!("sha256:{}", "a1b2c3d4".repeat(8));
     let u1 = format!("sha256:{}", "1111".repeat(16));
     let u2 = format!("sha256:{}", "2222".repeat(16));
+
+    // Pre-clean any leftover rows from a previous run so the test is idempotent.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get pre-cleanup connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start pre-cleanup transaction");
+        tx.execute(
+            "DELETE FROM trace_instance_enrollments WHERE instance_subject_hash = $1",
+            &[&inst],
+        )
+        .await
+        .expect("delete leftover enrollment rows");
+        tx.commit().await.expect("commit pre-cleanup transaction");
+    }
 
     // First enrollment: cap = 1, new user.
     let outcome = backend
@@ -3649,4 +3667,25 @@ async fn reserve_instance_enrollment_dedups_and_caps() {
         InstanceEnrollmentOutcome::CapExceeded,
         "second distinct user should be rejected when cap is 1"
     );
+
+    // Clean up: remove the enrolled rows so repeated runs against the shared
+    // persistent DB don't accumulate state.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get cleanup connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "DELETE FROM trace_instance_enrollments WHERE instance_subject_hash = $1",
+            &[&inst],
+        )
+        .await
+        .expect("delete test enrollment rows");
+        tx.commit().await.expect("commit cleanup transaction");
+    }
 }

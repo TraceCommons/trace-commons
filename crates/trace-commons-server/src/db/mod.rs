@@ -238,16 +238,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// strict capping is later required, take an advisory lock on
     /// `hashtext(instance_subject_hash)` at the top of the transaction.
     ///
-    /// TODO(Task 8): strengthen the mock impl when the mock needs richer behavior.
     async fn reserve_instance_enrollment(
         &self,
-        _instance_subject_hash: &str,
-        _user_subject_hash: &str,
-        _tenant_id: &str,
-        _max_enrollments: i64,
-    ) -> Result<InstanceEnrollmentOutcome, DatabaseError> {
-        Ok(InstanceEnrollmentOutcome::NewlyEnrolled)
-    }
+        instance_subject_hash: &str,
+        user_subject_hash: &str,
+        tenant_id: &str,
+        max_enrollments: i64,
+    ) -> Result<InstanceEnrollmentOutcome, DatabaseError>;
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].
