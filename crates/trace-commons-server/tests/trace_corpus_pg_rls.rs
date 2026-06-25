@@ -43,6 +43,8 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         url: SecretString::from(url),
         pool_size: 4,
         ssl_mode: SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
     })
 }
 
@@ -471,6 +473,7 @@ async fn write_sample_credit_control_plane_rows(
                 source_list_hash: source_list_hash.clone(),
                 near_status: TraceCreditSettlementNearStatus::Pending,
                 near_outbox_id: Some(ids.near_outbox_id),
+                near_payout_hold_reason: None,
             }],
             near_contract_id: Some("trace-credits.testnet".to_string()),
             ranking_model_version: None,
@@ -500,6 +503,7 @@ async fn write_sample_credit_control_plane_rows(
                 "idempotency_key": format!("sha256:{label}:settle")
             }),
             status: TraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
         })
         .await
         .expect("write tenant NEAR receipt outbox");
@@ -519,6 +523,7 @@ async fn write_sample_credit_control_plane_rows(
                 "idempotency_key": format!("sha256:{label}:freeze")
             }),
             status: TraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
         })
         .await
         .expect("write tenant NEAR account outbox");

@@ -183,6 +183,92 @@ export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true
 export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true
 ```
 
+### Login-resolver role (contributor accounts)
+
+The contributor-account redeem path uses a dedicated, least-privilege
+PostgreSQL role (`trace_login_resolver`) on a **separate pool** configured by
+`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`. The `V30` migration creates that
+role as `NOLOGIN NOBYPASSRLS`, so it is **not directly connectable as shipped**
+— you must provision a connectable, NOBYPASSRLS role before first traffic or
+redeem fails closed (every redeem 400s).
+
+```sh
+export TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL="postgres://<login-role>@/trace-commons?host=/cloudsql/.../trace-commons"
+```
+
+Follow [`login-resolver-role.md`](login-resolver-role.md) for the exact
+provisioning SQL (recommended: a dedicated LOGIN role with membership in
+`trace_login_resolver`). The role MUST remain NOBYPASSRLS — the role-scoped
+permissive policy is what authorizes the cross-tenant `code_hash -> tenant_id`
+read.
+
+The Slice 2 discoverable **passkey login** path reuses this **same** resolver
+role and pool for its `credential_id -> tenant_id` bootstrap (V32 extends the
+role with a `(tenant_id, credential_id)` grant on `trace_webauthn_credentials`
+plus its own permissive policy). No additional login role is needed — the same
+provisioning above covers it. If the resolver pool is unconfigured, passkey login
+fails closed (every assertion collapses to the uniform deny; no session minted),
+while passkey enrollment/management on the authenticated runtime pool are
+unaffected.
+
+### WebAuthn relying party (contributor passkeys, Slice 2)
+
+Passkey enrollment and login require the WebAuthn relying-party identity. All
+**three** of these env vars are **required together**:
+
+```sh
+export TRACE_COMMONS_WEBAUTHN_RP_ID="tracecommons.ai"            # effective domain; cannot change without invalidating every passkey
+export TRACE_COMMONS_WEBAUTHN_RP_ORIGIN="https://app.tracecommons.ai"  # full origin URL
+export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authenticator prompts
+```
+
+- **All-or-nothing.** Setting only some of the three is a misconfiguration: the
+  passkey surface stays **disabled** (fail-closed), and the server emits a startup
+  `WARN` naming which of the three are set vs unset (names only, never values).
+  Setting **none** of them is the normal "passkeys disabled" state and is silent.
+- **Origin must match the browser.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` must be the
+  exact origin the browser sees (scheme + host + port). A mismatch makes every
+  ceremony fail verification at the authenticator. `RP_ID` must be a registrable
+  suffix of that origin's host.
+- The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
+  in-process soft-authenticator used by the passkey tests). It is **not** compiled
+  into or shipped with the production binaries; no production env var enables it.
+
+### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
+
+NEAR enrollment and login require the NEAR configuration. All **three** of these
+env vars are **required together**:
+
+```sh
+export TRACE_COMMONS_NEAR_RPC_URL="https://rpc.mainnet.near.org"   # pin a TRUSTED endpoint; used ONLY at enroll
+export TRACE_COMMONS_NEAR_NETWORK="mainnet"                        # network label (mainnet|testnet)
+export TRACE_COMMONS_NEAR_LOGIN_RECIPIENT="app.tracecommons.ai"    # NEP-413 recipient the signed challenge binds to
+```
+
+- **All-or-nothing.** Setting only some of the three is a misconfiguration: the
+  NEAR surface stays **disabled** (fail-closed), and the server emits a startup
+  `WARN` naming which of the three are set vs unset (names only, never values —
+  an rpc_url/recipient may be sensitive). Setting **none** of them is the normal
+  "NEAR disabled" state and is silent.
+- **RPC is used ONLY at enroll.** The `view_access_key_list` JSON-RPC call that
+  proves the signing key is a FullAccess key on the named NEAR account runs
+  exclusively during enroll-finish. A malicious/compromised RPC could falsely
+  confirm that binding, so **pin a trusted endpoint**. **Login is fully offline**:
+  it verifies the NEP-413 signature and resolves the stored `public_key -> tenant`
+  binding without any network call.
+- **The login `accountId` field is informational only.** The `accountId` in the
+  `login/finish` assertion body is NOT verified at login — authentication is by the
+  NEP-413 signature over the challenge plus the `public_key -> tenant` resolution;
+  the account binding was established and RPC-verified at enroll time.
+- **NEAR login depends on the login-resolver pool.** The unauthenticated
+  `public_key -> tenant` bootstrap runs on the `trace_login_resolver` pool
+  (`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`, above). If that pool is
+  unconfigured, NEAR login fails closed (uniform deny, no session) — same as
+  redeem and passkey login. See `docs/operator/login-resolver-role.md`.
+- **Encoding deps.** NEP-413 message encoding uses `borsh` (canonical struct
+  serialization) and `bs58` (the `ed25519:<base58>` public-key form); both are
+  compiled into the production binary and need no env vars.
+
 ### Privacy filter backend (pilot)
 
 Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable

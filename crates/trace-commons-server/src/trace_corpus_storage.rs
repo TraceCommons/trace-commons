@@ -602,6 +602,13 @@ pub struct TraceCreditAccountSettlementLineItem {
     pub source_list_hash: String,
     pub near_status: TraceCreditSettlementNearStatus,
     pub near_outbox_id: Option<Uuid>,
+    /// Coarse label set when this account group's on-chain payout was withheld
+    /// (`"none_enrolled"` / `"ambiguous_no_designation"`). When present, NO NEAR
+    /// outbox row was enqueued for the group even though the credit is finalized
+    /// internally. `None` for groups that resolved a payout target and for
+    /// unlinked-principal groups. A label only; carries no account identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_payout_hold_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -715,6 +722,13 @@ pub struct TraceNearCreditOutboxItemWrite {
     pub credit_account_hash: String,
     pub near_call_json: serde_json::Value,
     pub status: TraceCreditSettlementNearStatus,
+    /// Designated NEAR account id to pay for this settlement group, when the
+    /// group resolved to a single durable account with an unambiguous payout
+    /// target. A public on-chain identifier (operational routing state), never
+    /// key material. `None` for unlinked-principal groups and the account-hold /
+    /// reversal flows that do not resolve a payout target.
+    #[serde(default)]
+    pub payout_near_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -725,6 +739,10 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub credit_account_hash: String,
     pub near_call_json: serde_json::Value,
     pub status: TraceCreditSettlementNearStatus,
+    /// See [`TraceNearCreditOutboxItemWrite::payout_near_account_id`]. A public
+    /// on-chain identifier persisted as operational routing state.
+    #[serde(default)]
+    pub payout_near_account_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub submitted_at: Option<DateTime<Utc>>,
     pub near_transaction_hash: Option<String>,
@@ -788,6 +806,17 @@ pub struct TraceSubmissionWrite {
     pub credit_points_pending: Option<f32>,
     pub credit_points_final: Option<f32>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Opaque keyset cursor for the account trace read-back list. It carries the
+/// `(received_at, submission_id)` of the last row on the previous page; the
+/// next page continues strictly after it in `(received_at DESC, submission_id
+/// DESC)` order. The wire encoding (base64) lives in the binary; this is the
+/// decoded form the store consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSubmissionKeysetCursor {
+    pub received_at: DateTime<Utc>,
+    pub submission_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1791,6 +1820,24 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
 
+    /// Keyset-paginated submission read scoped to an account's active principal
+    /// set, for the dual-auth account read-back surface
+    /// (`GET /v1/account/traces`). Rows are filtered by
+    /// `auth_principal_ref = ANY(principal_refs)` under the caller's tenant RLS
+    /// and ordered `(received_at DESC, submission_id DESC)` so the keyset cursor
+    /// totally-orders across any number of principals (Hardening H). `cursor`,
+    /// when present, continues strictly after the last `(received_at,
+    /// submission_id)` of the previous page. `limit` is applied at the DB; the
+    /// caller is responsible for capping it. An empty `principal_refs` returns
+    /// an empty page without touching the table.
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+        cursor: Option<TraceSubmissionKeysetCursor>,
+        limit: i64,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
     async fn upsert_trace_tenant_policy(
         &self,
         policy: TraceTenantPolicyWrite,
@@ -2097,6 +2144,10 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError>;
 
+    /// Update an outbox row's status. When `expected_prior_statuses` is `Some`,
+    /// the write only applies if the row's CURRENT status is in that allow-list
+    /// (optimistic guard the submit path uses to never advance an already
+    /// `submitted`/`confirmed` row); `None` writes unconditionally.
     async fn update_trace_near_credit_outbox_status(
         &self,
         tenant_id: &str,
@@ -2104,6 +2155,7 @@ pub trait TraceCorpusStore: Send + Sync {
         status: TraceCreditSettlementNearStatus,
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
+        expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
 
     async fn upsert_trace_benchmark_registry_outbox_item(

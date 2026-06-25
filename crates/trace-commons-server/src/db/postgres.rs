@@ -12,8 +12,79 @@ use crate::config::DatabaseConfig;
 use crate::db::{Database, TraceCorpusRlsDiagnostics};
 use crate::error::DatabaseError;
 
+/// Rotation-on-use cadence for browser sessions. A cookie session whose CURRENT
+/// token was issued more than this many seconds ago is rotated on its next live
+/// request: a fresh secret is minted and the old hash is parked in
+/// `prev_token_hash` for a short grace window. Default ~12h. Overridable via
+/// `TRACE_COMMONS_SESSION_ROTATION_INTERVAL_SECS` so tests can force rotation
+/// without waiting (the env var is read per call; production never sets it).
+const SESSION_ROTATION_INTERVAL_SECS_DEFAULT: i64 = 12 * 60 * 60;
+/// Grace window during which the PREVIOUS token still validates after a rotation,
+/// so an in-flight / multi-tab request holding the old cookie is not logged out
+/// before it observes the new `Set-Cookie`. Default ~2 min. Overridable via
+/// `TRACE_COMMONS_SESSION_ROTATION_GRACE_SECS` for tests.
+const SESSION_ROTATION_GRACE_SECS_DEFAULT: i64 = 2 * 60;
+
+/// Read the rotation interval (seconds), honoring the test-only env override.
+/// A malformed or non-positive override falls back to the default so a bad value
+/// can never disable rotation cadence entirely.
+fn session_rotation_interval_secs() -> i64 {
+    std::env::var("TRACE_COMMONS_SESSION_ROTATION_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(SESSION_ROTATION_INTERVAL_SECS_DEFAULT)
+}
+
+/// Read the prev-token grace (seconds), honoring the test-only env override.
+fn session_rotation_grace_secs() -> i64 {
+    std::env::var("TRACE_COMMONS_SESSION_ROTATION_GRACE_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(SESSION_ROTATION_GRACE_SECS_DEFAULT)
+}
+
+/// Fixed advisory-lock namespace (classid) for the NEAR settlement submit serializer.
+/// Paired with a per-tenant objid (`hashtext('near-credit-submit:'||tenant)`), the
+/// two-int `pg_try_advisory_lock(classid, objid)` form keeps this lock space
+/// disjoint from the one-arg `pg_advisory_xact_lock(hashtext(tenant))` used by the
+/// audit-chain append, so the two can never alias.
+const NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID: i32 = 0x7472_6163u32 as i32; // "trac"
+
+/// Owns the pooled connection that holds a session-level advisory lock for the
+/// duration of a NEAR settlement submit pass. Released explicitly via
+/// [`NearCreditSubmitAdvisoryLockInner::release`]; see the public
+/// `NearCreditSubmitAdvisoryLock` wrapper in `db::mod` for lifecycle docs.
+pub struct NearCreditSubmitAdvisoryLockInner {
+    client: deadpool_postgres::Object,
+    objid: i32,
+}
+
+impl NearCreditSubmitAdvisoryLockInner {
+    pub(crate) async fn release(self) -> Result<(), DatabaseError> {
+        // Best-effort unlock on the SAME connection that took the lock; session
+        // advisory locks are connection-scoped, so this must run here before the
+        // connection returns to the pool.
+        self.client
+            .execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &self.objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
 pub struct PgBackend {
     pool: Pool,
+    /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
+    /// Built only when `login_resolver_url` is configured; its DB user is the
+    /// operator-provisioned `trace_login_resolver` role (no BYPASSRLS,
+    /// column-scoped SELECT on `trace_login_links` only). `None` keeps the
+    /// account-redeem path fail-closed. NEVER aliased to `pool`.
+    login_resolver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -52,6 +123,14 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_contributor_profile_audit",
     "device_keys",
     "onboarding_invites",
+    "trace_accounts",
+    "trace_account_principals",
+    "trace_login_links",
+    "trace_sessions",
+    "trace_account_audit",
+    "trace_webauthn_credentials",
+    "trace_near_identities",
+    "trace_account_merge_proposals",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -121,7 +200,32 @@ impl PgBackend {
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
         let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
         let pool = Pool::builder(manager).max_size(config.pool_size).build()?;
-        Ok(Self { pool })
+
+        // Build a SEPARATE, small resolver pool only when a distinct resolver
+        // connection string is configured. This pool runs as the narrow
+        // `trace_login_resolver` role and is never aliased to the runtime pool.
+        let login_resolver_pool = match config.login_resolver_url() {
+            Some(resolver_url) => {
+                let resolver_config =
+                    resolver_url
+                        .parse::<tokio_postgres::Config>()
+                        .map_err(|e| {
+                            DatabaseError::Pool(format!(
+                                "invalid login-resolver PostgreSQL URL: {e}"
+                            ))
+                        })?;
+                let resolver_manager =
+                    deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
+                let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
+                Some(resolver_pool)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            pool,
+            login_resolver_pool,
+        })
     }
 
     pub(crate) fn trace_pool(&self) -> Pool {
@@ -132,10 +236,140 @@ impl PgBackend {
     pub fn raw_pool_for_tests_and_diagnostics(&self) -> Pool {
         self.pool.clone()
     }
+
+    /// Resolve the tenant for a login code via the NARROW resolver pool (separate
+    /// role, column-scoped SELECT, no BYPASSRLS). Returns the tenant only; the
+    /// caller MUST re-confirm tenant inside an RLS-scoped transaction before any
+    /// write. Fail-closed: if the resolver pool is not configured, this errors
+    /// with a safe missing-control name rather than falling back to the runtime
+    /// pool.
+    pub async fn resolve_login_link_tenant(
+        &self,
+        code_hash: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        // Safe without a tenant predicate: code_hash is globally UNIQUE (CHECK-shaped sha256) so
+        // this returns at most one row across all tenants; the redeem handler re-confirms tenant
+        // inside an RLS-scoped tx before any write. Do NOT add a non-unique lookup column to this
+        // role's grant.
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_login_links WHERE code_hash = $1",
+                &[&code_hash],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
+
+    /// Resolve the tenant for a WebAuthn credential via the NARROW resolver pool
+    /// (separate role, column-scoped SELECT, no BYPASSRLS). Returns the tenant
+    /// only; the caller MUST re-confirm tenant inside an RLS-scoped transaction
+    /// before any write. Fail-closed: if the resolver pool is not configured, this
+    /// errors with a safe missing-control name rather than falling back to the
+    /// runtime pool.
+    ///
+    /// Wired into the login handler in Task 6; until then its only non-test caller
+    /// is pending. It is `pub` (part of the crate API, like
+    /// `resolve_login_link_tenant`), so it does not trip dead-code under
+    /// `-D warnings` despite having no internal caller yet.
+    pub async fn resolve_credential_tenant(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        // Safe without a tenant predicate: credential_id is globally UNIQUE so this returns at most
+        // one row across all tenants; the login handler re-confirms tenant inside an RLS-scoped tx
+        // before any write. Do NOT add a non-unique lookup column to this role's grant.
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+                &[&credential_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
+
+    /// Resolve a NEAR access public_key to its tenant via the narrow,
+    /// restricted-role resolver pool (separate role, column-scoped SELECT, no
+    /// BYPASSRLS), exactly like `resolve_credential_tenant`. Returns the tenant
+    /// ONLY. The NEAR login path (Task 7) calls this with the public_key parsed
+    /// from an UNAUTHENTICATED, wallet-signed assertion, BEFORE any tenant context
+    /// exists, then re-confirms tenant inside an RLS-scoped tx before any write.
+    /// Fail-closed: if the resolver pool is not configured, this errors with a
+    /// safe missing-control name rather than falling back to the runtime pool.
+    ///
+    /// Wired into the login handler in Task 7; until then its only non-test caller
+    /// is pending. It is `pub` (part of the crate API, like
+    /// `resolve_credential_tenant`), so it does not trip dead-code under
+    /// `-D warnings` despite having no internal caller yet.
+    pub async fn resolve_near_public_key_tenant(
+        &self,
+        public_key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        // Safe without a tenant predicate: public_key is globally UNIQUE so this returns at most
+        // one row across all tenants; the login handler re-confirms tenant inside an RLS-scoped tx
+        // before any write. Do NOT add a non-unique lookup column to this role's grant.
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_near_identities WHERE public_key = $1",
+                &[&public_key],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
 }
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn try_acquire_near_credit_submit_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::db::NearCreditSubmitAdvisoryLock>, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        // Derive the per-tenant objid in SQL so it matches the unlock key exactly.
+        let objid: i32 = client
+            .query_one(
+                "SELECT hashtext('near-credit-submit:' || $1)",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        let acquired: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1, $2)",
+                &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if !acquired {
+            // Another submit run already holds the lock; drop the connection back
+            // to the pool without taking ownership.
+            return Ok(None);
+        }
+        Ok(Some(crate::db::NearCreditSubmitAdvisoryLock::new(
+            NearCreditSubmitAdvisoryLockInner { client, objid },
+        )))
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         let client = self
             .trace_pool()
@@ -729,6 +963,106 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&29_i32, &"onboarding_invites"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&30_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V30__trace_accounts.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&30_i32, &"trace_accounts"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&31_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V31__account_traces_index.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&31_i32, &"account_traces_index"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&32_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V32__webauthn_credentials.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&32_i32, &"webauthn_credentials"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&33_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V33__near_identities.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&33_i32, &"near_identities"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&34_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V34__account_consolidation.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&34_i32, &"account_consolidation"],
                 )
                 .await?;
         }
@@ -1612,6 +1946,1458 @@ impl Database for PgBackend {
             crate::db::InstanceEnrollmentOutcome::ExistingUser
         })
     }
+
+    async fn create_or_reuse_account(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Fast path: an active link for this principal already maps to an account.
+        if let Some(row) = tx
+            .query_opt(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        {
+            let account_id: Uuid = row.get("account_id");
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(account_id);
+        }
+
+        // No active link: mint a fresh account and link the principal. The link
+        // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
+        // principal_ref) constraint so a concurrent mint that won the race does
+        // not error us out; we re-select the authoritative account below.
+        let new_account_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id)
+             VALUES (trace_current_tenant_id(), $1)",
+            &[&new_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)
+             ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+            &[&new_account_id, &principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Re-select the authoritative account for this principal. If a
+        // concurrent mint inserted the link first, this returns ITS account_id
+        // and our freshly-inserted (now orphaned) trace_accounts row is harmless
+        // (no principal links to it). If we won, it returns new_account_id.
+        let row = tx
+            .query_one(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let account_id: Uuid = row.get("account_id");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(account_id)
+    }
+
+    /// Batched principal->account resolution. One query under the tenant tx maps
+    /// every active-linked principal in `principal_refs` to its account; principals
+    /// with no active link are simply absent from the result. Mirrors the
+    /// tenant-tx shape of `create_or_reuse_account`.
+    async fn resolve_principals_to_accounts(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+    ) -> Result<std::collections::HashMap<String, Uuid>, DatabaseError> {
+        // Empty input short-circuits without a query.
+        if principal_refs.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT principal_ref, account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND unlinked_at IS NULL
+                    AND principal_ref = ANY($1)",
+                &[&principal_refs],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let principal_ref: String = row.get("principal_ref");
+            let account_id: Uuid = row.get("account_id");
+            map.insert(principal_ref, account_id);
+        }
+        Ok(map)
+    }
+
+    async fn count_outstanding_login_links(
+        &self,
+        tenant_id: &str,
+        created_principal_ref: &str,
+    ) -> Result<i64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "SELECT count(*) AS outstanding
+                   FROM trace_login_links
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND created_principal_ref = $1
+                    AND consumed_at IS NULL
+                    AND expires_at > now()",
+                &[&created_principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let outstanding: i64 = row.get("outstanding");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(outstanding)
+    }
+
+    async fn insert_login_link(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        code_hash: &str,
+        created_principal_ref: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let link_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_login_links (
+                tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, created_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), $5
+             )",
+            &[
+                &link_id,
+                &account_id,
+                &code_hash,
+                &created_principal_ref,
+                &expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn append_account_audit(
+        &self,
+        tenant_id: &str,
+        action: &str,
+        actor_ref: &str,
+        outcome: &str,
+        safe_metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&action, &actor_ref, &outcome, &safe_metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn resolve_login_link_tenant(
+        &self,
+        code_hash: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error.
+        PgBackend::resolve_login_link_tenant(self, code_hash)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn resolve_credential_tenant(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error, which the
+        // login handler collapses to the uniform deny.
+        PgBackend::resolve_credential_tenant(self, credential_id)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn resolve_near_public_key_tenant(
+        &self,
+        public_key: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error, which the
+        // login handler collapses to the uniform deny.
+        PgBackend::resolve_near_public_key_tenant(self, public_key)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn redeem_login_link(
+        &self,
+        tenant_id: &str,
+        code_hash: &str,
+        session: crate::db::NewSession<'_>,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<Option<crate::db::RedeemedSession>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Single atomic conditional consume (Hardening D/G): ALWAYS executed, never
+        // SELECT-then-branch. Unknown / expired / already-consumed / wrong-tenant
+        // codes all affect zero rows. The explicit tenant predicate is
+        // belt-and-suspenders on top of RLS; `code_hash` is globally UNIQUE.
+        let consumed = tx
+            .query_opt(
+                "UPDATE trace_login_links SET consumed_at = now()
+                  WHERE code_hash = $1
+                    AND tenant_id = trace_current_tenant_id()
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                  RETURNING account_id",
+                &[&code_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            // No row consumed: commit the no-op tx so the link stays UNconsumed and
+            // retryable, and return None for the uniform deny upstream.
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let account_id: Uuid = consumed.get("account_id");
+
+        // Same RLS-scoped tx: insert the session (hash-only token) ...
+        let session_id = Uuid::new_v4(); // server-assigned; never client-supplied.
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), now(), $5
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // ... and the hash-only / label-only audit row. Actor is derived from the
+        // consumed account_id (reserved-prefix, never sha-shaped). If any of these
+        // fail the whole redeem rolls back: link stays reusable, no orphaned
+        // session, no un-audited state change.
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::RedeemedSession {
+            account_id,
+            session_id,
+        }))
+    }
+
+    async fn validate_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<Option<crate::db::ValidatedSession>, DatabaseError> {
+        // SECURITY: do NOT ensure_trace_tenant here. `tenant_id` is the
+        // client-supplied, pre-auth value decoded from the session cookie; an
+        // UPSERT into trace_tenants would let an unauthenticated forged cookie
+        // spray arbitrary tenant rows before the token is validated. The tenant
+        // already exists for any legitimate session (created at mint), and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency), so a forged/nonexistent tenant scopes the lookup to a
+        // tenant where this hash cannot exist -> zero rows -> deny, no write.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Every-request liveness gate (Hardening I): unexpired AND not revoked AND
+        // seen within the idle cap. The idle cap (3d) is intentionally shorter than
+        // the 7d absolute `expires_at` so an abandoned session dies sooner than its
+        // hard expiry. The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `token_hash` is globally
+        // UNIQUE so a client-supplied (forged/mismatched) tenant simply scopes the
+        // lookup to a tenant where this hash does not exist -> no row -> deny.
+        //
+        // Rotation-on-use: the SELECT also accepts a within-grace PREVIOUS token
+        // (`prev_token_hash = $1 AND prev_token_valid_until > now()`) so a request
+        // still carrying the old cookie during the brief rotation grace continues
+        // to validate (multi-tab / in-flight). `matched_current` records whether
+        // the request matched the CURRENT token: only a current match is eligible
+        // to (re-)rotate, so a prev-token request never re-rotates. `needs_rotate`
+        // pre-computes the age check in SQL against the (possibly env-overridden)
+        // interval. We always read back the row's CURRENT `token_hash` so the
+        // last_seen / rotate UPDATE keys on the canonical hash, not the presented
+        // one (which may be the prev token).
+        let interval_secs = session_rotation_interval_secs();
+        let grace_secs = session_rotation_grace_secs();
+        let row = tx
+            .query_opt(
+                "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        (s.token_hash = $1) AS matched_current,
+                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                   FROM trace_sessions s
+                   JOIN trace_accounts a
+                     ON a.tenant_id = s.tenant_id
+                    AND a.account_id = s.account_id
+                  WHERE s.tenant_id = trace_current_tenant_id()
+                    AND a.closed_at IS NULL
+                    AND (s.token_hash = $1
+                         OR (s.prev_token_hash = $1 AND s.prev_token_valid_until > now()))
+                    AND s.expires_at > now()
+                    AND s.revoked_at IS NULL
+                    AND s.last_seen_at > now() - INTERVAL '3 days'",
+                &[&token_hash, &(interval_secs as f64)],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(row) = row else {
+            // Miss OR idle-capped. Auto-revoke any matching row that is still live
+            // (unexpired, unrevoked) but fell past the idle cap, so a leaked secret
+            // cannot be reused after the idle window even before hard expiry. The
+            // predicate is the inverse idle-cap on an otherwise-valid row; a true
+            // unknown hash affects zero rows. It keys ONLY on the CURRENT
+            // `token_hash`, so a within-grace prev-token presentation (whose own
+            // row, if any, is still live and was simply not matched here) is never
+            // revoked by this branch.
+            tx.execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1
+                    AND revoked_at IS NULL
+                    AND expires_at > now()
+                    AND last_seen_at <= now() - INTERVAL '3 days'",
+                &[&token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let account_id: Uuid = row.get("account_id");
+        let auth_credential_id: Option<String> = row.get("auth_credential_id");
+        let client_kind: String = row.get("client_kind");
+        let current_token_hash: String = row.get("token_hash");
+        let matched_current: bool = row.get("matched_current");
+        let needs_rotate: bool = row.get("needs_rotate");
+
+        // Rotate only on a CURRENT-token match that has aged past the interval. A
+        // prev-token (within-grace) request slides the idle window forward but must
+        // NOT re-rotate (that would churn the secret every multi-tab request and
+        // could orphan the cookie the other tab still holds).
+        let rotated_secret = if matched_current && needs_rotate {
+            let new_secret = crate::account_session::generate_session_secret();
+            let new_hash = crate::account_session::hash_secret(&new_secret);
+            // Same-tx rotation: park the old hash as the prev token for `grace`,
+            // swap in the new hash, reset the issue clock, slide last_seen. Keyed on
+            // the canonical current hash.
+            tx.execute(
+                "UPDATE trace_sessions
+                    SET prev_token_hash = token_hash,
+                        prev_token_valid_until = now() + make_interval(secs => $2),
+                        token_hash = $3,
+                        token_issued_at = now(),
+                        last_seen_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1",
+                &[&current_token_hash, &(grace_secs as f64), &new_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+            // Hash-only audit. Records only the action and actor (reserved-prefix
+            // account actor); never a token, secret, or hash.
+            let actor_ref = crate::account_session::account_actor_ref(
+                &crate::account_session::AccountId::from_uuid(account_id),
+            );
+            tx.execute(
+                "INSERT INTO trace_account_audit (
+                    tenant_id, action, actor_ref, outcome, safe_metadata
+                 ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+                &[
+                    &"account_session_rotated",
+                    &actor_ref,
+                    &"success",
+                    &serde_json::json!({}),
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            Some(new_secret)
+        } else {
+            // Live hit (no rotation): bump last_seen_at to slide the idle window
+            // forward. Keyed on the canonical current hash so a prev-token match
+            // still refreshes the right row.
+            tx.execute(
+                "UPDATE trace_sessions SET last_seen_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1",
+                &[&current_token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            None
+        };
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::ValidatedSession {
+            account_id,
+            auth_credential_id,
+            client_kind,
+            rotated_secret,
+        }))
+    }
+
+    async fn revoke_current_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Idempotent single-session revoke. Match the presented hash as EITHER the
+        // current `token_hash` OR the just-rotated-away `prev_token_hash`: if the
+        // same request rotated the session (rotation runs in the auth middleware
+        // BEFORE the logout handler re-derives the hash from the presented OLD
+        // cookie), the row's current hash is now the freshly minted one and the
+        // presented hash lives in `prev_token_hash`. Keying on the current hash
+        // alone would miss that row and leave the rotated session live. Revoking on
+        // either match kills the WHOLE row (one row per session: both hashes belong
+        // to the same row), so the rotated cookie the middleware appends lands on an
+        // already-revoked row and the next request 401s. `token_hash` is globally
+        // UNIQUE and `prev_token_hash` is its short-lived predecessor, so at most one
+        // row matches; an already-revoked or unknown hash affects zero rows.
+        let revoked = tx
+            .execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND (token_hash = $1 OR prev_token_hash = $1)
+                    AND revoked_at IS NULL",
+                &[&token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(revoked)
+    }
+
+    async fn revoke_all_account_sessions(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Sign-out-everywhere: revoke every live session for the auth-derived
+        // account. Tenant- + account-scoped under forced RLS, so only the caller's
+        // own sessions can ever be touched.
+        let revoked = tx
+            .execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(revoked)
+    }
+
+    async fn resolve_account_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Active-membership only (Hardening A): an unlinked principal must not
+        // resolve to its former account.
+        let row = tx
+            .query_opt(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let account_id = row.map(|row| row.get::<_, Uuid>("account_id"));
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(account_id)
+    }
+
+    async fn expand_account_principals(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::account_session::AccountPrincipalSet, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The ONLY sanctioned ownership-bearing expansion (Hardening A): active
+        // memberships only. An `unlinked_at`-set principal is absent from the set.
+        let rows = tx
+            .query(
+                "SELECT principal_ref FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND unlinked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let principals = crate::account_session::AccountPrincipalSet::from_iter(
+            rows.into_iter()
+                .map(|row| row.get::<_, String>("principal_ref")),
+        );
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(principals)
+    }
+
+    async fn insert_webauthn_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        passkey: &serde_json::Value,
+        label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_webauthn_credentials (
+                tenant_id, credential_id, account_id, passkey, label, created_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now()
+             )",
+            &[&credential_id, &account_id, &passkey, &label],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn load_webauthn_credential_for_login(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+    ) -> Result<Option<crate::db::WebauthnCredentialRow>, DatabaseError> {
+        // The resolver has already mapped credential_id -> tenant_id; this load
+        // runs under that resolved tenant's RLS. We do NOT ensure_trace_tenant
+        // here: the tenant already exists for any registered credential, and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency). The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `credential_id` is globally
+        // UNIQUE.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT account_id, passkey FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND credential_id = $1
+                    AND revoked_at IS NULL",
+                &[&credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| crate::db::WebauthnCredentialRow {
+            account_id: row.get("account_id"),
+            passkey: row.get("passkey"),
+        }))
+    }
+
+    async fn update_webauthn_credential_after_login(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        passkey: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_webauthn_credentials
+                SET passkey = $1, last_used_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND credential_id = $2
+                AND revoked_at IS NULL",
+            &[&passkey, &credential_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn issue_passkey_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        auth_credential_id: &str,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: do NOT ensure_trace_tenant here. The credential (and thus its
+        // tenant) was verified by the login handler before this call: the tenant
+        // provably exists via the credential row's FK, and an UPSERT here would
+        // let a forged assertion spray tenant rows. begin_trace_tenant_transaction
+        // only sets the RLS config var (no row dependency), and the session insert
+        // is FK-bound to (tenant_id, account_id) in trace_accounts, so a bogus
+        // tenant/account simply fails the insert rather than writing anything.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Session row: hash-only token, client_kind='passkey', the base64url
+        // credential id STRING in auth_credential_id (V32 TEXT column), and
+        // token_issued_at left to its DEFAULT now(). session_id is server-assigned.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, auth_credential_id, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, $5, now(), now(), $6
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &auth_credential_id,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
+        // back the session (no un-audited session, no orphaned audit).
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn issue_near_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        auth_credential_id: &str,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: do NOT ensure_trace_tenant here. The NEAR identity (and thus
+        // its tenant) was verified by the login handler before this call: the
+        // tenant provably exists via the identity row's FK, and an UPSERT here
+        // would let a forged assertion spray tenant rows. begin_trace_tenant_
+        // transaction only sets the RLS config var (no row dependency), and the
+        // session insert is FK-bound to (tenant_id, account_id) in trace_accounts,
+        // so a bogus tenant/account simply fails the insert rather than writing
+        // anything. Mirrors issue_passkey_session except client_kind='near' and
+        // auth_credential_id carries the NEAR access key (a public identifier).
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, auth_credential_id, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, $5, now(), now(), $6
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &auth_credential_id,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
+        // back the session (no un-audited session, no orphaned audit). Never the
+        // NEAR public key, account id, or any signature material.
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn list_account_credentials(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<crate::db::AccountCredentialSummary>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT credential_id, label, created_at, last_used_at
+                   FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+                  ORDER BY created_at",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::db::AccountCredentialSummary {
+                credential_id: row.get("credential_id"),
+                label: row.get("label"),
+                created_at: row.get("created_at"),
+                last_used_at: row.get("last_used_at"),
+            })
+            .collect())
+    }
+
+    async fn rename_account_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped so a caller can never rename a credential they do not own.
+        let affected = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET label = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND credential_id = $3
+                    AND revoked_at IS NULL",
+                &[&label, &account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn revoke_account_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+    ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped soft-delete: an unknown / already-revoked / other-account
+        // credential affects zero rows.
+        let removed = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND credential_id = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining_row = tx
+            .query_one(
+                "SELECT count(*) AS remaining
+                   FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining: i64 = remaining_row.get("remaining");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RevokeCredentialResult {
+            removed: removed > 0,
+            remaining,
+        })
+    }
+
+    async fn insert_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        near_account_id: &str,
+        label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_near_identities (
+                tenant_id, public_key, near_account_id, account_id, label, created_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now()
+             )",
+            &[&public_key, &near_account_id, &account_id, &label],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn load_near_identity_for_login(
+        &self,
+        tenant_id: &str,
+        public_key: &str,
+    ) -> Result<Option<crate::db::NearIdentityRow>, DatabaseError> {
+        // The resolver has already mapped public_key -> tenant_id; this load runs
+        // under that resolved tenant's RLS. We do NOT ensure_trace_tenant here: the
+        // tenant already exists for any registered identity, and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency). The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `public_key` is globally UNIQUE.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT account_id, near_account_id FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND public_key = $1
+                    AND revoked_at IS NULL",
+                &[&public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| crate::db::NearIdentityRow {
+            account_id: row.get("account_id"),
+            near_account_id: row.get("near_account_id"),
+        }))
+    }
+
+    async fn touch_near_identity_last_used(
+        &self,
+        tenant_id: &str,
+        public_key: &str,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: do NOT ensure_trace_tenant here — login path. The identity row
+        // (loaded above) already guarantees the tenant via its FK;
+        // begin_trace_tenant_transaction only sets the RLS var (no write).
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_near_identities
+                SET last_used_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND public_key = $1
+                AND revoked_at IS NULL",
+            &[&public_key],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn list_account_near_identities(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<crate::db::NearIdentitySummary>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT public_key, near_account_id, label, created_at, last_used_at,
+                        payout_designated_at
+                   FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+                  ORDER BY created_at",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let payout_designated_at: Option<chrono::DateTime<chrono::Utc>> =
+                    row.get("payout_designated_at");
+                crate::db::NearIdentitySummary {
+                    public_key: row.get("public_key"),
+                    near_account_id: row.get("near_account_id"),
+                    label: row.get("label"),
+                    created_at: row.get("created_at"),
+                    last_used_at: row.get("last_used_at"),
+                    is_payout: payout_designated_at.is_some(),
+                }
+            })
+            .collect())
+    }
+
+    async fn rename_account_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped so a caller can never rename an identity they do not own.
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET label = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND public_key = $3
+                    AND revoked_at IS NULL",
+                &[&label, &account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn revoke_account_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<crate::db::RevokeNearResult, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped soft-delete: an unknown / already-revoked / other-account
+        // key affects zero rows.
+        let removed = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        // remaining strong authenticators = webauthn credentials + NEAR identities,
+        // computed in the SAME tx after the revoke.
+        let remaining_row = tx
+            .query_one(
+                "SELECT (
+                    SELECT count(*) FROM trace_webauthn_credentials
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) + (
+                    SELECT count(*) FROM trace_near_identities
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) AS remaining_strong",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining_strong: i64 = remaining_row.get("remaining_strong");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RevokeNearResult {
+            removed: removed > 0,
+            remaining_strong,
+        })
+    }
+
+    async fn count_active_strong_authenticators(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "SELECT (
+                    SELECT count(*) FROM trace_webauthn_credentials
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) + (
+                    SELECT count(*) FROM trace_near_identities
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) AS strong_count",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get("strong_count"))
+    }
+
+    async fn designate_payout_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Clear any existing active designation first so at most one active row ever
+        // carries payout_designated_at -> the partial-unique index can never trip.
+        tx.execute(
+            "UPDATE trace_near_identities
+                SET payout_designated_at = NULL
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND payout_designated_at IS NOT NULL",
+            &[&account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        // Stamp the named active key. account-scoped + revoked_at IS NULL so an
+        // unknown / revoked / other-account key affects zero rows.
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET payout_designated_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn clear_payout_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET payout_designated_at = NULL
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL
+                    AND payout_designated_at IS NOT NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn resolve_payout_near_account_id(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::db::PayoutResolution, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT near_account_id, payout_designated_at
+                   FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // A designated active identity wins outright.
+        if let Some(row) = rows.iter().find(|row| {
+            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
+                .is_some()
+        }) {
+            return Ok(crate::db::PayoutResolution::Designated(
+                row.get("near_account_id"),
+            ));
+        }
+        // No designation: a single active identity is unambiguous; otherwise hold.
+        match rows.len() {
+            0 => Ok(crate::db::PayoutResolution::Hold(
+                crate::db::PayoutHoldReason::NoneEnrolled,
+            )),
+            1 => Ok(crate::db::PayoutResolution::SoleActive(
+                rows[0].get("near_account_id"),
+            )),
+            _ => Ok(crate::db::PayoutResolution::Hold(
+                crate::db::PayoutHoldReason::AmbiguousNoDesignation,
+            )),
+        }
+    }
+
+    async fn stage_merge_proposal(
+        &self,
+        tenant_id: &str,
+        surviving_account_id: Uuid,
+        merge_code_hash: &str,
+    ) -> Result<Option<crate::db::StagedMergeProposal>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Proof-of-control: consume device B's login-link with the SAME atomic
+        // conditional consume as redeem_login_link (ALWAYS executed, never a
+        // SELECT-then-branch). Unknown / expired / already-consumed / wrong-tenant
+        // codes all affect zero rows -> commit the no-op tx and deny. The
+        // `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
+        // on top of forced RLS; `code_hash` is globally UNIQUE.
+        let consumed = tx
+            .query_opt(
+                "UPDATE trace_login_links SET consumed_at = now()
+                  WHERE code_hash = $1
+                    AND tenant_id = trace_current_tenant_id()
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                  RETURNING account_id",
+                &[&merge_code_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let absorbed_account_id: Uuid = consumed.get("account_id");
+
+        // Guard: cannot merge an account into itself. The consume already fired,
+        // so commit it (the link is single-use spent) and deny.
+        if absorbed_account_id == surviving_account_id {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        }
+
+        // Guard: the absorbed account B must still be open. A closed account has
+        // nothing live to fold in.
+        let closed_at: Option<chrono::DateTime<chrono::Utc>> = tx
+            .query_one(
+                "SELECT closed_at FROM trace_accounts
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get("closed_at");
+        if closed_at.is_some() {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        }
+
+        // Attribution-only count of B's ACTIVE principals for operator review.
+        let absorbed_principal_count: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND unlinked_at IS NULL",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
+        // Stage the single-use, time-bounded proposal. proposal_id is
+        // server-assigned; expires in 10 minutes.
+        let proposal_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_account_merge_proposals (
+                tenant_id, proposal_id, surviving_account_id, absorbed_account_id,
+                absorbed_principal_count, created_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(),
+                now() + interval '10 minutes'
+             )",
+            &[
+                &proposal_id,
+                &surviving_account_id,
+                &absorbed_account_id,
+                &absorbed_principal_count,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::StagedMergeProposal {
+            proposal_id,
+            absorbed_account_id,
+            absorbed_principal_count,
+        }))
+    }
+
+    async fn execute_merge(
+        &self,
+        tenant_id: &str,
+        surviving_account_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<crate::db::ExecutedMerge>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Load + consume the proposal atomically. The conditional UPDATE
+        // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
+        // caller), single-use (consumed_at IS NULL), and freshness (expires_at >
+        // now()) AND that the surviving account A is still OPEN in one shot: an
+        // expired / not-owned / already-consumed / unknown proposal, or a
+        // soft-closed A, affects zero rows -> deny. The A-open EXISTS guard is
+        // load-bearing: the proposal FK only guarantees A exists, not that it is
+        // open, and a soft-close (closed_at) does not trigger ON DELETE CASCADE,
+        // so without it B's principals + authenticators could be folded onto a
+        // tombstoned account (irreversible identity corruption). Returning Ok(None)
+        // before any mutation drops the tx (no commit), so the consume itself rolls
+        // back and the proposal stays usable on the benign-not-found paths.
+        let consumed = tx
+            .query_opt(
+                "UPDATE trace_account_merge_proposals SET consumed_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND proposal_id = $1
+                    AND surviving_account_id = $2
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                    AND EXISTS (
+                        SELECT 1 FROM trace_accounts a
+                         WHERE a.tenant_id = trace_current_tenant_id()
+                           AND a.account_id = $2
+                           AND a.closed_at IS NULL
+                    )
+                  RETURNING absorbed_account_id",
+                &[&proposal_id, &surviving_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            return Ok(None);
+        };
+        let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
+
+        // Re-check B is still open. If B closed between stage and execute, abandon
+        // the whole merge: return Ok(None) WITHOUT committing so the consume above
+        // (and any reads) roll back and the proposal remains usable.
+        let closed_at: Option<chrono::DateTime<chrono::Utc>> = tx
+            .query_one(
+                "SELECT closed_at FROM trace_accounts
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get("closed_at");
+        if closed_at.is_some() {
+            return Ok(None);
+        }
+
+        // Move B's ACTIVE principal links onto A. PK-column UPDATE; collision-free
+        // because (tenant_id, principal_ref) is UNIQUE and a principal has at most
+        // one active link.
+        let principals_moved = tx
+            .execute(
+                "UPDATE trace_account_principals
+                    SET account_id = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND unlinked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+
+        // Re-key B's ACTIVE webauthn credentials onto A (account_id is a non-key
+        // column, so a plain UPDATE is safe).
+        let webauthn_moved = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET account_id = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND revoked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+
+        // Re-key B's ACTIVE NEAR identities onto A, CLEARING payout_designated_at:
+        // A may already have its own designated payout, and the partial-unique
+        // index forbids two active designations per account. The contributor can
+        // re-designate afterward.
+        let near_moved = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET account_id = $1, payout_designated_at = NULL
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND revoked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+        let authenticators_moved = webauthn_moved + near_moved;
+
+        // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
+        // B's credentials now belong to A, so its old sessions must die.
+        tx.execute(
+            "UPDATE trace_sessions SET revoked_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[&absorbed_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Close B.
+        tx.execute(
+            "UPDATE trace_accounts SET closed_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND closed_at IS NULL",
+            &[&absorbed_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Hash-only / label-only audit. Actor is the surviving account A
+        // (reserved-prefix). Metadata is COUNTS ONLY: no principal_refs, public
+        // keys, or account uuids.
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(surviving_account_id),
+        );
+        let safe_metadata = serde_json::json!({
+            "principals_moved": principals_moved,
+            "authenticators_moved": authenticators_moved,
+        });
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&"account_merged", &actor_ref, &"success", &safe_metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::ExecutedMerge {
+            principals_moved,
+            authenticators_moved,
+        }))
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
@@ -1789,6 +3575,10 @@ mod tests {
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
+            include_str!("../../../../migrations/V30__trace_accounts.sql"),
+            include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
+            include_str!("../../../../migrations/V33__near_identities.sql"),
+            include_str!("../../../../migrations/V34__account_consolidation.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -1800,6 +3590,10 @@ mod tests {
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
+            include_str!("../../../../migrations/V30__trace_accounts.sql"),
+            include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
+            include_str!("../../../../migrations/V33__near_identities.sql"),
+            include_str!("../../../../migrations/V34__account_consolidation.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

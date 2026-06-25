@@ -50,6 +50,40 @@ issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-
   open. The pilot used a small `e2-standard-4`; the ingest binary CPU
   budget is dominated by fastembed.
 
+## Contributor accounts provisioning (Slices 1-3b)
+
+The contributor-account feature (accounts, passkeys, login-with-NEAR, credit
+consolidation) ships its schema in migrations V30-V34, which apply automatically
+on `trace-commons-ingest` boot (`run_migrations` runs before the HTTP bind). Two
+manual prerequisites must be in place or the feature fail-closes:
+
+- **Login-resolver LOGIN role (REQUIRED).** V30 creates the narrow
+  `trace_login_resolver` NOLOGIN role (column-scoped, NOBYPASSRLS) — the only
+  cross-tenant credential→tenant lookup. It cannot connect on its own; provision a
+  LOGIN member and point the resolver pool at it (see
+  `docs/operator/login-resolver-role.md`). As a Cloud SQL admin, after the first
+  boot has applied V30:
+  ```sql
+  CREATE ROLE tc_login_resolver_login LOGIN PASSWORD '<TC_LOGIN_RESOLVER_PASSWORD>' NOBYPASSRLS;
+  GRANT trace_login_resolver TO tc_login_resolver_login;
+  ```
+  Then set `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` (in `ingest.env.template`)
+  to that role. If unset, every device-link / passkey / NEAR login redeem returns
+  400 and no browser session resolves.
+- **Passkey RP config (REQUIRED for passkeys).** Set `TRACE_COMMONS_WEBAUTHN_RP_ID`
+  / `_RP_ORIGIN` / `_RP_NAME` (all three together) to the browser origin that serves
+  the account login UI. Partial config disables passkeys with a startup warning.
+
+Optional / posture:
+- **NEAR login** (`TRACE_COMMONS_NEAR_RPC_URL` / `_NEAR_NETWORK` /
+  `_NEAR_LOGIN_RECIPIENT`, all three together) is left commented in the template —
+  enable only if NEAR login is wanted at launch, and add a captured real-wallet
+  NEP-413 vector as a crypto cross-check first.
+- **Settlement** stays `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled` (credit accrues
+  internally, no on-chain payout). Real settlement (`http` mode) is deferred until a
+  credit contract + funded issuer exist (a future 3b-2). See
+  `docs/operator/settlement-mode.md` and `docs/operator/account-merge.md`.
+
 ## Build the binaries on the host
 
 ```
@@ -82,6 +116,7 @@ export TC_LE_EMAIL=ops@example.com
 export TC_KMS_KEY_NAME=projects/$TC_GCP_PROJECT/locations/$TC_GCP_REGION/keyRings/tc-pilot/cryptoKeys/kek-v1
 export TC_GCS_BUCKET=tc-pilot-artifacts-<DATE>
 export TC_RUNTIME_SA=tc-pilot-runtime@$TC_GCP_PROJECT.iam.gserviceaccount.com
+export TC_LOGIN_RESOLVER_PASSWORD=<tc_login_resolver_login role password>
 # ...plus all secret placeholders from ingest.env.template/issuer.env.template
 envsubst < deploy/pilot-gcp/ingest.env.template     > /tmp/ingest.env
 envsubst < deploy/pilot-gcp/issuer.env.template     > /tmp/issuer.env

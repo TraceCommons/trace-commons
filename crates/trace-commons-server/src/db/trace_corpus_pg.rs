@@ -41,12 +41,13 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
-    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
-    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
-    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
+    TraceSubmissionWrite, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
+    TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite, TraceTenantPolicyRecord,
+    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
+    TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -111,12 +112,15 @@ const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
 
 const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
-    status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
+    status, payout_near_account_id, created_at, submitted_at, near_transaction_hash, \
+    last_error_hash, confirmed_at";
 
+// The account-hold outbox table has no payout designation; project a typed NULL
+// so the shared `row_to_near_credit_outbox_item` mapper can read the column.
 const TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, credit_hold_id AS settlement_batch_id, credit_account_hash, \
-    near_call_json, status, created_at, submitted_at, near_transaction_hash, last_error_hash, \
-    confirmed_at";
+    near_call_json, status, NULL::text AS payout_near_account_id, created_at, submitted_at, \
+    near_transaction_hash, last_error_hash, confirmed_at";
 
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
     tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
@@ -529,6 +533,7 @@ fn row_to_near_credit_outbox_item(
             &status,
             "TraceCreditSettlementNearStatus",
         )?,
+        payout_near_account_id: row.get("payout_near_account_id"),
         created_at: row.get("created_at"),
         submitted_at: row.get("submitted_at"),
         near_transaction_hash: row.get("near_transaction_hash"),
@@ -1366,6 +1371,77 @@ impl TraceCorpusStore for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_submission).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+        cursor: Option<TraceSubmissionKeysetCursor>,
+        limit: i64,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        // An empty active principal set can own no submissions; return an empty
+        // page without querying the table (Hardening A/B: ownership is carried
+        // only by the set).
+        if principal_refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Tenant-leading keyset over `(received_at DESC, submission_id DESC)`
+        // backed by idx_trace_submissions_account_keyset (V31). The
+        // `= ANY($2)` filter is an index-condition over the active principal
+        // set; the cursor totally-orders across any number of principals
+        // (Hardening H). No offset.
+        const SELECT_COLUMNS: &str = "tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at";
+        let rows = match cursor {
+            Some(cursor) => {
+                let sql = format!(
+                    "SELECT {SELECT_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = $1
+                       AND auth_principal_ref = ANY($2)
+                       AND (received_at, submission_id) < ($3, $4)
+                     ORDER BY received_at DESC, submission_id DESC
+                     LIMIT $5"
+                );
+                tx.query(
+                    &sql,
+                    &[
+                        &tenant_id,
+                        &principal_refs,
+                        &cursor.received_at,
+                        &cursor.submission_id,
+                        &limit,
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?
+            }
+            None => {
+                let sql = format!(
+                    "SELECT {SELECT_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = $1
+                       AND auth_principal_ref = ANY($2)
+                     ORDER BY received_at DESC, submission_id DESC
+                     LIMIT $3"
+                );
+                tx.query(&sql, &[&tenant_id, &principal_refs, &limit])
+                    .await
+                    .map_err(DatabaseError::Postgres)?
+            }
+        };
         let records = rows.iter().map(row_to_submission).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
@@ -3915,13 +3991,14 @@ impl TraceCorpusStore for PgBackend {
                     &format!(
                         "INSERT INTO trace_near_credit_outbox (
                             tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
-                            near_call_json, status
-                         ) VALUES ($1, $2, $3, $4, $5, $6)
+                            near_call_json, status, payout_near_account_id
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                          ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
                             settlement_batch_id = excluded.settlement_batch_id,
                             credit_account_hash = excluded.credit_account_hash,
                             near_call_json = excluded.near_call_json,
-                            status = excluded.status
+                            status = excluded.status,
+                            payout_near_account_id = excluded.payout_near_account_id
                          RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
                     ),
                     &[
@@ -3931,6 +4008,7 @@ impl TraceCorpusStore for PgBackend {
                         &item.credit_account_hash,
                         &item.near_call_json,
                         &status,
+                        &item.payout_near_account_id,
                     ],
                 )
                 .await
@@ -4005,10 +4083,24 @@ impl TraceCorpusStore for PgBackend {
         status: TraceCreditSettlementNearStatus,
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
+        expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_storage = enum_to_storage(status)?;
+        // Optimistic prior-status allow-list (text[] or NULL). When NULL the write
+        // is unconditional; when present the UPDATE only matches a row whose current
+        // status is in the list, so the submit path can never re-advance an already
+        // `submitted`/`confirmed` row.
+        let expected_prior_storage: Option<Vec<String>> = match expected_prior_statuses {
+            Some(statuses) => Some(
+                statuses
+                    .into_iter()
+                    .map(enum_to_storage)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => None,
+        };
         let row = tx
             .query_opt(
                 &format!(
@@ -4032,6 +4124,7 @@ impl TraceCorpusStore for PgBackend {
                             ELSE last_error_hash
                          END
                      WHERE tenant_id = $1 AND near_outbox_id = $2
+                       AND ($6::text[] IS NULL OR status = ANY($6))
                      RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
                 ),
                 &[
@@ -4040,6 +4133,7 @@ impl TraceCorpusStore for PgBackend {
                     &status_storage,
                     &near_transaction_hash,
                     &last_error_hash,
+                    &expected_prior_storage,
                 ],
             )
             .await
@@ -4069,6 +4163,7 @@ impl TraceCorpusStore for PgBackend {
                             ELSE last_error_hash
                          END
                      WHERE tenant_id = $1 AND near_outbox_id = $2
+                       AND ($6::text[] IS NULL OR status = ANY($6))
                      RETURNING {TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS}"
                 ),
                 &[
@@ -4077,6 +4172,7 @@ impl TraceCorpusStore for PgBackend {
                     &status_storage,
                     &near_transaction_hash,
                     &last_error_hash,
+                    &expected_prior_storage,
                 ],
             )
             .await

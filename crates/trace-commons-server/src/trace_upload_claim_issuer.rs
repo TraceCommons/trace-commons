@@ -3709,6 +3709,7 @@ mod tests {
             url: SecretString::from(pg_url),
             pool_size: 4,
             ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
@@ -4025,6 +4026,7 @@ mod tests {
             url: SecretString::from(pg_url),
             pool_size: 4,
             ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
