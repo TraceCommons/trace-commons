@@ -23116,18 +23116,52 @@ async fn run_near_credit_outbox_submit_worker(
         .as_ref()
         .context("NEAR credit outbox submitter is not configured")?
         .clone();
-    for item in candidates {
-        let submit_request = match near_credit_submitter_request_from_outbox_item(&item) {
-            Ok(request) => request,
-            Err(error) => {
-                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
-                tracing::warn!(
+
+    // Serialize the live submit pass per-tenant with a session-level Postgres
+    // advisory lock held across the external submitter call and the status writes.
+    // Without it, two overlapping submit runs (scheduler tick racing a manual
+    // worker POST, or a slow run) could both observe the same `pending` row and
+    // both call the external submitter before either `pending -> submitted` flip
+    // lands — a money-path double on-chain submit. If the lock is already held by
+    // another run, no-op (leave rows pending for that run to drive); fail-closed.
+    let submit_lock = match state.db_mirror.as_ref() {
+        Some(db) => match db
+            .try_acquire_near_credit_submit_lock(&tenant.tenant_id)
+            .await
+            .context("failed to acquire NEAR credit submit advisory lock")?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                tracing::info!(
                     tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
-                    near_outbox_id = %item.near_outbox_id,
-                    error_hash = %last_error_hash,
-                    "Trace Commons NEAR credit outbox submit skipped invalid method call"
+                    "Trace Commons NEAR credit submit worker yielded: another submit run holds the lock"
                 );
-                update_near_credit_outbox_item_status_with_db_mirror(
+                append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
+                log_near_credit_outbox_submit_worker_summary(tenant, &response);
+                return Ok(response);
+            }
+        },
+        // No DB mirror configured: live submit cannot be serialized. The live
+        // submit path requires the mirror in practice; proceed without a lock only
+        // for the mirror-less (test/file-only) shape.
+        None => None,
+    };
+
+    // Run the submit loop under the held lock, capturing the result so the lock is
+    // always released explicitly before returning (success OR error).
+    let pass_result: anyhow::Result<()> = async {
+        for item in candidates {
+            let submit_request = match near_credit_submitter_request_from_outbox_item(&item) {
+                Ok(request) => request,
+                Err(error) => {
+                    let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                    tracing::warn!(
+                        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                        near_outbox_id = %item.near_outbox_id,
+                        error_hash = %last_error_hash,
+                        "Trace Commons NEAR credit outbox submit skipped invalid method call"
+                    );
+                    update_near_credit_outbox_item_status_with_db_mirror(
                     state,
                     tenant,
                     item.near_outbox_id,
@@ -23142,63 +23176,74 @@ async fn run_near_credit_outbox_submit_worker(
                         item.near_outbox_id
                     )
                 })?;
-                response.failed += 1;
-                continue;
-            }
-        };
-        match submitter.submit(submit_request).await {
-            Ok(submit_response) => {
-                let near_transaction_hash =
-                    normalize_near_transaction_hash(&submit_response.near_transaction_hash)?;
-                let updated = update_near_credit_outbox_item_status_with_db_mirror(
-                    state,
-                    tenant,
-                    item.near_outbox_id,
-                    StorageTraceCreditSettlementNearStatus::Submitted,
-                    Some(near_transaction_hash),
-                    None,
-                )
-                .await?
-                .with_context(|| {
-                    format!(
-                        "NEAR credit outbox item {} disappeared before submitted status update",
-                        item.near_outbox_id
+                    response.failed += 1;
+                    continue;
+                }
+            };
+            match submitter.submit(submit_request).await {
+                Ok(submit_response) => {
+                    let near_transaction_hash =
+                        normalize_near_transaction_hash(&submit_response.near_transaction_hash)?;
+                    let updated = update_near_credit_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.near_outbox_id,
+                        StorageTraceCreditSettlementNearStatus::Submitted,
+                        Some(near_transaction_hash),
+                        None,
                     )
-                })?;
-                anyhow::ensure!(
-                    updated.status == StorageTraceCreditSettlementNearStatus::Submitted,
-                    "NEAR credit outbox item {} did not update to submitted status",
-                    item.near_outbox_id
-                );
-                response.submitted += 1;
-            }
-            Err(error) => {
-                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
-                tracing::warn!(
-                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
-                    near_outbox_id = %item.near_outbox_id,
-                    error_hash = %last_error_hash,
-                    "Trace Commons NEAR credit outbox submit failed"
-                );
-                update_near_credit_outbox_item_status_with_db_mirror(
-                    state,
-                    tenant,
-                    item.near_outbox_id,
-                    StorageTraceCreditSettlementNearStatus::Failed,
-                    None,
-                    Some(last_error_hash),
-                )
-                .await?
-                .with_context(|| {
-                    format!(
-                        "NEAR credit outbox item {} disappeared before failed status update",
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "NEAR credit outbox item {} disappeared before submitted status update",
+                            item.near_outbox_id
+                        )
+                    })?;
+                    anyhow::ensure!(
+                        updated.status == StorageTraceCreditSettlementNearStatus::Submitted,
+                        "NEAR credit outbox item {} did not update to submitted status",
                         item.near_outbox_id
+                    );
+                    response.submitted += 1;
+                }
+                Err(error) => {
+                    let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                    tracing::warn!(
+                        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                        near_outbox_id = %item.near_outbox_id,
+                        error_hash = %last_error_hash,
+                        "Trace Commons NEAR credit outbox submit failed"
+                    );
+                    update_near_credit_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.near_outbox_id,
+                        StorageTraceCreditSettlementNearStatus::Failed,
+                        None,
+                        Some(last_error_hash),
                     )
-                })?;
-                response.failed += 1;
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "NEAR credit outbox item {} disappeared before failed status update",
+                            item.near_outbox_id
+                        )
+                    })?;
+                    response.failed += 1;
+                }
             }
         }
+        Ok(())
     }
+    .await;
+
+    if let Some(lock) = submit_lock {
+        lock.release()
+            .await
+            .context("failed to release NEAR credit submit advisory lock")?;
+    }
+    pass_result?;
+
     response.pending = pending_total.saturating_sub(response.submitted);
     append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
     log_near_credit_outbox_submit_worker_summary(tenant, &response);

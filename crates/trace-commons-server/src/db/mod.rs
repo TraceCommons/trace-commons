@@ -60,9 +60,67 @@ impl TraceCorpusRlsDiagnostics {
     }
 }
 
+/// Session-level Postgres advisory lock guarding the NEAR settlement SUBMIT
+/// pass for a single tenant. The lock is held on a dedicated pooled connection
+/// for the full duration of a submit run — across the external submitter call
+/// and the `pending -> submitted/failed` status writes — so two overlapping
+/// submit runs (e.g. a scheduler tick racing a manual worker POST) can never
+/// both invoke the external submitter for the same outbox row (money-path
+/// double-submit). The lock is independent of RLS / tenant transactions.
+///
+/// MUST be released by calling [`NearCreditSubmitAdvisoryLock::release`] when the
+/// pass completes; the connection is then returned to the pool. `Drop` is a
+/// best-effort safety net only (it cannot run async unlock), so callers are
+/// responsible for the explicit release on every path.
+pub struct NearCreditSubmitAdvisoryLock {
+    inner: Option<crate::db::postgres::NearCreditSubmitAdvisoryLockInner>,
+}
+
+impl NearCreditSubmitAdvisoryLock {
+    pub(crate) fn new(inner: crate::db::postgres::NearCreditSubmitAdvisoryLockInner) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    /// Release the advisory lock and return the connection to the pool. Idempotent.
+    pub async fn release(mut self) -> Result<(), DatabaseError> {
+        if let Some(inner) = self.inner.take() {
+            inner.release().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for NearCreditSubmitAdvisoryLock {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            // Safety net: the lock guard was dropped without an explicit
+            // `release().await`. The session-level lock will linger on the
+            // recycled connection until the backend session ends or the
+            // connection is reset. Log hash-free so operators can spot the leak.
+            tracing::warn!(
+                "NEAR credit submit advisory lock dropped without explicit release; \
+                 connection-scoped lock may linger until session reset"
+            );
+        }
+    }
+}
+
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Try to acquire the per-tenant NEAR settlement submit advisory lock without
+    /// blocking. Returns `Ok(Some(guard))` if acquired (caller may proceed and
+    /// MUST `release()` it), or `Ok(None)` if another submit run already holds it
+    /// (caller must no-op). Default impl returns `Ok(None)` (no serialization
+    /// available), which is fail-closed for the submit worker.
+    async fn try_acquire_near_credit_submit_lock(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<NearCreditSubmitAdvisoryLock>, DatabaseError> {
+        Ok(None)
+    }
 
     async fn trace_corpus_rls_diagnostics(
         &self,

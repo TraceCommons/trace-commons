@@ -69751,3 +69751,174 @@ async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+// --- Slice 3b race fix: NEAR settlement submit worker must not double-submit ---
+
+/// Blocking, call-counting NEAR credit submitter for the concurrent-worker
+/// regression. On first `submit` it signals `entered` and then parks on `proceed`,
+/// so the test can deterministically overlap a second submit-worker run while the
+/// first holds the per-tenant submit advisory lock. Counts total `submit` calls so
+/// the test can assert the external submitter fires EXACTLY ONCE for the shared row.
+#[derive(Clone)]
+struct BlockingCountingNearCreditSubmitter {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl TraceNearCreditSubmitter for BlockingCountingNearCreditSubmitter {
+    async fn submit(
+        &self,
+        _request: TraceNearCreditSubmitterRequest,
+    ) -> anyhow::Result<TraceNearCreditSubmitterResponse> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            // First (and only legitimate) submit: announce entry, then block until
+            // the test has driven the competing run and released us.
+            self.entered.notify_one();
+            self.proceed.notified().await;
+        }
+        Ok(TraceNearCreditSubmitterResponse {
+            near_transaction_hash: TEST_NEAR_TX_HASH_1.to_string(),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(BlockingCountingNearCreditSubmitter {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            proceed: proceed.clone(),
+        }));
+
+    // Designate a payout for the account BEFORE settlement so the finalize enqueues
+    // exactly one `pending` outbox row routed to the payout target.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for concurrent submit race".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Run A: acquires the submit lock, enters the (blocking) submitter, parks.
+    let state_a = state.clone();
+    let run_a = tokio::spawn(async move {
+        near_credit_outbox_submit_worker_handler(
+            State(state_a),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("race run A".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+    });
+
+    // Wait until A is inside the external submitter (lock held, mid-submit).
+    entered.notified().await;
+
+    // Run B overlaps while A holds the lock: it must yield (lock not acquired) and
+    // NOT call the external submitter for the same row.
+    let Json(b) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("race run B".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("run B returns (yields on contended lock)");
+    assert_eq!(
+        b.submitted, 0,
+        "contended run B must not submit the row held by run A"
+    );
+
+    // Release A; it completes its single submit.
+    proceed.notify_one();
+    let Json(a) = run_a
+        .await
+        .expect("run A task joins")
+        .expect("run A succeeds");
+    assert_eq!(a.submitted, 1, "run A submits the row exactly once");
+
+    // The external submitter was invoked EXACTLY ONCE for the shared row.
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "external submitter must be called exactly once across both runs"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let submitted: Vec<_> = outbox
+        .iter()
+        .filter(|i| i.status == StorageTraceCreditSettlementNearStatus::Submitted)
+        .collect();
+    assert_eq!(submitted.len(), 1, "exactly one row ends submitted");
+    assert_eq!(
+        submitted[0].near_transaction_hash.as_deref(),
+        Some(TEST_NEAR_TX_HASH_1),
+        "submitted row carries the single submit's tx hash"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

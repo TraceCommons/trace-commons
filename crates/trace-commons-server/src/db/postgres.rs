@@ -45,6 +45,38 @@ fn session_rotation_grace_secs() -> i64 {
         .unwrap_or(SESSION_ROTATION_GRACE_SECS_DEFAULT)
 }
 
+/// Fixed advisory-lock namespace (classid) for the NEAR settlement submit serializer.
+/// Paired with a per-tenant objid (`hashtext('near-credit-submit:'||tenant)`), the
+/// two-int `pg_try_advisory_lock(classid, objid)` form keeps this lock space
+/// disjoint from the one-arg `pg_advisory_xact_lock(hashtext(tenant))` used by the
+/// audit-chain append, so the two can never alias.
+const NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID: i32 = 0x7472_6163u32 as i32; // "trac"
+
+/// Owns the pooled connection that holds a session-level advisory lock for the
+/// duration of a NEAR settlement submit pass. Released explicitly via
+/// [`NearCreditSubmitAdvisoryLockInner::release`]; see the public
+/// `NearCreditSubmitAdvisoryLock` wrapper in `db::mod` for lifecycle docs.
+pub struct NearCreditSubmitAdvisoryLockInner {
+    client: deadpool_postgres::Object,
+    objid: i32,
+}
+
+impl NearCreditSubmitAdvisoryLockInner {
+    pub(crate) async fn release(self) -> Result<(), DatabaseError> {
+        // Best-effort unlock on the SAME connection that took the lock; session
+        // advisory locks are connection-scoped, so this must run here before the
+        // connection returns to the pool.
+        self.client
+            .execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &self.objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
 pub struct PgBackend {
     pool: Pool,
     /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
@@ -302,6 +334,42 @@ impl PgBackend {
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn try_acquire_near_credit_submit_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::db::NearCreditSubmitAdvisoryLock>, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        // Derive the per-tenant objid in SQL so it matches the unlock key exactly.
+        let objid: i32 = client
+            .query_one(
+                "SELECT hashtext('near-credit-submit:' || $1)",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        let acquired: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1, $2)",
+                &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if !acquired {
+            // Another submit run already holds the lock; drop the connection back
+            // to the pool without taking ownership.
+            return Ok(None);
+        }
+        Ok(Some(crate::db::NearCreditSubmitAdvisoryLock::new(
+            NearCreditSubmitAdvisoryLockInner { client, objid },
+        )))
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         let client = self
             .trace_pool()
