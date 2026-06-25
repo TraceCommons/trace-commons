@@ -70271,3 +70271,144 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+/// Config-edge fail-closed: a DB mirror is present but DB-mirror writes are NOT
+/// required (`require_db_mirror_writes=false`, best-effort dual write). In that mode
+/// neither store is guaranteed authoritative — a submit can write the FILE
+/// `submitted` then fail the best-effort DB write, leaving the DB stale `pending`,
+/// so a DB-authoritative read could re-fire the external submitter. The live submit
+/// worker must REFUSE (503 missing-control) and mutate nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    // Seed with required mirror writes so the pending row lands in BOTH stores; the
+    // submit attempt below flips into the unsafe best-effort mode the gate refuses.
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+    // Seed one pending outbox row (with require=true so the mirror write lands), then
+    // flip the worker into the unsafe best-effort mode for the submit attempt.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for fail-closed config edge".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+
+    // Drop into best-effort dual-write mode (the unsafe config the gate refuses).
+    Arc::make_mut(&mut state).require_db_mirror_writes = false;
+
+    let submit_error = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("best-effort submit attempt".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect_err("live submit must fail closed without required DB mirror writes");
+    assert_eq!(submit_error.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        submit_error
+            .1
+            .0
+            .error
+            .contains("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"),
+        "fail-closed names the missing control"
+    );
+
+    // No external submit and no status mutation: the row stays pending in both stores.
+    assert!(
+        calls.lock().expect("calls lock").is_empty(),
+        "external submitter is never called in the refused config"
+    );
+    let file_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("file read");
+    assert_eq!(file_items.len(), 1);
+    assert_eq!(
+        file_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "file row remains pending (no mutation)"
+    );
+    let db_items = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("DB list");
+    assert_eq!(
+        db_items[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "DB row remains pending (no mutation)"
+    );
+
+    // The dry_run PREVIEW path stays available (it never mutates) even in this mode.
+    let Json(preview) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("best-effort preview".to_string()),
+            dry_run: true,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry_run preview is allowed in best-effort mode");
+    assert!(preview.dry_run);
+    assert_eq!(preview.submitted, 0);
+    assert!(
+        calls.lock().expect("calls lock").is_empty(),
+        "preview does not call the external submitter"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

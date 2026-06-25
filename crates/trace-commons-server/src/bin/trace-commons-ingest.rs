@@ -22156,6 +22156,19 @@ async fn near_credit_outbox_submit_worker_handler(
             "NEAR credit outbox submit worker requires TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN",
         ));
     }
+    // The live submit pass reads candidate status DB-authoritatively, which is only
+    // safe when DB-mirror writes are REQUIRED. In best-effort dual-write mode
+    // (`require_db_mirror_writes=false`) a submit can write the FILE `submitted` and
+    // then fail the best-effort DB status write, leaving the DB stale `pending`; a
+    // later run would re-read that stale row and re-fire the external submitter.
+    // Refuse fail-closed rather than trust a possibly-stale store. (No mirror = a
+    // single source with no skew, which proceeds on the file path.)
+    if !body.dry_run && state.db_mirror.is_some() && !state.require_db_mirror_writes {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NEAR credit outbox submit worker requires TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true when a DB mirror is configured",
+        ));
+    }
     let response = run_near_credit_outbox_submit_worker(state.as_ref(), &tenant, body)
         .await
         .map_err(maintenance_error)?;
