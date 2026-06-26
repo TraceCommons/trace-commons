@@ -1,46 +1,65 @@
 #!/usr/bin/env bash
-# Pull a Cloud Build-produced trace-commons-ingest binary from GCS and install it
-# on the pilot host, then restart the service. Pairs with cloudbuild.yaml.
+# Pull Cloud Build-produced binaries from GCS and install them on the pilot host,
+# restarting the services. Pairs with cloudbuild.yaml.
+#
+# The pilot runs two services; both can change, so this deploys BOTH by default:
+#   - trace-commons-upload-claim-issuer  (EdDSA claims, device-key registration,
+#     per-user subject, /v1/enroll; serves the JWKS the ingest verifies at boot)
+#   - trace-commons-ingest               (account API; applies migrations on boot)
+# The issuer is installed first so its (possibly rotated) JWKS is up before ingest
+# restarts and fetches it.
 #
 # Usage (on tc-pilot-host):
-#   deploy/pilot-gcp/pull-and-install.sh [<gs://.../trace-commons-ingest>]
-# With no arg it reads the `latest.txt` pointer the build publishes.
+#   deploy/pilot-gcp/pull-and-install.sh            # both binaries (default)
+#   deploy/pilot-gcp/pull-and-install.sh ingest     # just ingest
+#   deploy/pilot-gcp/pull-and-install.sh issuer     # just the issuer
 #
-# Verifies the sha256 sidecar, backs up the running binary, installs, and
-# restarts trace-commons-ingest (which auto-applies any pending migrations).
+# Each install verifies the sha256 sidecar, backs up the running binary, installs,
+# and restarts the service. Reads the per-binary `latest.txt` pointer the build
+# publishes.
 set -euo pipefail
 
 BUCKET="${TC_ARTIFACT_BUCKET:-tc-pilot-artifacts-20260518}"
-BIN_DEST="/opt/tracecommons/bin/trace-commons-ingest"
-LATEST="gs://${BUCKET}/binaries/trace-commons-ingest/latest.txt"
 
-SRC="${1:-}"
-if [ -z "$SRC" ]; then
-  SRC="$(gcloud storage cat "$LATEST")"
-fi
-echo "Pulling: $SRC"
+install_one() {
+  local bin="$1" svc="$2"
+  local latest="gs://${BUCKET}/binaries/${bin}/latest.txt"
+  local src
+  src="$(gcloud storage cat "$latest")"
+  echo "[$bin] pulling: $src"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-gcloud storage cp "$SRC" "$TMP/trace-commons-ingest"
-gcloud storage cp "${SRC}.sha256" "$TMP/trace-commons-ingest.sha256" || true
+  local tmp
+  tmp="$(mktemp -d)"
+  gcloud storage cp "$src" "$tmp/$bin"
+  if gcloud storage cp "${src}.sha256" "$tmp/$bin.sha256" 2>/dev/null; then
+    ( cd "$tmp" && sha256sum -c "$bin.sha256" )
+    echo "[$bin] sha256 verified"
+  else
+    echo "[$bin] WARNING: no sha256 sidecar; skipping checksum" >&2
+  fi
+  chmod 0755 "$tmp/$bin"
 
-if [ -f "$TMP/trace-commons-ingest.sha256" ]; then
-  ( cd "$TMP" && awk '{print $1"  trace-commons-ingest"}' trace-commons-ingest.sha256 | sha256sum -c - )
-  echo "sha256 verified"
-else
-  echo "WARNING: no sha256 sidecar found; skipping checksum verification" >&2
-fi
+  local stamp dest
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  dest="/opt/tracecommons/bin/$bin"
+  sudo cp -av "$dest" "${dest}.bak-${stamp}"
+  sudo install -o root -g root -m 0755 "$tmp/$bin" "$dest"
+  rm -rf "$tmp"
+  echo "[$bin] installed $dest"
 
-chmod 0755 "$TMP/trace-commons-ingest"
-"$TMP/trace-commons-ingest" --version 2>/dev/null || true
+  sudo systemctl restart "$svc"
+  sleep 8
+  echo "[$bin] $(systemctl is-active "$svc")"
+  echo "[$bin] rollback: sudo install -m0755 ${dest}.bak-${stamp} ${dest} && sudo systemctl restart $svc"
+}
 
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-sudo cp -av "$BIN_DEST" "${BIN_DEST}.bak-${STAMP}"
-sudo install -o root -g root -m 0755 "$TMP/trace-commons-ingest" "$BIN_DEST"
-echo "installed $BIN_DEST"
-
-sudo systemctl restart trace-commons-ingest
-sleep 10
-systemctl is-active trace-commons-ingest
-echo "done; rollback with: sudo install -m0755 ${BIN_DEST}.bak-${STAMP} ${BIN_DEST} && sudo systemctl restart trace-commons-ingest"
+case "${1:-both}" in
+  ingest) install_one trace-commons-ingest trace-commons-ingest ;;
+  issuer) install_one trace-commons-upload-claim-issuer trace-commons-upload-claim-issuer ;;
+  both)
+    install_one trace-commons-upload-claim-issuer trace-commons-upload-claim-issuer
+    install_one trace-commons-ingest trace-commons-ingest
+    ;;
+  *) echo "usage: $0 [both|ingest|issuer]" >&2; exit 2 ;;
+esac
+echo "done."
