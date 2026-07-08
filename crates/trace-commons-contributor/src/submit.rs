@@ -632,6 +632,52 @@ mod tests {
         );
     }
 
+    /// An issuer that predates the consent_scopes/allowed_uses echo: the
+    /// claim response omits both fields entirely.
+    fn stub_issuer_omits_scope_echo() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                }))
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_stamped_with_requested_scopes_when_issuer_omits_echo() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_omits_scope_echo()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        // cfg_for requests debugging_evaluation + model_training; the stub
+        // issuer's claim response has no consent_scopes/allowed_uses fields
+        // at all, so the fallback must stamp the requested set verbatim.
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 1);
+        let sent = &received_guard[0];
+        assert_eq!(
+            sent["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+    }
+
     #[tokio::test]
     async fn scope_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
         let received = Arc::new(Mutex::new(Vec::new()));

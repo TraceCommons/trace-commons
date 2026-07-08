@@ -546,6 +546,15 @@ mod tests {
         assert!(!msg.contains("stored config"), "{msg}");
     }
 
+    #[test]
+    fn non_tty_default_falls_back_to_debugging_evaluation_only() {
+        // `cargo test` runs with stdin that is not a terminal, so this
+        // exercises the non-interactive silent-default branch rather than
+        // the interactive prompt path.
+        let scopes = resolve_consent_scopes(None).unwrap();
+        assert_eq!(scopes, vec!["debugging_evaluation".to_string()]);
+    }
+
     #[tokio::test]
     async fn login_rejects_issuer_host_off_allowlist_and_saves_nothing() {
         let dir = tempfile::tempdir().unwrap();
