@@ -70803,3 +70803,446 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), &tenant).await;
 }
+
+// ============================================================================
+// Slice 0 Task 2: device-key claim paths derive their scope ceiling from
+// tenant access grants.
+// ============================================================================
+
+// In-memory device-key + tenant-access-grant registry stub used exclusively by
+// the `device_key_claims_honor_grant_scope_ceiling` test below. The issuer
+// device-key claim path calls `Database::get_device_key` and
+// `TraceCorpusStore::list_active_trace_tenant_access_grants_for_principal`;
+// every other `TraceCorpusStore` / `Database` method is an unreachable stub
+// that panics if reached.
+struct DeviceGrantScopeTestDb {
+    device_keys: std::sync::RwLock<
+        std::collections::HashMap<
+            (String, String),
+            trace_commons_server::db::DeviceKeyRecord,
+        >,
+    >,
+    grants: std::sync::RwLock<
+        std::collections::HashMap<String, Vec<StorageTraceTenantAccessGrantRecord>>,
+    >,
+}
+
+impl DeviceGrantScopeTestDb {
+    fn new() -> Self {
+        Self {
+            device_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
+            grants: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn insert_device_key(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        record: trace_commons_server::db::DeviceKeyRecord,
+    ) {
+        self.device_keys
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), device_key_id.to_string()), record);
+    }
+
+    fn insert_grant(&self, principal_ref: &str, grant: StorageTraceTenantAccessGrantRecord) {
+        self.grants
+            .write()
+            .unwrap()
+            .entry(principal_ref.to_string())
+            .or_default()
+            .push(grant);
+    }
+}
+
+// TraceCorpusStore: all methods except the grant lookup are unreachable — the
+// issuer device-key ceiling path never calls any of them.
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for DeviceGrantScopeTestDb {
+    async fn upsert_trace_submission(&self, _: StorageTraceSubmissionWrite) -> Result<StorageTraceSubmissionRecord, DatabaseError> { todo!("stub") }
+    async fn get_trace_submission(&self, _: &str, _: Uuid) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+    async fn list_trace_submissions(&self, _: &str) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+    async fn list_account_trace_submissions_keyset(&self, _: &str, _: &[String], _: Option<TraceSubmissionKeysetCursor>, _: i64) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_tenant_policy(&self, _: StorageTraceTenantPolicyWrite) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> { todo!("stub") }
+    async fn get_trace_tenant_policy(&self, _: &str) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_tenant_access_grant(&self, _: StorageTraceTenantAccessGrantWrite) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_tenant_access_grants(&self, _: &str) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> { todo!("stub") }
+    async fn list_active_trace_tenant_access_grants_for_principal(&self, _tenant_id: &str, principal_ref: &str, _now: DateTime<Utc>) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        Ok(self
+            .grants
+            .read()
+            .unwrap()
+            .get(principal_ref)
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn list_trace_credit_events(&self, _: &str) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> { todo!("stub") }
+    async fn update_trace_submission_status(&self, _: &str, _: Uuid, _: StorageTraceCorpusStatus, _: &str, _: Option<&str>) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn claim_trace_review_lease(&self, _: &str, _: Uuid, _: &str, _: DateTime<Utc>, _: Option<DateTime<Utc>>, _: DateTime<Utc>) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+    async fn release_trace_review_lease(&self, _: &str, _: Uuid, _: &str) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
+    async fn append_trace_object_ref(&self, _: StorageTraceObjectRefWrite) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn list_trace_object_refs(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> { todo!("stub") }
+    async fn get_latest_active_trace_object_ref(&self, _: &str, _: Uuid, _: StorageTraceObjectArtifactKind) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> { todo!("stub") }
+    async fn append_trace_derived_record(&self, _: StorageTraceDerivedRecordWrite) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn list_trace_derived_records(&self, _: &str) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_vector_entry(&self, _: StorageTraceVectorEntryWrite) -> Result<StorageTraceVectorEntryRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_vector_entries(&self, _: &str) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_model_version(&self, _: StorageTraceRankingModelVersionWrite) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_model_versions(&self, _: &str) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_calibration_dataset(&self, _: StorageTraceRankingCalibrationDatasetWrite) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
+    async fn update_trace_ranking_calibration_dataset_status(&self, _: StorageTraceRankingCalibrationDatasetStatusUpdate) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_calibration_datasets(&self, _: &str) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_feature(&self, _: StorageTraceRankingFeatureWrite) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_features(&self, _: &str) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_prediction(&self, _: StorageTraceRankingPredictionWrite) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_predictions(&self, _: &str) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_label(&self, _: StorageTraceRankingLabelWrite) -> Result<StorageTraceRankingLabelRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_labels(&self, _: &str) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_preference_label(&self, _: StorageTraceRankingPreferenceLabelWrite) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_preference_labels(&self, _: &str) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_calibration_run(&self, _: StorageTraceRankingCalibrationRunWrite) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_calibration_runs(&self, _: &str) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_ranking_worker_run(&self, _: StorageTraceRankingWorkerRunWrite) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_ranking_worker_runs(&self, _: &str) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_export_manifest(&self, _: StorageTraceExportManifestWrite) -> Result<StorageTraceExportManifestRecord, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_export_manifest_mirror(&self, _: StorageTraceExportManifestMirrorWrite) -> Result<StorageTraceExportManifestRecord, DatabaseError> { todo!("stub") }
+    async fn delete_trace_export_manifest_mirror(&self, _: &str, _: Uuid) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn list_trace_export_manifests(&self, _: &str) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_export_manifest_item(&self, _: StorageTraceExportManifestItemWrite) -> Result<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_export_manifest_items(&self, _: &str, _: Uuid) -> Result<Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>, DatabaseError> { todo!("stub") }
+    async fn invalidate_trace_export_manifests_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+    async fn invalidate_trace_export_manifest_items_for_submission(&self, _: &str, _: Uuid, _: StorageTraceExportManifestItemInvalidationReason) -> Result<u64, DatabaseError> { todo!("stub") }
+    async fn invalidate_trace_vector_entries_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+    async fn invalidate_trace_vector_entry_for_submission(&self, _: &str, _: Uuid, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
+    async fn append_trace_audit_event(&self, _: StorageTraceAuditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn list_trace_audit_events(&self, _: &str) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+    async fn list_recent_trace_audit_events(&self, _: &str, _: usize) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+    async fn get_trace_audit_event_by_id(&self, _: &str, _: Uuid) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
+    async fn append_trace_credit_event(&self, _: StorageTraceCreditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn upsert_trace_utility_attestation(&self, _: StorageTraceUtilityAttestationWrite) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_utility_attestations(&self, _: &str) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_credit_settlement_batch(&self, _: StorageTraceCreditSettlementBatchWrite) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_credit_settlement_batches(&self, _: &str) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_credit_hold(&self, _: StorageTraceCreditHoldWrite) -> Result<StorageTraceCreditHoldRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_credit_holds(&self, _: &str) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_near_credit_outbox_item(&self, _: StorageTraceNearCreditOutboxItemWrite) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_near_credit_outbox_items(&self, _: &str) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
+    async fn update_trace_near_credit_outbox_status(&self, _: &str, _: Uuid, _: StorageTraceCreditSettlementNearStatus, _: Option<String>, _: Option<String>, _: Option<Vec<StorageTraceCreditSettlementNearStatus>>) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_benchmark_registry_outbox_item(&self, _: StorageTraceBenchmarkRegistryOutboxItemWrite) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_benchmark_registry_outbox_items(&self, _: &str) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
+    async fn update_trace_benchmark_registry_outbox_status(&self, _: &str, _: Uuid, _: StorageTraceBenchmarkRegistryOutboxStatus, _: Option<String>, _: Option<String>) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
+    async fn write_trace_tombstone(&self, _: StorageTraceTombstoneWrite) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn list_trace_tombstones(&self, _: &str) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_retention_job(&self, _: StorageTraceRetentionJobWrite) -> Result<StorageTraceRetentionJobRecord, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_retention_job_item(&self, _: StorageTraceRetentionJobItemWrite) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_retention_jobs(&self, _: &str) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> { todo!("stub") }
+    async fn list_trace_retention_job_items(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_export_access_grant(&self, _: StorageTraceExportAccessGrantWrite) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_export_access_grants(&self, _: &str) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_export_job(&self, _: StorageTraceExportJobWrite) -> Result<StorageTraceExportJobRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_export_jobs(&self, _: &str) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
+    async fn update_trace_export_job_status(&self, _: &str, _: Uuid, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
+    async fn claim_next_trace_export_job(&self, _: &str, _: Option<&str>, _: DateTime<Utc>, _: &str) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
+    async fn recover_stale_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
+    async fn retry_failed_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_revocation_propagation_item(&self, _: StorageTraceRevocationPropagationItemWrite) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> { todo!("stub") }
+    async fn list_trace_revocation_propagation_items(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+    async fn list_due_trace_revocation_propagation_items(&self, _: &str, _: DateTime<Utc>, _: u32) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+    async fn update_trace_revocation_propagation_item_status(&self, _: &str, _: Uuid, _: StorageTraceRevocationPropagationItemStatusUpdate) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
+    async fn invalidate_trace_submission_artifacts(&self, _: &str, _: Uuid, _: StorageTraceDerivedStatus) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> { todo!("stub") }
+    async fn mark_trace_object_ref_deleted(&self, _: &str, _: Uuid, _: &str, _: &str) -> Result<u64, DatabaseError> { todo!("stub") }
+    async fn insert_trace_gate_decision(&self, _: &str, _: StorageTraceGateDecisionRow) -> Result<(), DatabaseError> { todo!("stub") }
+    async fn stream_trace_gate_decisions_for_replay(&self, _: &str, _: u32, _: Option<(DateTime<Utc>, Uuid)>) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> { todo!("stub") }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> { todo!("stub") }
+}
+
+#[async_trait::async_trait]
+impl Database for DeviceGrantScopeTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn get_device_key(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+    ) -> Result<Option<trace_commons_server::db::DeviceKeyRecord>, DatabaseError> {
+        Ok(self
+            .device_keys
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), device_key_id.to_string()))
+            .cloned())
+    }
+}
+
+/// `principal_sha256:<hex>` ref for a device principal, matching the private
+/// `principal_storage_ref` helper in `trace_upload_claim_issuer.rs`. Computed
+/// independently here (not by calling private issuer code) so the test also
+/// pins the format contract.
+fn test_device_grant_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let raw = format!("device:{tenant_id}:{device_key_id}");
+    format!("principal_sha256:{}", hex::encode(Sha256::digest(raw.as_bytes())))
+}
+
+/// Device-key claim scopes derive from tenant access grants (Task 2 of the
+/// consent-scope broadening slice): with a grant DB configured and an active
+/// `role=contributor` grant for the device principal, a claim request is
+/// clipped to the intersection of the request and the grant-derived ceiling;
+/// a request outside the ceiling is refused with 403; a device key with no
+/// grant row falls back unchanged to the hardcoded pilot floor.
+#[tokio::test]
+async fn device_key_claims_honor_grant_scope_ceiling() {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt as _;
+    use trace_commons_server::trace_upload_claim_issuer::{
+        TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION, TraceUploadClaimIssuerConfig,
+        trace_upload_claim_issuer_router,
+    };
+
+    let tenant_id = "tenant-device-grant";
+
+    // Two device keypairs: one with an active contributor grant, one without.
+    use ring::signature::KeyPair;
+    let rng = ring::rand::SystemRandom::new();
+    let granted_pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("granted keypair generates");
+    let granted_kp = ring::signature::Ed25519KeyPair::from_pkcs8(granted_pkcs8.as_ref())
+        .expect("granted keypair parses");
+    let granted_pk = granted_kp.public_key().as_ref().to_vec();
+    let granted_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&granted_pk);
+    let granted_device_key_id =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&granted_pk);
+
+    let ungranted_pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+        .expect("ungranted keypair generates");
+    let ungranted_kp = ring::signature::Ed25519KeyPair::from_pkcs8(ungranted_pkcs8.as_ref())
+        .expect("ungranted keypair parses");
+    let ungranted_pk = ungranted_kp.public_key().as_ref().to_vec();
+    let ungranted_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&ungranted_pk);
+    let ungranted_device_key_id =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&ungranted_pk);
+
+    let stub = Arc::new(DeviceGrantScopeTestDb::new());
+    stub.insert_device_key(
+        tenant_id,
+        &granted_device_key_id,
+        trace_commons_server::db::DeviceKeyRecord {
+            device_key_id: granted_device_key_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            public_key: granted_pk_b64.clone(),
+            invite_subject_hash: "sha256:stub".to_string(),
+            client_info: serde_json::json!({}),
+            created_at: Utc::now(),
+            revoked_at: None,
+        },
+    );
+    stub.insert_device_key(
+        tenant_id,
+        &ungranted_device_key_id,
+        trace_commons_server::db::DeviceKeyRecord {
+            device_key_id: ungranted_device_key_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            public_key: ungranted_pk_b64.clone(),
+            invite_subject_hash: "sha256:stub".to_string(),
+            client_info: serde_json::json!({}),
+            created_at: Utc::now(),
+            revoked_at: None,
+        },
+    );
+
+    let granted_principal_ref = test_device_grant_principal_ref(tenant_id, &granted_device_key_id);
+    let now = Utc::now();
+    stub.insert_grant(
+        &granted_principal_ref,
+        StorageTraceTenantAccessGrantRecord {
+            tenant_id: tenant_id.to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: granted_principal_ref.clone(),
+            role: StorageTraceTenantAccessGrantRole::Contributor,
+            status: StorageTraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
+            allowed_uses: vec!["debugging".into(), "evaluation".into(), "model_training".into()],
+            issuer: None,
+            audience: None,
+            subject: None,
+            issued_at: now,
+            expires_at: None,
+            revoked_at: None,
+            created_by_principal_ref: None,
+            revoked_by_principal_ref: None,
+            reason: None,
+            metadata: std::collections::BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        },
+    );
+
+    let config = || TraceUploadClaimIssuerConfig {
+        bind: "127.0.0.1:0".parse().expect("bind parses"),
+        signing_private_key_pem: TEST_EDDSA_PRIVATE_KEY_PEM.to_string(),
+        signing_public_key_pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+        signing_kid: "issuer-key-1".to_string(),
+        issuer: "trace-commons-upload-issuer".to_string(),
+        audience: "trace-commons-upload".to_string(),
+        max_ttl_seconds: 300,
+        workload_public_key_pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+        workload_issuer: None,
+        workload_audience: None,
+        tenant_access_grant_db: Some(stub.clone() as Arc<dyn Database>),
+        require_tenant_access_grants: false,
+        shutdown_grace_seconds: 30,
+        request_timeout_seconds: 10,
+        max_request_bytes: 64 * 1024,
+        allowlist_source: None,
+        allowlist_refresh_interval_seconds: 60,
+        allowlist_max_stale_seconds: 3600,
+        onboarding_device_key_db: Some(stub.clone() as Arc<dyn Database>),
+        onboarding_ingest_url: Some("https://ingest.tracecommons.ai".to_string()),
+        onboarding_community_url: None,
+        onboarding_profile_url: None,
+        onboarding_leaderboard_url: None,
+        admin_bind: None,
+    };
+
+    async fn post_device_claim(
+        config: TraceUploadClaimIssuerConfig,
+        device_key_id: &str,
+        device_kp: &ring::signature::Ed25519KeyPair,
+        tenant_id: &str,
+        consent_scopes: &[&str],
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let body_json = serde_json::json!({
+            "schema_version": TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION,
+            "tenant_id": tenant_id,
+            "audience": "trace-commons-upload",
+            "trace_id": Uuid::new_v4(),
+            "submission_id": Uuid::new_v4(),
+            "consent_scopes": consent_scopes,
+            "requested_at": Utc::now(),
+        });
+        let body_str = body_json.to_string();
+        let sig = device_kp.sign(body_str.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+
+        let router = trace_upload_claim_issuer_router(config)
+            .expect("device grant test issuer router must build");
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/v1/trace-upload-claim")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header("x-trace-device-key-id", device_key_id)
+                    .header("x-trace-device-signature", sig_b64.as_str())
+                    .body(Body::from(body_str))
+                    .expect("claim request must build"),
+            )
+            .await
+            .expect("issuer oneshot must complete");
+        let status = response.status();
+        let body_bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body must read");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("response body must be JSON");
+        (status, body)
+    }
+
+    // Assertion 1: request within the grant-derived ceiling is granted in
+    // full, and the JWT claim matches the response echo.
+    let (status, body) = post_device_claim(
+        config(),
+        &granted_device_key_id,
+        &granted_kp,
+        tenant_id,
+        &["debugging_evaluation", "model_training"],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let granted_scopes = body["consent_scopes"]
+        .as_array()
+        .expect("consent_scopes array")
+        .iter()
+        .map(|v| v.as_str().expect("scope string").to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        granted_scopes,
+        std::collections::BTreeSet::from([
+            "debugging_evaluation".to_string(),
+            "model_training".to_string(),
+        ]),
+        "grant-derived ceiling must admit both requested scopes: {body}"
+    );
+
+    let token = body["access_token"].as_str().expect("access token");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.set_issuer(&["trace-commons-upload-issuer"]);
+    validation.set_audience(&["trace-commons-upload"]);
+    let claims = jsonwebtoken::decode::<serde_json::Value>(
+        token,
+        &DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+            .expect("issuer public key parses"),
+        &validation,
+    )
+    .expect("issuer token verifies")
+    .claims;
+    assert_eq!(
+        claims["allowed_consent_scopes"], body["consent_scopes"],
+        "JWT claim must match the response echo"
+    );
+
+    // Assertion 2: a request entirely outside the grant-derived ceiling is
+    // refused with 403 and the exact error label.
+    let (status, body) = post_device_claim(
+        config(),
+        &granted_device_key_id,
+        &granted_kp,
+        tenant_id,
+        &["benchmark_only"],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, serde_json::json!({"error": "consent scopes not permitted"}));
+
+    // Assertion 3 (regression pin): a device key with no grant row falls back
+    // unchanged to the hardcoded pilot floor.
+    let (status, body) = post_device_claim(
+        config(),
+        &ungranted_device_key_id,
+        &ungranted_kp,
+        tenant_id,
+        &[],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(
+        body["consent_scopes"],
+        serde_json::json!(["debugging_evaluation", "public_attribution"]),
+        "no-grant device key must fall back to the exact hardcoded floor: {body}"
+    );
+}

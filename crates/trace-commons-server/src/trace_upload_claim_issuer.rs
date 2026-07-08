@@ -1433,6 +1433,58 @@ impl TraceUploadClaimIssuerState {
         .await
     }
 
+    /// Ceiling for a device principal: parsed scopes from active contributor
+    /// grants when a grant DB is configured and rows exist; otherwise the
+    /// hardcoded pilot floor. PublicAttribution is always included.
+    async fn resolve_device_scope_ceiling(
+        &self,
+        tenant_id: &str,
+        grant_principal_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ConsentScope>, Vec<TraceAllowedUse>), IssuerError> {
+        let hardcoded_floor = || (device_key_allowed_consent_scopes(), device_key_allowed_uses());
+        let Some(db) = self.tenant_access_grant_db.as_ref() else {
+            return Ok(hardcoded_floor());
+        };
+        let grants = db
+            .list_active_trace_tenant_access_grants_for_principal(tenant_id, grant_principal_ref, now)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        let matching_grants: Vec<&TraceTenantAccessGrantRecord> = grants
+            .iter()
+            .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+            .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
+            .collect();
+        if matching_grants.is_empty() {
+            return Ok(hardcoded_floor());
+        }
+        let mut scope_union: BTreeSet<ConsentScope> = BTreeSet::new();
+        let mut use_union: BTreeSet<TraceAllowedUse> = BTreeSet::new();
+        for grant in matching_grants {
+            if grant.allowed_consent_scopes.is_empty() {
+                scope_union.extend(device_key_allowed_consent_scopes());
+            } else {
+                scope_union.extend(parse_storage_grant_values::<ConsentScope>(
+                    &grant.allowed_consent_scopes,
+                    "tenant_access_grant.allowed_consent_scopes",
+                )?);
+            }
+            if grant.allowed_uses.is_empty() {
+                use_union.extend(device_key_allowed_uses());
+            } else {
+                use_union.extend(parse_storage_grant_values::<TraceAllowedUse>(
+                    &grant.allowed_uses,
+                    "tenant_access_grant.allowed_uses",
+                )?);
+            }
+        }
+        scope_union.insert(ConsentScope::PublicAttribution);
+        Ok((
+            scope_union.into_iter().collect(),
+            use_union.into_iter().collect(),
+        ))
+    }
+
     async fn issue_claim_for_device_key(
         &self,
         auth: DeviceClaimAuth,
@@ -1471,13 +1523,29 @@ impl TraceUploadClaimIssuerState {
             }
             None => device_key_id,
         };
+        let (ceiling_scopes, ceiling_uses) = self
+            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .await?;
+        let granted_scopes = intersect_requested_with_ceiling(
+            &request.consent_scopes,
+            &ceiling_scopes,
+            "consent scopes not permitted",
+        )?;
+        let granted_uses = intersect_requested_with_ceiling(
+            &request.allowed_uses,
+            &ceiling_uses,
+            "allowed uses not permitted",
+        )?;
+        let mut request = request;
+        request.consent_scopes = granted_scopes.clone();
+        request.allowed_uses = granted_uses.clone();
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
                 tenant_id,
                 grant_principal_ref,
-                allowed_consent_scopes: device_key_allowed_consent_scopes(),
-                allowed_uses: device_key_allowed_uses(),
+                allowed_consent_scopes: granted_scopes,
+                allowed_uses: granted_uses,
                 policy_label: None,
             },
             request,
@@ -1514,13 +1582,29 @@ impl TraceUploadClaimIssuerState {
         validate_device_workload_claims(&claims, &tenant_id)?;
         let actor = auth.device_key_id;
         let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        let (ceiling_scopes, ceiling_uses) = self
+            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .await?;
+        let granted_scopes = intersect_requested_with_ceiling(
+            &request.consent_scopes,
+            &ceiling_scopes,
+            "consent scopes not permitted",
+        )?;
+        let granted_uses = intersect_requested_with_ceiling(
+            &request.allowed_uses,
+            &ceiling_uses,
+            "allowed uses not permitted",
+        )?;
+        let mut request = request;
+        request.consent_scopes = granted_scopes.clone();
+        request.allowed_uses = granted_uses.clone();
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
                 tenant_id: tenant_id.to_string(),
                 grant_principal_ref,
-                allowed_consent_scopes: device_key_allowed_consent_scopes(),
-                allowed_uses: device_key_allowed_uses(),
+                allowed_consent_scopes: granted_scopes,
+                allowed_uses: granted_uses,
                 policy_label: None,
             },
             request,
@@ -2209,6 +2293,28 @@ fn device_key_allowed_uses() -> Vec<TraceAllowedUse> {
     ]
 }
 
+/// Spec intersection: empty requested -> full ceiling; else intersection
+/// preserving ceiling order; empty intersection -> Err (403 with
+/// `empty_label` as the error message).
+fn intersect_requested_with_ceiling<T: PartialEq + Copy>(
+    requested: &[T],
+    ceiling: &[T],
+    empty_label: &'static str,
+) -> Result<Vec<T>, IssuerError> {
+    if requested.is_empty() {
+        return Ok(ceiling.to_vec());
+    }
+    let intersected = ceiling
+        .iter()
+        .filter(|item| requested.contains(item))
+        .copied()
+        .collect::<Vec<_>>();
+    if intersected.is_empty() {
+        return Err(IssuerError::forbidden(empty_label));
+    }
+    Ok(intersected)
+}
+
 fn device_public_key_bytes(
     public_key: &str,
     expected_device_key_id: &str,
@@ -2597,6 +2703,29 @@ mod tests {
     };
     use trace_commons_protocol::onboarding::TRACE_ONBOARD_REQUEST_SCHEMA_VERSION;
     use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
+
+    #[test]
+    fn intersect_empty_request_grants_full_ceiling() {
+        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::ModelTraining];
+        let got = intersect_requested_with_ceiling(&[], &ceiling, "consent scopes not permitted").unwrap();
+        assert_eq!(got, ceiling);
+    }
+
+    #[test]
+    fn intersect_clips_to_ceiling_and_rejects_empty() {
+        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::PublicAttribution];
+        let got = intersect_requested_with_ceiling(
+            &[ConsentScope::ModelTraining, ConsentScope::DebuggingEvaluation],
+            &ceiling,
+            "consent scopes not permitted",
+        )
+        .unwrap();
+        assert_eq!(got, vec![ConsentScope::DebuggingEvaluation]);
+        let err = intersect_requested_with_ceiling(&[ConsentScope::ModelTraining], &ceiling, "consent scopes not permitted")
+            .unwrap_err();
+        // IssuerError renders {"error": label}; assert the label text.
+        assert!(format!("{err:?}").contains("consent scopes not permitted"));
+    }
 
     #[test]
     fn normalize_subject_accepts_pseudonymous_token() {
