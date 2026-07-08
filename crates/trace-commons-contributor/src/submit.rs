@@ -17,8 +17,9 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    build_raw_contribution, build_redactor_with, canary_self_test_async, envelope_size_ok,
-    near_ai_settings_from_env, redact_to_envelope,
+    apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
+    envelope_size_ok, near_ai_settings_from_env, parse_scope_names, parse_use_names,
+    redact_to_envelope,
 };
 use crate::identity::{DeviceIdentity, build_signed_claim_request};
 use crate::issuer_client::{ClaimToken, IssuerClient};
@@ -119,7 +120,7 @@ pub async fn submit_sessions(
 
         let now = Utc::now();
         let raw = build_raw_contribution(&transcript, &effective_cfg, now);
-        let envelope = match redact_to_envelope(&redactor, raw).await {
+        let mut envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {
                 outcomes.push(SubmitOutcome::Refused {
@@ -154,13 +155,45 @@ pub async fn submit_sessions(
         if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
             match mint_claim(&issuer, cfg, &device, now).await {
                 Ok(token) => claim = Some(token),
-                Err(_) => {
-                    outcomes.push(SubmitOutcome::Failed {
-                        reason_label: "claim-mint-failed".to_string(),
-                    });
+                Err(e) => {
+                    if e.to_string().contains("consent scopes not permitted") {
+                        println!("hint: re-run login --scopes with a narrower selection");
+                        outcomes.push(SubmitOutcome::Refused {
+                            reason_label: "scopes-not-permitted".to_string(),
+                        });
+                    } else {
+                        outcomes.push(SubmitOutcome::Failed {
+                            reason_label: "claim-mint-failed".to_string(),
+                        });
+                    }
                     continue;
                 }
             }
+        }
+
+        let token = claim
+            .as_ref()
+            .expect("a claim must be minted before applying granted scopes");
+        let (granted_scopes, granted_uses) = if token.consent_scopes.is_empty() {
+            (
+                parse_scope_names(&effective_cfg.consent_scopes),
+                parse_use_names(&crate::consent::scopes_to_allowed_uses(
+                    &effective_cfg.consent_scopes,
+                )),
+            )
+        } else {
+            (
+                parse_scope_names(&token.consent_scopes),
+                parse_use_names(&token.allowed_uses),
+            )
+        };
+        apply_granted_scopes(&mut envelope, &granted_scopes, &granted_uses);
+
+        if envelope_size_ok(&envelope).is_err() {
+            outcomes.push(SubmitOutcome::Refused {
+                reason_label: "session-too-large".to_string(),
+            });
+            continue;
         }
 
         match upload_with_retry(cfg, &issuer, &device, &mut claim, &envelope).await {
@@ -358,7 +391,21 @@ mod tests {
                     "token_type": "Bearer",
                     "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
                     "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation", "model_training"],
+                    "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
                 }))
+            }),
+        )
+    }
+
+    fn stub_issuer_refuses_scopes() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "consent scopes not permitted"})),
+                )
             }),
         )
     }
@@ -415,7 +462,7 @@ mod tests {
             instance_id: "instance-1".into(),
             user_subject: "alice".into(),
             device_key_id: device_key_id.into(),
-            consent_scopes: vec!["debugging_evaluation".into()],
+            consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
         }
@@ -451,6 +498,10 @@ mod tests {
                 !serde_json::to_string(sent)
                     .unwrap()
                     .contains("sk-fake-fixture-secret-1234")
+            );
+            assert_eq!(
+                sent["consent"]["scopes"],
+                serde_json::json!(["debugging_evaluation", "model_training"])
             );
         }
 
@@ -509,6 +560,33 @@ mod tests {
             .await
             .unwrap();
         assert!(store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    #[tokio::test]
+    async fn scope_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_refuses_scopes()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Refused { reason_label } => {
+                assert_eq!(reason_label, "scopes-not-permitted");
+            }
+            other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
     }
 
     #[tokio::test]
