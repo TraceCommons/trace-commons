@@ -7,3 +7,4 @@ pub mod commands;
 pub mod config;
 pub mod identity;
 pub mod issuer_client;
+pub mod source;
