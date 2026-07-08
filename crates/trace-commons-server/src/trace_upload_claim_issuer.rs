@@ -574,6 +574,10 @@ struct TraceUploadClaimResponse {
     token_type: &'static str,
     expires_at: DateTime<Utc>,
     expires_in: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consent_scopes: Vec<ConsentScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_uses: Vec<TraceAllowedUse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1583,6 +1587,8 @@ impl TraceUploadClaimIssuerState {
         let expires_at = now
             .checked_add_signed(Duration::seconds(self.max_ttl_seconds))
             .ok_or_else(IssuerError::internal)?;
+        let granted_consent_scopes = consent_scopes.clone();
+        let granted_allowed_uses = allowed_uses.clone();
         let claims = UploadClaimClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
@@ -1608,6 +1614,8 @@ impl TraceUploadClaimIssuerState {
             token_type: "Bearer",
             expires_at,
             expires_in: self.max_ttl_seconds,
+            consent_scopes: granted_consent_scopes,
+            allowed_uses: granted_allowed_uses,
         })
     }
 
@@ -2838,6 +2846,35 @@ mod tests {
         );
         assert_eq!(claims["allowed_uses"], json!(["debugging"]));
         assert!(claims["jti"].as_str().is_some_and(|jti| !jti.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn claim_response_echoes_granted_scopes() {
+        let (status, body) = post_claim(
+            test_config(),
+            workload_token("workload-issuer", "trace-claim-issuer"),
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let token = body["access_token"].as_str().expect("access token");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&["trace-commons-upload-issuer"]);
+        validation.set_audience(&["trace-commons-upload"]);
+        let claims = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+                .expect("issuer public key parses"),
+            &validation,
+        )
+        .expect("issuer token verifies")
+        .claims;
+
+        assert_eq!(body["consent_scopes"], claims["allowed_consent_scopes"]);
+        assert_eq!(body["allowed_uses"], claims["allowed_uses"]);
+        assert_eq!(body["consent_scopes"], json!(["debugging_evaluation"]));
+        assert_eq!(body["allowed_uses"], json!(["debugging"]));
     }
 
     #[tokio::test]
