@@ -185,12 +185,39 @@ impl ConfigStore {
     }
 
     /// Remove all local contributor state (logout).
+    ///
+    /// Also sweeps orphaned atomic-write temp files (`.{name}.tmp-{uuid}`)
+    /// that can be left behind if the process crashes between creating the
+    /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
         for name in [CONFIG_FILE, DEVICE_KEY_FILE, RECEIPTS_FILE] {
             let path = self.dir.join(name);
             if path.exists() {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+
+        let tmp_prefixes: Vec<String> = [CONFIG_FILE, DEVICE_KEY_FILE, RECEIPTS_FILE]
+            .into_iter()
+            .map(|name| format!(".{name}.tmp-"))
+            .collect();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading dir {}", self.dir.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if tmp_prefixes.iter().any(|prefix| file_name.starts_with(prefix)) {
+                let path = entry.path();
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing orphaned temp file {}", path.display()))?;
             }
         }
         Ok(())
@@ -210,7 +237,8 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
             .with_context(|| format!("creating temp file {}", tmp_path.display()))?;
         tmp.write_all(body)
             .with_context(|| format!("writing temp file {}", tmp_path.display()))?;
-        tmp.sync_all().ok();
+        tmp.sync_all()
+            .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
     }
     #[cfg(unix)]
     {
@@ -218,8 +246,11 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting permissions on {}", tmp_path.display()))?;
     }
-    std::fs::rename(&tmp_path, path)
-        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e)
+            .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()));
+    }
     Ok(())
 }
 
@@ -301,6 +332,16 @@ mod tests {
         store.wipe().unwrap();
         assert!(store.load_config().unwrap().is_none());
         assert!(store.load_device_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn wipe_removes_orphaned_temp_files() {
+        let (_d, store) = store();
+        let orphan = store.dir().join(".device.pk8.tmp-deadbeef");
+        std::fs::write(&orphan, b"leftover-key-material").unwrap();
+        assert!(orphan.exists());
+        store.wipe().unwrap();
+        assert!(!orphan.exists());
     }
 
     // Test helper: expose the file path for assertions.
