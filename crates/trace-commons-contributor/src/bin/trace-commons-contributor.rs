@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use trace_commons_contributor::commands;
+use trace_commons_contributor::config::ConfigStore;
 
 #[derive(Parser)]
 #[command(name = "trace-commons-contributor", version, about = "Submit local coding-agent traces to Trace Commons")]
@@ -73,13 +75,31 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
-        Command::Login { .. } => anyhow::bail!("not implemented"),
+        Command::Login { grant } => commands::login(&store, grant.as_deref()).await,
         Command::List => anyhow::bail!("not implemented"),
         Command::Submit { .. } => anyhow::bail!("not implemented"),
         Command::Status => anyhow::bail!("not implemented"),
-        Command::Whoami => anyhow::bail!("not implemented"),
-        Command::Logout => anyhow::bail!("not implemented"),
-        Command::MintGrant { .. } => anyhow::bail!("not implemented"),
+        Command::Whoami => commands::whoami(&store),
+        Command::Logout => commands::logout(&store),
+        Command::MintGrant {
+            instance_key_pem,
+            instance_id,
+            user_subject,
+            audience,
+            issuer_url,
+            device_key_id,
+            ttl_seconds,
+        } => commands::mint_grant_cmd(
+            &store,
+            &instance_key_pem,
+            &instance_id,
+            &user_subject,
+            &audience,
+            &issuer_url,
+            device_key_id.as_deref(),
+            ttl_seconds,
+        ),
     }
 }
