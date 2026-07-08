@@ -84,9 +84,28 @@ async fn main() -> anyhow::Result<()> {
             grant,
             allowed_hosts,
         } => commands::login(&store, grant.as_deref(), allowed_hosts.as_deref()).await,
-        Command::List => anyhow::bail!("not implemented"),
-        Command::Submit { .. } => anyhow::bail!("not implemented"),
-        Command::Status => anyhow::bail!("not implemented"),
+        Command::List => commands::list(),
+        Command::Submit {
+            all,
+            since,
+            project,
+            source,
+            yes,
+            dry_run,
+            pii_filter,
+        } => {
+            let sel = commands::SubmitSelection {
+                all,
+                since: since.as_deref(),
+                project: project.as_deref(),
+                source: source.as_deref(),
+                yes,
+                dry_run,
+                pii_filter: pii_filter.as_deref(),
+            };
+            commands::submit(&store, &sel).await
+        }
+        Command::Status => commands::status(&store).await,
         Command::Whoami => commands::whoami(&store),
         Command::Logout => commands::logout(&store),
         Command::MintGrant {

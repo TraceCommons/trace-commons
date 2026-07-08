@@ -7,12 +7,17 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use trace_commons_operator_client::format::print_table;
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::onboarding::user_subject_hash;
 
 use crate::config::{ContributorConfig, ConfigStore, CONTRIBUTOR_CONFIG_SCHEMA_VERSION};
 use crate::identity::{build_enroll_request, mint_grant, pem_to_pkcs8_der, DeviceIdentity, EnrollmentGrant};
 use crate::issuer_client::IssuerClient;
+use crate::picker;
+use crate::source::{all_sources, SessionRef, TraceSource};
+use crate::submit::{self, SubmitOptions, SubmitOutcome};
 
 /// Build the allowlist to enforce for issuer requests: the config's
 /// `allowed_hosts` CSV when set, otherwise `TRACE_COMMONS_ALLOWED_HOSTS`.
@@ -140,6 +145,247 @@ pub fn mint_grant_cmd(
     .context("minting enrollment grant")?;
 
     println!("{}", grant.encode());
+    Ok(())
+}
+
+/// Discover every locally discoverable session across all sources, applying
+/// optional `source`/`project`/`since` filters. `project` matches either the
+/// session's basename (`SessionRef.project`) or a prefix of its full path;
+/// `since` filters against `started_at` (falls back to excluding sessions
+/// with no timestamp when set).
+fn discover_filtered(
+    source_filter: Option<&str>,
+    project_filter: Option<&Path>,
+    since: Option<chrono::Duration>,
+) -> Result<Vec<SessionRef>> {
+    let mut refs = Vec::new();
+    for source in all_sources(None, None) {
+        if let Some(sf) = source_filter {
+            if source.name() != sf {
+                continue;
+            }
+        }
+        refs.extend(source.discover().context("discovering local sessions")?);
+    }
+
+    let now = Utc::now();
+    refs.retain(|r| {
+        let project_ok = match project_filter {
+            None => true,
+            Some(p) => {
+                let basename = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let basename_match = r.project.as_deref() == Some(basename);
+                let prefix_match = r.path.starts_with(p);
+                basename_match || prefix_match
+            }
+        };
+        let since_ok = match since {
+            None => true,
+            Some(d) => r.started_at.map(|t| now - t <= d).unwrap_or(false),
+        };
+        project_ok && since_ok
+    });
+    Ok(refs)
+}
+
+/// Build a fresh `TraceSource` instance for the adapter named `name` (used
+/// to pair a previously discovered `SessionRef` with a loadable source).
+fn source_for(name: &str) -> Option<Box<dyn TraceSource>> {
+    all_sources(None, None).into_iter().find(|s| s.name() == name)
+}
+
+/// Human-readable "Nh"/"Nd" age, or "-" when the session has no timestamp.
+fn format_age(started_at: Option<chrono::DateTime<Utc>>) -> String {
+    match started_at {
+        None => "-".to_string(),
+        Some(t) => {
+            let age = Utc::now() - t;
+            if age.num_hours() < 48 {
+                format!("{}h", age.num_hours().max(0))
+            } else {
+                format!("{}d", age.num_days())
+            }
+        }
+    }
+}
+
+/// Human-readable byte size (bytes/KB/MB).
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
+    vec![
+        (idx + 1).to_string(),
+        r.source.to_string(),
+        r.project.clone().unwrap_or_else(|| "-".to_string()),
+        format_age(r.started_at),
+        format_size(r.size_bytes),
+    ]
+}
+
+/// List every discoverable local session in a numbered table. Never prints
+/// full paths -- only the source name, project basename, age, and size.
+pub fn list() -> Result<()> {
+    let sessions = discover_filtered(None, None, None)?;
+    if sessions.is_empty() {
+        println!("no sessions found");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, r)| session_row(i, r))
+        .collect();
+    print_table(
+        &mut std::io::stdout(),
+        &["#", "SOURCE", "PROJECT", "AGE", "SIZE"],
+        &rows,
+    )
+    .context("printing session table")?;
+    Ok(())
+}
+
+/// Options controlling which local sessions `submit` considers and whether
+/// it prompts interactively before uploading.
+pub struct SubmitSelection<'a> {
+    pub all: bool,
+    pub since: Option<&'a str>,
+    pub project: Option<&'a Path>,
+    pub source: Option<&'a str>,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub pii_filter: Option<&'a str>,
+}
+
+/// Discover, filter, (optionally) interactively pick, redact, and submit
+/// local sessions. Prints exactly one outcome line per session; returns an
+/// error (nonzero exit) if any outcome was refused or failed.
+pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    let since = sel.since.map(picker::parse_since).transpose()?;
+    let mut refs = discover_filtered(sel.source, sel.project, since)?;
+    refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+
+    if refs.is_empty() {
+        println!("no sessions found");
+        return Ok(());
+    }
+
+    let indices: Vec<usize> = if sel.all || sel.yes {
+        (0..refs.len()).collect()
+    } else {
+        let rows: Vec<Vec<String>> = refs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| session_row(i, r))
+            .collect();
+        print_table(
+            &mut std::io::stdout(),
+            &["#", "SOURCE", "PROJECT", "AGE", "SIZE"],
+            &rows,
+        )
+        .context("printing session table")?;
+        println!("Select sessions to submit (e.g. 3, 1,3-5, or 'all'):");
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("reading selection from stdin")?;
+        picker::parse_selection(&line, refs.len())?
+    };
+
+    let pairs: Vec<(Box<dyn TraceSource>, SessionRef)> = indices
+        .into_iter()
+        .map(|i| {
+            let r = refs[i].clone();
+            let src = source_for(r.source)
+                .with_context(|| format!("no adapter registered for source '{}'", r.source))?;
+            Ok((src, r))
+        })
+        .collect::<Result<_>>()?;
+
+    let opts = SubmitOptions {
+        dry_run: sel.dry_run,
+        pii_filter: sel.pii_filter.map(str::to_string),
+    };
+    let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
+
+    let mut had_failure = false;
+    for outcome in &outcomes {
+        match outcome {
+            SubmitOutcome::Submitted { submission_id, status } => {
+                println!("submitted {submission_id} {status}");
+            }
+            SubmitOutcome::AlreadySubmitted { submission_id } => {
+                println!("already-submitted {submission_id}");
+            }
+            SubmitOutcome::SkippedParseFailure { reason_label } => {
+                println!("skipped ({reason_label})");
+            }
+            SubmitOutcome::Refused { reason_label } => {
+                println!("refused ({reason_label})");
+                had_failure = true;
+            }
+            SubmitOutcome::Failed { reason_label } => {
+                println!("failed ({reason_label})");
+                had_failure = true;
+            }
+        }
+    }
+
+    if had_failure {
+        anyhow::bail!("one or more sessions were refused or failed to submit");
+    }
+    Ok(())
+}
+
+/// Print server-side status for every locally recorded submission receipt.
+pub async fn status(store: &ConfigStore) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    let updates = submit::status(store, &cfg).await?;
+    if updates.is_empty() {
+        println!("no submissions found");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = updates
+        .iter()
+        .map(|u| {
+            vec![
+                u.submission_id.to_string(),
+                u.status.clone(),
+                format!("{:.2}", u.credit_points_pending),
+                u.credit_points_final
+                    .map(|f| format!("{f:.2}"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ]
+        })
+        .collect();
+    print_table(
+        &mut std::io::stdout(),
+        &["SUBMISSION", "STATUS", "PENDING", "FINAL"],
+        &rows,
+    )
+    .context("printing status table")?;
     Ok(())
 }
 
