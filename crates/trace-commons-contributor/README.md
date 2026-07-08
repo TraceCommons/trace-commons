@@ -61,23 +61,38 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
   follow-up work; this CLI does not attempt to request them, and the issuer
   will not grant them to a device-key claim today.
 - Local secret redaction (deterministic, via the shared protocol crate) runs
-  on every session before it ever reaches the network. It replaces secrets
-  and file paths with stable placeholders; it never sends the raw content
-  out for scrubbing.
+  on every session before it ever reaches the network, and covers
+  *everything* in the envelope: message text, tool-call and tool-result
+  content, and structured tool payloads alike. It replaces secrets and file
+  paths with stable placeholders; it never sends the raw content out for
+  scrubbing.
 - An optional second pass, `--pii-filter near-ai`, sends the
-  already-locally-redacted text through a NEAR AI Cloud (TEE-hosted) PII
-  filter for a second opinion. It requires `TRACE_NEAR_AI_PRIVACY_API_KEY`
-  to be set; `TRACE_NEAR_AI_PRIVACY_BASE_URL` and
-  `TRACE_NEAR_AI_PRIVACY_MODEL` are optional overrides. This path is
-  fail-closed: if the filter is requested but unreachable or misconfigured,
-  or if an unknown `--pii-filter` value is given, the batch is refused
-  rather than silently uploaded unfiltered.
+  already-locally-redacted **message text only** (`content`/
+  `human_correction` fields — not structured tool payloads) through a NEAR AI
+  Cloud (TEE-hosted) PII filter for a second opinion. Structured tool
+  payloads are covered solely by the deterministic pass above, never by the
+  NEAR AI pass. This path requires `TRACE_NEAR_AI_PRIVACY_API_KEY` to be
+  set; `TRACE_NEAR_AI_PRIVACY_BASE_URL` and `TRACE_NEAR_AI_PRIVACY_MODEL`
+  are optional overrides. It is fail-closed: if the filter is requested but
+  unreachable or misconfigured, or if an unknown `--pii-filter` value is
+  given, the batch is refused rather than silently uploaded unfiltered. The
+  API key is read from the environment only; it is never written to
+  `contributor.json` or any other local state file (no key at rest).
+- The first time a batch runs with `--pii-filter near-ai` (or a saved config
+  with that filter selected), the CLI prints a one-time notice that
+  redacted-but-unscrubbed message text will be sent to NEAR AI under your
+  API key, then records that the notice has been shown (a marker file in
+  the local state directory) so later runs stay quiet.
 - Once per batch, a synthetic privacy-filter canary is run through the
-  active redactor before any real session is uploaded. If the canary
-  values survive redaction, the whole batch aborts — this catches a broken
-  or disabled filter before it can leak anything.
+  active redactor before any real session is uploaded — including, when one
+  is attached, the NEAR AI (or other) privacy-filter backend itself, not
+  just the deterministic pass. If the canary values survive redaction
+  through either stage, the whole batch aborts — this catches a broken,
+  disabled, or no-op filter before it can leak anything.
 - The server applies its own rescrub pass on top of whatever the client
-  sends; local redaction is a first line of defense, not the only one.
+  sends; that rescrub is deterministic (the same class of secret/path
+  redaction as the client's first pass), not a NEAR AI-style PII pass. Local
+  redaction is a first line of defense, not the only one.
 
 ## Local state
 
