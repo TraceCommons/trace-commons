@@ -57,8 +57,9 @@ After device-key verification succeeds:
      `device_key_allowed_consent_scopes()` / `device_key_allowed_uses()`.
      This branch must be byte-for-byte behavior-compatible with today.
 2. Validate the request: any `consent_scopes` / `allowed_uses` entry that
-   does not parse as a known enum value is a 400 with label
-   `"invalid consent scope"` (or `"invalid allowed use"`).
+   does not parse as a known enum value is rejected by serde at request
+   parse time with the existing 400 `"invalid upload claim request"` (no
+   new label; see the error-handling table).
 3. Intersect: issued claim carries
    `intersect(requested_scopes, ceiling_scopes)` and
    `intersect(requested_uses, ceiling_uses)`. An empty requested list keeps
