@@ -33299,6 +33299,7 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     assert_eq!(statuses[0].credit_points_ledger, 1.75);
     assert_eq!(statuses[0].credit_points_final, None);
     assert_eq!(statuses[0].credit_points_total, Some(1.75));
+    assert_eq!(statuses[0].consent_scopes, vec![ConsentScope::ModelTraining]);
     assert!(
         statuses[0]
             .delayed_credit_explanations
