@@ -235,6 +235,37 @@ fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     ]
 }
 
+/// SUBMITTED marker for the interactive submit picker: `Some(true)` when a
+/// receipt with an already-submitted status matches this session's hash,
+/// `Some(false)` when not, `None` when the transcript failed to load (the
+/// session stays selectable; `submit_sessions` will classify it).
+fn submitted_marker(
+    source: &dyn TraceSource,
+    r: &SessionRef,
+    receipts: &[crate::config::Receipt],
+) -> Option<bool> {
+    let transcript = source.load(r).ok()?;
+    Some(receipts.iter().any(|rec| {
+        rec.session_hash == transcript.session_hash
+            && crate::submit::ALREADY_SUBMITTED_STATUSES.contains(&rec.status.as_str())
+    }))
+}
+
+/// Row for the submit picker table: the `list` columns plus a SUBMITTED
+/// cell ("yes" / "-" / "?" when the transcript could not be loaded).
+fn submit_picker_row(idx: usize, r: &SessionRef, submitted: Option<bool>) -> Vec<String> {
+    let mut row = session_row(idx, r);
+    row.push(
+        match submitted {
+            Some(true) => "yes",
+            Some(false) => "-",
+            None => "?",
+        }
+        .to_string(),
+    );
+    row
+}
+
 /// List every discoverable local session in a numbered table. Never prints
 /// full paths -- only the source name, project basename, age, and size.
 pub fn list() -> Result<()> {
@@ -290,14 +321,19 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let indices: Vec<usize> = if sel.all || sel.yes {
         (0..refs.len()).collect()
     } else {
+        let receipts = store.load_receipts().context("loading receipts")?;
         let rows: Vec<Vec<String>> = refs
             .iter()
             .enumerate()
-            .map(|(i, r)| session_row(i, r))
+            .map(|(i, r)| {
+                let marker = source_for(r.source)
+                    .and_then(|src| submitted_marker(src.as_ref(), r, &receipts));
+                submit_picker_row(i, r, marker)
+            })
             .collect();
         print_table(
             &mut std::io::stdout(),
-            &["#", "SOURCE", "PROJECT", "AGE", "SIZE"],
+            &["#", "SOURCE", "PROJECT", "AGE", "SIZE", "SUBMITTED"],
             &rows,
         )
         .context("printing session table")?;
@@ -392,6 +428,44 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_picker_marks_already_submitted_fixture_session() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let src = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        let transcript = src.load(&r).unwrap();
+
+        // No receipts: not submitted, cell renders "-".
+        assert_eq!(submitted_marker(&src, &r, &[]), Some(false));
+        let row = submit_picker_row(0, &r, Some(false));
+        assert_eq!(row.last().unwrap(), "-");
+
+        // Matching receipt with an already-submitted status: "yes".
+        let receipt = crate::config::Receipt {
+            submission_id: uuid::Uuid::new_v4(),
+            session_hash: transcript.session_hash.clone(),
+            source: r.source.to_string(),
+            submitted_at: chrono::Utc::now(),
+            status: "accepted".into(),
+        };
+        assert_eq!(
+            submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
+            Some(true)
+        );
+        let row = submit_picker_row(0, &r, Some(true));
+        assert_eq!(row.last().unwrap(), "yes");
+
+        // Receipt with a non-terminal status does not mark the session.
+        let mut rejected = receipt;
+        rejected.status = "rejected".into();
+        assert_eq!(submitted_marker(&src, &r, &[rejected]), Some(false));
+
+        // Load failure renders "?" and stays selectable.
+        let row = submit_picker_row(0, &r, None);
+        assert_eq!(row.last().unwrap(), "?");
+    }
 
     #[tokio::test]
     async fn login_rejects_issuer_host_off_allowlist_and_saves_nothing() {

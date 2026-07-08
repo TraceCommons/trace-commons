@@ -27,7 +27,7 @@ use crate::source::{SessionRef, TraceSource};
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
 /// per-session flow instead of re-uploading.
-const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
