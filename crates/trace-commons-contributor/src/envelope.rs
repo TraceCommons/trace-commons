@@ -25,7 +25,8 @@ use trace_commons_protocol::trace_contribution::{
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
     RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TokenCounts,
     TraceChannel, TraceContributionEnvelope, TraceContributionEventType, TraceRedactor,
-    ValueMetadata, synthetic_privacy_filter_canary_text, synthetic_privacy_filter_canary_values,
+    ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
+    synthetic_privacy_filter_canary_values,
 };
 
 use crate::config::ContributorConfig;
@@ -157,6 +158,32 @@ pub fn canary_self_test(redactor: &DeterministicTraceRedactor) -> Result<()> {
             continue;
         }
         if redacted.contains(&value) {
+            anyhow::bail!("privacy-filter-canary-failed");
+        }
+    }
+    Ok(())
+}
+
+/// Once-per-batch precondition, extended to also exercise any privacy-filter
+/// backend attached to `redactor` (NEAR AI, sidecar, ...).
+///
+/// `canary_self_test` only checks the deterministic pass (the email/path
+/// shaped canary values it is responsible for). A well-formed no-op filter
+/// -- one that returns 200 with an empty span list for everything -- passes
+/// that check trivially, because the deterministic pass never depended on
+/// the filter to strip anything. This function additionally runs the
+/// protocol crate's `run_privacy_filter_canary` directly against the
+/// attached adapter (if any) and fails closed when the canary's synthetic
+/// secret/email/path values survive redaction through that adapter alone,
+/// which is exactly the failure mode a no-op or broken filter exhibits.
+pub async fn canary_self_test_async(redactor: &DeterministicTraceRedactor) -> Result<()> {
+    canary_self_test(redactor)?;
+
+    if let Some(adapter) = redactor.attached_privacy_filter() {
+        let report = run_privacy_filter_canary(adapter.as_ref())
+            .await
+            .map_err(|_| anyhow::anyhow!("privacy-filter-canary-failed"))?;
+        if !report.healthy {
             anyhow::bail!("privacy-filter-canary-failed");
         }
     }
@@ -394,29 +421,78 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn near_ai_filter_redacts_via_mock_endpoint() {
-        // Stub NEAR AI classify endpoint: flags "bob@example.com" as private_email.
+    /// Spans back every occurrence of `bob@example.com` (used by
+    /// `near_ai_filter_redacts_via_mock_endpoint`) and every canary email
+    /// value the redaction canary sends through (used by the canary tests
+    /// below), so one realistic classifier stub covers both. Matches how a
+    /// real NEAR AI privacy-filter deployment would flag these categories --
+    /// unlike a no-op filter, which always returns an empty span list.
+    fn realistic_classify_router() -> axum::Router {
         use axum::{Json, Router, routing::post};
-        let router = Router::new().route(
+        Router::new().route(
             "/privacy/classify",
             post(|Json(req): Json<serde_json::Value>| async move {
                 let input = req["input"].as_str().unwrap_or_default().to_string();
-                let spans = match input.find("bob@example.com") {
-                    Some(start) => serde_json::json!([{
-                        "category": "private_email",
-                        "start": start,
-                        "end": start + "bob@example.com".len(),
-                        "score": 0.99
-                    }]),
-                    None => serde_json::json!([]),
-                };
+                let targets: &[(&str, &str)] = &[
+                    ("bob@example.com", "private_email"),
+                    ("trace-canary.person@example.invalid", "private_email"),
+                    ("tc_canary_secret_0123456789abcdef", "secret"),
+                    ("/tmp/trace_canary_private/path.txt", "private_url"),
+                ];
+                let mut spans = Vec::new();
+                for (needle, category) in targets {
+                    if let Some(start) = input.find(needle) {
+                        spans.push(serde_json::json!({
+                            "category": category,
+                            "start": start,
+                            "end": start + needle.len(),
+                            "score": 0.99
+                        }));
+                    }
+                }
                 Json(serde_json::json!({"data": [{"spans": spans}]}))
             }),
-        );
+        )
+    }
+
+    /// Always returns 200 with an empty span list, regardless of input --
+    /// the shape a well-formed but non-functional ("no-op") privacy filter
+    /// takes. It must not be able to pass the batch canary.
+    fn noop_classify_router() -> axum::Router {
+        use axum::{Json, Router, routing::post};
+        Router::new().route(
+            "/privacy/classify",
+            post(|Json(_req): Json<serde_json::Value>| async move {
+                Json(serde_json::json!({"data": [{"spans": []}]}))
+            }),
+        )
+    }
+
+    async fn spawn_near_ai_mock(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        base
+    }
+
+    fn near_ai_redactor(base_url: String) -> DeterministicTraceRedactor {
+        let mut cfg = test_config();
+        cfg.pii_filter = Some("near-ai".into());
+        build_redactor_with(
+            &cfg,
+            Some("/Users/testuser/code/myproj"),
+            Some(NearAiSettings {
+                api_key: "test-key".into(),
+                base_url: Some(base_url),
+                model: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn near_ai_filter_redacts_via_mock_endpoint() {
+        let base = spawn_near_ai_mock(realistic_classify_router()).await;
 
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
@@ -427,22 +503,38 @@ mod tests {
             tool_name: None,
             token_counts: None,
         });
-        let mut cfg = test_config();
-        cfg.pii_filter = Some("near-ai".into());
-        let redactor = build_redactor_with(
-            &cfg,
-            Some("/Users/testuser/code/myproj"),
-            Some(NearAiSettings {
-                api_key: "test-key".into(),
-                base_url: Some(base),
-                model: None,
-            }),
-        )
-        .unwrap();
+        let cfg = test_config();
+        let redactor = near_ai_redactor(base);
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         let json = serde_json::to_string(&envelope).unwrap();
         assert!(!json.contains("bob@example.com"));
+    }
+
+    #[tokio::test]
+    async fn canary_self_test_async_passes_for_realistic_near_ai_filter() {
+        let base = spawn_near_ai_mock(realistic_classify_router()).await;
+        let redactor = near_ai_redactor(base);
+        canary_self_test_async(&redactor).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canary_self_test_async_fails_closed_for_noop_near_ai_filter() {
+        // A no-op filter (always empty spans) must not be able to pass the
+        // batch canary just because the deterministic pass alone happens to
+        // strip the values it is responsible for.
+        let base = spawn_near_ai_mock(noop_classify_router()).await;
+        let redactor = near_ai_redactor(base);
+        let err = canary_self_test_async(&redactor).await.unwrap_err();
+        assert!(err.to_string().contains("privacy-filter-canary-failed"));
+    }
+
+    #[tokio::test]
+    async fn canary_self_test_async_is_noop_without_attached_filter() {
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        canary_self_test_async(&redactor).await.unwrap();
     }
 
     #[tokio::test]

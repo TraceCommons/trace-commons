@@ -2163,6 +2163,15 @@ impl DeterministicTraceRedactor {
         self
     }
 
+    /// The optional privacy-filter adapter attached to this redactor (via
+    /// `with_privacy_filter` or an env-configured backend picked up by
+    /// `new`). Callers use this to run [`run_privacy_filter_canary`] against
+    /// whatever backend is actually wired in before trusting it with real
+    /// traffic.
+    pub fn attached_privacy_filter(&self) -> Option<&Arc<dyn PrivacyFilterAdapter>> {
+        self.privacy_filter.as_ref()
+    }
+
     async fn apply_privacy_filter_to_text(
         &self,
         text: String,
