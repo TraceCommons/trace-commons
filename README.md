@@ -41,9 +41,12 @@ The contract is "local-first, opt-in, scrub before upload":
 
 This repository — `trace-commons-server` — is the hosted control plane:
 ingest, review, retention, revocation, encrypted artifact storage,
-upload-claim issuing, audit chain, and credit settlement. The contributor
-client lives in a separate repo (Ironclaw); the shared protocol DTOs live
-in `crates/trace-commons-protocol`.
+upload-claim issuing, audit chain, and credit settlement. It also ships
+`trace-commons-contributor`, a standalone CLI contributors run on their own
+machine to discover, locally redact, and submit Claude Code / Codex
+session traces. Ironclaw is a separate, TEE-hosted trace source with its
+own client integration; the shared protocol DTOs live in
+`crates/trace-commons-protocol`.
 
 ## Status: Pilot Deployment
 
@@ -58,7 +61,7 @@ concretely:
 | Contributor gate | Invite-code allowlist on the upload-claim issuer; off by default, enabled for the pilot — see [`docs/operator/pilot-allowlist.md`](docs/operator/pilot-allowlist.md). |
 | KMS / KEK | Cloud KMS (GCP first) with envelope-encrypted per-object DEKs. Phase A trust boundary. |
 | TEE trust upgrade | Phase B — move the gate service into an attested dstack enclave once dstack-GPU primitives stabilize. The current KEK boundary is honestly weaker than the Phase B target; this is documented, not papered over. |
-| Contributor client | Ironclaw integration is the remaining gate before live contributor traffic. The `trace-commons-pilot-bootstrap` binary stands in as a load-generation harness against real HF agent-traces sessions so calibration and end-to-end validation can proceed without it. |
+| Contributor client | `trace-commons-contributor` (this repo) is available for direct human contributors: `login`, `submit`, `status`, `whoami`, `logout`, `mint-grant`. Ironclaw integration (a TEE-hosted trace source) is separate, ongoing work. The `trace-commons-pilot-bootstrap` binary stands in as a load-generation harness against real HF agent-traces sessions so calibration and end-to-end validation can proceed without either. |
 | Credits | Settlement, hash-only attestation pipeline, central-issuer ABAC, NEAR receipt outbox — all in. Credit-bearing routes are gated by a central-issuer principal allowlist. |
 
 Pilot intentionally **scopes down** from the original design: regular GPU
@@ -111,6 +114,8 @@ crates/
 │                                Two real perplexity backends: mistralrs (local CUDA,
 │                                feature `local-gpu-models`) and NEAR AI Cloud HTTP
 │                                (feature `near-ai-scorer`).
+├── trace-commons-contributor/   Contributor-facing CLI: login, list, submit, status,
+│                                whoami, logout, mint-grant. See its own README.
 └── trace-commons-server/        All hosted binaries.
     └── src/bin/
         ├── trace-commons-ingest                 Hosted ingest / review / admin / worker API.
@@ -163,6 +168,16 @@ PostgreSQL integration tests require a live database; export
 ```bash
 cargo test -p trace-commons-server --test trace_corpus_pg_store
 ```
+
+### Contributor CLI
+
+```bash
+cargo build --release -p trace-commons-contributor
+./target/release/trace-commons-contributor login
+```
+
+See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
+for the full quickstart, consent model, and subcommand reference.
 
 ### Run a Local Ingest Server
 
@@ -221,6 +236,7 @@ follow.
 - Per-slice design specs: [`docs/superpowers/specs/`](docs/superpowers/specs/)
 - Per-slice implementation plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
 - Operator runbooks: [`docs/operator/`](docs/operator/)
+- Contributor CLI: [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 
 ## Public Reference Notes
 

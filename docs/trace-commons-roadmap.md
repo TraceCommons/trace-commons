@@ -95,7 +95,13 @@ Recently closed: A2.6 outcome-routing question (settled by Qwen 3.6
 tail_floor credentials-leak pilot blocker (PR #86); CI clippy
 enforcement (PR #78); Actions Node 24 + pilot-bootstrap smoke job
 (PR #79); A2.6 corpus archived for A.5a reuse (PR #83); A.5a rarity
-pre-flight tool (PR #84).
+pre-flight tool (PR #84); standalone contributor uploader CLI
+(`trace-commons-contributor` — login/list/submit/status/whoami/logout/
+mint-grant, local secret redaction, optional NEAR AI PII pass, v1
+debugging_evaluation consent scope) shipped per
+`docs/superpowers/specs/2026-07-07-contributor-uploader-cli-design.md`.
+This is a direct-human-contributor path independent of item 5's Ironclaw
+client wiring.
 
 ### Deferred
 
