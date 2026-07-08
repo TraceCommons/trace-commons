@@ -27,6 +27,8 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
 trace-commons-server = { path = "../trace-commons-server" }
+async-trait = "0.1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+tokio = { version = "1", features = ["net"] }
