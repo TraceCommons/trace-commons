@@ -223,7 +223,12 @@ impl ConfigStore {
     /// that can be left behind if the process crashes between creating the
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
-        for name in [CONFIG_FILE, DEVICE_KEY_FILE, RECEIPTS_FILE] {
+        for name in [
+            CONFIG_FILE,
+            DEVICE_KEY_FILE,
+            RECEIPTS_FILE,
+            NEAR_AI_NOTICE_MARKER_FILE,
+        ] {
             let path = self.dir.join(name);
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -381,9 +386,13 @@ mod tests {
         let (_d, store) = store();
         store.save_config(&sample_config()).unwrap();
         store.save_device_key(b"k").unwrap();
+        assert!(store.ensure_near_ai_notice_shown().unwrap());
         store.wipe().unwrap();
         assert!(store.load_config().unwrap().is_none());
         assert!(store.load_device_key().unwrap().is_none());
+        // Logout must also clear the first-use notice marker so a
+        // re-enrolled user sees the notice again.
+        assert!(store.ensure_near_ai_notice_shown().unwrap());
     }
 
     #[test]
