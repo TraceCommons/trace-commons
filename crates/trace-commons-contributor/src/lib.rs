@@ -2,3 +2,5 @@
 //! agent transcripts, redacts them through the deterministic pipeline, and
 //! submits TraceContributionEnvelopes under instance-vouched per-user
 //! identities.
+
+pub mod config;
