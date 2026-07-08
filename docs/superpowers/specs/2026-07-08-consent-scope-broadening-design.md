@@ -84,10 +84,29 @@ exist there).
 ## CLI design
 
 - `login` gains `--scopes <csv>` of ConsentScope wire names, validated
-  client-side against the known set; default `debugging_evaluation`;
-  `public_attribution` is only included when explicitly listed. The chosen
-  set is stored in the existing `ContributorConfig.consent_scopes` field
-  (which becomes load-bearing) and echoed in the login consent line.
+  client-side against the known set; `public_attribution` is only included
+  when explicitly listed. The chosen set is stored in the existing
+  `ContributorConfig.consent_scopes` field (which becomes load-bearing) and
+  echoed in the login consent line.
+- **Interactive consent prompt (the natural flow).** When `--scopes` is
+  not given and stdin is a TTY, `login` prompts in plain language after
+  successful enrollment, one line per optional scope:
+
+  ```
+  How may your submitted traces be used? (you can revoke submitted traces later)
+    Debugging and evaluation                 [always on]
+    Benchmark generation                     [y/N]
+    Ranking-model training                   [y/N]
+    Model training                           [y/N]
+    Public attribution of your handle        [y/N]
+  ```
+
+  Defaults are conservative (everything optional defaults to No);
+  `debugging_evaluation` is always included. Answers map to ConsentScope
+  values and are stored/echoed identically to `--scopes`. When stdin is
+  not a TTY and `--scopes` is absent, the default is `debugging_evaluation`
+  only (no prompt, no hang in scripts). The prompt logic is a pure helper
+  (answers in, scopes out) so it is testable without a TTY.
 - Claim requests send the configured scopes plus the matching allowed-uses
   mapping: `debugging_evaluation -> [debugging, evaluation]`,
   `benchmark_only -> [benchmark_generation]`,
@@ -129,6 +148,9 @@ Issuer:
 CLI:
 - `--scopes` parsing and validation (unknown name rejected with the set of
   valid names in the message).
+- Interactive-prompt helper: answer combinations map to the right scope
+  sets; all-No yields `[debugging_evaluation]`; non-TTY default path
+  yields `[debugging_evaluation]` without prompting.
 - Envelope stamps the response-granted set (stub issuer returns a narrowed
   set); fallback stamping when the response lacks the fields.
 - Scope-refusal outcome mapping.
