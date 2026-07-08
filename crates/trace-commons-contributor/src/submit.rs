@@ -156,7 +156,10 @@ pub async fn submit_sessions(
             match mint_claim(&issuer, cfg, &device, now).await {
                 Ok(token) => claim = Some(token),
                 Err(e) => {
-                    if e.to_string().contains("consent scopes not permitted") {
+                    let msg = e.to_string();
+                    if msg.contains("consent scopes not permitted")
+                        || msg.contains("allowed uses not permitted")
+                    {
                         println!("hint: re-run login --scopes with a narrower selection");
                         outcomes.push(SubmitOutcome::Refused {
                             reason_label: "scopes-not-permitted".to_string(),
@@ -410,6 +413,18 @@ mod tests {
         )
     }
 
+    fn stub_issuer_refuses_uses() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "allowed uses not permitted"})),
+                )
+            }),
+        )
+    }
+
     fn stub_ingest(received: Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
         Router::new().route(
             "/v1/traces",
@@ -621,6 +636,33 @@ mod tests {
     async fn scope_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer_refuses_scopes()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Refused { reason_label } => {
+                assert_eq!(reason_label, "scopes-not-permitted");
+            }
+            other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uses_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_refuses_uses()).await;
         let ingest = spawn(stub_ingest(received.clone())).await;
         let dir = tempfile::tempdir().unwrap();
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
