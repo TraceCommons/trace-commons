@@ -101,7 +101,12 @@ mint-grant, local secret redaction, optional NEAR AI PII pass, v1
 debugging_evaluation consent scope) shipped per
 `docs/superpowers/specs/2026-07-07-contributor-uploader-cli-design.md`.
 This is a direct-human-contributor path independent of item 5's Ironclaw
-client wiring.
+client wiring. Consent-scope broadening for device-key claims (the
+enrollment-stored instance policy as ceiling, contributor scope choice
+threaded end-to-end through the CLI, server-granted set visible per-trace
+via `status`) shipped per
+`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`.
+Retroactive consent updates on already-submitted traces remain deferred.
 
 ### Deferred
 

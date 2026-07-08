@@ -1,7 +1,7 @@
 # Consent-Scope Broadening for Device-Key Claims — Design
 
 Date: 2026-07-08
-Status: Approved
+Status: Implemented
 Depends on: PR #154 (contributor uploader CLI), instance-vouched enrollment (PR #150)
 
 ## Purpose

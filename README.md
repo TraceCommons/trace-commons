@@ -177,7 +177,14 @@ cargo build --release -p trace-commons-contributor
 ```
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
-for the full quickstart, consent model, and subcommand reference.
+for the full quickstart, consent model, and subcommand reference. Consent is
+scope-based, not capped to a single default: the enrollment-stored instance
+policy is the ceiling, the contributor chooses from within it at login
+(interactive prompt or `--scopes`), and the server-granted set — visible
+per-trace via `status` — rides in the envelope. Retroactive updates to
+consent on already-submitted traces are deferred to a future slice. See
+[`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`](docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md)
+for the full design.
 
 ### Run a Local Ingest Server
 
