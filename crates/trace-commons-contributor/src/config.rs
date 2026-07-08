@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use uuid::Uuid;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
@@ -18,6 +19,7 @@ pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_c
 const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
+const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 
 /// Per-user contributor CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,19 @@ pub struct ContributorConfig {
     pub consent_scopes: Vec<String>,
     pub pii_filter: Option<String>,
     pub allowed_hosts: Option<String>,
+}
+
+/// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
+/// CSV when set (config's `allowed_hosts` field, or a pre-enrollment CLI
+/// flag), otherwise the `TRACE_COMMONS_ALLOWED_HOSTS` env fallback. Shared by
+/// every call site that builds an operator-client (`login`, issuer minting,
+/// and ingest uploads/status) so none of them can drift into skipping env
+/// enforcement.
+pub fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
+    match allowed_hosts {
+        Some(csv) => HostAllowlist::from_csv(csv),
+        None => HostAllowlist::from_env(),
+    }
 }
 
 /// A hash-only record of a submitted trace. Never contains paths or content.
@@ -183,6 +198,25 @@ impl ConfigStore {
         Ok(receipts)
     }
 
+    fn near_ai_notice_marker_path(&self) -> PathBuf {
+        self.dir.join(NEAR_AI_NOTICE_MARKER_FILE)
+    }
+
+    /// Ensure the one-time first-use NEAR AI privacy-filter notice has been
+    /// shown. Returns `true` the first time this is called for a given
+    /// state directory (the marker file did not exist and was just
+    /// created); returns `false` on every later call once the marker
+    /// already exists. Callers print the notice only when this returns
+    /// `true`.
+    pub fn ensure_near_ai_notice_shown(&self) -> Result<bool> {
+        let path = self.near_ai_notice_marker_path();
+        if path.exists() {
+            return Ok(false);
+        }
+        std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+        Ok(true)
+    }
+
     /// Remove all local contributor state (logout).
     ///
     /// Also sweeps orphaned atomic-write temp files (`.{name}.tmp-{uuid}`)
@@ -329,6 +363,17 @@ mod tests {
         let loaded = store.load_receipts().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_hash, "sha256:aa");
+    }
+
+    #[test]
+    fn near_ai_notice_shown_once_then_silent() {
+        let (_d, store) = store();
+        // Marker absent: first call reports "shown" and creates the marker.
+        assert!(store.ensure_near_ai_notice_shown().unwrap());
+        assert!(store_path(&store, "near-ai-notice-shown").exists());
+        // Marker present: subsequent calls stay silent.
+        assert!(!store.ensure_near_ai_notice_shown().unwrap());
+        assert!(!store.ensure_near_ai_notice_shown().unwrap());
     }
 
     #[test]

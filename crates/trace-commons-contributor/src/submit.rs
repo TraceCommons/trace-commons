@@ -9,15 +9,15 @@ use chrono::{DateTime, Utc};
 use reqwest::Method;
 use uuid::Uuid;
 
-use trace_commons_operator_client::{Client, Error as OcError, host_allowlist::HostAllowlist};
+use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
     TraceSubmissionStatusUpdate,
 };
 
-use crate::config::{ConfigStore, ContributorConfig, Receipt};
+use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    build_raw_contribution, build_redactor_with, canary_self_test, envelope_size_ok,
+    build_raw_contribution, build_redactor_with, canary_self_test_async, envelope_size_ok,
     near_ai_settings_from_env, redact_to_envelope,
 };
 use crate::identity::{DeviceIdentity, build_signed_claim_request};
@@ -56,8 +56,20 @@ pub async fn submit_sessions(
     let mut outcomes = Vec::with_capacity(sessions.len());
     let effective_cfg = effective_config(cfg, opts);
 
+    if effective_cfg.pii_filter.as_deref() == Some("near-ai")
+        && store
+            .ensure_near_ai_notice_shown()
+            .context("recording NEAR AI first-use notice")?
+    {
+        println!(
+            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
+             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
+        );
+    }
+
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg)).context("building issuer client")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
 
     let mut claim: Option<ClaimToken> = None;
     let mut canary_checked = false;
@@ -99,7 +111,9 @@ pub async fn submit_sessions(
         };
 
         if !canary_checked {
-            canary_self_test(&redactor).context("privacy-filter-canary-failed")?;
+            canary_self_test_async(&redactor)
+                .await
+                .context("privacy-filter-canary-failed")?;
             canary_checked = true;
         }
 
@@ -186,7 +200,8 @@ pub async fn status(
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg)).context("building issuer client")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
     let token = mint_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for status lookup")?;
@@ -220,13 +235,6 @@ fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> Contributo
     c
 }
 
-fn allowlist_for(cfg: &ContributorConfig) -> HostAllowlist {
-    match cfg.allowed_hosts.as_deref() {
-        Some(csv) => HostAllowlist::from_csv(csv),
-        None => HostAllowlist::from_env(),
-    }
-}
-
 async fn mint_claim(
     issuer: &IssuerClient,
     cfg: &ContributorConfig,
@@ -242,15 +250,13 @@ fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
 ) -> std::result::Result<Client, OcError> {
-    let mut builder = Client::builder(
+    Client::builder(
         &cfg.ingest_url,
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
-    .bearer_token(&token.access_token);
-    if let Some(csv) = cfg.allowed_hosts.as_deref() {
-        builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
-    }
-    builder.build()
+    .bearer_token(&token.access_token)
+    .host_allowlist(allowlist_for(cfg.allowed_hosts.as_deref()))
+    .build()
 }
 
 /// Upload `envelope`, retrying transient transport failures up to 3 attempts
@@ -330,6 +336,17 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    /// Same as `spawn`, but returns a URL addressed via `localhost` instead
+    /// of the literal `127.0.0.1`, so tests can put the issuer and ingest
+    /// endpoints on distinct allowlist-checkable host strings while both
+    /// still resolve to the same loopback listener.
+    async fn spawn_as_localhost(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://localhost:{port}")
     }
 
     fn stub_issuer() -> Router {
@@ -465,6 +482,62 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn near_ai_batch_creates_first_use_notice_marker() {
+        // No TRACE_NEAR_AI_PRIVACY_API_KEY is set in this process, so every
+        // session will be refused as pii-filter-unavailable -- but the
+        // once-per-batch first-use notice marker must still be created,
+        // since it is unconditional on effective_cfg.pii_filter and does
+        // not depend on the redactor actually building successfully.
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        assert!(!store.dir().join("near-ai-notice-shown").exists());
+
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: Some("near-ai".to_string()),
+        };
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_ingest_host_off_allowlist_before_any_request() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        // Issuer stays on the literal `127.0.0.1` host (allowed); ingest is
+        // addressed via `localhost` (not on the allowlist), so the claim
+        // mints fine but the ingest client must refuse to even build.
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn_as_localhost(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.allowed_hosts = Some("127.0.0.1".to_string());
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Failed { reason_label } => {
+                assert_eq!(reason_label, "host-not-allowed");
+            }
+            other => panic!("expected Failed(host-not-allowed), got {other:?}"),
+        }
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
     }

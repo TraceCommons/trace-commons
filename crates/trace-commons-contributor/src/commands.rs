@@ -9,10 +9,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use trace_commons_operator_client::format::print_table;
-use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::onboarding::user_subject_hash;
 
-use crate::config::{CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig};
+use crate::config::{
+    CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
+};
 use crate::identity::{
     DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
 };
@@ -20,15 +21,6 @@ use crate::issuer_client::IssuerClient;
 use crate::picker;
 use crate::source::{SessionRef, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
-
-/// Build the allowlist to enforce for issuer requests: the config's
-/// `allowed_hosts` CSV when set, otherwise `TRACE_COMMONS_ALLOWED_HOSTS`.
-fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
-    match allowed_hosts {
-        Some(csv) => HostAllowlist::from_csv(csv),
-        None => HostAllowlist::from_env(),
-    }
-}
 
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
@@ -81,7 +73,9 @@ pub async fn login(
     println!("enrolled: tenant_id={}", cfg.tenant_id);
     println!(
         "Traces you submit carry the debugging_evaluation consent scope; secrets are removed \
-         locally, PII is scrubbed server-side."
+         locally (including tool payloads), and the server re-applies the same deterministic \
+         redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
+         message text only."
     );
     Ok(())
 }
