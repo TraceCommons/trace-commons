@@ -17,11 +17,19 @@ scope choice end-to-end through the CLI.
 
 Key discovery grounding the design: the storage and enforcement machinery
 already exist. The allowlist's `InstancePolicyTemplate` carries per-instance
-`allowed_consent_scopes` / `allowed_uses`; enrollment persists them via
-`InstanceUserProvision` into a tenant-access-grant row for the device
-principal (`device:{tenant_id}:{device_key_id}`); the issuer already has
-grant lookup and scope-intersection code on the workload path; ingest
-already enforces claim scopes. The device-key claim path is the only gap.
+`allowed_consent_scopes` / `allowed_uses`; enrollment hands them to the DB
+via `InstanceUserProvision`, which provisions a tenant-access-grant row for
+the device principal (`device:{tenant_id}:{device_key_id}`); the issuer
+already has grant lookup and scope-intersection code on the workload path;
+ingest already enforces claim scopes.
+
+Implementation-time correction (2026-07-08 research): the grant writer
+(`upsert_onboarding_device_tenant_access_grant`, db/postgres.rs) currently
+IGNORES the provision's template scopes and hardcodes pilot defaults
+(`["debugging_evaluation","public_attribution"]`). So the slice has two
+server gaps, not one: (a) the grant writer must persist the template scopes
+(falling back to the pilot defaults when the template omits them), and
+(b) the device-key claim path must derive its ceiling from the grant.
 
 ## Decisions (settled during brainstorming)
 
@@ -149,7 +157,7 @@ hash-only audit, and (for downgrades) the invalidation-propagation path.
 
 | Condition | Layer | Result |
 |---|---|---|
-| Unknown scope string in request | issuer | 400 `"invalid consent scope"` |
+| Unknown scope string in request | issuer | existing 400 `"invalid upload claim request"` (serde already rejects unknown enum values at parse time; no new label) |
 | Empty scope intersection | issuer | 403 `"consent scopes not permitted"` |
 | Scope refusal at submit | CLI | `Refused { "scopes-not-permitted" }` + re-login hint, batch continues |
 | No grant row / no grant DB | issuer | hardcoded floor, today's behavior exactly |
