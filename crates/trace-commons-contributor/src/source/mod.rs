@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 pub mod claude_code;
+pub mod codex;
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
@@ -74,12 +75,14 @@ pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
-    let _ = &codex_root;
     let claude_root =
         claude_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude/projects"));
-    let sources: Vec<Box<dyn TraceSource>> =
-        vec![Box::new(claude_code::ClaudeCodeSource::new(claude_root))];
-    // codex source wired in Task 8
+    let codex_root =
+        codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
+    let sources: Vec<Box<dyn TraceSource>> = vec![
+        Box::new(claude_code::ClaudeCodeSource::new(claude_root)),
+        Box::new(codex::CodexSource::new(codex_root)),
+    ];
     sources
 }
 
