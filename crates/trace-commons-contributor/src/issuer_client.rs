@@ -20,6 +20,12 @@ use crate::identity::{
 pub struct ClaimToken {
     pub access_token: String,
     pub expires_at: DateTime<Utc>,
+    /// Consent scopes the issuer granted, echoed from the response. Empty
+    /// means an older issuer that does not echo this field.
+    pub consent_scopes: Vec<String>,
+    /// Allowed uses the issuer granted, echoed from the response. Empty
+    /// means an older issuer that does not echo this field.
+    pub allowed_uses: Vec<String>,
 }
 
 impl ClaimToken {
@@ -33,6 +39,10 @@ impl ClaimToken {
 struct ClaimTokenResponse {
     access_token: String,
     expires_at: DateTime<Utc>,
+    #[serde(default)]
+    consent_scopes: Vec<String>,
+    #[serde(default)]
+    allowed_uses: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +125,8 @@ impl IssuerClient {
         Ok(ClaimToken {
             access_token: parsed.access_token,
             expires_at: parsed.expires_at,
+            consent_scopes: parsed.consent_scopes,
+            allowed_uses: parsed.allowed_uses,
         })
     }
 }
@@ -155,6 +167,8 @@ mod tests {
                     "token_type": "Bearer",
                     "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
                     "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation"],
+                    "allowed_uses": ["debugging"],
                 }))
             }),
         );
@@ -171,6 +185,41 @@ mod tests {
         let token = client.mint_claim(&base, &signed).await.unwrap();
         assert_eq!(token.access_token, "jwt-token");
         assert!(token.is_fresh(chrono::Utc::now()));
+        assert_eq!(
+            token.consent_scopes,
+            vec!["debugging_evaluation".to_string()]
+        );
+        assert_eq!(token.allowed_uses, vec!["debugging".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn mint_claim_response_without_echo_fields_yields_empty_vecs() {
+        let router = Router::new().route(
+            "/v1/trace-upload-claim",
+            post(
+                |_headers: axum::http::HeaderMap, _body: String| async move {
+                    Json(serde_json::json!({
+                        "access_token": "jwt-token",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                    }))
+                },
+            ),
+        );
+        let base = spawn(router).await;
+        let client = IssuerClient::new(
+            trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
+        )
+        .unwrap();
+        let signed = crate::identity::SignedClaimRequest {
+            body: r#"{"k":"v"}"#.into(),
+            device_key_id: "sha256:ab".into(),
+            signature_b64: "c2ln".into(),
+        };
+        let token = client.mint_claim(&base, &signed).await.unwrap();
+        assert!(token.consent_scopes.is_empty());
+        assert!(token.allowed_uses.is_empty());
     }
 
     #[tokio::test]

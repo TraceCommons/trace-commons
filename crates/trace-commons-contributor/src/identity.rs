@@ -194,13 +194,16 @@ pub fn build_signed_claim_request(
     device: &DeviceIdentity,
     now: DateTime<Utc>,
 ) -> Result<SignedClaimRequest> {
+    let consent_scopes = crate::consent::validate_scopes(&cfg.consent_scopes)
+        .context("validating configured consent scopes (re-run login to fix the stored config)")?;
+    let allowed_uses = crate::consent::scopes_to_allowed_uses(&consent_scopes);
     let subject = user_subject_hash(&cfg.user_subject);
     let payload = serde_json::json!({
         "schema_version": CLAIM_REQUEST_SCHEMA_VERSION,
         "tenant_id": cfg.tenant_id,
         "audience": cfg.audience,
-        "consent_scopes": ["debugging_evaluation"],
-        "allowed_uses": ["debugging", "evaluation"],
+        "consent_scopes": consent_scopes,
+        "allowed_uses": allowed_uses,
         "subject": subject,
         "requested_at": now.to_rfc3339(),
     });
@@ -294,7 +297,7 @@ mod tests {
             instance_id: "instance-1".into(),
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
+            consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
         };
@@ -305,6 +308,13 @@ mod tests {
             "ironclaw.trace_upload_claim_request.v1"
         );
         assert_eq!(parsed["tenant_id"], "tenant-abc");
+        assert_eq!(
+            parsed["consent_scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+        let allowed_uses = parsed["allowed_uses"].as_array().unwrap();
+        assert!(allowed_uses.contains(&serde_json::json!("model_training")));
+        assert!(allowed_uses.contains(&serde_json::json!("aggregate_analytics")));
         // Subject is the sha256 form, never the raw user_subject.
         let subject = parsed["subject"].as_str().unwrap();
         assert!(subject.starts_with("sha256:"));
