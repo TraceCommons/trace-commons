@@ -27,6 +27,11 @@ enum Command {
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
         allowed_hosts: Option<String>,
+        /// CSV of consent scopes to request (e.g. debugging_evaluation,model_training);
+        /// omit to be prompted interactively (or default to the debugging_evaluation
+        /// floor when not running in a terminal)
+        #[arg(long)]
+        scopes: Option<String>,
     },
     /// List discoverable local sessions
     List,
@@ -87,7 +92,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Login {
             grant,
             allowed_hosts,
-        } => commands::login(&store, grant.as_deref(), allowed_hosts.as_deref()).await,
+            scopes,
+        } => {
+            commands::login(
+                &store,
+                grant.as_deref(),
+                allowed_hosts.as_deref(),
+                scopes.as_deref(),
+            )
+            .await
+        }
         Command::List => commands::list(),
         Command::Submit {
             all,

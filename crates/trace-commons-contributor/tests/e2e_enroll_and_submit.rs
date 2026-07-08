@@ -816,7 +816,7 @@ async fn enroll_mint_submit_round_trip() {
         chrono::Utc::now(),
     )
     .unwrap();
-    trace_commons_contributor::commands::login(&store, Some(&grant.encode()), None)
+    trace_commons_contributor::commands::login(&store, Some(&grant.encode()), None, None)
         .await
         .unwrap();
 

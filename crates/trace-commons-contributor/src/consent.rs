@@ -69,9 +69,119 @@ pub fn scopes_to_allowed_uses(scopes: &[String]) -> Vec<String> {
     uses
 }
 
+/// Interactive consent answers gathered at login. `debugging_evaluation` is
+/// always on and is not represented here; the other four fields correspond
+/// 1:1 to the optional scopes in [`VALID_SCOPES`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConsentAnswers {
+    pub benchmark: bool,
+    pub ranking: bool,
+    pub training: bool,
+    pub attribution: bool,
+}
+
+/// Pure mapping: answers -> validated wire-name scope list. Always includes
+/// the `debugging_evaluation` floor; an all-false `ConsentAnswers` yields
+/// just the floor scope.
+pub fn scopes_from_answers(a: ConsentAnswers) -> Vec<String> {
+    let mut names = Vec::new();
+    if a.benchmark {
+        names.push("benchmark_only".to_string());
+    }
+    if a.ranking {
+        names.push("ranking_training".to_string());
+    }
+    if a.training {
+        names.push("model_training".to_string());
+    }
+    if a.attribution {
+        names.push("public_attribution".to_string());
+    }
+    // validate_scopes always adds the floor and orders per VALID_SCOPES;
+    // these names are already known-valid, so this cannot fail.
+    validate_scopes(&names).expect("scope names derived from ConsentAnswers are always valid")
+}
+
+/// Print the plain-language consent menu and read one y/N answer per
+/// optional scope from `input`. `debugging_evaluation` is always on and is
+/// not prompted for.
+pub fn prompt_consent_answers(
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) -> Result<ConsentAnswers> {
+    writeln!(
+        output,
+        "How may your submitted traces be used? (you can revoke submitted traces later)"
+    )?;
+    writeln!(
+        output,
+        "  Debugging and evaluation                 [always on]"
+    )?;
+    writeln!(output, "  Benchmark generation                     [y/N]")?;
+    let benchmark = read_yes_no(input)?;
+    writeln!(output, "  Ranking-model training                   [y/N]")?;
+    let ranking = read_yes_no(input)?;
+    writeln!(output, "  Model training                           [y/N]")?;
+    let training = read_yes_no(input)?;
+    writeln!(output, "  Public attribution of your handle        [y/N]")?;
+    let attribution = read_yes_no(input)?;
+
+    Ok(ConsentAnswers {
+        benchmark,
+        ranking,
+        training,
+        attribution,
+    })
+}
+
+/// Read one line from `input` and interpret it as a yes/no answer: `y`, `Y`,
+/// or `yes` (case-insensitive) is true; anything else (including an empty
+/// line) is false.
+fn read_yes_no(input: &mut impl std::io::BufRead) -> Result<bool> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let trimmed = line.trim();
+    Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_map_to_scopes() {
+        assert_eq!(
+            scopes_from_answers(ConsentAnswers::default()),
+            vec!["debugging_evaluation".to_string()]
+        );
+        let all = ConsentAnswers {
+            benchmark: true,
+            ranking: true,
+            training: true,
+            attribution: true,
+        };
+        assert_eq!(
+            scopes_from_answers(all),
+            vec![
+                "debugging_evaluation".to_string(),
+                "benchmark_only".to_string(),
+                "ranking_training".to_string(),
+                "model_training".to_string(),
+                "public_attribution".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_reads_yes_no_answers_without_tty() {
+        let mut input = std::io::Cursor::new(b"y\nn\nyes\n\n".to_vec());
+        let mut output = Vec::new();
+        let a = prompt_consent_answers(&mut input, &mut output).unwrap();
+        assert!(a.benchmark && !a.ranking && a.training && !a.attribution);
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("How may your submitted traces be used?"));
+        assert!(printed.contains("Model training"));
+    }
 
     #[test]
     fn validate_scopes_dedups_orders_and_always_includes_floor() {

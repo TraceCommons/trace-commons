@@ -51,15 +51,29 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
    trace-commons-contributor submit --since 7d
    ```
 
-## Consent model (v1 scope)
+## Consent model
 
-- Every device-key claim issued in v1 is server-capped to the
-  `debugging_evaluation` consent scope. Envelopes this CLI produces carry
-  `debugging_evaluation` and only the `debugging` / `evaluation` allowed-use
-  labels — nothing broader.
-- Broader consent scopes (e.g. `model_training`) are explicit server-side
-  follow-up work; this CLI does not attempt to request them, and the issuer
-  will not grant them to a device-key claim today.
+- The instance's onboarding policy template sets a **ceiling**: it lists the
+  consent scopes device-key claims from that instance are allowed to carry.
+  Nothing this CLI requests can exceed that ceiling; the issuer enforces it
+  server-side regardless of what the contributor picks locally.
+- At `login`, the contributor picks which of those scopes to grant, up to
+  the instance ceiling:
+  - Interactively, when no `--scopes` flag is given and stdin is a
+    terminal: `login` prints a plain-language menu (`Debugging and
+    evaluation` is always on; `Benchmark generation`, `Ranking-model
+    training`, `Model training`, and `Public attribution of your handle`
+    are each a y/N prompt) and stores the resulting scope set.
+  - Non-interactively, via `login --scopes debugging_evaluation,model_training`
+    (a CSV of wire-name scopes). Unknown scope names are rejected before any
+    network call, naming the valid set.
+  - With no `--scopes` and no terminal (e.g. CI), `login` falls back to the
+    `debugging_evaluation` floor only.
+- The scopes actually written to `contributor.json` are only ever what the
+  contributor chose; the envelopes this CLI produces carry whatever the
+  server granted for that device-key claim (the intersection of the
+  contributor's choice and the instance ceiling), and `status` shows the
+  per-trace granted scopes for each submission.
 - Local secret redaction (deterministic, via the shared protocol crate) runs
   on every session before it ever reaches the network, and covers
   *everything* in the envelope: message text, tool-call and tool-result

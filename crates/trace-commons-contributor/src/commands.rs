@@ -14,6 +14,7 @@ use trace_commons_protocol::onboarding::user_subject_hash;
 use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
+use crate::consent::{prompt_consent_answers, scopes_from_answers, validate_scopes};
 use crate::identity::{
     DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
 };
@@ -28,11 +29,19 @@ use crate::submit::{self, SubmitOptions, SubmitOutcome};
 /// When `allowed_hosts` is provided it takes precedence over the
 /// `TRACE_COMMONS_ALLOWED_HOSTS` env fallback and is persisted into the
 /// saved config so every later command enforces it.
+///
+/// `scopes` (a CSV of wire-name consent scopes) is validated before any
+/// network call. When absent, an interactive terminal prompts for consent
+/// choices; a non-interactive session falls back to the
+/// `debugging_evaluation` floor only.
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
     allowed_hosts: Option<&str>,
+    scopes: Option<&str>,
 ) -> Result<()> {
+    let consent_scopes = resolve_consent_scopes(scopes)?;
+
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
 
     let Some(grant_b64) = grant_b64 else {
@@ -62,7 +71,7 @@ pub async fn login(
         instance_id: grant.attestation.instance_id.clone(),
         user_subject: grant.attestation.user_subject.clone(),
         device_key_id: response.device_key_id,
-        consent_scopes: vec!["debugging_evaluation".to_string()],
+        consent_scopes: consent_scopes.clone(),
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
     };
@@ -72,12 +81,34 @@ pub async fn login(
 
     println!("enrolled: tenant_id={}", cfg.tenant_id);
     println!(
-        "Traces you submit carry the debugging_evaluation consent scope; secrets are removed \
-         locally (including tool payloads), and the server re-applies the same deterministic \
+        "Traces you submit carry the {} consent scope(s); secrets are removed locally \
+         (including tool payloads), and the server re-applies the same deterministic \
          redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
-         message text only."
+         message text only.",
+        consent_scopes.join(", ")
     );
     Ok(())
+}
+
+/// Resolve the consent scopes to request for this login: an explicit
+/// `--scopes` CSV wins (validated immediately, before any network call); a
+/// TTY prompts interactively; a non-interactive session with no `--scopes`
+/// falls back to the `debugging_evaluation` floor only.
+fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
+    if let Some(csv) = scopes {
+        let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
+        return validate_scopes(&names).context("validating --scopes");
+    }
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout();
+        let answers = prompt_consent_answers(&mut stdin, &mut stdout)
+            .context("reading interactive consent answers")?;
+        Ok(scopes_from_answers(answers))
+    } else {
+        Ok(vec!["debugging_evaluation".to_string()])
+    }
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
@@ -490,7 +521,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), Some("api.example"))
+        let err = login(&store, Some(&grant.encode()), Some("api.example"), None)
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
