@@ -33,24 +33,50 @@ impl TraceSource for ClaudeCodeSource {
 
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
+        let mut skipped = 0usize;
         let Ok(project_dirs) = std::fs::read_dir(&self.root) else {
             return Ok(sessions);
         };
         for project_dir in project_dirs {
-            let project_dir = project_dir?;
-            if !project_dir.file_type()?.is_dir() {
+            let project_dir = match project_dir {
+                Ok(d) => d,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let is_dir = match project_dir.file_type() {
+                Ok(ft) => ft.is_dir(),
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            if !is_dir {
                 continue;
             }
             let Ok(entries) = std::fs::read_dir(project_dir.path()) else {
                 continue;
             };
             for entry in entries {
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let metadata = entry.metadata()?;
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 let started_at = metadata
                     .modified()
                     .ok()
@@ -63,6 +89,12 @@ impl TraceSource for ClaudeCodeSource {
                     size_bytes: metadata.len(),
                 });
             }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped unreadable claude-code session entries during discovery"
+            );
         }
         Ok(sessions)
     }

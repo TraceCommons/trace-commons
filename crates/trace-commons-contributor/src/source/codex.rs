@@ -33,7 +33,14 @@ impl TraceSource for CodexSource {
 
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
-        collect_rollout_files(&self.root, &mut sessions)?;
+        let mut skipped = 0usize;
+        collect_rollout_files(&self.root, &mut sessions, &mut skipped);
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped unreadable codex session entries during discovery"
+            );
+        }
         Ok(sessions)
     }
 
@@ -42,16 +49,28 @@ impl TraceSource for CodexSource {
     }
 }
 
-fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>) -> anyhow::Result<()> {
+fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &mut usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(());
+        return;
     };
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                *skipped += 1;
+                continue;
+            }
+        };
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => {
+                *skipped += 1;
+                continue;
+            }
+        };
         if file_type.is_dir() {
-            collect_rollout_files(&path, sessions)?;
+            collect_rollout_files(&path, sessions, skipped);
             continue;
         }
         let file_name = entry.file_name();
@@ -61,7 +80,13 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>) -> anyhow::
         if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
             continue;
         }
-        let metadata = entry.metadata()?;
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                *skipped += 1;
+                continue;
+            }
+        };
         let started_at = metadata
             .modified()
             .ok()
@@ -74,7 +99,6 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>) -> anyhow::
             size_bytes: metadata.len(),
         });
     }
-    Ok(())
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
