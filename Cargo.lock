@@ -7123,6 +7123,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-contributor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dirs",
+ "hex",
+ "reqwest 0.12.28",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "trace-commons-operator-client",
+ "trace-commons-protocol",
+ "trace-commons-server",
+ "tracing",
+ "uuid 1.23.1",
+]
+
+[[package]]
 name = "trace-commons-gate-enclave"
 version = "0.1.0"
 dependencies = [
