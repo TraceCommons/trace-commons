@@ -125,6 +125,26 @@ exist there).
 - README consent-model section: replace the "v1 cap" language with the
   instance-template-ceiling description.
 
+## Scope visibility (added)
+
+Contributors must be able to see, server-side, what consent each submitted
+trace actually carries:
+
+- `TraceSubmissionStatusUpdate` gains an additive field
+  `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub consent_scopes: Vec<ConsentScope>`
+  populated from the stored envelope's consent block by the
+  submission-status handler.
+- `trace-commons-contributor status` gains a SCOPES column rendering the
+  wire names comma-joined (empty cell when the field is absent from an
+  older server).
+- This is contributor-authenticated read-back only. Consent settings never
+  appear on the public community-profile surface.
+
+Retroactive consent updates (upgrading old traces to broader scopes, or
+partial downgrades short of full revocation) are explicitly deferred to the
+next slice: they require a consent-change endpoint with claim-backed proof,
+hash-only audit, and (for downgrades) the invalidation-propagation path.
+
 ## Error handling summary
 
 | Condition | Layer | Result |
@@ -155,6 +175,10 @@ CLI:
   set); fallback stamping when the response lacks the fields.
 - Scope-refusal outcome mapping.
 
+Scope visibility:
+- Submission-status handler returns the stored envelope's consent scopes;
+  CLI status renders the SCOPES column and tolerates the field's absence.
+
 E2E (extends `e2e_enroll_and_submit`):
 - Allowlist `policy_template` grants `model_training` (+ floor);
   `login --scopes debugging_evaluation,model_training`; submit; assert the
@@ -164,8 +188,12 @@ E2E (extends `e2e_enroll_and_submit`):
 
 ## Out of scope
 
+- Retroactive consent updates on already-submitted traces (upgrade or
+  partial downgrade) — next slice, per 2026-07-08 decision.
 - Invite-path scope broadening.
 - Per-user scopes inside the signed enrollment attestation.
-- Ingest-side changes (claim-scope enforcement already exists).
+- Ingest-side enforcement changes (claim-scope enforcement already
+  exists). The only ingest edit in this slice is the additive
+  `consent_scopes` field on the submission-status response.
 - Retention-policy changes and credit changes.
 - Schema migrations (none needed; grant columns exist and are written).
