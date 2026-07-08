@@ -562,6 +562,61 @@ mod tests {
         assert!(store.dir().join("near-ai-notice-shown").exists());
     }
 
+    /// Grants strictly less than requested: config asks for
+    /// debugging_evaluation + model_training, issuer grants only
+    /// debugging_evaluation.
+    fn stub_issuer_narrows_grant() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation"],
+                    "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+                }))
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_stamped_with_narrowed_grant_when_server_grants_less() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_narrows_grant()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        // cfg_for requests debugging_evaluation + model_training; the stub
+        // issuer grants only debugging_evaluation. The envelope must carry
+        // the granted (narrower) set, never the requested one.
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 1);
+        let sent = &received_guard[0];
+        assert_eq!(
+            sent["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation"])
+        );
+        let allowed_uses = sent["trace_card"]["allowed_uses"].as_array().unwrap();
+        assert!(
+            !allowed_uses
+                .iter()
+                .any(|u| u == &serde_json::json!("model_training"))
+        );
+    }
+
     #[tokio::test]
     async fn scope_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
         let received = Arc::new(Mutex::new(Vec::new()));
