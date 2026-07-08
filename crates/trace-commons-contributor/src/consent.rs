@@ -21,17 +21,17 @@ const FLOOR_SCOPE: &str = "debugging_evaluation";
 
 /// Validate a list of wire-name consent scopes against [`VALID_SCOPES`].
 ///
-/// Unknown names produce an error listing the valid set (with a hint to
-/// re-run login to fix the stored config). The result is deduped, ordered to
-/// match [`VALID_SCOPES`], and always includes the floor scope
-/// `debugging_evaluation` even if it was omitted from `names`.
+/// Unknown names produce a context-neutral error listing the valid set;
+/// callers add their own context (stored config vs. `--scopes` flag). The
+/// result is deduped, ordered to match [`VALID_SCOPES`], and always includes
+/// the floor scope `debugging_evaluation` even if it was omitted from
+/// `names`.
 pub fn validate_scopes(names: &[String]) -> Result<Vec<String>> {
     for name in names {
         if !VALID_SCOPES.contains(&name.as_str()) {
             bail!(
-                "unknown consent scope \"{name}\" in stored config; valid scopes are {:?} \
-                 (re-run login to fix the stored config)",
-                VALID_SCOPES
+                "unknown consent scope \"{name}\"; valid scopes are: {}",
+                VALID_SCOPES.join(", ")
             );
         }
     }

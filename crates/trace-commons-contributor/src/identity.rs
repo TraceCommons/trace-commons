@@ -195,7 +195,7 @@ pub fn build_signed_claim_request(
     now: DateTime<Utc>,
 ) -> Result<SignedClaimRequest> {
     let consent_scopes = crate::consent::validate_scopes(&cfg.consent_scopes)
-        .context("validating configured consent scopes (re-run login to fix the stored config)")?;
+        .context("invalid consent scopes in stored config (re-run login to fix)")?;
     let allowed_uses = crate::consent::scopes_to_allowed_uses(&consent_scopes);
     let subject = user_subject_hash(&cfg.user_subject);
     let payload = serde_json::json!({

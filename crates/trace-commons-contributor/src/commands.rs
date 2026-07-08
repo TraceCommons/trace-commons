@@ -97,7 +97,7 @@ pub async fn login(
 fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
     if let Some(csv) = scopes {
         let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
-        return validate_scopes(&names).context("validating --scopes");
+        return validate_scopes(&names).context("invalid --scopes value");
     }
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
@@ -499,6 +499,18 @@ mod tests {
         // Load failure renders "?" and stays selectable.
         let row = submit_picker_row(0, &r, None);
         assert_eq!(row.last().unwrap(), "?");
+    }
+
+    #[test]
+    fn scopes_flag_error_is_flag_scoped_not_stored_config() {
+        let err = resolve_consent_scopes(Some("bogus")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--scopes"), "{msg}");
+        assert!(
+            msg.contains("bogus") && msg.contains("model_training"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stored config"), "{msg}");
     }
 
     #[tokio::test]
