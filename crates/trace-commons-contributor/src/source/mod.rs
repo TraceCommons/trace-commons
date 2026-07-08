@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+pub mod claude_code;
+
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 
@@ -72,9 +74,13 @@ pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
-    let _ = (&claude_root, &codex_root);
-    // populated by claude_code/codex tasks
-    Vec::new()
+    let _ = &codex_root;
+    let claude_root =
+        claude_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude/projects"));
+    let sources: Vec<Box<dyn TraceSource>> =
+        vec![Box::new(claude_code::ClaudeCodeSource::new(claude_root))];
+    // codex source wired in Task 8
+    sources
 }
 
 #[cfg(test)]
