@@ -7,10 +7,11 @@
 //! status`) is stubbed; the enrollment and claim-minting paths run through
 //! the real `trace_upload_claim_issuer_router` from `trace-commons-server`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Utc};
+use sha2::Digest as _;
 use trace_commons_contributor::source::TraceSource as _;
 use uuid::Uuid;
 
@@ -27,14 +28,32 @@ use trace_commons_server::trace_corpus_storage::*;
 /// unreachable and panics via `todo!` if hit.
 struct InMemoryEnrollDb {
     device_keys: RwLock<HashMap<(String, String), DeviceKeyRecord>>,
+    /// Grants captured at `enroll_instance_user` time, keyed by
+    /// `(tenant_id, principal_ref)`, where `principal_ref` mirrors the real
+    /// issuer's `principal_storage_ref(&format!("device:{tenant_id}:{device_key_id}"))`
+    /// (see `device_key_claims_honor_grant_scope_ceiling` in the server
+    /// crate, which pins this exact format). Value is
+    /// `(allowed_consent_scopes, allowed_uses)`.
+    grants: Mutex<HashMap<(String, String), (Vec<String>, Vec<String>)>>,
 }
 
 impl InMemoryEnrollDb {
     fn new() -> Self {
         Self {
             device_keys: RwLock::new(HashMap::new()),
+            grants: Mutex::new(HashMap::new()),
         }
     }
+}
+
+/// `principal_sha256:<hex>` ref for a device principal, matching the private
+/// `principal_storage_ref` helper in `trace_upload_claim_issuer.rs`.
+fn device_grant_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    let raw = format!("device:{tenant_id}:{device_key_id}");
+    format!(
+        "principal_sha256:{}",
+        hex::encode(sha2::Sha256::digest(raw.as_bytes()))
+    )
 }
 
 #[async_trait::async_trait]
@@ -93,11 +112,38 @@ impl TraceCorpusStore for InMemoryEnrollDb {
     }
     async fn list_active_trace_tenant_access_grants_for_principal(
         &self,
-        _tenant_id: &str,
-        _principal_ref: &str,
+        tenant_id: &str,
+        principal_ref: &str,
         _now: DateTime<Utc>,
     ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
-        todo!("stub")
+        let grants = self.grants.lock().unwrap();
+        let Some((allowed_consent_scopes, allowed_uses)) =
+            grants.get(&(tenant_id.to_string(), principal_ref.to_string()))
+        else {
+            return Ok(Vec::new());
+        };
+        let now = Utc::now();
+        Ok(vec![TraceTenantAccessGrantRecord {
+            tenant_id: tenant_id.to_string(),
+            grant_id: Uuid::new_v4(),
+            principal_ref: principal_ref.to_string(),
+            role: TraceTenantAccessGrantRole::Contributor,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: allowed_consent_scopes.clone(),
+            allowed_uses: allowed_uses.clone(),
+            issuer: None,
+            audience: None,
+            subject: None,
+            issued_at: now - chrono::Duration::seconds(60),
+            expires_at: None,
+            revoked_at: None,
+            created_by_principal_ref: None,
+            revoked_by_principal_ref: None,
+            reason: None,
+            metadata: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        }])
     }
     async fn list_trace_credit_events(
         &self,
@@ -635,6 +681,15 @@ impl Database for InMemoryEnrollDb {
     }
 
     async fn enroll_instance_user(&self, p: InstanceUserProvision) -> Result<(), DatabaseError> {
+        let allowed_consent_scopes: Vec<String> =
+            serde_json::from_value(p.allowed_consent_scopes.clone()).unwrap_or_default();
+        let allowed_uses: Vec<String> =
+            serde_json::from_value(p.allowed_uses.clone()).unwrap_or_default();
+        let principal_ref = device_grant_principal_ref(&p.tenant_id, &p.device_key_id);
+        self.grants.lock().unwrap().insert(
+            (p.tenant_id.clone(), principal_ref),
+            (allowed_consent_scopes, allowed_uses),
+        );
         self.device_keys.write().unwrap().insert(
             (p.tenant_id.clone(), p.device_key_id.clone()),
             DeviceKeyRecord {
@@ -705,8 +760,8 @@ async fn enroll_mint_submit_round_trip() {
                 "rate_per_min": 60,
                 "policy_template": {
                     "policy_version": "e2e-v1",
-                    "allowed_consent_scopes": ["debugging_evaluation"],
-                    "allowed_uses": ["debugging"]
+                    "allowed_consent_scopes": ["debugging_evaluation","public_attribution","model_training"],
+                    "allowed_uses": ["debugging","evaluation","aggregate_analytics","model_training"]
                 }
             }]
         })
@@ -750,7 +805,7 @@ async fn enroll_mint_submit_round_trip() {
                         "status": "accepted",
                         "credit_points_pending": 0.0,
                         "explanation": [],
-                        "consent_scopes": ["debugging_evaluation"]
+                        "consent_scopes": ["debugging_evaluation","model_training"]
                     }]))
                 }),
             );
@@ -775,7 +830,7 @@ async fn enroll_mint_submit_round_trip() {
         workload_public_key_pem: keys.public_key_pem.clone(),
         workload_issuer: None,
         workload_audience: None,
-        tenant_access_grant_db: None,
+        tenant_access_grant_db: Some(db.clone() as Arc<dyn Database>),
         require_tenant_access_grants: false,
         shutdown_grace_seconds: 30,
         request_timeout_seconds: 10,
@@ -817,9 +872,14 @@ async fn enroll_mint_submit_round_trip() {
         chrono::Utc::now(),
     )
     .unwrap();
-    trace_commons_contributor::commands::login(&store, Some(&grant.encode()), None, None)
-        .await
-        .unwrap();
+    trace_commons_contributor::commands::login(
+        &store,
+        Some(&grant.encode()),
+        None,
+        Some("debugging_evaluation,model_training"),
+    )
+    .await
+    .unwrap();
 
     let cfg = store.load_config().unwrap().unwrap();
     assert_eq!(
@@ -862,6 +922,21 @@ async fn enroll_mint_submit_round_trip() {
     let sent = received.lock().unwrap()[0].to_string();
     assert!(!sent.contains("sk-fake-fixture-secret-1234"));
 
+    // The training-consent scopes granted at enrollment must ride through
+    // the real issuer's claim into the submitted envelope.
+    let envelope = received.lock().unwrap()[0].clone();
+    assert_eq!(
+        envelope["consent"]["scopes"],
+        serde_json::json!(["debugging_evaluation", "model_training"])
+    );
+    let allowed_uses = envelope["trace_card"]["allowed_uses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(allowed_uses.contains(&"model_training".to_string()));
+
     assert_eq!(store.load_receipts().unwrap().len(), 1);
 
     let status = trace_commons_contributor::submit::status(&store, &cfg)
@@ -870,6 +945,9 @@ async fn enroll_mint_submit_round_trip() {
     assert_eq!(status.len(), 1);
     assert_eq!(
         status[0].consent_scopes,
-        vec![trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation]
+        vec![
+            trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation,
+            trace_commons_protocol::trace_contribution::ConsentScope::ModelTraining,
+        ]
     );
 }
