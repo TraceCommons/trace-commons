@@ -22,6 +22,7 @@ use crate::issuer_client::IssuerClient;
 use crate::picker;
 use crate::source::{SessionRef, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
+use trace_commons_protocol::trace_contribution::ConsentScope;
 
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
@@ -424,6 +425,24 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     Ok(())
 }
 
+/// Render a comma-joined list of wire-name consent scopes for the status
+/// table; an empty slice renders as `"-"`.
+pub(crate) fn scopes_cell(scopes: &[ConsentScope]) -> String {
+    if scopes.is_empty() {
+        return "-".to_string();
+    }
+    scopes
+        .iter()
+        .map(|scope| {
+            serde_json::to_value(scope)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Print server-side status for every locally recorded submission receipt.
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
@@ -443,6 +462,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
             vec![
                 u.submission_id.to_string(),
                 u.status.clone(),
+                scopes_cell(&u.consent_scopes),
                 format!("{:.2}", u.credit_points_pending),
                 u.credit_points_final
                     .map(|f| format!("{f:.2}"))
@@ -452,7 +472,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
         .collect();
     print_table(
         &mut std::io::stdout(),
-        &["SUBMISSION", "STATUS", "PENDING", "FINAL"],
+        &["SUBMISSION", "STATUS", "SCOPES", "PENDING", "FINAL"],
         &rows,
     )
     .context("printing status table")?;
@@ -462,6 +482,19 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scopes_cell_renders_wire_names() {
+        use trace_commons_protocol::trace_contribution::ConsentScope;
+        assert_eq!(scopes_cell(&[]), "-");
+        assert_eq!(
+            scopes_cell(&[
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::ModelTraining
+            ]),
+            "debugging_evaluation,model_training"
+        );
+    }
 
     #[test]
     fn submit_picker_marks_already_submitted_fixture_session() {

@@ -749,7 +749,8 @@ async fn enroll_mint_submit_round_trip() {
                         "trace_id": "00000000-0000-0000-0000-000000000000",
                         "status": "accepted",
                         "credit_points_pending": 0.0,
-                        "explanation": []
+                        "explanation": [],
+                        "consent_scopes": ["debugging_evaluation"]
                     }]))
                 }),
             );
@@ -867,4 +868,8 @@ async fn enroll_mint_submit_round_trip() {
         .await
         .unwrap();
     assert_eq!(status.len(), 1);
+    assert_eq!(
+        status[0].consent_scopes,
+        vec![trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation]
+    );
 }
