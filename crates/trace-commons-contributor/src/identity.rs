@@ -217,10 +217,7 @@ pub fn build_signed_claim_request(
 mod tests {
     use super::*;
     use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
-    #[allow(unused_imports)]
-    use trace_commons_protocol::onboarding::{
-        device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
-    };
+    use trace_commons_protocol::onboarding::instance_enroll_attestation_signing_bytes;
 
     #[test]
     fn device_identity_is_stable_across_loads() {
