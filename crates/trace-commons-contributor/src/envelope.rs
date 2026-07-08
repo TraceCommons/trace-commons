@@ -78,6 +78,11 @@ pub fn near_ai_settings_from_env() -> Option<NearAiSettings> {
 /// Fail-closed: if `cfg.pii_filter == Some("near-ai")` and `near_ai` is
 /// `None`, this refuses (never silently downgrades to deterministic-only).
 /// Any other `pii_filter` value is refused as `"unknown-pii-filter"`.
+///
+/// Note: the underlying `DeterministicTraceRedactor::new` may additionally
+/// attach an env-configured filter via `TRACE_PRIVACY_FILTER_BACKEND`
+/// (protocol-crate contract, fail-closed on misconfig), so `cfg.pii_filter`
+/// is not the sole filter source.
 pub fn build_redactor_with(
     cfg: &ContributorConfig,
     transcript_cwd: Option<&str>,
@@ -370,6 +375,18 @@ mod tests {
         cfg.pii_filter = Some("near-ai".into());
         // No settings injected: must refuse, never downgrade to deterministic-only.
         assert!(build_redactor_with(&cfg, None, None).is_err());
+    }
+
+    #[test]
+    fn unknown_pii_filter_fails_closed() {
+        let mut cfg = test_config();
+        cfg.pii_filter = Some("bogus".into());
+        // DeterministicTraceRedactor is not Debug, so unwrap_err() is
+        // unavailable; match on the error branch instead.
+        match build_redactor_with(&cfg, None, None) {
+            Err(err) => assert!(err.to_string().contains("unknown-pii-filter")),
+            Ok(_) => panic!("unknown pii_filter must fail closed"),
+        }
     }
 
     #[tokio::test]
