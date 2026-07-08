@@ -3,7 +3,7 @@
 //! "2d", bare integer days). No I/O lives here so these are unit-testable
 //! without touching stdin or the filesystem.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 /// Parse a 1-based selection string against `max` available items, returning
 /// 0-based, sorted, deduplicated indices.

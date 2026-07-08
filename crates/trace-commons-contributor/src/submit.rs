@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Method;
 use uuid::Uuid;
 
-use trace_commons_operator_client::{host_allowlist::HostAllowlist, Client, Error as OcError};
+use trace_commons_operator_client::{Client, Error as OcError, host_allowlist::HostAllowlist};
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
     TraceSubmissionStatusUpdate,
@@ -20,7 +20,7 @@ use crate::envelope::{
     build_raw_contribution, build_redactor_with, canary_self_test, envelope_size_ok,
     near_ai_settings_from_env, redact_to_envelope,
 };
-use crate::identity::{build_signed_claim_request, DeviceIdentity};
+use crate::identity::{DeviceIdentity, build_signed_claim_request};
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
 
@@ -233,8 +233,8 @@ async fn mint_claim(
     device: &DeviceIdentity,
     now: DateTime<Utc>,
 ) -> Result<ClaimToken> {
-    let signed = build_signed_claim_request(cfg, device, now)
-        .context("building signed claim request")?;
+    let signed =
+        build_signed_claim_request(cfg, device, now).context("building signed claim request")?;
     issuer.mint_claim(&cfg.issuer_url, &signed).await
 }
 
@@ -242,9 +242,11 @@ fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
 ) -> std::result::Result<Client, OcError> {
-    let mut builder =
-        Client::builder(&cfg.ingest_url, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
-            .bearer_token(&token.access_token);
+    let mut builder = Client::builder(
+        &cfg.ingest_url,
+        "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
+    )
+    .bearer_token(&token.access_token);
     if let Some(csv) = cfg.allowed_hosts.as_deref() {
         builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
     }
@@ -320,7 +322,7 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, Json, Router};
+    use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
 
     async fn spawn(router: Router) -> String {
@@ -347,35 +349,46 @@ mod tests {
     fn stub_ingest(received: Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
         Router::new().route(
             "/v1/traces",
-            post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
-                let received = received.clone();
-                async move {
-                    assert_eq!(
-                        headers.get("authorization").unwrap(),
-                        "Bearer stub-claim-jwt"
-                    );
-                    received.lock().unwrap().push(body);
-                    Json(serde_json::json!({
-                        "status": "accepted",
-                        "credit_points_pending": 0.0,
-                        "explanation": []
-                    }))
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let received = received.clone();
+                    async move {
+                        assert_eq!(
+                            headers.get("authorization").unwrap(),
+                            "Bearer stub-claim-jwt"
+                        );
+                        received.lock().unwrap().push(body);
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                    }
+                },
+            ),
         )
     }
 
-    fn fixture_selection() -> Vec<(Box<dyn crate::source::TraceSource>, crate::source::SessionRef)> {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+    fn fixture_selection() -> Vec<(
+        Box<dyn crate::source::TraceSource>,
+        crate::source::SessionRef,
+    )> {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
         let src = crate::source::claude_code::ClaudeCodeSource::new(root.clone());
         let r = src.discover().unwrap().remove(0);
         vec![(
-            Box::new(crate::source::claude_code::ClaudeCodeSource::new(root)) as Box<dyn crate::source::TraceSource>,
+            Box::new(crate::source::claude_code::ClaudeCodeSource::new(root))
+                as Box<dyn crate::source::TraceSource>,
             r,
         )]
     }
 
-    fn cfg_for(issuer: &str, ingest: &str, device_key_id: &str) -> crate::config::ContributorConfig {
+    fn cfg_for(
+        issuer: &str,
+        ingest: &str,
+        device_key_id: &str,
+    ) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: issuer.into(),
@@ -400,9 +413,14 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions { dry_run: false, pii_filter: None };
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
 
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts).await.unwrap();
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
         assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
         {
             // Scope the guard: `let sent = &received.lock().unwrap()[0]` would
@@ -420,8 +438,13 @@ mod tests {
         }
 
         // Second run: receipt short-circuits, no second upload.
-        let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &opts).await.unwrap();
-        assert!(matches!(outcomes2[0], SubmitOutcome::AlreadySubmitted { .. }));
+        let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcomes2[0],
+            SubmitOutcome::AlreadySubmitted { .. }
+        ));
         assert_eq!(received.lock().unwrap().len(), 1);
     }
 
@@ -434,8 +457,13 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions { dry_run: true, pii_filter: None };
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts).await.unwrap();
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+        };
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
         assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());

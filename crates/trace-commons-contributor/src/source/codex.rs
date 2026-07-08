@@ -9,11 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{
-    session_hash, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
-    SOURCE_CODEX,
+    SOURCE_CODEX, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
+    session_hash,
 };
 
 pub struct CodexSource {
@@ -134,7 +134,9 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
             }
             "turn_context" => {
                 if model.is_none() {
-                    if let Some(m) = payload.and_then(|p| p.get("model")).and_then(|v| v.as_str())
+                    if let Some(m) = payload
+                        .and_then(|p| p.get("model"))
+                        .and_then(|v| v.as_str())
                     {
                         model = Some(m.to_string());
                     }
@@ -325,7 +327,7 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
-                SessionEventKind::Opaque,   // reasoning
+                SessionEventKind::Opaque, // reasoning
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
                 SessionEventKind::Assistant,

@@ -23,15 +23,14 @@ use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
-    RawTraceContributionEvent, ReplayMetadata, TokenCounts, TraceChannel,
-    TraceContributionEnvelope, TraceContributionEventType, TraceRedactor, ValueMetadata,
-    TRACE_CONTRIBUTION_POLICY_VERSION, synthetic_privacy_filter_canary_text,
-    synthetic_privacy_filter_canary_values,
+    RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TokenCounts,
+    TraceChannel, TraceContributionEnvelope, TraceContributionEventType, TraceRedactor,
+    ValueMetadata, synthetic_privacy_filter_canary_text, synthetic_privacy_filter_canary_values,
 };
 
 use crate::config::ContributorConfig;
 use crate::source::{
-    session_hash, submission_id_for, SessionEvent, SessionEventKind, SessionTranscript,
+    SessionEvent, SessionEventKind, SessionTranscript, session_hash, submission_id_for,
 };
 
 /// Envelopes larger than this are refused before submission (label-only
@@ -102,13 +101,15 @@ pub fn build_redactor_with(
     match cfg.pii_filter.as_deref() {
         None => Ok(redactor),
         Some("near-ai") => {
-            let settings =
-                near_ai.ok_or_else(|| anyhow::anyhow!("near-ai-privacy-filter-requires-settings"))?;
+            let settings = near_ai
+                .ok_or_else(|| anyhow::anyhow!("near-ai-privacy-filter-requires-settings"))?;
             let adapter = NearAiPrivacyFilterAdapter::new(
                 settings
                     .base_url
                     .unwrap_or_else(|| "https://cloud-api.near.ai/v1".to_string()),
-                settings.model.unwrap_or_else(|| "openai/privacy-filter".to_string()),
+                settings
+                    .model
+                    .unwrap_or_else(|| "openai/privacy-filter".to_string()),
                 settings.api_key,
                 Duration::from_millis(10_000),
                 1024 * 1024,
@@ -310,10 +311,11 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{claude_code::ClaudeCodeSource, TraceSource};
+    use crate::source::{TraceSource, claude_code::ClaudeCodeSource};
 
     fn fixture_transcript() -> crate::source::SessionTranscript {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
         let src = ClaudeCodeSource::new(root);
         let refs = src.discover().unwrap();
         src.load(&refs[0]).unwrap()
@@ -340,11 +342,14 @@ mod tests {
         let t = fixture_transcript();
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        assert_eq!(raw.submission_id, crate::source::submission_id_for(&t.session_hash));
+        assert_eq!(
+            raw.submission_id,
+            crate::source::submission_id_for(&t.session_hash)
+        );
         let redactor =
-            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::new(
-                vec!["/Users/testuser".into()],
-            )
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::new(vec![
+                "/Users/testuser".into(),
+            ])
             .unwrap();
         let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         assert_eq!(
@@ -392,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn near_ai_filter_redacts_via_mock_endpoint() {
         // Stub NEAR AI classify endpoint: flags "bob@example.com" as private_email.
-        use axum::{routing::post, Json, Router};
+        use axum::{Json, Router, routing::post};
         let router = Router::new().route(
             "/privacy/classify",
             post(|Json(req): Json<serde_json::Value>| async move {

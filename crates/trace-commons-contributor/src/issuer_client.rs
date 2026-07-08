@@ -5,7 +5,7 @@
 //! only the `{"error": "<label>"}` label is surfaced, or the HTTP status if
 //! no label parses.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
@@ -111,10 +111,7 @@ impl IssuerClient {
             return Err(error_from_response(response, "claim refused").await);
         }
 
-        let parsed: ClaimTokenResponse = response
-            .json()
-            .await
-            .context("parsing claim response")?;
+        let parsed: ClaimTokenResponse = response.json().await.context("parsing claim response")?;
         Ok(ClaimToken {
             access_token: parsed.access_token,
             expires_at: parsed.expires_at,
@@ -136,7 +133,7 @@ async fn error_from_response(response: reqwest::Response, prefix: &str) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, Json, Router};
+    use axum::{Json, Router, routing::post};
 
     async fn spawn(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -192,9 +189,17 @@ mod tests {
             trace_commons_operator_client::host_allowlist::HostAllowlist::permissive(),
         )
         .unwrap();
-        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
         let grant = crate::identity::mint_grant(
-            doc.as_ref(), &base, "instance-1", "alice", "aud", "sha256:ab", 300, chrono::Utc::now(),
+            doc.as_ref(),
+            &base,
+            "instance-1",
+            "alice",
+            "aud",
+            "sha256:ab",
+            300,
+            chrono::Utc::now(),
         )
         .unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -202,7 +207,14 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         // Force a matching device_key_id so we reach the HTTP call.
         let grant2 = crate::identity::mint_grant(
-            doc.as_ref(), &base, "instance-1", "alice", "aud", &device.device_key_id, 300, chrono::Utc::now(),
+            doc.as_ref(),
+            &base,
+            "instance-1",
+            "alice",
+            "aud",
+            &device.device_key_id,
+            300,
+            chrono::Utc::now(),
         )
         .unwrap();
         let req = crate::identity::build_enroll_request(&grant2, &device).unwrap();

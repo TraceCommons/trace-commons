@@ -6,18 +6,18 @@
 //! (e.g. QR code / paste). Claim requests are signed by the device key over
 //! the exact JSON body bytes sent to the issuer.
 
-use anyhow::{anyhow, bail, Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_protocol::onboarding::{
-    instance_enroll_attestation_signing_bytes, user_subject_hash, TraceInstanceEnrollAttestation,
-    TraceInstanceEnrollRequest, TraceOnboardClientInfo,
-    TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION,
+    TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
+    TraceInstanceEnrollRequest, TraceOnboardClientInfo, instance_enroll_attestation_signing_bytes,
+    user_subject_hash,
 };
 
 use crate::config::{ConfigStore, ContributorConfig};
@@ -38,28 +38,22 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// Load the persisted device key, or generate and persist a new one.
     pub fn load_or_generate(store: &ConfigStore) -> Result<Self> {
-        let pkcs8_der = match store
-            .load_device_key()
-            .context("loading device key")?
-        {
+        let pkcs8_der = match store.load_device_key().context("loading device key")? {
             Some(der) => der,
             None => {
                 let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
                     .map_err(|_| anyhow!("generating device keypair"))?;
                 let der = doc.as_ref().to_vec();
-                store
-                    .save_device_key(&der)
-                    .context("saving device key")?;
+                store.save_device_key(&der).context("saving device key")?;
                 der
             }
         };
         let keypair = Ed25519KeyPair::from_pkcs8(&pkcs8_der)
             .map_err(|_| anyhow!("parsing stored device key"))?;
         let public_key_bytes = keypair.public_key().as_ref().to_vec();
-        let device_key_id =
-            trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
-                &public_key_bytes,
-            );
+        let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            &public_key_bytes,
+        );
         let public_key_b64 = BASE64.encode(&public_key_bytes);
         Ok(Self {
             device_key_id,
@@ -222,7 +216,7 @@ pub fn build_signed_claim_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
+    use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
     #[allow(unused_imports)]
     use trace_commons_protocol::onboarding::{
         device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
@@ -242,15 +236,27 @@ mod tests {
     fn minted_grant_signature_verifies_against_signing_bytes() {
         let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
         let grant = mint_grant(
-            doc.as_ref(), "https://issuer.example", "instance-1", "alice@example.com",
-            "trace-commons-upload", "sha256:ab", 300, chrono::Utc::now(),
+            doc.as_ref(),
+            "https://issuer.example",
+            "instance-1",
+            "alice@example.com",
+            "trace-commons-upload",
+            "sha256:ab",
+            300,
+            chrono::Utc::now(),
         )
         .unwrap();
         let kp = Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap();
         let pk = UnparsedPublicKey::new(&ED25519, kp.public_key().as_ref());
         use base64::Engine as _;
-        let sig = base64::engine::general_purpose::STANDARD.decode(&grant.attestation_sig).unwrap();
-        pk.verify(&instance_enroll_attestation_signing_bytes(&grant.attestation), &sig).unwrap();
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(&grant.attestation_sig)
+            .unwrap();
+        pk.verify(
+            &instance_enroll_attestation_signing_bytes(&grant.attestation),
+            &sig,
+        )
+        .unwrap();
         assert_eq!(grant.attestation.user_subject, "alice@example.com");
         // Grant round-trips through base64.
         let decoded = EnrollmentGrant::decode(&grant.encode()).unwrap();
@@ -264,8 +270,14 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
         let grant = mint_grant(
-            doc.as_ref(), "https://issuer.example", "instance-1", "alice",
-            "trace-commons-upload", "sha256:not-this-device", 300, chrono::Utc::now(),
+            doc.as_ref(),
+            "https://issuer.example",
+            "instance-1",
+            "alice",
+            "trace-commons-upload",
+            "sha256:not-this-device",
+            300,
+            chrono::Utc::now(),
         )
         .unwrap();
         assert!(build_enroll_request(&grant, &device).is_err());
@@ -291,16 +303,23 @@ mod tests {
         };
         let signed = build_signed_claim_request(&cfg, &device, chrono::Utc::now()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&signed.body).unwrap();
-        assert_eq!(parsed["schema_version"], "ironclaw.trace_upload_claim_request.v1");
+        assert_eq!(
+            parsed["schema_version"],
+            "ironclaw.trace_upload_claim_request.v1"
+        );
         assert_eq!(parsed["tenant_id"], "tenant-abc");
         // Subject is the sha256 form, never the raw user_subject.
         let subject = parsed["subject"].as_str().unwrap();
         assert!(subject.starts_with("sha256:"));
         assert_ne!(subject, "alice");
         // Signature verifies over the exact body string.
-        let pk_bytes = base64::engine::general_purpose::STANDARD.decode(&device.public_key_b64).unwrap();
+        let pk_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&device.public_key_b64)
+            .unwrap();
         let pk = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pk_bytes);
-        let sig = base64::engine::general_purpose::STANDARD.decode(&signed.signature_b64).unwrap();
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(&signed.signature_b64)
+            .unwrap();
         pk.verify(signed.body.as_bytes(), &sig).unwrap();
     }
 }

@@ -75,8 +75,11 @@ pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
-    let claude_root =
-        claude_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude/projects"));
+    let claude_root = claude_root.unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude/projects")
+    });
     let codex_root =
         codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
     let sources: Vec<Box<dyn TraceSource>> = vec![

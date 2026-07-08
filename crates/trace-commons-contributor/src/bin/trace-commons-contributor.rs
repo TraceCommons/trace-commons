@@ -4,7 +4,11 @@ use trace_commons_contributor::commands;
 use trace_commons_contributor::config::ConfigStore;
 
 #[derive(Parser)]
-#[command(name = "trace-commons-contributor", version, about = "Submit local coding-agent traces to Trace Commons")]
+#[command(
+    name = "trace-commons-contributor",
+    version,
+    about = "Submit local coding-agent traces to Trace Commons"
+)]
 struct Cli {
     /// Override the config directory (default: $TRACE_COMMONS_CONTRIBUTOR_DIR, then OS config dir)
     #[arg(long, global = true)]

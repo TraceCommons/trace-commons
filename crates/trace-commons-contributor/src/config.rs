@@ -102,8 +102,8 @@ impl ConfigStore {
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let cfg =
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         Ok(Some(cfg))
     }
 
@@ -128,8 +128,7 @@ impl ConfigStore {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         Ok(Some(bytes))
     }
 
@@ -206,15 +205,17 @@ impl ConfigStore {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("reading dir {}", self.dir.display()));
+                return Err(e).with_context(|| format!("reading dir {}", self.dir.display()));
             }
         };
         for entry in entries {
             let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if tmp_prefixes.iter().any(|prefix| file_name.starts_with(prefix)) {
+            if tmp_prefixes
+                .iter()
+                .any(|prefix| file_name.starts_with(prefix))
+            {
                 let path = entry.path();
                 std::fs::remove_file(&path)
                     .with_context(|| format!("removing orphaned temp file {}", path.display()))?;
@@ -288,7 +289,10 @@ mod tests {
         store.save_config(&sample_config()).unwrap();
         let loaded = store.load_config().unwrap().unwrap();
         assert_eq!(loaded.tenant_id, "tenant-abc");
-        let mode = std::fs::metadata(store_path(&store, "contributor.json")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(store_path(&store, "contributor.json"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -298,7 +302,10 @@ mod tests {
         assert!(store.load_device_key().unwrap().is_none());
         store.save_device_key(b"fake-der-bytes").unwrap();
         assert_eq!(store.load_device_key().unwrap().unwrap(), b"fake-der-bytes");
-        let mode = std::fs::metadata(store.device_key_path()).unwrap().permissions().mode();
+        let mode = std::fs::metadata(store.device_key_path())
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 

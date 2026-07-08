@@ -9,11 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{
-    session_hash, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
-    SOURCE_CLAUDE_CODE,
+    SOURCE_CLAUDE_CODE, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
+    session_hash,
 };
 
 pub struct ClaudeCodeSource {
@@ -126,10 +126,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
             }
             "assistant" => {
                 if model.is_none() {
-                    if let Some(m) = record
-                        .pointer("/message/model")
-                        .and_then(|v| v.as_str())
-                    {
+                    if let Some(m) = record.pointer("/message/model").and_then(|v| v.as_str()) {
                         model = Some(m.to_string());
                     }
                 }
@@ -258,10 +255,7 @@ fn map_assistant_record(
     let usage = record.pointer("/message/usage");
     let token_counts = usage.map(|u| {
         let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let output = u
-            .get("output_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         (input, output)
     });
 
@@ -358,9 +352,9 @@ mod tests {
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
                 SessionEventKind::Assistant,
-                SessionEventKind::Opaque,   // system
-                SessionEventKind::Opaque,   // attachment
-                SessionEventKind::Opaque,   // future-unknown-record
+                SessionEventKind::Opaque, // system
+                SessionEventKind::Opaque, // attachment
+                SessionEventKind::Opaque, // future-unknown-record
             ]
         );
         // Thinking dropped; token counts captured on the assistant text event.

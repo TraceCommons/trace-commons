@@ -12,11 +12,13 @@ use trace_commons_operator_client::format::print_table;
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::onboarding::user_subject_hash;
 
-use crate::config::{ContributorConfig, ConfigStore, CONTRIBUTOR_CONFIG_SCHEMA_VERSION};
-use crate::identity::{build_enroll_request, mint_grant, pem_to_pkcs8_der, DeviceIdentity, EnrollmentGrant};
+use crate::config::{CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig};
+use crate::identity::{
+    DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
+};
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{all_sources, SessionRef, TraceSource};
+use crate::source::{SessionRef, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 
 /// Build the allowlist to enforce for issuer requests: the config's
@@ -72,7 +74,9 @@ pub async fn login(
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
     };
-    store.save_config(&cfg).context("saving contributor config")?;
+    store
+        .save_config(&cfg)
+        .context("saving contributor config")?;
 
     println!("enrolled: tenant_id={}", cfg.tenant_id);
     println!(
@@ -93,7 +97,10 @@ pub fn whoami(store: &ConfigStore) -> Result<()> {
     println!("instance_id: {}", cfg.instance_id);
     println!("tenant_id: {}", cfg.tenant_id);
     println!("device_key_id: {}", device.device_key_id);
-    println!("user_subject_hash: {}", user_subject_hash(&cfg.user_subject));
+    println!(
+        "user_subject_hash: {}",
+        user_subject_hash(&cfg.user_subject)
+    );
     println!("config_dir: {}", store.dir().display());
     Ok(())
 }
@@ -173,10 +180,7 @@ fn discover_filtered(
         let project_ok = match project_filter {
             None => true,
             Some(p) => {
-                let basename = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
+                let basename = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
                 let basename_match = r.project.as_deref() == Some(basename);
                 let prefix_match = r.path.starts_with(p);
                 basename_match || prefix_match
@@ -194,7 +198,9 @@ fn discover_filtered(
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
 fn source_for(name: &str) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None).into_iter().find(|s| s.name() == name)
+    all_sources(None, None)
+        .into_iter()
+        .find(|s| s.name() == name)
 }
 
 /// Human-readable "Nh"/"Nd" age, or "-" when the session has no timestamp.
@@ -364,7 +370,10 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let mut had_failure = false;
     for outcome in &outcomes {
         match outcome {
-            SubmitOutcome::Submitted { submission_id, status } => {
+            SubmitOutcome::Submitted {
+                submission_id,
+                status,
+            } => {
                 println!("submitted {submission_id} {status}");
             }
             SubmitOutcome::AlreadySubmitted { submission_id } => {
@@ -472,9 +481,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let doc =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-                .unwrap();
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
         // Grant issuer host is 127.0.0.1; the allowlist only permits
         // api.example, so login must fail before any request is sent.
         let grant = mint_grant(
