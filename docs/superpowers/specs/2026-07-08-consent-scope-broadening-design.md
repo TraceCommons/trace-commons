@@ -62,11 +62,13 @@ After device-key verification succeeds:
    new label; see the error-handling table).
 3. Intersect: issued claim carries
    `intersect(requested_scopes, ceiling_scopes)` and
-   `intersect(requested_uses, ceiling_uses)`. An empty requested list keeps
-   today's behavior of granting the full (hardcoded-floor) ceiling only in
-   the no-grant branch; in the grant branch an empty request grants the
-   full grant ceiling. (Rationale: pre-this-slice CLIs send
-   `["debugging_evaluation"]`, so nothing silently broadens for them.)
+   `intersect(requested_uses, ceiling_uses)`. An empty requested list
+   grants the full ceiling (floor or grant). Implementation note: this is
+   deliberately STRICTER than pre-slice behavior, where an empty device
+   request yielded a claim with empty allowlists that ingest treated as
+   unrestricted; post-slice an empty request yields the explicit ceiling.
+   Pre-this-slice CLIs send `["debugging_evaluation"]`, so nothing
+   silently broadens for them.
 4. Empty intersection on `consent_scopes` is a 403 with label
    `"consent scopes not permitted"` — never an empty-scope claim.
 5. `public_attribution` remains always permitted on the device path (added
