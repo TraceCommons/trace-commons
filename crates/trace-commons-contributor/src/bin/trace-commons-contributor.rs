@@ -20,6 +20,9 @@ enum Command {
         /// Base64 enrollment grant minted by your instance; omit to print this device's key id
         #[arg(long)]
         grant: Option<String>,
+        /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
+        #[arg(long)]
+        allowed_hosts: Option<String>,
     },
     /// List discoverable local sessions
     List,
@@ -77,7 +80,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
-        Command::Login { grant } => commands::login(&store, grant.as_deref()).await,
+        Command::Login {
+            grant,
+            allowed_hosts,
+        } => commands::login(&store, grant.as_deref(), allowed_hosts.as_deref()).await,
         Command::List => anyhow::bail!("not implemented"),
         Command::Submit { .. } => anyhow::bail!("not implemented"),
         Command::Status => anyhow::bail!("not implemented"),

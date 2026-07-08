@@ -25,7 +25,15 @@ fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
 
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
-pub async fn login(store: &ConfigStore, grant_b64: Option<&str>) -> Result<()> {
+///
+/// When `allowed_hosts` is provided it takes precedence over the
+/// `TRACE_COMMONS_ALLOWED_HOSTS` env fallback and is persisted into the
+/// saved config so every later command enforces it.
+pub async fn login(
+    store: &ConfigStore,
+    grant_b64: Option<&str>,
+    allowed_hosts: Option<&str>,
+) -> Result<()> {
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
 
     let Some(grant_b64) = grant_b64 else {
@@ -40,8 +48,9 @@ pub async fn login(store: &ConfigStore, grant_b64: Option<&str>) -> Result<()> {
     let grant = EnrollmentGrant::decode(grant_b64).context("decoding enrollment grant")?;
     let req = build_enroll_request(&grant, &device).context("building enroll request")?;
 
-    // Pre-enrollment there is no saved config yet; fall back to the env var.
-    let allowlist = allowlist_for(None);
+    // Pre-enrollment there is no saved config yet; the flag takes
+    // precedence, else fall back to the env var.
+    let allowlist = allowlist_for(allowed_hosts);
     let client = IssuerClient::new(allowlist).context("building issuer client")?;
     let response = client.enroll(&grant.issuer_url, &req).await?;
 
@@ -56,7 +65,7 @@ pub async fn login(store: &ConfigStore, grant_b64: Option<&str>) -> Result<()> {
         device_key_id: response.device_key_id,
         consent_scopes: vec!["debugging_evaluation".to_string()],
         pii_filter: None,
-        allowed_hosts: None,
+        allowed_hosts: allowed_hosts.map(str::to_string),
     };
     store.save_config(&cfg).context("saving contributor config")?;
 
@@ -93,6 +102,7 @@ pub fn logout(store: &ConfigStore) -> Result<()> {
 
 /// Operator/dogfood tool: mint an enrollment grant with an instance private
 /// key and print it (base64) to stdout.
+// Arity is fixed by the plan's interface contract for this function.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_grant_cmd(
     store: &ConfigStore,
@@ -131,4 +141,39 @@ pub fn mint_grant_cmd(
 
     println!("{}", grant.encode());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn login_rejects_issuer_host_off_allowlist_and_saves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let doc =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .unwrap();
+        // Grant issuer host is 127.0.0.1; the allowlist only permits
+        // api.example, so login must fail before any request is sent.
+        let grant = mint_grant(
+            doc.as_ref(),
+            "http://127.0.0.1:9",
+            "instance-1",
+            "alice",
+            "aud",
+            &device.device_key_id,
+            300,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let err = login(&store, Some(&grant.encode()), Some("api.example"))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
+        // No config was persisted.
+        assert!(store.load_config().unwrap().is_none());
+    }
 }
