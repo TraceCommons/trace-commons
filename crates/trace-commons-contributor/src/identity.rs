@@ -112,6 +112,8 @@ impl EnrollmentGrant {
 
 /// Mint a new enrollment grant, signing the attestation with the instance's
 /// Ed25519 key (PKCS8 DER).
+// Arity is fixed by the plan's interface contract for this function.
+#[allow(clippy::too_many_arguments)]
 pub fn mint_grant(
     instance_key_pkcs8_der: &[u8],
     issuer_url: &str,
