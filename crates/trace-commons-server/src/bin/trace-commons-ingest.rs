@@ -44937,12 +44937,45 @@ fn build_cost_control_decision_row(
     }
 }
 
+/// Bumps the submission's `trace_gate_evaluation_attempts` row and, when the
+/// resulting attempt count reaches `max_attempts`, emits a hash-only
+/// `gate_scoring_exhausted` warning. Once a submission's attempt count
+/// reaches `max_attempts`, the enumeration query's `MAX_ATTEMPTS` filter
+/// (migration V36) permanently excludes it from future ticks, so this is the
+/// only observability signal that the submission dropped out of the
+/// gate-scoring set without ever being scored. Hash-only per repo policy —
+/// never logs the raw tenant id or submission id.
+async fn bump_gate_evaluation_attempt_and_log_exhaustion(
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    now: DateTime<Utc>,
+    label: &str,
+    max_attempts: i32,
+) {
+    if let Ok(attempts) = db
+        .bump_gate_evaluation_attempt(tenant_id, submission_id, now, label)
+        .await
+    {
+        if attempts >= max_attempts {
+            tracing::warn!(
+                tenant_hash = %sha256_prefixed(tenant_id),
+                submission_hash = %sha256_prefixed(&submission_id.to_string()),
+                attempts,
+                max_attempts,
+                "gate_scoring_exhausted"
+            );
+        }
+    }
+}
+
 /// Applies the perplexity-scoring driver's per-submission cost controls
 /// (skip-duplicate short-circuit, then cross-submission cache) before
 /// delegating to `evaluate_and_record_gate`. On any hard failure — including
 /// a scoring failure from the delegated call — bumps the submission's
 /// `trace_gate_evaluation_attempts` row so the enumeration query's
-/// exponential backoff (migration V36) can pace retries.
+/// exponential backoff (migration V36) can pace retries, logging
+/// `gate_scoring_exhausted` (hash-only) once the attempt ceiling is reached.
 #[allow(dead_code)]
 async fn score_one_submission(
     state: &AppState,
@@ -44970,9 +45003,15 @@ async fn score_one_submission(
                 .find(|record| record.submission_id == item.submission_id),
             Err(err) => {
                 let label = format!("{err}");
-                let _ = db
-                    .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
-                    .await;
+                bump_gate_evaluation_attempt_and_log_exhaustion(
+                    db,
+                    &item.tenant_id,
+                    item.submission_id,
+                    now,
+                    &label,
+                    knobs.max_attempts,
+                )
+                .await;
                 return GateOutcome::Failed { label };
             }
         };
@@ -45013,14 +45052,15 @@ async fn score_one_submission(
                         Ok(()) => GateOutcome::SkippedDuplicate { decision_id },
                         Err(err) => {
                             let label = format!("{err}");
-                            let _ = db
-                                .bump_gate_evaluation_attempt(
-                                    &item.tenant_id,
-                                    item.submission_id,
-                                    now,
-                                    &label,
-                                )
-                                .await;
+                            bump_gate_evaluation_attempt_and_log_exhaustion(
+                                db,
+                                &item.tenant_id,
+                                item.submission_id,
+                                now,
+                                &label,
+                                knobs.max_attempts,
+                            )
+                            .await;
                             GateOutcome::Failed { label }
                         }
                     };
@@ -45039,16 +45079,28 @@ async fn score_one_submission(
         Ok(Some(submission)) => submission.canonical_summary_hash,
         Ok(None) => {
             let label = "trace submission not found".to_string();
-            let _ = db
-                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
-                .await;
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
             return GateOutcome::Failed { label };
         }
         Err(err) => {
             let label = format!("{err}");
-            let _ = db
-                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
-                .await;
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
             return GateOutcome::Failed { label };
         }
     };
@@ -45066,14 +45118,15 @@ async fn score_one_submission(
                     Ok(()) => GateOutcome::Cached { decision_id },
                     Err(err) => {
                         let label = format!("{err}");
-                        let _ = db
-                            .bump_gate_evaluation_attempt(
-                                &item.tenant_id,
-                                item.submission_id,
-                                now,
-                                &label,
-                            )
-                            .await;
+                        bump_gate_evaluation_attempt_and_log_exhaustion(
+                            db,
+                            &item.tenant_id,
+                            item.submission_id,
+                            now,
+                            &label,
+                            knobs.max_attempts,
+                        )
+                        .await;
                         GateOutcome::Failed { label }
                     }
                 };
@@ -45081,9 +45134,15 @@ async fn score_one_submission(
             Ok(None) => {}
             Err(err) => {
                 let label = format!("{err}");
-                let _ = db
-                    .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
-                    .await;
+                bump_gate_evaluation_attempt_and_log_exhaustion(
+                    db,
+                    &item.tenant_id,
+                    item.submission_id,
+                    now,
+                    &label,
+                    knobs.max_attempts,
+                )
+                .await;
                 return GateOutcome::Failed { label };
             }
         }
@@ -45094,9 +45153,15 @@ async fn score_one_submission(
         Ok(outcome) => outcome,
         Err(err) => {
             let label = format!("{err}");
-            let _ = db
-                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
-                .await;
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
             GateOutcome::Failed { label }
         }
     }

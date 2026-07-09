@@ -63010,6 +63010,146 @@ async fn score_one_submission_failed_scorer_bumps_attempt_count() {
 }
 
 // -----------------------------------------------------------------------
+// Final-review fix wave: CI-running (non-PG) coverage for the cost-control
+// branches above. `score_one_submission_skips_duplicate_without_calling_gate_service`
+// and `score_one_submission_failed_scorer_bumps_attempt_count` are PG-gated
+// (`postgres_backend_for_ingest_test().await else { return }`), and CI never
+// runs Postgres, so those two branches were previously exercised only when a
+// developer happened to run the PG suite locally. These sibling tests use
+// the in-memory `PerplexityDriverTestDb` double (defined below, alongside
+// Task 5's driver-loop test) so the same branches run unconditionally in CI.
+// -----------------------------------------------------------------------
+
+/// CI-running sibling of `score_one_submission_skips_duplicate_without_calling_gate_service`:
+/// same skip-duplicate assertions, but backed by the in-memory
+/// `PerplexityDriverTestDb` double instead of Postgres, so this actually
+/// runs in CI.
+#[tokio::test]
+async fn score_one_submission_skips_duplicate_ci_without_postgres() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let tenant_id = "tenant-a";
+    let submission_id = Uuid::new_v4();
+    db.seed_duplicate_derived_record(tenant_id, submission_id, 0.99);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // The gate service must never be invoked when the skip-duplicate
+    // short-circuit fires; `PanicIfCalledGateService` proves it.
+    Arc::make_mut(&mut state).gate_service = Arc::new(PanicIfCalledGateService);
+
+    let item = GateWorkItem {
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: true,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::SkippedDuplicate { decision_id } = outcome else {
+        panic!("expected GateOutcome::SkippedDuplicate, got {outcome:?}");
+    };
+
+    let row = db
+        .gate_decision_for(tenant_id, submission_id)
+        .expect("gate decision row written");
+    assert_eq!(row.decision_id, decision_id);
+    assert_eq!(
+        row.credit_withheld_reason.as_deref(),
+        Some("skipped_duplicate")
+    );
+}
+
+/// CI-running sibling of `score_one_submission_failed_scorer_bumps_attempt_count`:
+/// backed by the in-memory `PerplexityDriverTestDb` double instead of
+/// Postgres. Also covers the `gate_scoring_exhausted` observability path
+/// (spec: docs/superpowers/specs/2026-07-09-perplexity-scoring-driver-design.md)
+/// by configuring `max_attempts: 1`, so the single bumped attempt count
+/// reaches the ceiling and drives `bump_gate_evaluation_attempt_and_log_exhaustion`'s
+/// warning branch. Asserting the exact returned/recorded attempt count is
+/// the most direct verification available for a pure hash-only log line.
+#[tokio::test]
+async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postgres() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let item = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission");
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(HardFailingGateService);
+
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        // Ceiling of 1 means this single failed attempt reaches
+        // `max_attempts`, driving the `gate_scoring_exhausted` log branch.
+        max_attempts: 1,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::Failed { label } = outcome else {
+        panic!("expected GateOutcome::Failed, got {outcome:?}");
+    };
+    assert!(!label.is_empty(), "expected a non-empty failure label");
+
+    let attempts = db
+        .gate_evaluation_attempts_for(&item.tenant_id, item.submission_id)
+        .expect("bump_gate_evaluation_attempt must have recorded an attempt");
+    assert_eq!(attempts, 1, "one hard scorer failure bumps attempts to 1");
+    assert!(
+        attempts >= knobs.max_attempts,
+        "attempt count must reach max_attempts so gate_scoring_exhausted fires"
+    );
+
+    assert!(
+        db.gate_decision_for(&item.tenant_id, item.submission_id)
+            .is_none(),
+        "no gate decision row written on hard scorer failure"
+    );
+}
+
+// -----------------------------------------------------------------------
 // Task 5: in-process perplexity-scoring driver loop tests
 // -----------------------------------------------------------------------
 
@@ -63034,6 +63174,18 @@ struct PerplexityDriverTestDb {
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
     gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
     ungated: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Derived records keyed loosely by tenant, scanned linearly by
+    /// `list_trace_derived_records` the same way the production Postgres
+    /// query would return every derived row for a tenant. Lets tests seed a
+    /// duplicate-precheck record for the skip-duplicate cost-control branch
+    /// without requiring Postgres.
+    derived_records: std::sync::RwLock<Vec<(String, StorageTraceDerivedRecord)>>,
+    /// Records `bump_gate_evaluation_attempt` calls so CI-running tests can
+    /// assert the failed-scorer cost-control branch actually bumped the
+    /// attempt counter, without needing the real `trace_gate_evaluation_attempts`
+    /// table.
+    gate_evaluation_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63043,7 +63195,76 @@ impl PerplexityDriverTestDb {
             object_refs: std::sync::RwLock::new(std::collections::HashMap::new()),
             gate_decisions: std::sync::RwLock::new(Vec::new()),
             ungated: std::sync::RwLock::new(Vec::new()),
+            derived_records: std::sync::RwLock::new(Vec::new()),
+            gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Seed a `DuplicatePrecheck` derived record for `submission_id` with the
+    /// given `duplicate_score`, so `score_one_submission`'s skip-duplicate
+    /// branch can find it via `list_trace_derived_records`.
+    fn seed_duplicate_derived_record(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        duplicate_score: f32,
+    ) {
+        let now = Utc::now();
+        self.derived_records.write().unwrap().push((
+            tenant_id.to_string(),
+            StorageTraceDerivedRecord {
+                derived_id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                status: StorageTraceDerivedStatus::Current,
+                worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+                worker_version: "test-precheck-v1".to_string(),
+                input_object_ref: None,
+                input_hash: sha256_prefixed("perplexity-driver-test-db-duplicate"),
+                output_object_ref: None,
+                canonical_summary: None,
+                canonical_summary_hash: None,
+                summary_model: "test-model".to_string(),
+                task_success: None,
+                privacy_risk: None,
+                event_count: None,
+                tool_sequence: vec![],
+                tool_categories: vec![],
+                coverage_tags: vec![],
+                duplicate_score: Some(duplicate_score),
+                novelty_score: Some(0.05),
+                cluster_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+        ));
+    }
+
+    /// Look up the `trace_gate_decisions` row written for `(tenant_id,
+    /// submission_id)`, if any — used to assert `credit_withheld_reason`.
+    fn gate_decision_for(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Option<StorageTraceGateDecisionRow> {
+        self.gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .map(|(_, row)| row.clone())
+    }
+
+    /// Current recorded attempt count for `(tenant_id, submission_id)`, as
+    /// last written by `bump_gate_evaluation_attempt`. `None` if it was never
+    /// called for this submission.
+    fn gate_evaluation_attempts_for(&self, tenant_id: &str, submission_id: Uuid) -> Option<i32> {
+        self.gate_evaluation_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .map(|(attempts, _)| *attempts)
     }
 
     /// Seed one ungated submission: a submission record (no
@@ -63243,9 +63464,16 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
     }
     async fn list_trace_derived_records(
         &self,
-        _: &str,
+        tenant_id: &str,
     ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
-        todo!("stub")
+        Ok(self
+            .derived_records
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == tenant_id)
+            .map(|(_, record)| record.clone())
+            .collect())
     }
     async fn upsert_trace_vector_entry(
         &self,
@@ -63705,6 +63933,26 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
             .unwrap()
             .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
         Ok(())
+    }
+    /// Overrides the default "not implemented for this backend" error so
+    /// CI-running (non-PG) tests can exercise `score_one_submission`'s
+    /// failed-scorer cost-control branch: increments and records the
+    /// in-memory attempt counter for `(tenant_id, submission_id)`, returning
+    /// the new count the same way the real Postgres backend does.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.gate_evaluation_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
     }
     async fn stream_trace_gate_decisions_for_replay(
         &self,
