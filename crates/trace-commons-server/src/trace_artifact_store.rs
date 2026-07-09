@@ -35,6 +35,25 @@ pub struct EncryptedTraceArtifactReceipt {
     pub encrypted_at: DateTime<Utc>,
 }
 
+impl EncryptedTraceArtifactReceipt {
+    /// Compares the identity and integrity fields of two receipts, ignoring
+    /// `encrypted_at`.
+    ///
+    /// Read paths reconstruct the receipt from a persisted object ref whose
+    /// `encrypted_at` is derived from the row's audit `created_at` timestamp —
+    /// a different instant than the artifact's true encryption time, which is
+    /// never persisted alongside it. A full-struct equality therefore never
+    /// holds on any real read. Integrity does not depend on `encrypted_at`:
+    /// `ciphertext_sha256` binds the bytes and is independently re-verified
+    /// against the decoded ciphertext at every read site.
+    pub fn matches_identity(&self, other: &Self) -> bool {
+        self.tenant_storage_ref == other.tenant_storage_ref
+            && self.artifact_kind == other.artifact_kind
+            && self.object_key == other.object_key
+            && self.ciphertext_sha256 == other.ciphertext_sha256
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceArtifactProviderConfig {
     pub kind: TraceArtifactProviderKind,
@@ -717,7 +736,7 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
         let artifact = self.read_scoped_artifact(&scope, &object_ref)?;
         anyhow::ensure!(
-            artifact.receipt == *receipt,
+            artifact.receipt.matches_identity(receipt),
             "encrypted trace artifact receipt mismatch"
         );
         Ok(artifact)
@@ -941,7 +960,7 @@ impl LocalEncryptedTraceArtifactStore {
             "encrypted trace artifact tenant mismatch"
         );
         anyhow::ensure!(
-            artifact.receipt == *receipt,
+            artifact.receipt.matches_identity(receipt),
             "encrypted trace artifact receipt mismatch"
         );
         let ciphertext = base64::engine::general_purpose::STANDARD
@@ -1767,6 +1786,81 @@ mod tests {
         assert!(!serialized.contains("<PRIVATE_DATE>"));
         assert!(!serialized.contains("User asked"));
         assert_eq!(artifact.receipt.tenant_storage_ref, "tenant:sha256:abc123");
+    }
+
+    #[test]
+    fn local_read_tolerates_encrypted_at_drift() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+        let payload = json!({"canonical_summary": "<redacted>"});
+
+        let receipt = store
+            .put_json(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+                &payload,
+            )
+            .expect("artifact writes");
+
+        // Reconstructed receipts derive `encrypted_at` from the object-ref
+        // audit timestamp (`created_at`), a different instant than the
+        // artifact's true encryption time. The read must still succeed on
+        // matching identity + integrity fields.
+        let mut drifted = receipt.clone();
+        drifted.encrypted_at = receipt.encrypted_at + chrono::Duration::seconds(42);
+
+        let artifact = store
+            .read_artifact("tenant:sha256:abc123", &drifted)
+            .expect("read tolerates encrypted_at drift");
+        assert_eq!(artifact.receipt.object_key, receipt.object_key);
+    }
+
+    #[test]
+    fn local_read_still_rejects_object_key_mismatch() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+        let payload = json!({"canonical_summary": "<redacted>"});
+
+        let receipt = store
+            .put_json(
+                "tenant:sha256:abc123",
+                TraceArtifactKind::ContributionEnvelope,
+                "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+                &payload,
+            )
+            .expect("artifact writes");
+
+        let mut tampered = receipt.clone();
+        tampered.ciphertext_sha256 = "0".repeat(64);
+
+        let err = store
+            .read_artifact("tenant:sha256:abc123", &tampered)
+            .expect_err("integrity mismatch must still fail");
+        assert!(err.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn remote_read_tolerates_encrypted_at_drift() {
+        let store = test_remote_store();
+        let payload = json!({"safe": true});
+        let serialized_payload = serde_json::to_vec(&payload).expect("payload serializes");
+        let receipt = TraceArtifactStore::put_serialized_json(
+            &store,
+            "tenant:sha256:alpha",
+            TraceArtifactKind::AuditSnapshot,
+            "legacy-trait-audit",
+            &serialized_payload,
+        )
+        .expect("artifact writes through trait");
+
+        let mut drifted = receipt.clone();
+        drifted.encrypted_at = receipt.encrypted_at + chrono::Duration::seconds(42);
+
+        let round_trip: serde_json::Value =
+            TraceArtifactStore::read_json(&store, "tenant:sha256:alpha", &drifted)
+                .expect("remote read tolerates encrypted_at drift");
+        assert_eq!(round_trip, payload);
     }
 
     #[test]
