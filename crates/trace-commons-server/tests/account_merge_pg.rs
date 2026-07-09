@@ -106,6 +106,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         pool_size: 4,
         ssl_mode: SslMode::Prefer,
         login_resolver_url: DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: DatabaseConfig::gate_driver_url_from_env(),
     })
 }
 

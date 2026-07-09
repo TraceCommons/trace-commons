@@ -66,7 +66,7 @@ use trace_commons_server::trace_artifact_store::{
 #[cfg(test)]
 use trace_commons_server::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
 use trace_commons_server::trace_corpus_storage::{
-    TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
+    GateWorkItem, TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
     TraceAuditAction as StorageTraceAuditAction,
     TraceAuditEventRecord as StorageTraceAuditEventRecord,
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
@@ -596,6 +596,19 @@ const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED: &str = "TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -800,6 +813,11 @@ const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON: &str =
     "scheduled trace benchmark pipeline";
 const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE: f32 = 1.0;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_INTERVAL_SECONDS: u64 = 45;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE: i64 = 5;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS: i32 = 5;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS: i64 = 900_000;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
@@ -906,6 +924,7 @@ async fn main() -> anyhow::Result<()> {
         state.retention_maintenance_scheduler.clone(),
     );
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
+    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1021,6 +1040,11 @@ struct AppState {
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     retention_maintenance_scheduler: Option<TraceRetentionMaintenanceSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
+    /// Task 5: the in-process perplexity-scoring driver loop config.
+    /// `None` (the default) means the driver is disabled; existing
+    /// deployments and CI are unaffected until an operator opts in via
+    /// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`.
+    perplexity_score_driver: Option<PerplexityScoreDriverConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -1177,6 +1201,28 @@ struct TraceVectorIndexSchedulerConfig {
     limit: usize,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process driver loop config (Task 5). Unlike the other schedulers here,
+/// this one has no worker bearer token: it runs entirely in-process against
+/// `state.db_mirror`'s cross-tenant gate-driver pool and never goes through
+/// an HTTP handler.
+#[derive(Clone)]
+struct PerplexityScoreDriverConfig {
+    interval: StdDuration,
+    batch_size: i64,
+    knobs: PerplexityDriverKnobs,
+    backoff_base_seconds: i64,
+}
+
+/// Per-tick outcome tally returned by `run_perplexity_score_driver_tick` and
+/// logged by `spawn_perplexity_score_driver_task`.
+#[derive(Debug, Default, Clone, Copy)]
+struct PerplexityDriverTickSummary {
+    scored: usize,
+    skipped_duplicate: usize,
+    cached: usize,
+    failed: usize,
 }
 
 #[derive(Clone)]
@@ -2927,6 +2973,7 @@ impl AppState {
         let retention_maintenance_scheduler =
             parse_trace_retention_maintenance_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
+        let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -3180,6 +3227,7 @@ impl AppState {
             export_job_scheduler,
             retention_maintenance_scheduler,
             vector_index_scheduler,
+            perplexity_score_driver,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -5242,6 +5290,61 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
         registry_ref_prefix,
         min_score,
         reason,
+    }))
+}
+
+/// Task 5: the in-process perplexity-scoring driver. Unlike the other
+/// schedulers in this file, it has no bearer-token gate — it drives
+/// `state.db_mirror`'s cross-tenant gate-driver enumeration directly, so
+/// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` alone turns it on. Off by
+/// default (`Ok(None)` when unset), so existing deployments and CI are
+/// unaffected until an operator explicitly opts in.
+fn parse_perplexity_score_driver_config_from_env()
+-> anyhow::Result<Option<PerplexityScoreDriverConfig>> {
+    if !env_truthy(TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED) {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE,
+        1,
+        1_000,
+    )?;
+    let max_attempts = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS,
+        i64::from(TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS),
+        1,
+        1_000,
+    )?;
+    let skip_duplicates =
+        parse_optional_scheduler_bool_env(TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES, true)?;
+    let skip_duplicate_threshold_micros = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
+        0,
+        1_000_000,
+    )?;
+    let backoff_base_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS,
+        0,
+        86_400,
+    )?;
+    Ok(Some(PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        batch_size,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates,
+            skip_duplicate_threshold_micros,
+            max_attempts: max_attempts as i32,
+        },
+        backoff_base_seconds,
     }))
 }
 
@@ -7806,6 +7909,50 @@ fn spawn_trace_vector_index_scheduler_task(
                         status = %status,
                         error_hash = %safe_display_error_hash(&error.error),
                         "Trace Commons vector index scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Task 5: spawn the in-process perplexity-scoring driver loop. Mirrors the
+/// shape of the other `spawn_*` schedulers in this file (sleep, tick, log,
+/// repeat) but calls `run_perplexity_score_driver_tick` directly instead of
+/// going through an HTTP handler, since there is no bearer-token worker
+/// route for this driver.
+fn spawn_perplexity_score_driver_task(
+    state: &Arc<AppState>,
+    config: Option<PerplexityScoreDriverConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        batch_size = config.batch_size,
+        max_attempts = config.knobs.max_attempts,
+        skip_duplicates = config.knobs.skip_duplicates,
+        "Trace Commons perplexity score driver enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_perplexity_score_driver_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        scored = summary.scored,
+                        skipped_duplicate = summary.skipped_duplicate,
+                        cached = summary.cached,
+                        failed = summary.failed,
+                        "Trace Commons perplexity score driver tick completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_hash = %safe_display_error_hash(&error),
+                        "Trace Commons perplexity score driver tick failed"
                     );
                 }
             }
@@ -35244,6 +35391,42 @@ async fn run_trace_vector_index_scheduler_tick(
     Ok(response)
 }
 
+/// Task 5: one pass of the in-process perplexity-scoring driver. Enumerates
+/// ungated submissions via the cross-tenant gate-driver pool, then scores
+/// each sequentially (no concurrency) through `score_one_submission`'s
+/// cost-control wrapper. Fail-safe by construction: when `db_mirror` is
+/// absent or the gate-driver pool is unconfigured,
+/// `list_submissions_needing_gate_decision` returns an `Err` that propagates
+/// here via `?` — the caller (`spawn_perplexity_score_driver_task`'s loop)
+/// logs a warning and continues on the next tick rather than panicking the
+/// process.
+async fn run_perplexity_score_driver_tick(
+    state: Arc<AppState>,
+    config: &PerplexityScoreDriverConfig,
+) -> anyhow::Result<PerplexityDriverTickSummary> {
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("perplexity score driver requires a configured DB mirror")
+    })?;
+    let items = db
+        .list_submissions_needing_gate_decision(
+            Utc::now(),
+            config.knobs.max_attempts,
+            config.backoff_base_seconds,
+            config.batch_size,
+        )
+        .await?;
+    let mut summary = PerplexityDriverTickSummary::default();
+    for item in &items {
+        match score_one_submission(state.as_ref(), item, &config.knobs).await {
+            GateOutcome::Scored { .. } => summary.scored += 1,
+            GateOutcome::SkippedDuplicate { .. } => summary.skipped_duplicate += 1,
+            GateOutcome::Cached { .. } => summary.cached += 1,
+            GateOutcome::Failed { .. } => summary.failed += 1,
+        }
+    }
+    Ok(summary)
+}
+
 async fn run_trace_benchmark_registry_scheduler_tick(
     state: Arc<AppState>,
     config: &TraceBenchmarkRegistrySchedulerConfig,
@@ -44558,6 +44741,432 @@ struct TraceGateEvaluateWorkerResponse {
     credit_withheld_reason: Option<String>,
 }
 
+/// Stable, label-only `credit_withheld_reason` sentinel written to the
+/// `trace_gate_decisions` audit row when novelty-utility credit computation
+/// fails with a hard error (as opposed to a policy/ABAC withhold, which has
+/// its own labels). Keeps the persisted row honest instead of leaving it at
+/// `None` after the pre-credit insert.
+const CREDIT_CHECK_ERROR_LABEL: &str = "credit_check_error";
+
+/// Outcome of `evaluate_and_record_gate`.
+///
+/// `Scored` is the only variant this fn's Task-3 implementation produces on
+/// success. `SkippedDuplicate`/`Cached` are constructed by the cost-control
+/// wrapper (in-process driver, Task 4) that sits in front of it.
+///
+/// `Failed` is declared for that same caller-facing wrapper. It is
+/// deliberately NOT constructed by `evaluate_and_record_gate` itself: two
+/// pre-existing HTTP-handler tests
+/// (`gate_evaluate_worker_route_returns_503_when_dstack_service_is_stubbed`)
+/// require the *raw* gate-service error text (e.g.
+/// `"DstackGateServiceUnavailable"`) to reach the HTTP response so the
+/// handler can classify it into the right status code — collapsing that
+/// into a fixed label would break status-code fidelity. All precondition
+/// and scoring failures instead propagate through the `anyhow::Result::Err`
+/// path with their original message text, exactly as
+/// `gate_evaluate_worker_handler` did before this extraction; the handler
+/// re-derives the same status-code mapping it always has.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum GateOutcome {
+    Scored {
+        decision_id: Uuid,
+        perplexity_passed: bool,
+        novelty_passed: bool,
+        vector_entry_id: Option<Uuid>,
+        gate_policy_version: String,
+        gate_version_hash: String,
+    },
+    SkippedDuplicate {
+        decision_id: Uuid,
+    },
+    Cached {
+        decision_id: Uuid,
+    },
+    Failed {
+        label: String,
+    },
+}
+
+/// Non-auth core of the gate worker: fetch submission → resolve the latest
+/// active submitted-envelope object ref → decrypt → score through the
+/// configured `TraceGateService` → build and insert the `trace_gate_decisions`
+/// audit row. Used by both the HTTP handler (`gate_evaluate_worker_handler`)
+/// and the in-process driver. Cost controls (skip_duplicates, cache) are
+/// applied by the caller-facing wrapper; this fn always scores.
+async fn evaluate_and_record_gate(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<GateOutcome> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured DB mirror"))?;
+    let _submission = db
+        .get_trace_submission(tenant_id, submission_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("trace submission not found"))?;
+
+    let object_ref = db
+        .get_latest_active_trace_object_ref(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!(TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF))?;
+
+    let artifact_store = state
+        .artifact_store
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured artifact store"))?;
+    if !is_encrypted_trace_object_store(&object_ref.object_store) {
+        return Err(anyhow::anyhow!(
+            "trace gate worker requires an encrypted trace object store"
+        ));
+    }
+    if artifact_store.object_store_name() != object_ref.object_store {
+        return Err(anyhow::anyhow!(TRACE_OBJECT_REF_STORE_MISMATCH));
+    }
+    let receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        object_key: object_ref.object_key.clone(),
+        ciphertext_sha256: object_ref
+            .content_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&object_ref.content_sha256)
+            .to_string(),
+        encrypted_at: object_ref.created_at,
+    };
+    let artifact =
+        artifact_store.read_encrypted_artifact(&tenant_storage_ref(tenant_id), &receipt)?;
+    let ciphertext =
+        base64::engine::general_purpose::STANDARD.decode(artifact.ciphertext_base64.as_bytes())?;
+    let wrapped_dek = artifact
+        .wrapped_dek
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a v2 KEK-wrapped envelope"))?;
+
+    // Canonical tenant_storage_ref: the wrapped DEK was produced under this
+    // ref by the artifact-store path. Passing a raw tenant id here would
+    // make the gate service's KekContext disagree with the wrapped DEK's
+    // context binding → KekContextMismatch on every real-deployment evaluation.
+    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    let decision = state.gate_service.evaluate_trace(
+        &tenant_ctx,
+        &ciphertext,
+        &wrapped_dek,
+        TraceArtifactKind::ContributionEnvelope,
+    )?;
+
+    let decision_id = Uuid::new_v4();
+    let row = StorageTraceGateDecisionRow {
+        decision_id,
+        submission_id,
+        gate_policy_version: decision.gate_policy_version.clone(),
+        gate_version_hash: decision.gate_version_hash.clone(),
+        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
+        perplexity_passed: decision.perplexity_passed,
+        novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
+        novelty_passed: decision.novelty_passed,
+        embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
+        attestation_chain_hash: decision.attestation_chain_hash.clone(),
+        decided_at: Utc::now(),
+        vector_entry_id: decision.vector_entry_id,
+        credit_withheld_reason: None,
+    };
+    db.insert_trace_gate_decision(tenant_id, row).await?;
+
+    Ok(GateOutcome::Scored {
+        decision_id,
+        perplexity_passed: decision.perplexity_passed,
+        novelty_passed: decision.novelty_passed,
+        vector_entry_id: decision.vector_entry_id,
+        gate_policy_version: decision.gate_policy_version,
+        gate_version_hash: decision.gate_version_hash,
+    })
+}
+
+/// Per-submission cost-control knobs for the in-process perplexity-scoring
+/// driver's `score_one_submission` wrapper (Task 4).
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct PerplexityDriverKnobs {
+    /// When true, a submission whose derived `duplicate_score` is at or
+    /// above `skip_duplicate_threshold_micros` is recorded as a
+    /// `SkippedDuplicate` decision without ever invoking the gate service.
+    skip_duplicates: bool,
+    /// Threshold, expressed in micros (`duplicate_score * 1_000_000.0 as
+    /// i64`), at or above which a duplicate short-circuits scoring.
+    skip_duplicate_threshold_micros: i64,
+    /// Attempt ceiling consulted by the enumeration query
+    /// (`list_submissions_needing_gate_decision`). Carried here so the
+    /// driver's cost-control knobs live in one place; `score_one_submission`
+    /// does not itself re-check this — the enumeration query already
+    /// excludes submissions at or above the ceiling.
+    max_attempts: i32,
+}
+
+/// Stamp the caller-supplied `submission_id`/`decided_at`/`credit_withheld_reason`
+/// onto an otherwise-complete decision-row template and mint a fresh
+/// `decision_id`. Shared by the skip-duplicate and cross-submission-cache
+/// branches of `score_one_submission`, both of which build most of a
+/// `trace_gate_decisions` row up front (either from the derived record's
+/// scores or by copying a cached row) and only need these three fields
+/// overridden before insert. `vector_entry_id` is always forced to `None`:
+/// reusing the source row's vector-index entry id would make two
+/// submissions appear to own the same vector-index entry, which would
+/// corrupt per-submission revocation propagation.
+fn build_cost_control_decision_row(
+    submission_id: Uuid,
+    decided_at: DateTime<Utc>,
+    credit_withheld_reason: &'static str,
+    template: StorageTraceGateDecisionRow,
+) -> StorageTraceGateDecisionRow {
+    StorageTraceGateDecisionRow {
+        decision_id: Uuid::new_v4(),
+        submission_id,
+        decided_at,
+        vector_entry_id: None,
+        credit_withheld_reason: Some(credit_withheld_reason.to_string()),
+        ..template
+    }
+}
+
+/// Bumps the submission's `trace_gate_evaluation_attempts` row and, when the
+/// resulting attempt count reaches `max_attempts`, emits a hash-only
+/// `gate_scoring_exhausted` warning. Once a submission's attempt count
+/// reaches `max_attempts`, the enumeration query's `MAX_ATTEMPTS` filter
+/// (migration V36) permanently excludes it from future ticks, so this is the
+/// only observability signal that the submission dropped out of the
+/// gate-scoring set without ever being scored. Hash-only per repo policy —
+/// never logs the raw tenant id or submission id.
+async fn bump_gate_evaluation_attempt_and_log_exhaustion(
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    now: DateTime<Utc>,
+    label: &str,
+    max_attempts: i32,
+) {
+    if let Ok(attempts) = db
+        .bump_gate_evaluation_attempt(tenant_id, submission_id, now, label)
+        .await
+    {
+        if attempts >= max_attempts {
+            tracing::warn!(
+                tenant_hash = %sha256_prefixed(tenant_id),
+                submission_hash = %sha256_prefixed(&submission_id.to_string()),
+                attempts,
+                max_attempts,
+                "gate_scoring_exhausted"
+            );
+        }
+    }
+}
+
+/// Applies the perplexity-scoring driver's per-submission cost controls
+/// (skip-duplicate short-circuit, then cross-submission cache) before
+/// delegating to `evaluate_and_record_gate`. On any hard failure — including
+/// a scoring failure from the delegated call — bumps the submission's
+/// `trace_gate_evaluation_attempts` row so the enumeration query's
+/// exponential backoff (migration V36) can pace retries, logging
+/// `gate_scoring_exhausted` (hash-only) once the attempt ceiling is reached.
+#[allow(dead_code)]
+async fn score_one_submission(
+    state: &AppState,
+    item: &GateWorkItem,
+    knobs: &PerplexityDriverKnobs,
+) -> GateOutcome {
+    let now = Utc::now();
+
+    let db = match state.db_mirror.as_ref() {
+        Some(db) => db,
+        None => {
+            return GateOutcome::Failed {
+                label: "trace gate driver requires a configured DB mirror".to_string(),
+            };
+        }
+    };
+
+    // Branch 1: skip-duplicate short-circuit. Never touches the gate
+    // service — a duplicate at or above the configured threshold is
+    // recorded directly.
+    if knobs.skip_duplicates {
+        let derived = match db.list_trace_derived_records(&item.tenant_id).await {
+            Ok(records) => records
+                .into_iter()
+                .find(|record| record.submission_id == item.submission_id),
+            Err(err) => {
+                let label = format!("{err}");
+                bump_gate_evaluation_attempt_and_log_exhaustion(
+                    db,
+                    &item.tenant_id,
+                    item.submission_id,
+                    now,
+                    &label,
+                    knobs.max_attempts,
+                )
+                .await;
+                return GateOutcome::Failed { label };
+            }
+        };
+        if let Some(derived) = derived {
+            let duplicate_micros = derived
+                .duplicate_score
+                .map(|score| (score * 1_000_000.0) as i64);
+            if let Some(duplicate_micros) = duplicate_micros {
+                if duplicate_micros >= knobs.skip_duplicate_threshold_micros {
+                    let novelty_micros = derived
+                        .novelty_score
+                        .map(|score| (score * 1_000_000.0) as i64)
+                        .unwrap_or(0);
+                    let row = build_cost_control_decision_row(
+                        item.submission_id,
+                        now,
+                        "skipped_duplicate",
+                        StorageTraceGateDecisionRow {
+                            decision_id: Uuid::nil(),
+                            submission_id: item.submission_id,
+                            gate_policy_version: "skip_duplicate".to_string(),
+                            gate_version_hash: String::new(),
+                            perplexity_micros: 0,
+                            tail_fraction_micros: 0,
+                            perplexity_passed: true,
+                            novelty_score_micros: novelty_micros,
+                            nearest_neighbor_hash: String::new(),
+                            novelty_passed: true,
+                            embedding_evidence_hash: String::new(),
+                            attestation_chain_hash: String::new(),
+                            decided_at: now,
+                            vector_entry_id: None,
+                            credit_withheld_reason: None,
+                        },
+                    );
+                    let decision_id = row.decision_id;
+                    return match db.insert_trace_gate_decision(&item.tenant_id, row).await {
+                        Ok(()) => GateOutcome::SkippedDuplicate { decision_id },
+                        Err(err) => {
+                            let label = format!("{err}");
+                            bump_gate_evaluation_attempt_and_log_exhaustion(
+                                db,
+                                &item.tenant_id,
+                                item.submission_id,
+                                now,
+                                &label,
+                                knobs.max_attempts,
+                            )
+                            .await;
+                            GateOutcome::Failed { label }
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    // Branch 2: cross-submission cache. Reuses a prior decision recorded for
+    // a different submission in the same tenant sharing this submission's
+    // `canonical_summary_hash`, when one exists.
+    let canonical_summary_hash = match db
+        .get_trace_submission(&item.tenant_id, item.submission_id)
+        .await
+    {
+        Ok(Some(submission)) => submission.canonical_summary_hash,
+        Ok(None) => {
+            let label = "trace submission not found".to_string();
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
+            return GateOutcome::Failed { label };
+        }
+        Err(err) => {
+            let label = format!("{err}");
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
+            return GateOutcome::Failed { label };
+        }
+    };
+
+    if let Some(hash) = canonical_summary_hash {
+        match db
+            .find_gate_decision_by_canonical_hash(&item.tenant_id, &hash, item.submission_id)
+            .await
+        {
+            Ok(Some(cached)) => {
+                let row =
+                    build_cost_control_decision_row(item.submission_id, now, "cached", cached);
+                let decision_id = row.decision_id;
+                return match db.insert_trace_gate_decision(&item.tenant_id, row).await {
+                    Ok(()) => GateOutcome::Cached { decision_id },
+                    Err(err) => {
+                        let label = format!("{err}");
+                        bump_gate_evaluation_attempt_and_log_exhaustion(
+                            db,
+                            &item.tenant_id,
+                            item.submission_id,
+                            now,
+                            &label,
+                            knobs.max_attempts,
+                        )
+                        .await;
+                        GateOutcome::Failed { label }
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let label = format!("{err}");
+                bump_gate_evaluation_attempt_and_log_exhaustion(
+                    db,
+                    &item.tenant_id,
+                    item.submission_id,
+                    now,
+                    &label,
+                    knobs.max_attempts,
+                )
+                .await;
+                return GateOutcome::Failed { label };
+            }
+        }
+    }
+
+    // Branch 3: delegate to the real scorer.
+    match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let label = format!("{err}");
+            bump_gate_evaluation_attempt_and_log_exhaustion(
+                db,
+                &item.tenant_id,
+                item.submission_id,
+                now,
+                &label,
+                knobs.max_attempts,
+            )
+            .await;
+            GateOutcome::Failed { label }
+        }
+    }
+}
+
 /// Worker route that scores a single submission through the configured
 /// `TraceGateService` and writes a `trace_gate_decisions` audit row.
 ///
@@ -44573,142 +45182,148 @@ async fn gate_evaluate_worker_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
 
-    let db = state.db_mirror.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a configured DB mirror",
-        )
-    })?;
-    let _submission = db
-        .get_trace_submission(&tenant.tenant_id, body.submission_id)
+    let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-
-    let object_ref = db
-        .get_latest_active_trace_object_ref(
-            &tenant.tenant_id,
-            body.submission_id,
-            StorageTraceObjectArtifactKind::SubmittedEnvelope,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF,
-            )
-        })?;
-
-    let artifact_store = state.artifact_store.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a configured artifact store",
-        )
-    })?;
-    if !is_encrypted_trace_object_store(&object_ref.object_store) {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires an encrypted trace object store",
-        ));
-    }
-    if artifact_store.object_store_name() != object_ref.object_store {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            TRACE_OBJECT_REF_STORE_MISMATCH,
-        ));
-    }
-    let receipt = EncryptedTraceArtifactReceipt {
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        artifact_kind: TraceArtifactKind::ContributionEnvelope,
-        object_key: object_ref.object_key.clone(),
-        ciphertext_sha256: object_ref
-            .content_sha256
-            .strip_prefix("sha256:")
-            .unwrap_or(&object_ref.content_sha256)
-            .to_string(),
-        encrypted_at: object_ref.created_at,
-    };
-    let artifact = artifact_store
-        .read_encrypted_artifact(&tenant_storage_ref(&tenant.tenant_id), &receipt)
-        .map_err(internal_error)?;
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(artifact.ciphertext_base64.as_bytes())
-        .map_err(internal_error)?;
-    let wrapped_dek = artifact.wrapped_dek.clone().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a v2 KEK-wrapped envelope",
-        )
-    })?;
-
-    // Canonical tenant_storage_ref: the wrapped DEK was produced under this
-    // ref by the artifact-store path. Passing raw tenant.tenant_id here would
-    // make the gate service's KekContext disagree with the wrapped DEK's
-    // context binding → KekContextMismatch on every real-deployment evaluation.
-    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
-    let decision = match state.gate_service.evaluate_trace(
-        &tenant_ctx,
-        &ciphertext,
-        &wrapped_dek,
-        TraceArtifactKind::ContributionEnvelope,
-    ) {
-        Ok(decision) => decision,
-        Err(err) => {
+        .map_err(|err| {
             let msg = format!("{err}");
             if msg.contains("DstackGateServiceUnavailable") {
-                return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, msg));
+                api_error(StatusCode::SERVICE_UNAVAILABLE, msg)
+            } else if msg == TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF
+                || msg == "trace submission not found"
+            {
+                api_error(StatusCode::NOT_FOUND, msg)
+            } else if msg == "trace gate worker requires a configured DB mirror"
+                || msg == "trace gate worker requires a configured artifact store"
+                || msg == "trace gate worker requires an encrypted trace object store"
+                || msg == TRACE_OBJECT_REF_STORE_MISMATCH
+                || msg == "trace gate worker requires a v2 KEK-wrapped envelope"
+            {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, msg)
+            } else {
+                internal_error(err)
             }
-            return Err(internal_error(err));
+        })?;
+
+    let (
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+    ) = match outcome {
+        GateOutcome::Scored {
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version,
+            gate_version_hash,
+        } => (
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version,
+            gate_version_hash,
+        ),
+        GateOutcome::Failed { label } => {
+            return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
+        }
+        GateOutcome::SkippedDuplicate { .. } | GateOutcome::Cached { .. } => {
+            // evaluate_and_record_gate never produces these variants; the
+            // cost-control wrapper that would is not yet wired into this
+            // HTTP handler.
+            return Err(internal_error(anyhow::anyhow!(
+                "unexpected gate outcome variant from evaluate_and_record_gate"
+            )));
         }
     };
-
-    let decision_id = Uuid::new_v4();
 
     // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
     // credit-ledger event through the same pipeline that the operator-facing
     // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
     // overall — the decision row still lands so the operator can audit; we
     // only annotate `credit_withheld_reason` with a stable label-only string.
-    let (credit_emitted, credit_withheld_reason) = if decision.perplexity_passed
-        && decision.novelty_passed
-    {
-        attempt_emit_novelty_utility_credit(state.as_ref(), &tenant, &decision, body.submission_id)
-            .await?
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires a configured DB mirror",
+        )
+    })?;
+    let (credit_emitted, credit_withheld_reason) = if perplexity_passed && novelty_passed {
+        let decision = GateDecision {
+            gate_policy_version: gate_policy_version.clone(),
+            gate_version_hash: gate_version_hash.clone(),
+            perplexity_micros: 0,
+            tail_fraction_micros: 0,
+            perplexity_passed,
+            novelty_score_micros: 0,
+            nearest_neighbor_hash: String::new(),
+            novelty_passed,
+            embedding_evidence_hash: String::new(),
+            attestation_chain_hash: String::new(),
+            vector_entry_id,
+        };
+        let emit_result = attempt_emit_novelty_utility_credit(
+            state.as_ref(),
+            &tenant,
+            &decision,
+            body.submission_id,
+        )
+        .await;
+        let (emitted, withheld_reason) = match emit_result {
+            Ok((emitted, withheld_reason)) => (emitted, withheld_reason),
+            Err(err) => {
+                // Credit computation hit a hard error (e.g. tenant-policy or
+                // utility-record DB failure). The audit row was already
+                // written by `evaluate_and_record_gate` with
+                // `credit_withheld_reason = None`, which would misrepresent a
+                // failed request as a clean non-withheld outcome. Best-effort
+                // patch the row to a fixed sentinel so the persisted audit
+                // trail is honest, then propagate the *original* error
+                // unchanged (identical client-visible status/body). The patch
+                // is best-effort: if it too fails we still surface the
+                // original error rather than masking it.
+                let _ = db
+                    .update_trace_gate_decision_credit_withheld_reason(
+                        &tenant.tenant_id,
+                        decision_id,
+                        Some(CREDIT_CHECK_ERROR_LABEL.to_string()),
+                    )
+                    .await;
+                return Err(err);
+            }
+        };
+        if withheld_reason.is_some() {
+            // The initial row written inside `evaluate_and_record_gate` was
+            // recorded before credit eligibility was known (credit emission
+            // needs `TenantAuth`, which the non-auth core doesn't have).
+            // Update the row now so the persisted audit trail matches what
+            // the response reports, exactly as the pre-extraction single
+            // insert did.
+            db.update_trace_gate_decision_credit_withheld_reason(
+                &tenant.tenant_id,
+                decision_id,
+                withheld_reason.clone(),
+            )
+            .await
+            .map_err(internal_error)?;
+        }
+        (emitted, withheld_reason)
     } else {
         (false, None)
     };
-
-    let row = StorageTraceGateDecisionRow {
-        decision_id,
-        submission_id: body.submission_id,
-        gate_policy_version: decision.gate_policy_version.clone(),
-        gate_version_hash: decision.gate_version_hash.clone(),
-        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
-        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
-        perplexity_passed: decision.perplexity_passed,
-        novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
-        nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
-        novelty_passed: decision.novelty_passed,
-        embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
-        attestation_chain_hash: decision.attestation_chain_hash.clone(),
-        decided_at: Utc::now(),
-        vector_entry_id: decision.vector_entry_id,
-        credit_withheld_reason: credit_withheld_reason.clone(),
-    };
-    db.insert_trace_gate_decision(&tenant.tenant_id, row)
-        .await
-        .map_err(internal_error)?;
 
     Ok(Json(TraceGateEvaluateWorkerResponse {
         tenant_id: tenant.tenant_id.clone(),
         submission_id: body.submission_id,
         decision_id,
-        gate_policy_version: decision.gate_policy_version,
-        gate_version_hash: decision.gate_version_hash,
-        perplexity_passed: decision.perplexity_passed,
-        novelty_passed: decision.novelty_passed,
-        vector_entry_id: decision.vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
         credit_emitted,
         credit_withheld_reason,
     }))

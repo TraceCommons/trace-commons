@@ -21,6 +21,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -4002,6 +4003,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         export_job_scheduler: None,
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
+        perplexity_score_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -23393,6 +23395,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         export_job_scheduler: None,
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
+        perplexity_score_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -62460,6 +62463,92 @@ async fn seed_gate_worker_fixture_with_allowed_uses(
 }
 
 #[tokio::test]
+async fn evaluate_and_record_gate_scores_and_writes_decision_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(InMemoryGateService::new(
+        "in_memory_default",
+        "sha256:in_memory_default",
+    ));
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    let outcome = evaluate_and_record_gate(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds with in-memory gate service");
+
+    let GateOutcome::Scored {
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id: _,
+        gate_policy_version: _,
+        gate_version_hash: _,
+    } = outcome
+    else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+    assert!(perplexity_passed);
+    assert!(novelty_passed);
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace.tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT decision_id, submission_id, perplexity_passed, novelty_passed
+             FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision row reads back");
+    assert_eq!(rows.len(), 1, "exactly one gate decision row written");
+    let stored_decision_id: Uuid = rows[0].get(0);
+    let stored_submission_id: Uuid = rows[0].get(1);
+    let stored_perplexity_passed: bool = rows[0].get(2);
+    let stored_novelty_passed: bool = rows[0].get(3);
+    assert_eq!(stored_decision_id, decision_id);
+    assert_eq!(stored_submission_id, submission_id);
+    assert!(stored_perplexity_passed);
+    assert!(stored_novelty_passed);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
 async fn gate_evaluate_worker_route_writes_in_memory_decision_row() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -62652,6 +62741,1402 @@ async fn gate_evaluate_worker_route_rejects_non_vector_worker_tokens() {
     .await
     .expect_err("reviewer token must not reach gate evaluate worker");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+// -----------------------------------------------------------------------
+// Task 4: score_one_submission cost-control wrapper tests
+// -----------------------------------------------------------------------
+
+/// Test-only gate service that panics if invoked. Used to prove
+/// `score_one_submission`'s skip-duplicate branch never calls the gate
+/// service when a duplicate is short-circuited.
+struct PanicIfCalledGateService;
+
+impl TraceGateService for PanicIfCalledGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        panic!("gate service must not be called when skip_duplicates short-circuits scoring");
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "panic_if_called".into(),
+            gate_policy_version: "panic_if_called".into(),
+            gate_version_hash: "sha256:panic_if_called".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Test-only gate service that always fails hard (`Err`), unlike
+/// `FailingGateService` above which returns `Ok` with failing pass-flags.
+/// Used to exercise `score_one_submission`'s attempt-bookkeeping bump on a
+/// hard scoring failure.
+struct HardFailingGateService;
+
+impl TraceGateService for HardFailingGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        Err(anyhow::anyhow!("mock_hard_scorer_failure"))
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "hard_failing".into(),
+            gate_policy_version: "hard_failing".into(),
+            gate_version_hash: "sha256:hard_failing".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn score_one_submission_skips_duplicate_without_calling_gate_service() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(PanicIfCalledGateService);
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "test-precheck-v1".to_string(),
+            input_object_ref: None,
+            input_hash: sha256_prefixed("score-one-submission-skip-duplicate"),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: None,
+            summary_model: "test-model".to_string(),
+            task_success: None,
+            privacy_risk: None,
+            event_count: None,
+            tool_sequence: vec![],
+            tool_categories: vec![],
+            coverage_tags: vec![],
+            duplicate_score: Some(0.99),
+            novelty_score: Some(0.05),
+            cluster_id: None,
+        })
+        .await
+        .expect("seed derived record with high duplicate score");
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: true,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::SkippedDuplicate { decision_id } = outcome else {
+        panic!("expected GateOutcome::SkippedDuplicate, got {outcome:?}");
+    };
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT decision_id, credit_withheld_reason
+             FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision row reads back");
+    assert_eq!(rows.len(), 1, "exactly one gate decision row written");
+    let stored_decision_id: Uuid = rows[0].get(0);
+    let stored_reason: Option<String> = rows[0].get(1);
+    assert_eq!(stored_decision_id, decision_id);
+    assert_eq!(stored_reason.as_deref(), Some("skipped_duplicate"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn score_one_submission_failed_scorer_bumps_attempt_count() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(HardFailingGateService);
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::Failed { label } = outcome else {
+        panic!("expected GateOutcome::Failed, got {outcome:?}");
+    };
+    assert!(!label.is_empty(), "expected a non-empty failure label");
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT attempts, last_error_label
+             FROM trace_gate_evaluation_attempts WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("attempts row reads back");
+    assert_eq!(rows.len(), 1, "exactly one attempts row written");
+    let attempts: i32 = rows[0].get(0);
+    let stored_label: Option<String> = rows[0].get(1);
+    assert_eq!(attempts, 1);
+    assert_eq!(stored_label.as_deref(), Some(label.as_str()));
+
+    let decision_rows = client
+        .query(
+            "SELECT 1 FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision rows query");
+    assert!(
+        decision_rows.is_empty(),
+        "no gate decision row written on hard scorer failure"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// -----------------------------------------------------------------------
+// Final-review fix wave: CI-running (non-PG) coverage for the cost-control
+// branches above. `score_one_submission_skips_duplicate_without_calling_gate_service`
+// and `score_one_submission_failed_scorer_bumps_attempt_count` are PG-gated
+// (`postgres_backend_for_ingest_test().await else { return }`), and CI never
+// runs Postgres, so those two branches were previously exercised only when a
+// developer happened to run the PG suite locally. These sibling tests use
+// the in-memory `PerplexityDriverTestDb` double (defined below, alongside
+// Task 5's driver-loop test) so the same branches run unconditionally in CI.
+// -----------------------------------------------------------------------
+
+/// CI-running sibling of `score_one_submission_skips_duplicate_without_calling_gate_service`:
+/// same skip-duplicate assertions, but backed by the in-memory
+/// `PerplexityDriverTestDb` double instead of Postgres, so this actually
+/// runs in CI.
+#[tokio::test]
+async fn score_one_submission_skips_duplicate_ci_without_postgres() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let tenant_id = "tenant-a";
+    let submission_id = Uuid::new_v4();
+    db.seed_duplicate_derived_record(tenant_id, submission_id, 0.99);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // The gate service must never be invoked when the skip-duplicate
+    // short-circuit fires; `PanicIfCalledGateService` proves it.
+    Arc::make_mut(&mut state).gate_service = Arc::new(PanicIfCalledGateService);
+
+    let item = GateWorkItem {
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: true,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::SkippedDuplicate { decision_id } = outcome else {
+        panic!("expected GateOutcome::SkippedDuplicate, got {outcome:?}");
+    };
+
+    let row = db
+        .gate_decision_for(tenant_id, submission_id)
+        .expect("gate decision row written");
+    assert_eq!(row.decision_id, decision_id);
+    assert_eq!(
+        row.credit_withheld_reason.as_deref(),
+        Some("skipped_duplicate")
+    );
+}
+
+/// CI-running sibling of `score_one_submission_failed_scorer_bumps_attempt_count`:
+/// backed by the in-memory `PerplexityDriverTestDb` double instead of
+/// Postgres. Also covers the `gate_scoring_exhausted` observability path
+/// (spec: docs/superpowers/specs/2026-07-09-perplexity-scoring-driver-design.md)
+/// by configuring `max_attempts: 1`, so the single bumped attempt count
+/// reaches the ceiling and drives `bump_gate_evaluation_attempt_and_log_exhaustion`'s
+/// warning branch. Asserting the exact returned/recorded attempt count is
+/// the most direct verification available for a pure hash-only log line.
+#[tokio::test]
+async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postgres() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let item = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission");
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(HardFailingGateService);
+
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        // Ceiling of 1 means this single failed attempt reaches
+        // `max_attempts`, driving the `gate_scoring_exhausted` log branch.
+        max_attempts: 1,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::Failed { label } = outcome else {
+        panic!("expected GateOutcome::Failed, got {outcome:?}");
+    };
+    assert!(!label.is_empty(), "expected a non-empty failure label");
+
+    let attempts = db
+        .gate_evaluation_attempts_for(&item.tenant_id, item.submission_id)
+        .expect("bump_gate_evaluation_attempt must have recorded an attempt");
+    assert_eq!(attempts, 1, "one hard scorer failure bumps attempts to 1");
+    assert!(
+        attempts >= knobs.max_attempts,
+        "attempt count must reach max_attempts so gate_scoring_exhausted fires"
+    );
+
+    assert!(
+        db.gate_decision_for(&item.tenant_id, item.submission_id)
+            .is_none(),
+        "no gate decision row written on hard scorer failure"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Task 5: in-process perplexity-scoring driver loop tests
+// -----------------------------------------------------------------------
+
+/// In-memory `Database` double for the driver-loop integration test. Unlike
+/// the PG-backed Task 4 tests above, this test needs NO real database: it
+/// only exercises `run_perplexity_score_driver_tick` -> `score_one_submission`
+/// -> `evaluate_and_record_gate`, which together touch exactly
+/// `get_trace_submission`, `get_latest_active_trace_object_ref`,
+/// `insert_trace_gate_decision`, and (via `Database`)
+/// `list_submissions_needing_gate_decision`. Every other `TraceCorpusStore` /
+/// `Database` method is an unreachable stub, following the same pattern as
+/// `PerUserTestDeviceKeyDb` above.
+///
+/// `insert_trace_gate_decision` removes the matching item from the ungated
+/// backlog, so a second `list_submissions_needing_gate_decision` call
+/// reflects the drained backlog — this is what lets the test assert the
+/// second tick returns zero.
+struct PerplexityDriverTestDb {
+    submissions:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
+    object_refs:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
+    gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
+    ungated: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Derived records keyed loosely by tenant, scanned linearly by
+    /// `list_trace_derived_records` the same way the production Postgres
+    /// query would return every derived row for a tenant. Lets tests seed a
+    /// duplicate-precheck record for the skip-duplicate cost-control branch
+    /// without requiring Postgres.
+    derived_records: std::sync::RwLock<Vec<(String, StorageTraceDerivedRecord)>>,
+    /// Records `bump_gate_evaluation_attempt` calls so CI-running tests can
+    /// assert the failed-scorer cost-control branch actually bumped the
+    /// attempt counter, without needing the real `trace_gate_evaluation_attempts`
+    /// table.
+    gate_evaluation_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+}
+
+impl PerplexityDriverTestDb {
+    fn new() -> Self {
+        Self {
+            submissions: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_refs: std::sync::RwLock::new(std::collections::HashMap::new()),
+            gate_decisions: std::sync::RwLock::new(Vec::new()),
+            ungated: std::sync::RwLock::new(Vec::new()),
+            derived_records: std::sync::RwLock::new(Vec::new()),
+            gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Seed a `DuplicatePrecheck` derived record for `submission_id` with the
+    /// given `duplicate_score`, so `score_one_submission`'s skip-duplicate
+    /// branch can find it via `list_trace_derived_records`.
+    fn seed_duplicate_derived_record(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        duplicate_score: f32,
+    ) {
+        let now = Utc::now();
+        self.derived_records.write().unwrap().push((
+            tenant_id.to_string(),
+            StorageTraceDerivedRecord {
+                derived_id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                status: StorageTraceDerivedStatus::Current,
+                worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+                worker_version: "test-precheck-v1".to_string(),
+                input_object_ref: None,
+                input_hash: sha256_prefixed("perplexity-driver-test-db-duplicate"),
+                output_object_ref: None,
+                canonical_summary: None,
+                canonical_summary_hash: None,
+                summary_model: "test-model".to_string(),
+                task_success: None,
+                privacy_risk: None,
+                event_count: None,
+                tool_sequence: vec![],
+                tool_categories: vec![],
+                coverage_tags: vec![],
+                duplicate_score: Some(duplicate_score),
+                novelty_score: Some(0.05),
+                cluster_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+        ));
+    }
+
+    /// Look up the `trace_gate_decisions` row written for `(tenant_id,
+    /// submission_id)`, if any — used to assert `credit_withheld_reason`.
+    fn gate_decision_for(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Option<StorageTraceGateDecisionRow> {
+        self.gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .map(|(_, row)| row.clone())
+    }
+
+    /// Current recorded attempt count for `(tenant_id, submission_id)`, as
+    /// last written by `bump_gate_evaluation_attempt`. `None` if it was never
+    /// called for this submission.
+    fn gate_evaluation_attempts_for(&self, tenant_id: &str, submission_id: Uuid) -> Option<i32> {
+        self.gate_evaluation_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .map(|(attempts, _)| *attempts)
+    }
+
+    /// Seed one ungated submission: a submission record (no
+    /// `canonical_summary_hash`, so `score_one_submission`'s cross-submission
+    /// cache branch is a no-op) plus its active `SubmittedEnvelope` object
+    /// ref, and register it in the ungated backlog.
+    fn seed_ungated_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_ref: StorageTraceObjectRefRecord,
+    ) {
+        let now = Utc::now();
+        self.submissions.write().unwrap().insert(
+            (tenant_id.to_string(), submission_id),
+            StorageTraceSubmissionRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                status: StorageTraceCorpusStatus::Accepted,
+                auth_principal_ref: principal_storage_ref("perplexity-driver-test"),
+                contributor_pseudonym: Some("perplexity-driver-test-pseudonym".to_string()),
+                submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+                schema_version: "trace_contribution.v1".to_string(),
+                consent_policy_version: "trace-consent-v1".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["evaluation".to_string()],
+                retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+                privacy_risk: "low".to_string(),
+                redaction_pipeline_version: "test-redactor-v1".to_string(),
+                redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+                redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+                canonical_summary_hash: None,
+                submission_score: None,
+                credit_points_pending: None,
+                credit_points_final: None,
+                received_at: now,
+                updated_at: now,
+                reviewed_at: None,
+                review_assigned_to_principal_ref: None,
+                review_assigned_at: None,
+                review_lease_expires_at: None,
+                review_due_at: None,
+                revoked_at: None,
+                expires_at: None,
+                purged_at: None,
+            },
+        );
+        self.object_refs
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id), object_ref);
+        self.ungated.write().unwrap().push(GateWorkItem {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+        });
+    }
+
+    fn gate_decision_count(&self) -> usize {
+        self.gate_decisions.read().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerplexityDriverTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        _: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        Ok(self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _: &str,
+        _: &str,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCorpusStatus,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        _: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        Ok(self
+            .object_refs
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        Ok(self
+            .derived_records
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == tenant_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        let submission_id = decision.submission_id;
+        self.gate_decisions
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), decision));
+        self.ungated
+            .write()
+            .unwrap()
+            .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
+        Ok(())
+    }
+    /// Overrides the default "not implemented for this backend" error so
+    /// CI-running (non-PG) tests can exercise `score_one_submission`'s
+    /// failed-scorer cost-control branch: increments and records the
+    /// in-memory attempt counter for `(tenant_id, submission_id)`, returning
+    /// the new count the same way the real Postgres backend does.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.gate_evaluation_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for PerplexityDriverTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        _now: DateTime<Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .ungated
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+/// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
+/// each with a real v2 KEK-wrapped envelope written into `artifact_store` so
+/// `evaluate_and_record_gate` can decrypt and score it end-to-end.
+fn seed_perplexity_driver_test_db(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    count: usize,
+) -> Arc<PerplexityDriverTestDb> {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    for _ in 0..count {
+        let submission_id = Uuid::new_v4();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({"safe": true})).expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        // `evaluate_and_record_gate` reconstructs the `EncryptedTraceArtifactReceipt`
+        // from the object ref, using `object_ref.created_at` as `encrypted_at`. That
+        // reconstructed receipt must equal the one `put_serialized_json` returned
+        // (checked by `read_artifact`'s `artifact.receipt == *receipt`), so
+        // `created_at` here MUST be `receipt.encrypted_at`, not a fresh `Utc::now()`.
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+    }
+    db
+}
+
+/// Task 5 payoff: `run_perplexity_score_driver_tick` drains a backlog of
+/// ungated submissions in one tick (sequential `score_one_submission` calls),
+/// and a second tick against the now-empty backlog returns all zeros. Uses
+/// an in-memory `Database` double (no Postgres required) plus a real
+/// encrypted artifact store and the default in-memory gate service, so the
+/// whole `evaluate_and_record_gate` path runs for real.
+#[tokio::test]
+async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 3);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // `test_state_with_configured_artifact_store_policies_and_export_guardrails`
+    // already wires `gate_service: InMemoryGateService`, which always scores a
+    // passing decision — exactly what this test needs.
+
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+
+    let first = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("first tick succeeds");
+    assert_eq!(
+        first.scored + first.skipped_duplicate + first.cached,
+        3,
+        "first tick must account for all 3 seeded submissions: {first:?}"
+    );
+    assert_eq!(first.failed, 0, "no submission should fail: {first:?}");
+    assert_eq!(
+        db.gate_decision_count(),
+        3,
+        "3 gate decision rows must be written"
+    );
+
+    let second = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("second tick succeeds");
+    assert_eq!(
+        (
+            second.scored,
+            second.skipped_duplicate,
+            second.cached,
+            second.failed
+        ),
+        (0, 0, 0, 0),
+        "second tick must find the backlog already drained: {second:?}"
+    );
 }
 
 // -----------------------------------------------------------------------

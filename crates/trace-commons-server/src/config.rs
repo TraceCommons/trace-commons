@@ -56,6 +56,14 @@ pub struct DatabaseConfig {
     /// only). Optional at the type level; the account-redeem path is
     /// fail-closed without it. Never reuse the runtime `url` here.
     pub login_resolver_url: Option<SecretString>,
+    /// Separate connection string for the narrow, cross-tenant gate-driver
+    /// pool used by the perplexity scoring driver's ungated-submissions
+    /// enumeration. Its DB user MUST be an operator-provisioned LOGIN role
+    /// that inherits the `trace_gate_driver` role (NOLOGIN base, NOBYPASSRLS,
+    /// permissive cross-tenant SELECT policies only — see migration V36).
+    /// Optional at the type level; the gate driver is fail-closed without it.
+    /// Never reuse the runtime `url` here.
+    pub gate_driver_url: Option<SecretString>,
 }
 
 impl DatabaseConfig {
@@ -65,6 +73,7 @@ impl DatabaseConfig {
             pool_size,
             ssl_mode: SslMode::from_env(),
             login_resolver_url: Self::login_resolver_url_from_env(),
+            gate_driver_url: Self::gate_driver_url_from_env(),
         }
     }
 
@@ -79,12 +88,29 @@ impl DatabaseConfig {
             .map(SecretString::from)
     }
 
+    /// Read the optional separate gate-driver connection string from
+    /// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL`. A blank value is treated as
+    /// unset so the feature stays fail-closed rather than building a pool from
+    /// an empty string. Mirrors `login_resolver_url_from_env`.
+    pub fn gate_driver_url_from_env() -> Option<SecretString> {
+        std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::from)
+    }
+
     pub fn url(&self) -> &str {
         self.url.expose_secret()
     }
 
     pub fn login_resolver_url(&self) -> Option<&str> {
         self.login_resolver_url
+            .as_ref()
+            .map(|value| value.expose_secret())
+    }
+
+    pub fn gate_driver_url(&self) -> Option<&str> {
+        self.gate_driver_url
             .as_ref()
             .map(|value| value.expose_secret())
     }

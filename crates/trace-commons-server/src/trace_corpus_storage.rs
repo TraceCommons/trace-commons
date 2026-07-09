@@ -1796,6 +1796,17 @@ pub struct TraceGateDecisionRow {
     pub credit_withheld_reason: Option<String>,
 }
 
+/// A single submission awaiting a gate decision, as enumerated by
+/// [`crate::db::Database::list_submissions_needing_gate_decision`]. Cross-tenant
+/// by construction (the enumeration runs on the narrow `trace_gate_driver`
+/// pool), so the tenant is carried explicitly alongside the submission id
+/// rather than implied by a tenant-scoped call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateWorkItem {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2308,6 +2319,73 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         decision: TraceGateDecisionRow,
     ) -> Result<(), DatabaseError>;
+
+    /// Update the label-only `credit_withheld_reason` on an already-inserted
+    /// `trace_gate_decisions` row. Used by the gate-worker HTTP handler after
+    /// `evaluate_and_record_gate` writes the initial row: credit-emission
+    /// eligibility is only known once `attempt_emit_novelty_utility_credit`
+    /// runs, which needs `TenantAuth` and so cannot live in the non-auth
+    /// scoring core. Defaults to a log-once warning + no-op; only the
+    /// production Postgres backend has a real implementation today. The
+    /// default deliberately does not panic (so a backend that never withholds
+    /// credit stays usable) but does warn (label-only, no tenant/decision
+    /// identifiers) so a future non-Postgres backend that actually exercises
+    /// the withheld path cannot silently drop the update.
+    async fn update_trace_gate_decision_credit_withheld_reason(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _credit_withheld_reason: Option<String>,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_credit_withheld_reason called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Upsert per-`(tenant_id, submission_id)` gate-evaluation attempt
+    /// bookkeeping used by the perplexity-scoring driver's cost-control
+    /// wrapper (`score_one_submission`, Task 4). Increments the `attempts`
+    /// counter and stamps `last_attempt_at`/`last_error_label`, returning the
+    /// new attempt count. Implementations MUST scope the upsert by
+    /// `tenant_id` (migration V36 forces RLS on
+    /// `trace_gate_evaluation_attempts` bound to `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        Err(DatabaseError::Query(
+            "bump_gate_evaluation_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Look up an existing `trace_gate_decisions` row belonging to a
+    /// DIFFERENT submission in the same tenant that shares the given
+    /// `canonical_summary_hash`, used by the perplexity-scoring driver's
+    /// cache cost-control (Task 4). Returns the most recently decided
+    /// matching row (by `decided_at`), or `None` on a cache miss.
+    ///
+    /// The default always returns `Ok(None)` (cache miss): a backend without
+    /// a real implementation simply never benefits from the cache and falls
+    /// through to full scoring, which is a cost/perf tradeoff, not a
+    /// correctness or security one.
+    async fn find_gate_decision_by_canonical_hash(
+        &self,
+        _tenant_id: &str,
+        _canonical_summary_hash: &str,
+        _exclude_submission_id: Uuid,
+    ) -> Result<Option<TraceGateDecisionRow>, DatabaseError> {
+        Ok(None)
+    }
 
     /// Paginated scan over `trace_gate_decisions` for the replay binary.
     /// Filters to rows with `vector_entry_id IS NOT NULL` (i.e. rows that

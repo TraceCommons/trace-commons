@@ -5380,4 +5380,97 @@ impl TraceCorpusStore for PgBackend {
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
+
+    async fn update_trace_gate_decision_credit_withheld_reason(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        credit_withheld_reason: Option<String>,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_gate_decisions SET credit_withheld_reason = $3
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant_id, &decision_id, &credit_withheld_reason],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "INSERT INTO trace_gate_evaluation_attempts
+                     (tenant_id, submission_id, attempts, last_attempt_at, last_error_label)
+                 VALUES ($1, $2, 1, $3, $4)
+                 ON CONFLICT (tenant_id, submission_id) DO UPDATE
+                     SET attempts = trace_gate_evaluation_attempts.attempts + 1,
+                         last_attempt_at = $3,
+                         last_error_label = $4
+                 RETURNING attempts",
+                &[&tenant_id, &submission_id, &now, &error_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get(0))
+    }
+
+    async fn find_gate_decision_by_canonical_hash(
+        &self,
+        tenant_id: &str,
+        canonical_summary_hash: &str,
+        exclude_submission_id: Uuid,
+    ) -> Result<Option<TraceGateDecisionRow>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT d.decision_id, d.submission_id, d.gate_policy_version, d.gate_version_hash,
+                        d.perplexity_micros, d.tail_fraction_micros, d.perplexity_passed,
+                        d.novelty_score_micros, d.nearest_neighbor_hash, d.novelty_passed,
+                        d.embedding_evidence_hash, d.attestation_chain_hash, d.decided_at,
+                        d.vector_entry_id, d.credit_withheld_reason
+                 FROM trace_gate_decisions d
+                 JOIN trace_submissions s
+                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                 WHERE d.tenant_id = $1
+                   AND s.canonical_summary_hash = $2
+                   AND d.submission_id <> $3
+                 ORDER BY d.decided_at DESC
+                 LIMIT 1",
+                &[&tenant_id, &canonical_summary_hash, &exclude_submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows.into_iter().next().map(|row| TraceGateDecisionRow {
+            decision_id: row.get(0),
+            submission_id: row.get(1),
+            gate_policy_version: row.get(2),
+            gate_version_hash: row.get(3),
+            perplexity_micros: row.get(4),
+            tail_fraction_micros: row.get(5),
+            perplexity_passed: row.get(6),
+            novelty_score_micros: row.get(7),
+            nearest_neighbor_hash: row.get(8),
+            novelty_passed: row.get(9),
+            embedding_evidence_hash: row.get(10),
+            attestation_chain_hash: row.get(11),
+            decided_at: row.get(12),
+            vector_entry_id: row.get(13),
+            credit_withheld_reason: row.get(14),
+        }))
+    }
 }

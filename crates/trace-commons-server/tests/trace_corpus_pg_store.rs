@@ -48,6 +48,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         ssl_mode: SslMode::Prefer,
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
     })
 }
 
@@ -3538,6 +3539,108 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+/// Phase A5 driver-extraction: the gate-worker HTTP handler now writes the
+/// `trace_gate_decisions` row (via `evaluate_and_record_gate`) BEFORE credit
+/// computation, then patches `credit_withheld_reason` afterward. When credit
+/// computation fails with a hard error, the handler best-effort patches the
+/// row to the `credit_check_error` sentinel so the persisted audit row is not
+/// silently left at `None` (which would misrepresent a failed request as a
+/// clean non-withheld outcome). This exercises the underlying storage patch
+/// that mechanism depends on: an already-inserted `None` row can be updated to
+/// a `Some(sentinel)` and back to `None`.
+#[tokio::test]
+async fn pg_store_patches_trace_gate_decision_credit_withheld_reason() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-gate-patch-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    // Insert the row as the non-auth scoring core does: credit_withheld_reason
+    // starts as None because credit eligibility is not yet known.
+    let decision = sample_gate_decision(submission_id);
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision)
+        .await
+        .expect("insert gate decision with None credit_withheld_reason");
+
+    let read_withheld = |tenant_id: String, decision_id: Uuid| {
+        let backend = &backend;
+        async move {
+            let mut client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("get readback connection");
+            let tx = client
+                .transaction()
+                .await
+                .expect("start readback transaction");
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant_id],
+            )
+            .await
+            .expect("set tenant context for readback");
+            let row = tx
+                .query_one(
+                    "SELECT credit_withheld_reason FROM trace_gate_decisions \
+                     WHERE tenant_id = $1 AND decision_id = $2",
+                    &[&tenant_id, &decision_id],
+                )
+                .await
+                .expect("read back gate decision row");
+            tx.commit().await.expect("commit readback transaction");
+            let stored: Option<String> = row.get("credit_withheld_reason");
+            stored
+        }
+    };
+
+    assert!(
+        read_withheld(tenant_id.clone(), decision_id)
+            .await
+            .is_none(),
+        "row starts with NULL credit_withheld_reason"
+    );
+
+    // Simulate the handler's best-effort sentinel patch on a credit-error path.
+    backend
+        .update_trace_gate_decision_credit_withheld_reason(
+            &tenant_id,
+            decision_id,
+            Some("credit_check_error".to_string()),
+        )
+        .await
+        .expect("patch credit_withheld_reason to sentinel");
+    assert_eq!(
+        read_withheld(tenant_id.clone(), decision_id).await,
+        Some("credit_check_error".to_string()),
+        "sentinel patch makes the persisted audit row honest"
+    );
+
+    // The same method also clears back to NULL (defensive: not used by the
+    // handler today, but the column must round-trip both ways).
+    backend
+        .update_trace_gate_decision_credit_withheld_reason(&tenant_id, decision_id, None)
+        .await
+        .expect("clear credit_withheld_reason back to NULL");
+    assert!(
+        read_withheld(tenant_id.clone(), decision_id)
+            .await
+            .is_none(),
+        "clearing the sentinel restores NULL"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
 }
 
 #[tokio::test]
