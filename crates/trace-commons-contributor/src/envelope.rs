@@ -202,36 +202,24 @@ pub async fn redact_to_envelope(
         .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))
 }
 
-/// Reconstruct the pre-redaction text of a session (every event's content
-/// plus its structured payload rendered as JSON), for leaked-token
-/// comparison against the finalized envelope.
-pub fn session_original_text(t: &SessionTranscript) -> String {
-    let mut buf = String::new();
-    for event in &t.events {
-        if let Some(content) = &event.content {
-            buf.push_str(content);
-            buf.push(' ');
-        }
-        buf.push_str(&event.structured.to_string());
-        buf.push(' ');
-    }
-    buf
-}
-
-/// Serialize `envelope` and return the sha256 hashes of any >=4-char
-/// whitespace token from `original` that still appears verbatim in it.
-/// Empty = clean. This is a per-session, defense-in-depth check: even if the
-/// redaction pipeline misses a format, a session whose secret survives is
-/// refused rather than uploaded.
-pub fn envelope_leaked_tokens(
-    original: &str,
+/// Re-scan the *finished* envelope with the secret detector and report
+/// whether any secret shape survived redaction. Defense-in-depth: a
+/// correctly-redacted envelope yields zero detector hits, but a survivor (a
+/// detect-then-redact bug, or a non-string payload value the string-leaf
+/// pass never visited) is still caught here and fails the session closed.
+///
+/// Unlike a whole-token diff, this only flags secret *shapes* (pattern
+/// matches, PEM blocks, cue-gated entropy) -- ordinary prose and the
+/// `{"record_type":...}` markers on Opaque events are not secret-shaped and
+/// never trip it, so there are no prose false positives.
+pub fn envelope_has_residual_secret(
+    redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
-) -> Result<Vec<String>> {
+) -> Result<bool> {
     let json = serde_json::to_string(envelope)
         .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
-    Ok(trace_commons_operator_client::canary_leaked_tokens(
-        original, &json,
-    ))
+    let (_out, report) = redactor.redact_text(&json);
+    Ok(report.blocked_secret_detected)
 }
 
 /// Serialize `envelope` and refuse (label-only) if it exceeds

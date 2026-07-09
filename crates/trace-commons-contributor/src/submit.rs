@@ -18,8 +18,8 @@ use trace_commons_protocol::trace_contribution::{
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
     apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
-    envelope_leaked_tokens, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
-    parse_use_names, redact_to_envelope, session_original_text,
+    envelope_has_residual_secret, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
+    parse_use_names, redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -143,12 +143,8 @@ pub async fn submit_sessions(
         };
 
         if opts.dry_run {
-            let leaked = envelope_leaked_tokens(&session_original_text(&transcript), &envelope)?;
-            if !leaked.is_empty() {
-                tracing::warn!(
-                    leaked_token_count = leaked.len(),
-                    "refusing session: secret survived redaction"
-                );
+            if envelope_has_residual_secret(&redactor, &envelope)? {
+                tracing::warn!("refusing session: secret survived redaction");
                 outcomes.push(SubmitOutcome::Refused {
                     reason_label: "secret-leak-detected".to_string(),
                 });
@@ -193,12 +189,8 @@ pub async fn submit_sessions(
             .clone();
         stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
 
-        let leaked = envelope_leaked_tokens(&session_original_text(&transcript), &envelope)?;
-        if !leaked.is_empty() {
-            tracing::warn!(
-                leaked_token_count = leaked.len(),
-                "refusing session: secret survived redaction"
-            );
+        if envelope_has_residual_secret(&redactor, &envelope)? {
+            tracing::warn!("refusing session: secret survived redaction");
             outcomes.push(SubmitOutcome::Refused {
                 reason_label: "secret-leak-detected".to_string(),
             });
@@ -529,24 +521,12 @@ mod tests {
         )
     }
 
-    /// Happy-path fixture for submit-pipeline tests (allowlist, scope
-    /// narrowing, remint/retry, idempotency, ...). Deliberately distinct
-    /// from `fixtures/claude-code` (used by the source/envelope parsing
-    /// tests): its message content is built entirely from <4-char tokens
-    /// and it carries no `Opaque` (system/attachment/unknown-record)
-    /// events, so the per-session leaked-token guard added in
-    /// `session_with_surviving_secret_is_refused_not_uploaded` never trips
-    /// on it -- every non-secret token here is short enough (or the whole
-    /// event structured-payload is redacted, per the fake API key) that
-    /// none of it can appear as a >=4-char survivor in the finalized
-    /// envelope. Tests below assert `Submitted` because this fixture's
-    /// secret is expected to be caught by redaction, not the guard.
     fn fixture_selection() -> Vec<(
         Box<dyn crate::source::TraceSource>,
         crate::source::SessionRef,
     )> {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/claude-code-submit-happy");
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
         let src = crate::source::claude_code::ClaudeCodeSource::new(root.clone());
         let r = src.discover().unwrap().remove(0);
         vec![(
@@ -624,63 +604,52 @@ mod tests {
         assert_eq!(received.lock().unwrap().len(), 1);
     }
 
-    /// Builds a one-off `ClaudeCodeSource` selection over a session whose
-    /// user-message content contains a distinctive >=4-char token
-    /// (`ZZmarker4242`) that is not secret-shaped (no known prefix/PEM
-    /// header) and is not path- or email-shaped, so it survives the
-    /// deterministic redactor untouched and appears verbatim in both the
-    /// original text and the finalized envelope.
-    fn leaked_token_fixture_selection(
-        root: &std::path::Path,
-    ) -> Vec<(
-        Box<dyn crate::source::TraceSource>,
-        crate::source::SessionRef,
-    )> {
-        let project_dir = root.join("-tmp-fixture-leaktest");
-        std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(
-            project_dir.join("33333333-3333-3333-3333-333333333333.jsonl"),
-            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"plain token ZZmarker4242 stays\"},\"cwd\":\"/tmp/fixture/leaktest\",\"timestamp\":\"2026-07-01T10:00:00Z\",\"version\":\"2.0.1\",\"sessionId\":\"33333333-3333-3333-3333-333333333333\",\"uuid\":\"a1\"}\n",
-        )
-        .unwrap();
-        let src = crate::source::claude_code::ClaudeCodeSource::new(root.to_path_buf());
-        let r = src.discover().unwrap().remove(0);
-        vec![(
-            Box::new(crate::source::claude_code::ClaudeCodeSource::new(
-                root.to_path_buf(),
-            )) as Box<dyn crate::source::TraceSource>,
-            r,
-        )]
-    }
-
+    /// The residual-secret guard is a re-scan of the finished envelope with
+    /// the secret detector. A survivor (a detect-then-redact bug, or a
+    /// non-string payload value the string-leaf pass never visited) leaves a
+    /// recognizable secret shape in the serialized envelope and trips the
+    /// guard; a clean envelope does not. This exercises the helper directly:
+    /// forcing a real survivor through the (now-strong) redaction pipeline is
+    /// impractical, so we plant a detector-recognized secret shape
+    /// (`sk-ant-...`) into a finished envelope and assert the guard catches
+    /// it, plus that an unmodified redacted envelope is clean. The full
+    /// submit path's clean-session Submitted behavior is covered by
+    /// `submits_fixture_session_and_is_idempotent_on_rerun` against the
+    /// original fixture (whose Opaque record-type markers and normal prose
+    /// are not secret-shaped and never trip the guard).
     #[tokio::test]
-    async fn session_with_surviving_secret_is_refused_not_uploaded() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest(received.clone())).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            dry_run: false,
-            pii_filter: None,
+    async fn residual_secret_guard_flags_survivor_and_passes_clean_envelope() {
+        use crate::envelope::{
+            build_raw_contribution, envelope_has_residual_secret, redact_to_envelope,
         };
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let src = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        let transcript = src.load(&r).unwrap();
 
-        let fixture_root = tempfile::tempdir().unwrap();
-        let selection = leaked_token_fixture_selection(fixture_root.path());
+        let cfg = cfg_for(
+            "https://issuer.example",
+            "https://ingest.example",
+            "sha256:00",
+        );
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let raw = build_raw_contribution(&transcript, &cfg, Utc::now());
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
 
-        let outcomes = submit_sessions(&store, &cfg, selection, &opts)
-            .await
-            .unwrap();
-        match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
-                assert_eq!(reason_label, "secret-leak-detected");
-            }
-            other => panic!("expected Refused(secret-leak-detected), got {other:?}"),
+        // A properly-redacted envelope has no residual secret shape.
+        assert!(!envelope_has_residual_secret(&redactor, &envelope).unwrap());
+
+        // Plant a detector-recognized secret shape into the finished
+        // envelope, simulating a value that survived redaction. The re-scan
+        // must catch it and the session must fail closed.
+        if let Some(first) = envelope.events.first_mut() {
+            first.redacted_content =
+                Some("leftover sk-ant-EXPOSEDsecret0123456789abcdefghij here".to_string());
         }
-        assert_eq!(received.lock().unwrap().len(), 0);
-        assert!(store.load_receipts().unwrap().is_empty());
+        assert!(envelope_has_residual_secret(&redactor, &envelope).unwrap());
     }
 
     #[tokio::test]
