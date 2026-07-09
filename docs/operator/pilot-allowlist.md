@@ -417,3 +417,25 @@ diagnose — clear refusal class, exactly the right thing to grep for.
   the proxy.
 - Denial counter is process-local. Restart resets it. It's a
   "rough current pressure" signal, not an audit surface.
+
+## Reading enrollment grants for per-user consent scopes
+
+Instance-vouched enrollment writes a per-device tenant-access-grant row
+carrying the instance policy template's `allowed_consent_scopes` /
+`allowed_uses`. For a device-key upload claim to honor those broadened
+scopes (e.g. `model_training`), the issuer must READ that grant at claim
+time. Two env flags control this, decoupled:
+
+- `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB=1` — attach the
+  grant DB for READING only. Device-key claims derive their consent-scope
+  ceiling from the enrollment grant; no strict enforcement is imposed on
+  any other path. This is the flag to set for per-user consent (Devfolio).
+- `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS=1` —
+  attach the grant DB AND require an active grant for every claim (strict).
+  Implies the read behavior above. Do not enable on the pilot yet: the
+  ingest-side grant-principal alignment for grant-required deployments is a
+  separate, unlanded slice.
+
+With neither flag set, device-key claims fall back to the hardcoded floor
+`[debugging_evaluation, public_attribution]` and any requested
+`model_training` scope is clipped out.

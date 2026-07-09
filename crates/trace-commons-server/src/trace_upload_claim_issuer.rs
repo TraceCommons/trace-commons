@@ -42,6 +42,12 @@ pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
     "ironclaw.trace_upload_claim_request.v1";
 pub const TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV: &str =
     "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS";
+/// Configures the tenant-access-grant DB for READING (so device-key claims
+/// can derive their consent-scope ceiling from enrollment grants) WITHOUT
+/// turning on strict grant enforcement. Requiring grants (the env above)
+/// implies reading; this env enables reading alone.
+pub const TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV: &str =
+    "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB";
 const DEFAULT_BIND: &str = "127.0.0.1:3917";
 const DEFAULT_MAX_TTL_SECONDS: i64 = 300;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 30;
@@ -411,15 +417,29 @@ impl TraceUploadClaimIssuerConfig {
     }
 }
 
+/// Decide, from the two env flags, whether to attach the grant DB for reading
+/// and whether to enforce grants. Reading is enabled when either flag is set;
+/// enforcement follows the REQUIRE flag alone. Pure so it is unit-testable
+/// without a database.
+fn tenant_access_grant_env_decision(require_env: bool, grant_db_env: bool) -> (bool, bool) {
+    let require = require_env;
+    let attach_db = require || grant_db_env;
+    (attach_db, require)
+}
+
 pub async fn configure_tenant_access_grants_from_env(
     config: &mut TraceUploadClaimIssuerConfig,
 ) -> anyhow::Result<()> {
-    if !env_truthy(TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV) {
+    let (attach_db, require) = tenant_access_grant_env_decision(
+        env_truthy(TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV),
+        env_truthy(TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV),
+    );
+    if !attach_db {
         return Ok(());
     }
     let db = trace_upload_claim_issuer_db_from_env().await?;
     config.tenant_access_grant_db = Some(db);
-    config.require_tenant_access_grants = true;
+    config.require_tenant_access_grants = require;
     Ok(())
 }
 
@@ -2752,6 +2772,18 @@ mod tests {
     use chrono::{Duration, Utc};
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
     use serde_json::json;
+
+    #[test]
+    fn tenant_access_grant_env_decouples_read_from_require() {
+        // Neither env: no DB attached, no enforcement (unchanged default).
+        assert_eq!(super::tenant_access_grant_env_decision(false, false), (false, false));
+        // REQUIRE alone: attach DB and enforce (legacy behavior preserved).
+        assert_eq!(super::tenant_access_grant_env_decision(true, false), (true, true));
+        // GRANT_DB alone: attach DB for reading, do NOT enforce (the new path).
+        assert_eq!(super::tenant_access_grant_env_decision(false, true), (true, false));
+        // Both: attach and enforce.
+        assert_eq!(super::tenant_access_grant_env_decision(true, true), (true, true));
+    }
     use std::collections::BTreeMap;
     use tower::ServiceExt;
     use uuid::Uuid;
