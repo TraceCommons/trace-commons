@@ -3729,7 +3729,7 @@ async fn enroll_instance_user_provisions_tenant_and_device_key() {
         instance_subject_hash: instance_subject_hash.clone(),
         client_info: serde_json::json!({"agent": "ironclaw", "version": "0.x"}),
         policy_version: "ironclaw-pilot-v1".to_string(),
-        allowed_consent_scopes: serde_json::json!(["pilot_research"]),
+        allowed_consent_scopes: serde_json::json!(["debugging_evaluation", "model_training"]),
         allowed_uses: serde_json::json!(["model_training"]),
     };
 
@@ -3812,6 +3812,53 @@ async fn enroll_instance_user_provisions_tenant_and_device_key() {
         grant_count, 1,
         "instance-enrolled device must have an active contributor grant"
     );
+
+    // The grant must persist the instance policy template's consent scopes
+    // instead of the hardcoded pilot defaults.
+    let grant_principal_ref: String = tx
+        .query_one(
+            "SELECT principal_ref FROM trace_tenant_access_grants
+              WHERE tenant_id = $1 AND role = 'contributor' AND status = 'active'",
+            &[&tenant_id],
+        )
+        .await
+        .expect("fetch grant principal_ref")
+        .get(0);
+
+    tx.commit().await.expect("commit verification transaction");
+
+    let active_grants = backend
+        .list_active_trace_tenant_access_grants_for_principal(
+            tenant_id,
+            &grant_principal_ref,
+            Utc::now(),
+        )
+        .await
+        .expect("list active tenant access grants for principal");
+    assert_eq!(
+        active_grants.len(),
+        1,
+        "exactly one active grant must exist for the enrolled device principal"
+    );
+    assert!(
+        active_grants[0]
+            .allowed_consent_scopes
+            .iter()
+            .any(|s| s == "model_training"),
+        "grant must carry the instance policy template's allowed_consent_scopes, got {:?}",
+        active_grants[0].allowed_consent_scopes
+    );
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start second verification transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set verification tenant context");
 
     // Account creation: exactly one account and one active principal link must
     // exist (and the idempotent second enroll call must NOT create a second).

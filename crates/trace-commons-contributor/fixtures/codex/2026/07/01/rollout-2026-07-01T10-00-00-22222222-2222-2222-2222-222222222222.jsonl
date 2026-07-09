@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-07-01T10:00:00Z","payload":{"id":"22222222-2222-2222-2222-222222222222","cwd":"/Users/testuser/code/otherproj","cli_version":"0.48.0","model_provider":"openai","source":"cli"}}
+{"type":"turn_context","timestamp":"2026-07-01T10:00:01Z","payload":{"model":"gpt-5.2-codex","cwd":"/Users/testuser/code/otherproj","approval_policy":"on-request"}}
+{"type":"response_item","timestamp":"2026-07-01T10:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a healthcheck endpoint"}]}}
+{"type":"response_item","timestamp":"2026-07-01T10:00:03Z","payload":{"type":"reasoning","content":[],"summary":["thinking about it"]}}
+{"type":"response_item","timestamp":"2026-07-01T10:00:04Z","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"ls src/\"}","call_id":"c1"}}
+{"type":"response_item","timestamp":"2026-07-01T10:00:05Z","payload":{"type":"function_call_output","call_id":"c1","output":"main.rs\nroutes.rs"}}
+{"type":"response_item","timestamp":"2026-07-01T10:00:06Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added GET /health returning 200."}]}}

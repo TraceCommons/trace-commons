@@ -8,3 +8,4 @@
 
 # Local Cloudflare/Wrangler state
 community/.wrangler/
+.superpowers/

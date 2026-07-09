@@ -1687,6 +1687,14 @@ impl Database for PgBackend {
         if max_uses <= 0 {
             return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
         }
+        let default_allowed_consent_scopes: Vec<String> = DEFAULT_ONBOARDING_CONSENT_SCOPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let default_allowed_uses: Vec<String> = DEFAULT_ONBOARDING_ALLOWED_USES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         self.ensure_trace_tenant(&device_key.tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
@@ -1711,6 +1719,8 @@ impl Database for PgBackend {
                     &tx,
                     &device_key.tenant_id,
                     &device_key.device_key_id,
+                    &default_allowed_consent_scopes,
+                    &default_allowed_uses,
                 )
                 .await?;
                 tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -1784,6 +1794,8 @@ impl Database for PgBackend {
                         &tx,
                         &device_key.tenant_id,
                         &device_key.device_key_id,
+                        &default_allowed_consent_scopes,
+                        &default_allowed_uses,
                     )
                     .await?;
                     tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -1818,6 +1830,8 @@ impl Database for PgBackend {
             &tx,
             &device_key.tenant_id,
             &device_key.device_key_id,
+            &default_allowed_consent_scopes,
+            &default_allowed_uses,
         )
         .await?;
 
@@ -1910,7 +1924,22 @@ impl Database for PgBackend {
         // Grant the default contributor tenant-access grant so the device can mint
         // upload claims under the `require_tenant_access_grants` gate, exactly like
         // an invite-onboarded device. Same helper, same principal_ref derivation.
-        upsert_onboarding_device_tenant_access_grant(&tx, &p.tenant_id, &p.device_key_id).await?;
+        // Scopes come from the instance's policy template, falling back to the
+        // pilot defaults when the template is missing, empty, or malformed.
+        let allowed_consent_scopes = normalize_provision_scope_values(
+            &p.allowed_consent_scopes,
+            &DEFAULT_ONBOARDING_CONSENT_SCOPES,
+        );
+        let allowed_uses =
+            normalize_provision_scope_values(&p.allowed_uses, &DEFAULT_ONBOARDING_ALLOWED_USES);
+        upsert_onboarding_device_tenant_access_grant(
+            &tx,
+            &p.tenant_id,
+            &p.device_key_id,
+            &allowed_consent_scopes,
+            &allowed_uses,
+        )
+        .await?;
 
         tx.commit().await.map_err(DatabaseError::Postgres)?;
 
@@ -3495,15 +3524,46 @@ fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
     }
 }
 
+/// Pilot-default consent scopes for onboarding device-key grants, used when a
+/// device is onboarded via invite (no per-tenant policy template) and as the
+/// fail-closed fallback for instance-enrolled devices.
+const DEFAULT_ONBOARDING_CONSENT_SCOPES: [&str; 2] = ["debugging_evaluation", "public_attribution"];
+/// Pilot-default allowed uses, mirroring `DEFAULT_ONBOARDING_CONSENT_SCOPES`.
+const DEFAULT_ONBOARDING_ALLOWED_USES: [&str; 3] =
+    ["debugging", "evaluation", "aggregate_analytics"];
+
+/// Normalize a policy-template scope array (serde_json::Value from
+/// InstanceUserProvision) into storage strings. Non-array, empty, or
+/// non-string-element values fall back to `defaults` (fail closed).
+fn normalize_provision_scope_values(value: &serde_json::Value, defaults: &[&str]) -> Vec<String> {
+    let fallback = || defaults.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let Some(items) = value.as_array() else {
+        return fallback();
+    };
+    if items.is_empty() {
+        return fallback();
+    }
+    let mut normalized = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str() {
+            Some(s) => normalized.push(s.to_string()),
+            None => return fallback(),
+        }
+    }
+    normalized
+}
+
 async fn upsert_onboarding_device_tenant_access_grant(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
     device_key_id: &str,
+    allowed_consent_scopes: &[String],
+    allowed_uses: &[String],
 ) -> Result<(), DatabaseError> {
     let grant_id = onboarding_device_tenant_access_grant_id(tenant_id, device_key_id);
     let principal_ref = onboarding_device_principal_ref(tenant_id, device_key_id);
-    let allowed_consent_scopes = serde_json::json!(["debugging_evaluation", "public_attribution"]);
-    let allowed_uses = serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]);
+    let allowed_consent_scopes = serde_json::json!(allowed_consent_scopes);
+    let allowed_uses = serde_json::json!(allowed_uses);
     let metadata_json =
         serde_json::json!({"source": "onboarding_device_key", "capability": "pilot_default"});
 
@@ -3624,6 +3684,35 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, other_device);
         assert_ne!(first, other_tenant);
+    }
+
+    #[test]
+    fn provision_scopes_normalize_or_fall_back() {
+        use serde_json::json;
+        let d = ["debugging_evaluation", "public_attribution"];
+        assert_eq!(
+            normalize_provision_scope_values(
+                &json!(["model_training", "debugging_evaluation"]),
+                &d
+            ),
+            vec![
+                "model_training".to_string(),
+                "debugging_evaluation".to_string()
+            ]
+        );
+        // Empty array, non-array, and mixed-type arrays all fall back.
+        assert_eq!(
+            normalize_provision_scope_values(&json!([]), &d),
+            d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            normalize_provision_scope_values(&json!("nope"), &d),
+            d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            normalize_provision_scope_values(&json!([1, "x"]), &d),
+            d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
