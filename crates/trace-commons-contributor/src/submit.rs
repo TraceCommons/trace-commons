@@ -176,21 +176,9 @@ pub async fn submit_sessions(
 
         let token = claim
             .as_ref()
-            .expect("a claim must be minted before applying granted scopes");
-        let (granted_scopes, granted_uses) = if token.consent_scopes.is_empty() {
-            (
-                parse_scope_names(&effective_cfg.consent_scopes),
-                parse_use_names(&crate::consent::scopes_to_allowed_uses(
-                    &effective_cfg.consent_scopes,
-                )),
-            )
-        } else {
-            (
-                parse_scope_names(&token.consent_scopes),
-                parse_use_names(&token.allowed_uses),
-            )
-        };
-        apply_granted_scopes(&mut envelope, &granted_scopes, &granted_uses);
+            .expect("a claim must be minted before applying granted scopes")
+            .clone();
+        stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
 
         if envelope_size_ok(&envelope).is_err() {
             outcomes.push(SubmitOutcome::Refused {
@@ -199,7 +187,9 @@ pub async fn submit_sessions(
             continue;
         }
 
-        match upload_with_retry(cfg, &issuer, &device, &mut claim, &envelope).await {
+        match upload_with_retry(cfg, &issuer, &device, &mut claim, &mut envelope, &effective_cfg)
+            .await
+        {
             Ok(receipt) => {
                 let r = Receipt {
                     submission_id: envelope.submission_id,
@@ -282,6 +272,33 @@ async fn mint_claim(
     issuer.mint_claim(&cfg.issuer_url, &signed).await
 }
 
+/// Stamp `envelope` with the granted consent scopes/uses from `token`,
+/// falling back to the requested (`effective_cfg`) scopes/uses when the
+/// issuer is old enough not to echo them back (empty `consent_scopes`).
+/// Shared between the initial stamp before the first upload attempt and the
+/// restamp after a claim re-mint, so both paths derive the grant the same
+/// way.
+fn stamp_granted_scopes(
+    envelope: &mut TraceContributionEnvelope,
+    effective_cfg: &ContributorConfig,
+    token: &ClaimToken,
+) {
+    let (granted_scopes, granted_uses) = if token.consent_scopes.is_empty() {
+        (
+            parse_scope_names(&effective_cfg.consent_scopes),
+            parse_use_names(&crate::consent::scopes_to_allowed_uses(
+                &effective_cfg.consent_scopes,
+            )),
+        )
+    } else {
+        (
+            parse_scope_names(&token.consent_scopes),
+            parse_use_names(&token.allowed_uses),
+        )
+    };
+    apply_granted_scopes(envelope, &granted_scopes, &granted_uses);
+}
+
 fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
@@ -298,12 +315,20 @@ fn build_ingest_client(
 /// Upload `envelope`, retrying transient transport failures up to 3 attempts
 /// total (1s then 4s backoff) and, on a 401/403, re-minting the claim once
 /// and retrying once more before giving up.
+///
+/// A re-mint can return narrower (or otherwise different) granted scopes
+/// than the claim that was active when `envelope` was first stamped. To
+/// avoid resending an envelope stamped with a stale grant, the envelope is
+/// restamped with the new token's granted scopes/uses (via
+/// `stamp_granted_scopes`, the same helper used before the first attempt)
+/// and re-checked for size before the retry.
 async fn upload_with_retry(
     cfg: &ContributorConfig,
     issuer: &IssuerClient,
     device: &DeviceIdentity,
     claim: &mut Option<ClaimToken>,
-    envelope: &TraceContributionEnvelope,
+    envelope: &mut TraceContributionEnvelope,
+    effective_cfg: &ContributorConfig,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -323,7 +348,7 @@ async fn upload_with_retry(
                 Method::POST,
                 "/v1/traces",
                 &[],
-                Some(envelope),
+                Some(&*envelope),
             )
             .await;
 
@@ -343,7 +368,13 @@ async fn upload_with_retry(
                 }
                 remint_attempted = true;
                 match mint_claim(issuer, cfg, device, Utc::now()).await {
-                    Ok(new_token) => *claim = Some(new_token),
+                    Ok(new_token) => {
+                        stamp_granted_scopes(envelope, effective_cfg, &new_token);
+                        if envelope_size_ok(envelope).is_err() {
+                            return Err("session-too-large".to_string());
+                        }
+                        *claim = Some(new_token);
+                    }
                     Err(_) => return Err("auth-failed".to_string()),
                 }
             }
@@ -730,6 +761,124 @@ mod tests {
         }
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    /// Mints `["debugging_evaluation", "model_training"]` on the first call
+    /// and the narrower `["debugging_evaluation"]` on every call after —
+    /// simulating a grant narrowed between the first and second mint.
+    fn stub_issuer_narrows_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let mint_calls = mint_calls.clone();
+                async move {
+                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        Json(serde_json::json!({
+                            "access_token": "stub-claim-jwt",
+                            "token_type": "Bearer",
+                            "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                            "expires_in": 300,
+                            "consent_scopes": ["debugging_evaluation", "model_training"],
+                            "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "access_token": "stub-claim-jwt",
+                            "token_type": "Bearer",
+                            "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                            "expires_in": 300,
+                            "consent_scopes": ["debugging_evaluation"],
+                            "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+                        }))
+                    }
+                }
+            }),
+        )
+    }
+
+    /// Refuses the first POST with 401 (forcing a claim re-mint + retry) and
+    /// accepts every POST after, recording every received body so the test
+    /// can inspect what the *retried* request actually carried.
+    fn stub_ingest_401_then_200(
+        received: Arc<Mutex<Vec<serde_json::Value>>>,
+        post_calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Router {
+        use axum::response::IntoResponse;
+        Router::new().route(
+            "/v1/traces",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let received = received.clone();
+                let post_calls = post_calls.clone();
+                async move {
+                    let n = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    received.lock().unwrap().push(body);
+                    if n == 0 {
+                        axum::http::StatusCode::UNAUTHORIZED.into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_restamped_after_claim_remint_on_auth_failure() {
+        use std::sync::atomic::AtomicUsize;
+
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+
+        let issuer = spawn(stub_issuer_narrows_on_remint(mint_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(received.clone(), post_calls.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcomes[0], SubmitOutcome::Submitted { .. }),
+            "expected Submitted after remint+retry, got {:?}",
+            outcomes[0]
+        );
+        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let received_guard = received.lock().unwrap();
+        assert_eq!(
+            received_guard.len(),
+            2,
+            "the 401 attempt and the successful retry must both reach ingest"
+        );
+        // The envelope actually delivered on the second (200) POST must carry
+        // the NEW token's narrower grant, not the original wider one it was
+        // first stamped with.
+        let restamped = &received_guard[1];
+        assert_eq!(
+            restamped["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation"]),
+            "retried envelope must be restamped with the re-minted (narrower) scopes: {restamped}"
+        );
+        let allowed_uses = restamped["trace_card"]["allowed_uses"].as_array().unwrap();
+        assert!(
+            !allowed_uses
+                .iter()
+                .any(|u| u == &serde_json::json!("model_training")),
+            "retried envelope must not retain model_training from the stale claim: {restamped}"
+        );
     }
 
     #[tokio::test]
