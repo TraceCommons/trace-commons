@@ -1796,6 +1796,17 @@ pub struct TraceGateDecisionRow {
     pub credit_withheld_reason: Option<String>,
 }
 
+/// A single submission awaiting a gate decision, as enumerated by
+/// [`crate::db::Database::list_submissions_needing_gate_decision`]. Cross-tenant
+/// by construction (the enumeration runs on the narrow `trace_gate_driver`
+/// pool), so the tenant is carried explicitly alongside the submission id
+/// rather than implied by a tenant-scoped call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateWorkItem {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,

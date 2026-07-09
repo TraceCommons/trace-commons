@@ -7,17 +7,19 @@ use tokio_postgres::NoTls;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
 use trace_commons_server::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxOperation,
-    TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus, TraceCorpusStore,
-    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditEventWrite,
-    TraceCreditHoldReason, TraceCreditHoldWrite, TraceCreditSettlementBatchStatus,
-    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantStatus,
-    TraceExportAccessGrantWrite, TraceExportJobStatus, TraceExportJobStatusUpdate,
-    TraceExportJobWrite, TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
-    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus, TraceRankingCalibrationDatasetWrite,
+    GateWorkItem, TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite,
+    TraceAuditSafeMetadata, TraceBenchmarkRegistryOutboxItemWrite,
+    TraceBenchmarkRegistryOutboxOperation, TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus,
+    TraceCorpusStore, TraceCreditAccountSettlementLineItem, TraceCreditEventType,
+    TraceCreditEventWrite, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceExportAccessGrantStatus, TraceExportAccessGrantWrite,
+    TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
+    TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
+    TraceExportManifestWrite, TraceGateDecisionRow, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
     TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite,
@@ -45,7 +47,45 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         ssl_mode: SslMode::Prefer,
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
     })
+}
+
+/// Like `postgres_test_config`, but with `gate_driver_url` pointed at the SAME
+/// test database URL (rather than the separate
+/// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL`, which CI does not provision).
+/// This exercises the real second-pool wiring and the enumeration SQL
+/// end-to-end; the test DB role's actual RLS treatment for `trace_gate_driver`
+/// is covered separately by
+/// `gate_driver_role_reads_across_tenants_while_default_role_stays_isolated`
+/// via an explicit `SET ROLE`.
+fn gate_driver_test_config() -> Option<DatabaseConfig> {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
+
+    Some(DatabaseConfig {
+        url: SecretString::from(url.clone()),
+        pool_size: 4,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: Some(SecretString::from(url)),
+    })
+}
+
+async fn gate_driver_backend() -> Option<PgBackend> {
+    let Some(config) = gate_driver_test_config() else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return None;
+    };
+
+    match PgBackend::new(&config).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            eprintln!("skipping: database unavailable ({e})");
+            None
+        }
+    }
 }
 
 async fn postgres_backend() -> Option<PgBackend> {
@@ -5276,4 +5316,152 @@ async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated
         )
         .await;
     tx.commit().await.expect("commit gate driver cleanup transaction");
+}
+
+/// The perplexity scoring driver's enumeration query
+/// (`Database::list_submissions_needing_gate_decision`) must return only
+/// submissions that (a) have a submitted-envelope object ref, (b) have no
+/// `trace_gate_decisions` row yet, and (c) have not exhausted their attempt
+/// budget in `trace_gate_evaluation_attempts`. Seeds two tenants: tenant A
+/// gets a gate decision (must be excluded), tenant B has none (must be the
+/// sole result). A third submission (tenant C) is given an attempts row at
+/// the `max_attempts` cap and must also be excluded.
+#[tokio::test]
+async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_submissions() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_a = format!("gate-work-decided-{}", Uuid::new_v4());
+    let tenant_b = format!("gate-work-ungated-{}", Uuid::new_v4());
+    let tenant_c = format!("gate-work-capped-{}", Uuid::new_v4());
+    let submission_a = Uuid::new_v4();
+    let submission_b = Uuid::new_v4();
+    let submission_c = Uuid::new_v4();
+
+    for (tenant_id, submission_id) in [
+        (&tenant_a, submission_a),
+        (&tenant_b, submission_b),
+        (&tenant_c, submission_c),
+    ] {
+        backend
+            .upsert_trace_submission(sample_submission(tenant_id, submission_id))
+            .await
+            .expect("insert submission");
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                tenant_id: tenant_id.clone(),
+                object_ref_id: Uuid::new_v4(),
+                submission_id,
+                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: "s3://private-corpus".to_string(),
+                object_key: format!("{tenant_id}/submission.json"),
+                content_sha256: format!("sha256:{tenant_id}:object"),
+                encryption_key_ref: format!("kms:{tenant_id}"),
+                size_bytes: 1024,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("append submitted-envelope object ref");
+    }
+
+    // Tenant A already has a gate decision: must be excluded.
+    backend
+        .insert_trace_gate_decision(
+            &tenant_a,
+            TraceGateDecisionRow {
+                decision_id: Uuid::new_v4(),
+                submission_id: submission_a,
+                gate_policy_version: "enclave_mock_v1".to_string(),
+                gate_version_hash: "sha256:enclave_mock_v1".to_string(),
+                perplexity_micros: 1_500_000,
+                tail_fraction_micros: 750_000,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:fixture-neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:fixture-evidence".to_string(),
+                attestation_chain_hash: "sha256:fixture-attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(Uuid::new_v4()),
+                credit_withheld_reason: None,
+            },
+        )
+        .await
+        .expect("insert tenant A gate decision");
+
+    // Tenant C has exhausted its attempt budget: must be excluded even though
+    // it has no gate decision yet.
+    let max_attempts: i32 = 5;
+    let mut cap_client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get connection for attempts seed");
+    let tx = cap_client
+        .transaction()
+        .await
+        .expect("start attempts seed transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_c],
+    )
+    .await
+    .expect("set tenant C context");
+    tx.execute(
+        "INSERT INTO trace_gate_evaluation_attempts (tenant_id, submission_id, attempts, last_attempt_at) \
+         VALUES ($1, $2, $3, now())",
+        &[&tenant_c, &submission_c, &max_attempts],
+    )
+    .await
+    .expect("insert capped attempts row");
+    tx.commit().await.expect("commit attempts seed transaction");
+
+    let now = Utc::now();
+    let work_items = backend
+        .list_submissions_needing_gate_decision(now, max_attempts, 30, 10)
+        .await
+        .expect("enumerate submissions needing a gate decision");
+
+    let tenant_b_item = GateWorkItem {
+        tenant_id: tenant_b.clone(),
+        submission_id: submission_b,
+    };
+    assert!(
+        work_items.contains(&tenant_b_item),
+        "ungated tenant B submission must be returned"
+    );
+    assert!(
+        !work_items
+            .iter()
+            .any(|item| item.tenant_id == tenant_a && item.submission_id == submission_a),
+        "tenant A submission already has a gate decision and must be excluded"
+    );
+    assert!(
+        !work_items
+            .iter()
+            .any(|item| item.tenant_id == tenant_c && item.submission_id == submission_c),
+        "tenant C submission is at the attempts cap and must be excluded"
+    );
+
+    cleanup_trace_tenants(&backend, &[&tenant_a, &tenant_b, &tenant_c]).await;
+}
+
+/// When no gate-driver pool is configured, the enumeration must fail closed
+/// with a clear error rather than panicking.
+#[tokio::test]
+async fn list_submissions_needing_gate_decision_fails_closed_without_gate_driver_pool() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+
+    let result = backend
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 30, 10)
+        .await;
+    assert!(
+        result.is_err(),
+        "enumeration must fail closed when the gate-driver pool is not configured"
+    );
 }

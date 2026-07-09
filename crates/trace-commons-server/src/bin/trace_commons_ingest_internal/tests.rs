@@ -21,6 +21,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),

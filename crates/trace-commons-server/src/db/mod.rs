@@ -910,6 +910,37 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "execute_merge not implemented".to_string(),
         ))
     }
+
+    /// Enumerate submissions that still need a perplexity-scoring gate
+    /// decision, across ALL tenants. Runs on the narrow, cross-tenant
+    /// `trace_gate_driver` pool (never the tenant-scoped runtime pool) — the
+    /// permissive `USING (true)` SELECT policies installed by migration V36
+    /// authorize the read.
+    ///
+    /// A submission qualifies when: it has a `submitted_envelope` object ref
+    /// that is neither invalidated nor deleted; it has no `trace_gate_decisions`
+    /// row yet; its recorded attempt count in `trace_gate_evaluation_attempts`
+    /// is below `max_attempts`; and (if it has been attempted before) enough
+    /// time has passed since `last_attempt_at` per an exponential backoff of
+    /// `backoff_base_seconds * 2^attempts`. Results are ordered oldest-received
+    /// first and capped at `limit`.
+    ///
+    /// The default implementation returns a "not configured" error, which is
+    /// the correct behavior for any [`Database`] impl that never wires a
+    /// gate-driver pool (e.g. test doubles). [`postgres::PgBackend`] overrides
+    /// this with the real query and its own "pool not configured" check when
+    /// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset.
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "gate-driver pool not configured".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

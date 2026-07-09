@@ -85,6 +85,13 @@ pub struct PgBackend {
     /// column-scoped SELECT on `trace_login_links` only). `None` keeps the
     /// account-redeem path fail-closed. NEVER aliased to `pool`.
     login_resolver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the cross-tenant gate-driver enumeration
+    /// query. Built only when `gate_driver_url` is configured; its DB user is
+    /// the operator-provisioned `trace_gate_driver` role (NOLOGIN base,
+    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
+    /// V36). `None` keeps the gate driver's enumeration path fail-closed.
+    /// NEVER aliased to `pool`.
+    gate_driver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -222,9 +229,30 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small gate-driver pool only when a distinct
+        // gate-driver connection string is configured. This pool runs as the
+        // narrow `trace_gate_driver` role and is never aliased to the runtime
+        // pool. Mirrors the login-resolver pool above exactly.
+        let gate_driver_pool = match config.gate_driver_url() {
+            Some(gate_driver_url) => {
+                let gate_driver_config =
+                    gate_driver_url
+                        .parse::<tokio_postgres::Config>()
+                        .map_err(|e| {
+                            DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
+                        })?;
+                let gate_driver_manager =
+                    deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
+                let gate_driver_pool = Pool::builder(gate_driver_manager).max_size(2).build()?;
+                Some(gate_driver_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
+            gate_driver_pool,
         })
     }
 
@@ -3529,6 +3557,54 @@ impl Database for PgBackend {
             principals_moved,
             authenticators_moved,
         }))
+    }
+
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_attempts: i32,
+        backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        let pool = self.gate_driver_pool.as_ref().ok_or_else(|| {
+            DatabaseError::Pool("gate-driver pool not configured".to_string())
+        })?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant context is set on this connection: the trace_gate_driver
+        // role's permissive cross-tenant SELECT policies (migration V36) are
+        // what authorize this read across every tenant's submissions.
+        let rows = client
+            .query(
+                "SELECT s.tenant_id, s.submission_id
+                 FROM trace_submissions s
+                 JOIN trace_object_refs o
+                   ON o.tenant_id = s.tenant_id
+                  AND o.submission_id = s.submission_id
+                  AND o.artifact_kind = 'submitted_envelope'
+                  AND o.invalidated_at IS NULL
+                  AND o.deleted_at IS NULL
+                 LEFT JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 LEFT JOIN trace_gate_evaluation_attempts a
+                   ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                 WHERE d.decision_id IS NULL
+                   AND COALESCE(a.attempts, 0) < $1
+                   AND (a.last_attempt_at IS NULL
+                        OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                 ORDER BY s.received_at ASC
+                 LIMIT $4",
+                &[&max_attempts, &backoff_base_seconds, &now, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateWorkItem {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+            })
+            .collect())
     }
 }
 
