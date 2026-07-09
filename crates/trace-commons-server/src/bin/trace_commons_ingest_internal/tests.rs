@@ -62461,6 +62461,92 @@ async fn seed_gate_worker_fixture_with_allowed_uses(
 }
 
 #[tokio::test]
+async fn evaluate_and_record_gate_scores_and_writes_decision_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(InMemoryGateService::new(
+        "in_memory_default",
+        "sha256:in_memory_default",
+    ));
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    let outcome = evaluate_and_record_gate(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds with in-memory gate service");
+
+    let GateOutcome::Scored {
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id: _,
+        gate_policy_version: _,
+        gate_version_hash: _,
+    } = outcome
+    else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+    assert!(perplexity_passed);
+    assert!(novelty_passed);
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace.tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT decision_id, submission_id, perplexity_passed, novelty_passed
+             FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision row reads back");
+    assert_eq!(rows.len(), 1, "exactly one gate decision row written");
+    let stored_decision_id: Uuid = rows[0].get(0);
+    let stored_submission_id: Uuid = rows[0].get(1);
+    let stored_perplexity_passed: bool = rows[0].get(2);
+    let stored_novelty_passed: bool = rows[0].get(3);
+    assert_eq!(stored_decision_id, decision_id);
+    assert_eq!(stored_submission_id, submission_id);
+    assert!(stored_perplexity_passed);
+    assert!(stored_novelty_passed);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
 async fn gate_evaluate_worker_route_writes_in_memory_decision_row() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;

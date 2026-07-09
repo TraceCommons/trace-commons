@@ -44558,6 +44558,148 @@ struct TraceGateEvaluateWorkerResponse {
     credit_withheld_reason: Option<String>,
 }
 
+/// Outcome of `evaluate_and_record_gate`.
+///
+/// `Scored` is the only variant this fn's Task-3 implementation produces on
+/// success. `SkippedDuplicate`/`Cached` are constructed by the cost-control
+/// wrapper (in-process driver, Task 4) that sits in front of it.
+///
+/// `Failed` is declared for that same caller-facing wrapper. It is
+/// deliberately NOT constructed by `evaluate_and_record_gate` itself: two
+/// pre-existing HTTP-handler tests
+/// (`gate_evaluate_worker_route_returns_503_when_dstack_service_is_stubbed`)
+/// require the *raw* gate-service error text (e.g.
+/// `"DstackGateServiceUnavailable"`) to reach the HTTP response so the
+/// handler can classify it into the right status code — collapsing that
+/// into a fixed label would break status-code fidelity. All precondition
+/// and scoring failures instead propagate through the `anyhow::Result::Err`
+/// path with their original message text, exactly as
+/// `gate_evaluate_worker_handler` did before this extraction; the handler
+/// re-derives the same status-code mapping it always has.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum GateOutcome {
+    Scored {
+        decision_id: Uuid,
+        perplexity_passed: bool,
+        novelty_passed: bool,
+        vector_entry_id: Option<Uuid>,
+        gate_policy_version: String,
+        gate_version_hash: String,
+    },
+    SkippedDuplicate {
+        decision_id: Uuid,
+    },
+    Cached {
+        decision_id: Uuid,
+    },
+    Failed {
+        label: String,
+    },
+}
+
+/// Non-auth core of the gate worker: fetch submission → resolve the latest
+/// active submitted-envelope object ref → decrypt → score through the
+/// configured `TraceGateService` → build and insert the `trace_gate_decisions`
+/// audit row. Used by both the HTTP handler (`gate_evaluate_worker_handler`)
+/// and the in-process driver. Cost controls (skip_duplicates, cache) are
+/// applied by the caller-facing wrapper; this fn always scores.
+async fn evaluate_and_record_gate(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<GateOutcome> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured DB mirror"))?;
+    let _submission = db
+        .get_trace_submission(tenant_id, submission_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("trace submission not found"))?;
+
+    let object_ref = db
+        .get_latest_active_trace_object_ref(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!(TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF))?;
+
+    let artifact_store = state
+        .artifact_store
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured artifact store"))?;
+    if !is_encrypted_trace_object_store(&object_ref.object_store) {
+        return Err(anyhow::anyhow!(
+            "trace gate worker requires an encrypted trace object store"
+        ));
+    }
+    if artifact_store.object_store_name() != object_ref.object_store {
+        return Err(anyhow::anyhow!(TRACE_OBJECT_REF_STORE_MISMATCH));
+    }
+    let receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        object_key: object_ref.object_key.clone(),
+        ciphertext_sha256: object_ref
+            .content_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&object_ref.content_sha256)
+            .to_string(),
+        encrypted_at: object_ref.created_at,
+    };
+    let artifact = artifact_store.read_encrypted_artifact(&tenant_storage_ref(tenant_id), &receipt)?;
+    let ciphertext =
+        base64::engine::general_purpose::STANDARD.decode(artifact.ciphertext_base64.as_bytes())?;
+    let wrapped_dek = artifact
+        .wrapped_dek
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a v2 KEK-wrapped envelope"))?;
+
+    // Canonical tenant_storage_ref: the wrapped DEK was produced under this
+    // ref by the artifact-store path. Passing a raw tenant id here would
+    // make the gate service's KekContext disagree with the wrapped DEK's
+    // context binding → KekContextMismatch on every real-deployment evaluation.
+    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    let decision = state.gate_service.evaluate_trace(
+        &tenant_ctx,
+        &ciphertext,
+        &wrapped_dek,
+        TraceArtifactKind::ContributionEnvelope,
+    )?;
+
+    let decision_id = Uuid::new_v4();
+    let row = StorageTraceGateDecisionRow {
+        decision_id,
+        submission_id,
+        gate_policy_version: decision.gate_policy_version.clone(),
+        gate_version_hash: decision.gate_version_hash.clone(),
+        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
+        perplexity_passed: decision.perplexity_passed,
+        novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
+        novelty_passed: decision.novelty_passed,
+        embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
+        attestation_chain_hash: decision.attestation_chain_hash.clone(),
+        decided_at: Utc::now(),
+        vector_entry_id: decision.vector_entry_id,
+        credit_withheld_reason: None,
+    };
+    db.insert_trace_gate_decision(tenant_id, row).await?;
+
+    Ok(GateOutcome::Scored {
+        decision_id,
+        perplexity_passed: decision.perplexity_passed,
+        novelty_passed: decision.novelty_passed,
+        vector_entry_id: decision.vector_entry_id,
+        gate_policy_version: decision.gate_policy_version,
+        gate_version_hash: decision.gate_version_hash,
+    })
+}
+
 /// Worker route that scores a single submission through the configured
 /// `TraceGateService` and writes a `trace_gate_decisions` audit row.
 ///
@@ -44573,142 +44715,117 @@ async fn gate_evaluate_worker_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
 
-    let db = state.db_mirror.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a configured DB mirror",
-        )
-    })?;
-    let _submission = db
-        .get_trace_submission(&tenant.tenant_id, body.submission_id)
+    let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-
-    let object_ref = db
-        .get_latest_active_trace_object_ref(
-            &tenant.tenant_id,
-            body.submission_id,
-            StorageTraceObjectArtifactKind::SubmittedEnvelope,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF,
-            )
-        })?;
-
-    let artifact_store = state.artifact_store.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a configured artifact store",
-        )
-    })?;
-    if !is_encrypted_trace_object_store(&object_ref.object_store) {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires an encrypted trace object store",
-        ));
-    }
-    if artifact_store.object_store_name() != object_ref.object_store {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            TRACE_OBJECT_REF_STORE_MISMATCH,
-        ));
-    }
-    let receipt = EncryptedTraceArtifactReceipt {
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        artifact_kind: TraceArtifactKind::ContributionEnvelope,
-        object_key: object_ref.object_key.clone(),
-        ciphertext_sha256: object_ref
-            .content_sha256
-            .strip_prefix("sha256:")
-            .unwrap_or(&object_ref.content_sha256)
-            .to_string(),
-        encrypted_at: object_ref.created_at,
-    };
-    let artifact = artifact_store
-        .read_encrypted_artifact(&tenant_storage_ref(&tenant.tenant_id), &receipt)
-        .map_err(internal_error)?;
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(artifact.ciphertext_base64.as_bytes())
-        .map_err(internal_error)?;
-    let wrapped_dek = artifact.wrapped_dek.clone().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "trace gate worker requires a v2 KEK-wrapped envelope",
-        )
-    })?;
-
-    // Canonical tenant_storage_ref: the wrapped DEK was produced under this
-    // ref by the artifact-store path. Passing raw tenant.tenant_id here would
-    // make the gate service's KekContext disagree with the wrapped DEK's
-    // context binding → KekContextMismatch on every real-deployment evaluation.
-    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
-    let decision = match state.gate_service.evaluate_trace(
-        &tenant_ctx,
-        &ciphertext,
-        &wrapped_dek,
-        TraceArtifactKind::ContributionEnvelope,
-    ) {
-        Ok(decision) => decision,
-        Err(err) => {
+        .map_err(|err| {
             let msg = format!("{err}");
             if msg.contains("DstackGateServiceUnavailable") {
-                return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, msg));
+                api_error(StatusCode::SERVICE_UNAVAILABLE, msg)
+            } else if msg == TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF || msg == "trace submission not found" {
+                api_error(StatusCode::NOT_FOUND, msg)
+            } else if msg == "trace gate worker requires a configured DB mirror"
+                || msg == "trace gate worker requires a configured artifact store"
+                || msg == "trace gate worker requires an encrypted trace object store"
+                || msg == TRACE_OBJECT_REF_STORE_MISMATCH
+                || msg == "trace gate worker requires a v2 KEK-wrapped envelope"
+            {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, msg)
+            } else {
+                internal_error(err)
             }
-            return Err(internal_error(err));
-        }
-    };
+        })?;
 
-    let decision_id = Uuid::new_v4();
+    let (decision_id, perplexity_passed, novelty_passed, vector_entry_id, gate_policy_version, gate_version_hash) =
+        match outcome {
+            GateOutcome::Scored {
+                decision_id,
+                perplexity_passed,
+                novelty_passed,
+                vector_entry_id,
+                gate_policy_version,
+                gate_version_hash,
+            } => (
+                decision_id,
+                perplexity_passed,
+                novelty_passed,
+                vector_entry_id,
+                gate_policy_version,
+                gate_version_hash,
+            ),
+            GateOutcome::Failed { label } => {
+                return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
+            }
+            GateOutcome::SkippedDuplicate { .. } | GateOutcome::Cached { .. } => {
+                // evaluate_and_record_gate never produces these variants; the
+                // cost-control wrapper that would is not yet wired into this
+                // HTTP handler.
+                return Err(internal_error(anyhow::anyhow!(
+                    "unexpected gate outcome variant from evaluate_and_record_gate"
+                )));
+            }
+        };
 
     // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
     // credit-ledger event through the same pipeline that the operator-facing
     // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
     // overall — the decision row still lands so the operator can audit; we
     // only annotate `credit_withheld_reason` with a stable label-only string.
-    let (credit_emitted, credit_withheld_reason) = if decision.perplexity_passed
-        && decision.novelty_passed
-    {
-        attempt_emit_novelty_utility_credit(state.as_ref(), &tenant, &decision, body.submission_id)
-            .await?
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires a configured DB mirror",
+        )
+    })?;
+    let (credit_emitted, credit_withheld_reason) = if perplexity_passed && novelty_passed {
+        let decision = GateDecision {
+            gate_policy_version: gate_policy_version.clone(),
+            gate_version_hash: gate_version_hash.clone(),
+            perplexity_micros: 0,
+            tail_fraction_micros: 0,
+            perplexity_passed,
+            novelty_score_micros: 0,
+            nearest_neighbor_hash: String::new(),
+            novelty_passed,
+            embedding_evidence_hash: String::new(),
+            attestation_chain_hash: String::new(),
+            vector_entry_id,
+        };
+        let (emitted, withheld_reason) = attempt_emit_novelty_utility_credit(
+            state.as_ref(),
+            &tenant,
+            &decision,
+            body.submission_id,
+        )
+        .await?;
+        if withheld_reason.is_some() {
+            // The initial row written inside `evaluate_and_record_gate` was
+            // recorded before credit eligibility was known (credit emission
+            // needs `TenantAuth`, which the non-auth core doesn't have).
+            // Update the row now so the persisted audit trail matches what
+            // the response reports, exactly as the pre-extraction single
+            // insert did.
+            db.update_trace_gate_decision_credit_withheld_reason(
+                &tenant.tenant_id,
+                decision_id,
+                withheld_reason.clone(),
+            )
+            .await
+            .map_err(internal_error)?;
+        }
+        (emitted, withheld_reason)
     } else {
         (false, None)
     };
-
-    let row = StorageTraceGateDecisionRow {
-        decision_id,
-        submission_id: body.submission_id,
-        gate_policy_version: decision.gate_policy_version.clone(),
-        gate_version_hash: decision.gate_version_hash.clone(),
-        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
-        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
-        perplexity_passed: decision.perplexity_passed,
-        novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
-        nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
-        novelty_passed: decision.novelty_passed,
-        embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
-        attestation_chain_hash: decision.attestation_chain_hash.clone(),
-        decided_at: Utc::now(),
-        vector_entry_id: decision.vector_entry_id,
-        credit_withheld_reason: credit_withheld_reason.clone(),
-    };
-    db.insert_trace_gate_decision(&tenant.tenant_id, row)
-        .await
-        .map_err(internal_error)?;
 
     Ok(Json(TraceGateEvaluateWorkerResponse {
         tenant_id: tenant.tenant_id.clone(),
         submission_id: body.submission_id,
         decision_id,
-        gate_policy_version: decision.gate_policy_version,
-        gate_version_hash: decision.gate_version_hash,
-        perplexity_passed: decision.perplexity_passed,
-        novelty_passed: decision.novelty_passed,
-        vector_entry_id: decision.vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
         credit_emitted,
         credit_withheld_reason,
     }))

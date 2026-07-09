@@ -2320,6 +2320,23 @@ pub trait TraceCorpusStore: Send + Sync {
         decision: TraceGateDecisionRow,
     ) -> Result<(), DatabaseError>;
 
+    /// Update the label-only `credit_withheld_reason` on an already-inserted
+    /// `trace_gate_decisions` row. Used by the gate-worker HTTP handler after
+    /// `evaluate_and_record_gate` writes the initial row: credit-emission
+    /// eligibility is only known once `attempt_emit_novelty_utility_credit`
+    /// runs, which needs `TenantAuth` and so cannot live in the non-auth
+    /// scoring core. Defaults to a no-op; only the production Postgres
+    /// backend needs a real implementation, since it is the only backend
+    /// gate-worker credit-withholding tests exercise.
+    async fn update_trace_gate_decision_credit_withheld_reason(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _credit_withheld_reason: Option<String>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     /// Paginated scan over `trace_gate_decisions` for the replay binary.
     /// Filters to rows with `vector_entry_id IS NOT NULL` (i.e. rows that
     /// actually produced a vector-index insert) and orders by `decided_at

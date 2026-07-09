@@ -5380,4 +5380,23 @@ impl TraceCorpusStore for PgBackend {
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
+
+    async fn update_trace_gate_decision_credit_withheld_reason(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        credit_withheld_reason: Option<String>,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_gate_decisions SET credit_withheld_reason = $3
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant_id, &decision_id, &credit_withheld_reason],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
 }
