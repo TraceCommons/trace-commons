@@ -3527,8 +3527,7 @@ fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
 /// Pilot-default consent scopes for onboarding device-key grants, used when a
 /// device is onboarded via invite (no per-tenant policy template) and as the
 /// fail-closed fallback for instance-enrolled devices.
-const DEFAULT_ONBOARDING_CONSENT_SCOPES: [&str; 2] =
-    ["debugging_evaluation", "public_attribution"];
+const DEFAULT_ONBOARDING_CONSENT_SCOPES: [&str; 2] = ["debugging_evaluation", "public_attribution"];
 /// Pilot-default allowed uses, mirroring `DEFAULT_ONBOARDING_CONSENT_SCOPES`.
 const DEFAULT_ONBOARDING_ALLOWED_USES: [&str; 3] =
     ["debugging", "evaluation", "aggregate_analytics"];
@@ -3696,7 +3695,10 @@ mod tests {
                 &json!(["model_training", "debugging_evaluation"]),
                 &d
             ),
-            vec!["model_training".to_string(), "debugging_evaluation".to_string()]
+            vec![
+                "model_training".to_string(),
+                "debugging_evaluation".to_string()
+            ]
         );
         // Empty array, non-array, and mixed-type arrays all fall back.
         assert_eq!(

@@ -1442,12 +1442,21 @@ impl TraceUploadClaimIssuerState {
         grant_principal_ref: &str,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ConsentScope>, Vec<TraceAllowedUse>), IssuerError> {
-        let hardcoded_floor = || (device_key_allowed_consent_scopes(), device_key_allowed_uses());
+        let hardcoded_floor = || {
+            (
+                device_key_allowed_consent_scopes(),
+                device_key_allowed_uses(),
+            )
+        };
         let Some(db) = self.tenant_access_grant_db.as_ref() else {
             return Ok(hardcoded_floor());
         };
         let grants = db
-            .list_active_trace_tenant_access_grants_for_principal(tenant_id, grant_principal_ref, now)
+            .list_active_trace_tenant_access_grants_for_principal(
+                tenant_id,
+                grant_principal_ref,
+                now,
+            )
             .await
             .map_err(|_| IssuerError::internal())?;
         let matching_grants: Vec<&TraceTenantAccessGrantRecord> = grants
@@ -2756,23 +2765,37 @@ mod tests {
 
     #[test]
     fn intersect_empty_request_grants_full_ceiling() {
-        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::ModelTraining];
-        let got = intersect_requested_with_ceiling(&[], &ceiling, "consent scopes not permitted").unwrap();
+        let ceiling = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ];
+        let got = intersect_requested_with_ceiling(&[], &ceiling, "consent scopes not permitted")
+            .unwrap();
         assert_eq!(got, ceiling);
     }
 
     #[test]
     fn intersect_clips_to_ceiling_and_rejects_empty() {
-        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::PublicAttribution];
+        let ceiling = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::PublicAttribution,
+        ];
         let got = intersect_requested_with_ceiling(
-            &[ConsentScope::ModelTraining, ConsentScope::DebuggingEvaluation],
+            &[
+                ConsentScope::ModelTraining,
+                ConsentScope::DebuggingEvaluation,
+            ],
             &ceiling,
             "consent scopes not permitted",
         )
         .unwrap();
         assert_eq!(got, vec![ConsentScope::DebuggingEvaluation]);
-        let err = intersect_requested_with_ceiling(&[ConsentScope::ModelTraining], &ceiling, "consent scopes not permitted")
-            .unwrap_err();
+        let err = intersect_requested_with_ceiling(
+            &[ConsentScope::ModelTraining],
+            &ceiling,
+            "consent scopes not permitted",
+        )
+        .unwrap_err();
         // IssuerError renders {"error": label}; assert the label text.
         assert!(format!("{err:?}").contains("consent scopes not permitted"));
     }
@@ -2842,12 +2865,8 @@ mod tests {
     fn resolve_granted_uses_keeps_intersection_behavior_for_non_empty_request() {
         let ceiling = vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation];
         let granted_scopes = vec![ConsentScope::DebuggingEvaluation];
-        let got = resolve_granted_uses(
-            &[TraceAllowedUse::Debugging],
-            &granted_scopes,
-            &ceiling,
-        )
-        .unwrap();
+        let got =
+            resolve_granted_uses(&[TraceAllowedUse::Debugging], &granted_scopes, &ceiling).unwrap();
         assert_eq!(got, vec![TraceAllowedUse::Debugging]);
     }
 
