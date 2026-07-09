@@ -180,6 +180,9 @@ git commit -m "Add cue-gated high-entropy secret detection"
 
 ### Task 3: Per-session fail-closed leaked-token guard in submit
 
+> CORRECTION (2026-07-09, during execution): the original `canary_leaked_tokens` token-diff mechanism was a plan defect — it flags every surviving prose token, over-refusing real sessions. The implemented guard instead RE-SCANS the finished envelope with the secret DETECTOR: `envelope_has_residual_secret(redactor, envelope)` serializes the envelope and calls `redactor.redact_text(json)`, returning `report.blocked_secret_detected`. Only secret shapes trip it; ordinary prose does not. Same fail-closed placement and `Refused{"secret-leak-detected"}` outcome. The subsections below describing `session_original_text`/`envelope_leaked_tokens`/`canary_leaked_tokens` are SUPERSEDED by this note.
+
+
 **Files:**
 - Modify: `crates/trace-commons-contributor/src/envelope.rs` (add the guard helper)
 - Modify: `crates/trace-commons-contributor/src/submit.rs` (call it per session, before upload)
