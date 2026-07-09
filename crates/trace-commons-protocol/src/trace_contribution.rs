@@ -2134,12 +2134,39 @@ const ALLOWLISTED_ID_PREFIXES: &[&str] = &[
     "msg_", "req_", "mcp_", "toolu_", "chatcmpl", "run_", "file_", "asst_", "resp_", "call_",
 ];
 
+/// Exact `RedactionReport` metric-key label fragments this module emits via
+/// `report.increment("secret:<label>")` / `report.increment("secret:contextual_entropy")`
+/// (see the `secret:` increments below and in `apply_pem_block_redaction`).
+/// These diagnostic counter names are embedded in the finished envelope's
+/// `PrivacyMetadata::redaction_counts` and therefore appear in the very JSON
+/// that `envelope_has_residual_secret`-style fail-closed guards re-scan.
+/// Without this allowlist, the contextual-entropy pass would flag its own
+/// bookkeeping key (e.g. `"secret:contextual_entropy"`, an 18-char
+/// underscore-joined identifier immediately preceded by the cue word
+/// `secret:`) as a surviving secret, wrongly refusing any session whose
+/// redaction pipeline legitimately found and redacted something -- exactly
+/// the sessions the guard exists to let through. Exact-match only: a real
+/// secret value is astronomically unlikely to equal one of these literal
+/// label strings verbatim.
+const REPORT_METRIC_LABELS: &[&str] = &[
+    "contextual_entropy",
+    "openai_api_key",
+    "github_token",
+    "aws_access_key",
+    "provider_token",
+    "npm_token",
+    "google_api_key",
+    "pem_header_orphan",
+    "pem_private_key",
+];
+
 fn is_pure_hex(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, or hex hash/sha) rather than an opaque secret.
+/// prefix, hex hash/sha, or this module's own report-metric label) rather
+/// than an opaque secret.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -2148,6 +2175,9 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
         .iter()
         .any(|prefix| token.starts_with(prefix))
     {
+        return true;
+    }
+    if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
     if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
@@ -4330,8 +4360,14 @@ mod tests {
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
         let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
-        assert!(!out.contains("1234secretbody5678"), "pem body survived: {out}");
-        assert!(!out.contains("abcDEFghiJKL"), "pem body line 2 survived: {out}");
+        assert!(
+            !out.contains("1234secretbody5678"),
+            "pem body survived: {out}"
+        );
+        assert!(
+            !out.contains("abcDEFghiJKL"),
+            "pem body line 2 survived: {out}"
+        );
         assert!(out.contains("trailing"));
         assert!(rep.blocked_secret_detected);
     }
@@ -4342,7 +4378,10 @@ mod tests {
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
         let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
         let (out, _) = r.redact_text(truncated);
-        assert!(!out.contains("secretbytes"), "orphan pem body survived: {out}");
+        assert!(
+            !out.contains("secretbytes"),
+            "orphan pem body survived: {out}"
+        );
     }
 
     #[test]
@@ -4374,5 +4413,33 @@ mod tests {
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
+    }
+
+    /// Regression: the redaction report's own metric-key literals (as
+    /// embedded in `PrivacyMetadata::redaction_counts`, e.g.
+    /// `"secret:contextual_entropy": 1`) must never be mistaken by the
+    /// cue-gated entropy pass for a surviving secret. Without the
+    /// `REPORT_METRIC_LABELS` allowlist, a fail-closed re-scan of a
+    /// finished envelope (as `envelope_has_residual_secret` performs) would
+    /// find "secret:" immediately followed by the report's own
+    /// "contextual_entropy" counter name and wrongly flag it as a survivor
+    /// -- refusing every session whose redaction pipeline legitimately
+    /// found and redacted something.
+    #[test]
+    fn contextual_entropy_spares_its_own_report_metric_labels() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        for label in REPORT_METRIC_LABELS {
+            let json_like = format!("\"secret:{label}\":1");
+            let (out, rep) = r.redact_text(&json_like);
+            assert!(
+                out.contains(label),
+                "report metric label {label:?} was wrongly redacted: {out}"
+            );
+            assert!(
+                !rep.blocked_secret_detected,
+                "report metric label {label:?} wrongly tripped the fail-closed guard"
+            );
+        }
     }
 }

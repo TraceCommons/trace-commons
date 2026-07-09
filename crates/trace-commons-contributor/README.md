@@ -77,9 +77,43 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
 - Local secret redaction (deterministic, via the shared protocol crate) runs
   on every session before it ever reaches the network, and covers
   *everything* in the envelope: message text, tool-call and tool-result
-  content, and structured tool payloads alike. It replaces secrets and file
-  paths with stable placeholders; it never sends the raw content out for
-  scrubbing.
+  content, and structured tool payloads alike. It never sends the raw
+  content out for scrubbing. It is layered:
+  1. **Known-pattern scrubbing.** Named regexes for the common secret
+     shapes: OpenAI/Anthropic `sk-`, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`,
+     AWS `AKIA...`, Slack/GitLab/Stripe-style provider tokens (`xoxb-`,
+     `glpat`, `rk`/`pk`), three-segment JWTs (`eyJ...eyJ...`), npm `npm_`
+     tokens, Google `AIza...` API keys, and whole PEM private-key blocks
+     (`-----BEGIN ... PRIVATE KEY-----` through the trailing body, even
+     when the `-----END` marker is missing or truncated). Matches are
+     replaced with stable placeholders (`[REDACTED]`,
+     `<REDACTED_PRIVATE_KEY>`).
+  2. **Cue-gated high-entropy catch-all.** Secret formats change faster
+     than any fixed pattern list, so a second pass looks for opaque,
+     high-Shannon-entropy tokens (>=16 chars, >=3.2 bits/char) that sit
+     immediately after a secret-shaped cue word (`api_key:`, `Bearer `,
+     `password=`, `token:`, ...). This is deliberately *cue-gated*, not a
+     blanket entropy scan: an ungated scan over real transcripts flags on
+     the order of 100k+ tokens (message ids, base64 blobs, UUIDs, content
+     hashes) for every real secret it catches, which makes plain entropy
+     scanning useless in practice. Structural identifiers (UUIDs, known ID
+     prefixes like `msg_`/`req_`/`toolu_`, content hashes) are allowlisted
+     so they are never mistaken for opaque secrets.
+  3. **Per-session fail-closed leaked-token guard.** After the two passes
+     above, the redactor re-scans its own output for anything
+     key-shaped. Redaction is fail-closed: if a secret is still detected
+     in the finished envelope, that session is refused rather than
+     uploaded — the CLI does not silently ship a partially-redacted
+     session.
+  4. **NEAR AI (optional add-on).** A separate, optional pass for prose
+     PII (not secrets) — see below.
+
+  This layering was validated against ~100 real local Claude Code session
+  transcripts (a developer-only, `#[ignore]`d harness in
+  `tests/local_redaction_audit.rs`, never run in CI): pattern-shaped
+  secrets (API keys, GitHub/npm/Google tokens, JWTs, bearer headers, PEM
+  key blocks) and cue-gated high-entropy candidates all showed zero
+  survivors in the post-redaction envelope.
 - An optional second pass, `--pii-filter near-ai`, sends the
   already-locally-redacted **message text only** (`content`/
   `human_correction` fields — not structured tool payloads) through a NEAR AI
