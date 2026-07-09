@@ -104,6 +104,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
+    GateWorkItem,
     TraceGateDecisionRow as StorageTraceGateDecisionRow,
     TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
@@ -44705,6 +44706,221 @@ async fn evaluate_and_record_gate(
         gate_policy_version: decision.gate_policy_version,
         gate_version_hash: decision.gate_version_hash,
     })
+}
+
+/// Per-submission cost-control knobs for the in-process perplexity-scoring
+/// driver's `score_one_submission` wrapper (Task 4).
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct PerplexityDriverKnobs {
+    /// When true, a submission whose derived `duplicate_score` is at or
+    /// above `skip_duplicate_threshold_micros` is recorded as a
+    /// `SkippedDuplicate` decision without ever invoking the gate service.
+    skip_duplicates: bool,
+    /// Threshold, expressed in micros (`duplicate_score * 1_000_000.0 as
+    /// i64`), at or above which a duplicate short-circuits scoring.
+    skip_duplicate_threshold_micros: i64,
+    /// Attempt ceiling consulted by the enumeration query
+    /// (`list_submissions_needing_gate_decision`). Carried here so the
+    /// driver's cost-control knobs live in one place; `score_one_submission`
+    /// does not itself re-check this — the enumeration query already
+    /// excludes submissions at or above the ceiling.
+    max_attempts: i32,
+}
+
+/// Stamp the caller-supplied `submission_id`/`decided_at`/`credit_withheld_reason`
+/// onto an otherwise-complete decision-row template and mint a fresh
+/// `decision_id`. Shared by the skip-duplicate and cross-submission-cache
+/// branches of `score_one_submission`, both of which build most of a
+/// `trace_gate_decisions` row up front (either from the derived record's
+/// scores or by copying a cached row) and only need these three fields
+/// overridden before insert. `vector_entry_id` is always forced to `None`:
+/// reusing the source row's vector-index entry id would make two
+/// submissions appear to own the same vector-index entry, which would
+/// corrupt per-submission revocation propagation.
+fn build_cost_control_decision_row(
+    submission_id: Uuid,
+    decided_at: DateTime<Utc>,
+    credit_withheld_reason: &'static str,
+    template: StorageTraceGateDecisionRow,
+) -> StorageTraceGateDecisionRow {
+    StorageTraceGateDecisionRow {
+        decision_id: Uuid::new_v4(),
+        submission_id,
+        decided_at,
+        vector_entry_id: None,
+        credit_withheld_reason: Some(credit_withheld_reason.to_string()),
+        ..template
+    }
+}
+
+/// Applies the perplexity-scoring driver's per-submission cost controls
+/// (skip-duplicate short-circuit, then cross-submission cache) before
+/// delegating to `evaluate_and_record_gate`. On any hard failure — including
+/// a scoring failure from the delegated call — bumps the submission's
+/// `trace_gate_evaluation_attempts` row so the enumeration query's
+/// exponential backoff (migration V36) can pace retries.
+#[allow(dead_code)]
+async fn score_one_submission(
+    state: &AppState,
+    item: &GateWorkItem,
+    knobs: &PerplexityDriverKnobs,
+) -> GateOutcome {
+    let now = Utc::now();
+
+    let db = match state.db_mirror.as_ref() {
+        Some(db) => db,
+        None => {
+            return GateOutcome::Failed {
+                label: "trace gate driver requires a configured DB mirror".to_string(),
+            };
+        }
+    };
+
+    // Branch 1: skip-duplicate short-circuit. Never touches the gate
+    // service — a duplicate at or above the configured threshold is
+    // recorded directly.
+    if knobs.skip_duplicates {
+        let derived = match db.list_trace_derived_records(&item.tenant_id).await {
+            Ok(records) => records
+                .into_iter()
+                .find(|record| record.submission_id == item.submission_id),
+            Err(err) => {
+                let label = format!("{err}");
+                let _ = db
+                    .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
+                    .await;
+                return GateOutcome::Failed { label };
+            }
+        };
+        if let Some(derived) = derived {
+            let duplicate_micros = derived
+                .duplicate_score
+                .map(|score| (score * 1_000_000.0) as i64);
+            if let Some(duplicate_micros) = duplicate_micros {
+                if duplicate_micros >= knobs.skip_duplicate_threshold_micros {
+                    let novelty_micros = derived
+                        .novelty_score
+                        .map(|score| (score * 1_000_000.0) as i64)
+                        .unwrap_or(0);
+                    let row = build_cost_control_decision_row(
+                        item.submission_id,
+                        now,
+                        "skipped_duplicate",
+                        StorageTraceGateDecisionRow {
+                            decision_id: Uuid::nil(),
+                            submission_id: item.submission_id,
+                            gate_policy_version: "skip_duplicate".to_string(),
+                            gate_version_hash: String::new(),
+                            perplexity_micros: 0,
+                            tail_fraction_micros: 0,
+                            perplexity_passed: true,
+                            novelty_score_micros: novelty_micros,
+                            nearest_neighbor_hash: String::new(),
+                            novelty_passed: true,
+                            embedding_evidence_hash: String::new(),
+                            attestation_chain_hash: String::new(),
+                            decided_at: now,
+                            vector_entry_id: None,
+                            credit_withheld_reason: None,
+                        },
+                    );
+                    let decision_id = row.decision_id;
+                    return match db.insert_trace_gate_decision(&item.tenant_id, row).await {
+                        Ok(()) => GateOutcome::SkippedDuplicate { decision_id },
+                        Err(err) => {
+                            let label = format!("{err}");
+                            let _ = db
+                                .bump_gate_evaluation_attempt(
+                                    &item.tenant_id,
+                                    item.submission_id,
+                                    now,
+                                    &label,
+                                )
+                                .await;
+                            GateOutcome::Failed { label }
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    // Branch 2: cross-submission cache. Reuses a prior decision recorded for
+    // a different submission in the same tenant sharing this submission's
+    // `canonical_summary_hash`, when one exists.
+    let canonical_summary_hash = match db
+        .get_trace_submission(&item.tenant_id, item.submission_id)
+        .await
+    {
+        Ok(Some(submission)) => submission.canonical_summary_hash,
+        Ok(None) => {
+            let label = "trace submission not found".to_string();
+            let _ = db
+                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
+                .await;
+            return GateOutcome::Failed { label };
+        }
+        Err(err) => {
+            let label = format!("{err}");
+            let _ = db
+                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
+                .await;
+            return GateOutcome::Failed { label };
+        }
+    };
+
+    if let Some(hash) = canonical_summary_hash {
+        match db
+            .find_gate_decision_by_canonical_hash(&item.tenant_id, &hash, item.submission_id)
+            .await
+        {
+            Ok(Some(cached)) => {
+                let row = build_cost_control_decision_row(
+                    item.submission_id,
+                    now,
+                    "cached",
+                    cached,
+                );
+                let decision_id = row.decision_id;
+                return match db.insert_trace_gate_decision(&item.tenant_id, row).await {
+                    Ok(()) => GateOutcome::Cached { decision_id },
+                    Err(err) => {
+                        let label = format!("{err}");
+                        let _ = db
+                            .bump_gate_evaluation_attempt(
+                                &item.tenant_id,
+                                item.submission_id,
+                                now,
+                                &label,
+                            )
+                            .await;
+                        GateOutcome::Failed { label }
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let label = format!("{err}");
+                let _ = db
+                    .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
+                    .await;
+                return GateOutcome::Failed { label };
+            }
+        }
+    }
+
+    // Branch 3: delegate to the real scorer.
+    match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let label = format!("{err}");
+            let _ = db
+                .bump_gate_evaluation_attempt(&item.tenant_id, item.submission_id, now, &label)
+                .await;
+            GateOutcome::Failed { label }
+        }
+    }
 }
 
 /// Worker route that scores a single submission through the configured

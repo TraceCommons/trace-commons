@@ -62742,6 +62742,272 @@ async fn gate_evaluate_worker_route_rejects_non_vector_worker_tokens() {
 }
 
 // -----------------------------------------------------------------------
+// Task 4: score_one_submission cost-control wrapper tests
+// -----------------------------------------------------------------------
+
+/// Test-only gate service that panics if invoked. Used to prove
+/// `score_one_submission`'s skip-duplicate branch never calls the gate
+/// service when a duplicate is short-circuited.
+struct PanicIfCalledGateService;
+
+impl TraceGateService for PanicIfCalledGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        panic!("gate service must not be called when skip_duplicates short-circuits scoring");
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "panic_if_called".into(),
+            gate_policy_version: "panic_if_called".into(),
+            gate_version_hash: "sha256:panic_if_called".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Test-only gate service that always fails hard (`Err`), unlike
+/// `FailingGateService` above which returns `Ok` with failing pass-flags.
+/// Used to exercise `score_one_submission`'s attempt-bookkeeping bump on a
+/// hard scoring failure.
+struct HardFailingGateService;
+
+impl TraceGateService for HardFailingGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        Err(anyhow::anyhow!("mock_hard_scorer_failure"))
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "hard_failing".into(),
+            gate_policy_version: "hard_failing".into(),
+            gate_version_hash: "sha256:hard_failing".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+#[tokio::test]
+async fn score_one_submission_skips_duplicate_without_calling_gate_service() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(PanicIfCalledGateService);
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "test-precheck-v1".to_string(),
+            input_object_ref: None,
+            input_hash: sha256_prefixed("score-one-submission-skip-duplicate"),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: None,
+            summary_model: "test-model".to_string(),
+            task_success: None,
+            privacy_risk: None,
+            event_count: None,
+            tool_sequence: vec![],
+            tool_categories: vec![],
+            coverage_tags: vec![],
+            duplicate_score: Some(0.99),
+            novelty_score: Some(0.05),
+            cluster_id: None,
+        })
+        .await
+        .expect("seed derived record with high duplicate score");
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: true,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::SkippedDuplicate { decision_id } = outcome else {
+        panic!("expected GateOutcome::SkippedDuplicate, got {outcome:?}");
+    };
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT decision_id, credit_withheld_reason
+             FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision row reads back");
+    assert_eq!(rows.len(), 1, "exactly one gate decision row written");
+    let stored_decision_id: Uuid = rows[0].get(0);
+    let stored_reason: Option<String> = rows[0].get(1);
+    assert_eq!(stored_decision_id, decision_id);
+    assert_eq!(stored_reason.as_deref(), Some("skipped_duplicate"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn score_one_submission_failed_scorer_bumps_attempt_count() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = Arc::new(HardFailingGateService);
+
+    let submission_id =
+        seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 5,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::Failed { label } = outcome else {
+        panic!("expected GateOutcome::Failed, got {outcome:?}");
+    };
+    assert!(!label.is_empty(), "expected a non-empty failure label");
+
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw pool client");
+    let tenant_a = "tenant-a".to_string();
+    client
+        .execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_a],
+        )
+        .await
+        .expect("set tenant context");
+    let rows = client
+        .query(
+            "SELECT attempts, last_error_label
+             FROM trace_gate_evaluation_attempts WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("attempts row reads back");
+    assert_eq!(rows.len(), 1, "exactly one attempts row written");
+    let attempts: i32 = rows[0].get(0);
+    let stored_label: Option<String> = rows[0].get(1);
+    assert_eq!(attempts, 1);
+    assert_eq!(stored_label.as_deref(), Some(label.as_str()));
+
+    let decision_rows = client
+        .query(
+            "SELECT 1 FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_a, &submission_id],
+        )
+        .await
+        .expect("gate decision rows query");
+    assert!(
+        decision_rows.is_empty(),
+        "no gate decision row written on hard scorer failure"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// -----------------------------------------------------------------------
 // Phase A5: novelty_utility credit-emission caller tests
 // -----------------------------------------------------------------------
 

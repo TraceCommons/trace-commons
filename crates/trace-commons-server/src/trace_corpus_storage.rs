@@ -2346,6 +2346,47 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
+    /// Upsert per-`(tenant_id, submission_id)` gate-evaluation attempt
+    /// bookkeeping used by the perplexity-scoring driver's cost-control
+    /// wrapper (`score_one_submission`, Task 4). Increments the `attempts`
+    /// counter and stamps `last_attempt_at`/`last_error_label`, returning the
+    /// new attempt count. Implementations MUST scope the upsert by
+    /// `tenant_id` (migration V36 forces RLS on
+    /// `trace_gate_evaluation_attempts` bound to `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        Err(DatabaseError::Query(
+            "bump_gate_evaluation_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Look up an existing `trace_gate_decisions` row belonging to a
+    /// DIFFERENT submission in the same tenant that shares the given
+    /// `canonical_summary_hash`, used by the perplexity-scoring driver's
+    /// cache cost-control (Task 4). Returns the most recently decided
+    /// matching row (by `decided_at`), or `None` on a cache miss.
+    ///
+    /// The default always returns `Ok(None)` (cache miss): a backend without
+    /// a real implementation simply never benefits from the cache and falls
+    /// through to full scoring, which is a cost/perf tradeoff, not a
+    /// correctness or security one.
+    async fn find_gate_decision_by_canonical_hash(
+        &self,
+        _tenant_id: &str,
+        _canonical_summary_hash: &str,
+        _exclude_submission_id: Uuid,
+    ) -> Result<Option<TraceGateDecisionRow>, DatabaseError> {
+        Ok(None)
+    }
+
     /// Paginated scan over `trace_gate_decisions` for the replay binary.
     /// Filters to rows with `vector_entry_id IS NOT NULL` (i.e. rows that
     /// actually produced a vector-index insert) and orders by `decided_at
