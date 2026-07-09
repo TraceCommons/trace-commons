@@ -189,8 +189,15 @@ pub async fn submit_sessions(
             continue;
         }
 
-        match upload_with_retry(cfg, &issuer, &device, &mut claim, &mut envelope, &effective_cfg)
-            .await
+        match upload_with_retry(
+            cfg,
+            &issuer,
+            &device,
+            &mut claim,
+            &mut envelope,
+            &effective_cfg,
+        )
+        .await
         {
             Ok(receipt) => {
                 let r = Receipt {
@@ -857,7 +864,11 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
 
         let issuer = spawn(stub_issuer_narrows_on_remint(mint_calls.clone())).await;
-        let ingest = spawn(stub_ingest_401_then_200(received.clone(), post_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(
+            received.clone(),
+            post_calls.clone(),
+        ))
+        .await;
         let dir = tempfile::tempdir().unwrap();
         let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
