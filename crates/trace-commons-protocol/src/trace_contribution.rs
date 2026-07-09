@@ -27,7 +27,7 @@ use crate::redaction::redact_sensitive_json;
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
-pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v1";
+pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v2";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 
@@ -2067,6 +2067,171 @@ struct SecretLeakPattern {
     regex: Regex,
 }
 
+/// Chars scanned before a candidate high-entropy token to look for a
+/// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
+const CUE_WINDOW: usize = 48;
+/// Minimum candidate token length considered for contextual-entropy
+/// detection. Shorter tokens are too noisy to gate reliably.
+const ENTROPY_MIN_LEN: usize = 16;
+/// Minimum Shannon entropy (bits/char) for a candidate token to be treated
+/// as opaque high-entropy secret material.
+const ENTROPY_BITS_MIN: f64 = 3.2;
+
+/// Shannon entropy in bits/char over the token's byte distribution.
+fn token_shannon_entropy(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+    for byte in s.bytes() {
+        *counts.entry(byte).or_insert(0) += 1;
+    }
+    let len = s.len() as f64;
+    counts
+        .values()
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+fn secret_cue_regex() -> &'static Regex {
+    static SECRET_CUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        Regex::new(
+            r"(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[\x22'`:=\s]{1,6}$",
+        )
+        .expect("hardcoded secret cue regex must compile")
+    });
+    &SECRET_CUE_REGEX
+}
+
+fn entropy_candidate_regex() -> &'static Regex {
+    static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
+            .expect("hardcoded entropy candidate regex must compile")
+    });
+    &ENTROPY_CANDIDATE_REGEX
+}
+
+fn uuid_regex() -> &'static Regex {
+    static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+            .expect("hardcoded UUID regex must compile")
+    });
+    &UUID_REGEX
+}
+
+/// Structural ID prefixes observed across real transcripts (message ids,
+/// request ids, tool-call ids, ...). These are opaque and high-entropy by
+/// construction but are not secrets; a prototype scan against real
+/// transcripts found ~105k such tokens against ~20 real secrets, which is
+/// why this allowlist exists rather than relying on entropy alone.
+const ALLOWLISTED_ID_PREFIXES: &[&str] = &[
+    "msg_", "req_", "mcp_", "toolu_", "chatcmpl", "run_", "file_", "asst_", "resp_", "call_",
+];
+
+/// Exact `RedactionReport` metric-key label fragments this module emits via
+/// `report.increment("secret:<label>")` / `report.increment("secret:contextual_entropy")`
+/// (see the `secret:` increments below and in `apply_pem_block_redaction`).
+/// These diagnostic counter names are embedded in the finished envelope's
+/// `PrivacyMetadata::redaction_counts` and therefore appear in the very JSON
+/// that `envelope_has_residual_secret`-style fail-closed guards re-scan.
+/// Without this allowlist, the contextual-entropy pass would flag its own
+/// bookkeeping key (e.g. `"secret:contextual_entropy"`, an 18-char
+/// underscore-joined identifier immediately preceded by the cue word
+/// `secret:`) as a surviving secret, wrongly refusing any session whose
+/// redaction pipeline legitimately found and redacted something -- exactly
+/// the sessions the guard exists to let through. Exact-match only: a real
+/// secret value is astronomically unlikely to equal one of these literal
+/// label strings verbatim.
+const REPORT_METRIC_LABELS: &[&str] = &[
+    "contextual_entropy",
+    "openai_api_key",
+    "github_token",
+    "aws_access_key",
+    "provider_token",
+    "npm_token",
+    "google_api_key",
+    "pem_header_orphan",
+    "pem_private_key",
+];
+
+fn is_pure_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// True when the candidate token is a structural identifier (UUID, known ID
+/// prefix, hex hash/sha, or this module's own report-metric label) rather
+/// than an opaque secret.
+fn is_allowlisted_entropy_candidate(token: &str) -> bool {
+    if uuid_regex().is_match(token) {
+        return true;
+    }
+    if ALLOWLISTED_ID_PREFIXES
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+    {
+        return true;
+    }
+    if REPORT_METRIC_LABELS.contains(&token) {
+        return true;
+    }
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
+        return true;
+    }
+    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
+    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
+    if token.len() >= 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return true;
+    }
+    false
+}
+
+/// Byte ranges of high-entropy tokens that sit within [`CUE_WINDOW`] chars
+/// after a secret cue (authorization/bearer/api_key/secret/password/token/
+/// key=/: ...), excluding allowlisted ID/UUID/hash shapes. Fail-closed: when
+/// unsure whether a token is a structural identifier, it is redacted.
+///
+/// This exists to catch secrets in formats not covered by
+/// [`secret_leak_patterns`] (unknown provider key shapes, ad hoc tokens,
+/// etc). Cue-gating is mandatory, not a nicety: an ungated entropy scan over
+/// real transcripts flags on the order of 105k tokens (message ids, base64
+/// content, UUIDs) against ~20 real secrets, which makes plain entropy
+/// scanning useless in practice.
+fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    for candidate in entropy_candidate_regex().find_iter(content) {
+        let token = candidate.as_str();
+        if token.len() < ENTROPY_MIN_LEN {
+            continue;
+        }
+        if is_allowlisted_entropy_candidate(token) {
+            continue;
+        }
+        if token_shannon_entropy(token) < ENTROPY_BITS_MIN {
+            continue;
+        }
+        let mut window_start = candidate.start().saturating_sub(CUE_WINDOW);
+        while window_start > 0 && !content.is_char_boundary(window_start) {
+            window_start -= 1;
+        }
+        let window = &content[window_start..candidate.start()];
+        if !secret_cue_regex().is_match(window) {
+            continue;
+        }
+        ranges.push(candidate.start()..candidate.end());
+    }
+    ranges
+}
+
 fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
     static SECRET_LEAK_PATTERNS: LazyLock<Vec<SecretLeakPattern>> = LazyLock::new(|| {
         vec![
@@ -2079,7 +2244,7 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
             SecretLeakPattern {
                 name: "github_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
                     .expect("hardcoded GitHub token regex must compile"),
             },
             SecretLeakPattern {
@@ -2095,10 +2260,30 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                     .expect("hardcoded provider token regex must compile"),
             },
             SecretLeakPattern {
-                name: "pem_private_key",
+                name: "jwt",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-                    .expect("hardcoded private key regex must compile"),
+                regex: Regex::new(
+                    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                )
+                .expect("hardcoded JWT regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "npm_token",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b")
+                    .expect("hardcoded npm token regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "google_api_key",
+                severity: SecretLeakSeverity::High,
+                regex: Regex::new(r"\bAIza[0-9A-Za-z_-]{35,}\b")
+                    .expect("hardcoded Google API key regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "pem_header_orphan",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*")
+                    .expect("hardcoded orphan private key header regex must compile"),
             },
         ]
     });
@@ -2236,13 +2421,10 @@ impl DeterministicTraceRedactor {
         let mut redacted = self.redact_private_emails(input, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
+        redacted = apply_pem_block_redaction(&redacted, &mut report);
 
         let scan = self.leak_detector.scan(&redacted);
-        if scan.is_clean() {
-            return (redacted, report);
-        }
-
-        let ranges = scan
+        let mut ranges = scan
             .matches
             .iter()
             .map(|m| {
@@ -2257,6 +2439,27 @@ impl DeterministicTraceRedactor {
                 m.location.clone()
             })
             .collect::<Vec<_>>();
+
+        // Contextual-entropy pass: mop up unknown key formats missed by the
+        // named patterns above. Runs over the already-pattern-redacted text
+        // so known secrets stay attributed to their named rule; dedupe
+        // against ranges already flagged so a token isn't double-counted.
+        for entropy_range in contextual_entropy_secret_ranges(&redacted) {
+            let overlaps = ranges.iter().any(|existing| {
+                existing.start < entropy_range.end && entropy_range.start < existing.end
+            });
+            if overlaps {
+                continue;
+            }
+            report.increment("secret");
+            report.increment("secret:contextual_entropy");
+            report.blocked_secret_detected = true;
+            ranges.push(entropy_range);
+        }
+
+        if ranges.is_empty() {
+            return (redacted, report);
+        }
 
         (apply_redaction_ranges(&redacted, &ranges), report)
     }
@@ -3653,6 +3856,26 @@ fn apply_redaction_ranges(input: &str, ranges: &[std::ops::Range<usize>]) -> Str
     apply_labeled_ranges(input, ranges, "[REDACTED]")
 }
 
+/// Whole-block PEM redaction. Runs before the leak scan so an entire
+/// `-----BEGIN ... PRIVATE KEY-----` .. `-----END ... PRIVATE KEY-----`
+/// block (header, base64 body, and footer) is replaced in one pass rather
+/// than leaving the base64 body to survive header-only redaction.
+fn apply_pem_block_redaction(input: &str, report: &mut RedactionReport) -> String {
+    let ranges: Vec<std::ops::Range<usize>> = pem_block_regex()
+        .find_iter(input)
+        .map(|matched| matched.start()..matched.end())
+        .collect();
+    if ranges.is_empty() {
+        return input.to_string();
+    }
+    for _ in &ranges {
+        report.increment("secret");
+        report.increment("secret:pem_private_key");
+        report.blocked_secret_detected = true;
+    }
+    apply_labeled_ranges(input, &ranges, "<REDACTED_PRIVATE_KEY>")
+}
+
 fn apply_placeholder_regex(
     input: &str,
     regex: &Regex,
@@ -3718,6 +3941,15 @@ fn private_email_regex() -> &'static Regex {
             .expect("hardcoded private email regex must compile")
     });
     &PRIVATE_EMAIL_REGEX
+}
+
+fn pem_block_regex() -> &'static Regex {
+    static PEM_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
+            .expect("hardcoded PEM block regex must compile")
+    });
+    &PEM_BLOCK_REGEX
 }
 
 fn local_path_regex() -> &'static Regex {
@@ -4103,6 +4335,111 @@ mod tests {
         }
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
+
+    #[test]
+    fn redact_text_strips_broadened_secret_shapes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // JWT (three base64url segments)
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+        let (out, rep) = r.redact_text(&format!("Authorization: Bearer {jwt}"));
+        assert!(!out.contains(jwt), "jwt survived: {out}");
+        assert!(rep.blocked_secret_detected);
+        // npm + google
+        let (o2, _) = r.redact_text("token npm_abcdefghijklmnopqrstuvwxyz0123456789 done");
+        assert!(!o2.contains("npm_abcdefghijklmnopqrstuvwxyz0123456789"));
+        let (o3, _) = r.redact_text("key AIzaSyA1234567890abcdefghijklmnopqrstuvw end");
+        assert!(!o3.contains("AIzaSyA1234567890abcdefghijklmnopqrstuvw"));
+    }
+
+    #[test]
+    fn redact_text_removes_entire_pem_block_not_just_header() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
+        let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
+        assert!(
+            !out.contains("1234secretbody5678"),
+            "pem body survived: {out}"
+        );
+        assert!(
+            !out.contains("abcDEFghiJKL"),
+            "pem body line 2 survived: {out}"
+        );
+        assert!(out.contains("trailing"));
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn redact_text_catches_orphan_pem_header_without_end() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
+        let (out, _) = r.redact_text(truncated);
+        assert!(
+            !out.contains("secretbytes"),
+            "orphan pem body survived: {out}"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_redacts_unknown_key_after_cue() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // opaque high-entropy token, no known prefix, but preceded by a cue
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let (out, rep) = r.redact_text(&format!("api_key: {secret}"));
+        assert!(!out.contains(secret), "cue-adjacent secret survived: {out}");
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // message id after a cue-shaped word must NOT be redacted (allowlisted prefix)
+        let (o1, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(
+            o1.contains("msg_01ABCDEFghijklmnopqrstuvwx"),
+            "allowlisted id got redacted: {o1}"
+        );
+        // git sha after cue must survive (hex len 40)
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let (o2, _) = r.redact_text(&format!("key {sha}"));
+        assert!(o2.contains(sha), "git sha got redacted: {o2}");
+        // high-entropy token with NO cue nearby must survive (avoids shredding base64 content)
+        let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
+        assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
+    }
+
+    /// Regression: the redaction report's own metric-key literals (as
+    /// embedded in `PrivacyMetadata::redaction_counts`, e.g.
+    /// `"secret:contextual_entropy": 1`) must never be mistaken by the
+    /// cue-gated entropy pass for a surviving secret. Without the
+    /// `REPORT_METRIC_LABELS` allowlist, a fail-closed re-scan of a
+    /// finished envelope (as `envelope_has_residual_secret` performs) would
+    /// find "secret:" immediately followed by the report's own
+    /// "contextual_entropy" counter name and wrongly flag it as a survivor
+    /// -- refusing every session whose redaction pipeline legitimately
+    /// found and redacted something.
+    #[test]
+    fn contextual_entropy_spares_its_own_report_metric_labels() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        for label in REPORT_METRIC_LABELS {
+            let json_like = format!("\"secret:{label}\":1");
+            let (out, rep) = r.redact_text(&json_like);
+            assert!(
+                out.contains(label),
+                "report metric label {label:?} was wrongly redacted: {out}"
+            );
+            assert!(
+                !rep.blocked_secret_detected,
+                "report metric label {label:?} wrongly tripped the fail-closed guard"
+            );
         }
     }
 }

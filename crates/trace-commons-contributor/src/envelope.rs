@@ -202,6 +202,26 @@ pub async fn redact_to_envelope(
         .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))
 }
 
+/// Re-scan the *finished* envelope with the secret detector and report
+/// whether any secret shape survived redaction. Defense-in-depth: a
+/// correctly-redacted envelope yields zero detector hits, but a survivor (a
+/// detect-then-redact bug, or a non-string payload value the string-leaf
+/// pass never visited) is still caught here and fails the session closed.
+///
+/// Unlike a whole-token diff, this only flags secret *shapes* (pattern
+/// matches, PEM blocks, cue-gated entropy) -- ordinary prose and the
+/// `{"record_type":...}` markers on Opaque events are not secret-shaped and
+/// never trip it, so there are no prose false positives.
+pub fn envelope_has_residual_secret(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> Result<bool> {
+    let json = serde_json::to_string(envelope)
+        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
+    let (_out, report) = redactor.redact_text(&json);
+    Ok(report.blocked_secret_detected)
+}
+
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {

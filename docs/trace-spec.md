@@ -36,7 +36,7 @@ human-readable normative companion.
 |---|---|---|
 | `schema_version` | `ironclaw.trace_contribution.v1` | The on-the-wire envelope schema. A submission whose `schema_version` does not match is treated as invalid (`schema_validity = 0`). |
 | `consent.policy_version` | `2026-04-24` | The consent policy the contributor agreed to. |
-| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v1` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v1`. |
+| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v2` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v1`. |
 
 ## The contract in one paragraph
 
@@ -456,7 +456,7 @@ the server crate (`crates/trace-commons-server/src/`) on 2026-05-29.
 - **Confirmed:** all schema field names, types, optionality, enum variants
   (incl. snake_case wire forms), version constants
   (`ironclaw.trace_contribution.v1`, policy `2026-04-24`,
-  `ironclaw-deterministic-secret-path-v1`, `+server-rescrub-v1`), the
+  `ironclaw-deterministic-secret-path-v2`, `+server-rescrub-v1`), the
   residual-risk derivation (secret→high, text/payloads→medium, else low), and
   the submission-status set (`accepted`/`quarantined`/`rejected`/`revoked`/
   `expired`/`purged`, all present in the server crate).
