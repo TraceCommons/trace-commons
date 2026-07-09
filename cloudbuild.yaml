@@ -1,0 +1,70 @@
+# Fast release build of the pilot binaries (trace-commons-ingest AND
+# trace-commons-upload-claim-issuer) for the pilot host.
+#
+# The pilot host (tc-pilot-host) is Ubuntu 24.04 (glibc 2.39, OpenSSL 3). This
+# builds on a matching ubuntu:24.04 image on a high-CPU machine and pushes each
+# binary to GCS for the host to pull (deploy/pilot-gcp/pull-and-install.sh).
+#
+# BOTH binaries are built because the pilot runs both services and changes can
+# land in either: ingest (account API + the migration runner that applies V30+
+# on boot) or the issuer (EdDSA upload claims, device-key registration, the
+# per-user `subject` derivation, and the instance-enroll `/v1/enroll` handler).
+# ingest builds with the cloud features; the issuer builds without them (it does
+# not use GCS/KMS/NEAR-AI), matching the operator runbook. The ONNX runtime
+# (ort/fastembed, ingest only) is statically linked.
+#
+# Run:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --project tracecommons-pilot-2026 \
+#     --substitutions _TAG=$(git rev-parse --short HEAD)
+
+substitutions:
+  _TAG: 'manual'            # short SHA or tag; defaults to BUILD_ID below if 'manual'
+  _BUCKET: 'tc-pilot-artifacts-20260518'
+
+steps:
+  - name: 'ubuntu:24.04'
+    id: build
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          build-essential pkg-config libssl-dev curl ca-certificates git clang cmake
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --default-toolchain stable --profile minimal
+        . "$$HOME/.cargo/env"
+        cargo build --release --bin trace-commons-ingest \
+          --features gcs-client,gcp-kms,near-ai-scorer
+        # Reuses the deps compiled above; the issuer takes no features.
+        cargo build --release --bin trace-commons-upload-claim-issuer
+        mkdir -p /workspace/out
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer; do
+          cp "target/release/$$b" "/workspace/out/$$b"
+          ( cd /workspace/out && sha256sum "$$b" > "$$b.sha256" )
+        done
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: publish
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        TAG="${_TAG}"; [ "$$TAG" = "manual" ] && TAG="${BUILD_ID}"
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer; do
+          DEST="gs://${_BUCKET}/binaries/$$b/$$TAG"
+          gcloud storage cp "/workspace/out/$$b"        "$$DEST/$$b"
+          gcloud storage cp "/workspace/out/$$b.sha256" "$$DEST/$$b.sha256"
+          # latest pointer the host's pull script reads
+          printf '%s' "$$DEST/$$b" | gcloud storage cp - "gs://${_BUCKET}/binaries/$$b/latest.txt"
+          echo "published: $$DEST/$$b"
+        done
+
+options:
+  machineType: 'E2_HIGHCPU_32'
+  diskSizeGb: 120
+timeout: '3600s'

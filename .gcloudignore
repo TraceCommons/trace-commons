@@ -1,0 +1,12 @@
+# Keep `gcloud builds submit` source uploads small. Cloud Build compiles from a
+# clean checkout, so build artifacts and local scratch must not be uploaded.
+.git/
+.gitignore
+.worktrees/
+target/
+**/target/
+node_modules/
+community/
+docs/
+*.log
+.DS_Store
