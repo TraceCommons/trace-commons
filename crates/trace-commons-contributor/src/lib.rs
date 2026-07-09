@@ -1,0 +1,14 @@
+//! Contributor-side client for trace-commons-server: discovers local coding
+//! agent transcripts, redacts them through the deterministic pipeline, and
+//! submits TraceContributionEnvelopes under instance-vouched per-user
+//! identities.
+
+pub mod commands;
+pub mod config;
+pub mod consent;
+pub mod envelope;
+pub mod identity;
+pub mod issuer_client;
+pub mod picker;
+pub mod source;
+pub mod submit;

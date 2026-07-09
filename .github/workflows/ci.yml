@@ -89,6 +89,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-default-
       - run: cargo check -p trace-commons-server --bins
+      - run: cargo check -p trace-commons-contributor
 
   cargo-check-local-gpu-models:
     name: cargo check (local-gpu-models, non-CUDA)
@@ -153,6 +154,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-default-
       - run: cargo test -p trace-commons-server
+      - run: cargo test -p trace-commons-contributor
 
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke

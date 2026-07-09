@@ -48598,6 +48598,7 @@ fn submission_status_from_record(
         credit_points_total,
         explanation: receipt.explanation,
         delayed_credit_explanations,
+        consent_scopes: record.consent_scopes.clone(),
     }
 }
 

@@ -33,6 +33,7 @@ pub struct ClientBuilder {
     bearer_token_env: String,
     host_allowlist: HostAllowlist,
     timeout: Duration,
+    explicit_bearer: Option<String>,
 }
 
 impl Client {
@@ -45,6 +46,7 @@ impl Client {
             bearer_token_env: bearer_token_env.into(),
             host_allowlist: HostAllowlist::permissive(),
             timeout: DEFAULT_TIMEOUT,
+            explicit_bearer: None,
         }
     }
 
@@ -173,6 +175,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Provide the bearer token directly instead of naming an env var.
+    /// Used by clients that mint short-lived tokens in memory (e.g. the
+    /// contributor CLI's upload claims). Blank tokens are rejected at build.
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.explicit_bearer = Some(token.into());
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
         let endpoint =
             url::Url::parse(&self.endpoint).map_err(|source| Error::InvalidEndpoint {
@@ -183,12 +193,23 @@ impl ClientBuilder {
         // operators see the rejection at startup rather than at first request.
         self.host_allowlist.check(&endpoint)?;
 
-        let bearer_token = std::env::var(&self.bearer_token_env)
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .ok_or(Error::BearerMissing {
-                env_var: self.bearer_token_env.clone(),
-            })?;
+        let bearer_token = match self.explicit_bearer {
+            Some(token) => {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    return Err(Error::BearerMissing {
+                        env_var: "<explicit>".to_string(),
+                    });
+                }
+                trimmed.to_string()
+            }
+            None => std::env::var(&self.bearer_token_env)
+                .ok()
+                .filter(|t| !t.trim().is_empty())
+                .ok_or(Error::BearerMissing {
+                    env_var: self.bearer_token_env.clone(),
+                })?,
+        };
 
         let inner = reqwest::Client::builder()
             .timeout(self.timeout)
@@ -408,6 +429,25 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), "malformed-response");
+    }
+
+    #[test]
+    fn explicit_bearer_token_bypasses_env() {
+        // Env var deliberately not set; explicit token must win.
+        let client = Client::builder("https://ingest.example", "DEFINITELY_UNSET_ENV_VAR_XYZ")
+            .bearer_token("claim-token-abc")
+            .build()
+            .expect("explicit token should not require env var");
+        let _ = client.endpoint();
+    }
+
+    #[test]
+    fn blank_explicit_bearer_token_is_rejected() {
+        let err = Client::builder("https://ingest.example", "DEFINITELY_UNSET_ENV_VAR_XYZ")
+            .bearer_token("   ")
+            .build()
+            .expect_err("blank explicit token must fail");
+        assert_eq!(err.kind(), "bearer-missing");
     }
 
     #[tokio::test]
