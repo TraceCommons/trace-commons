@@ -5136,3 +5136,144 @@ async fn instance_enrollment_ledger_is_instance_scoped() {
         .await;
     tx.commit().await.expect("commit cleanup transaction");
 }
+
+#[tokio::test]
+async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated() {
+    let database_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+    {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured"
+            );
+            return;
+        }
+    };
+
+    // Apply migrations (including V36) before the raw connection test.
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend
+        .run_migrations()
+        .await
+        .expect("run migrations for gate driver test");
+
+    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping gate driver RLS test: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!(
+                "skipping gate driver RLS test: current role bypasses RLS (superuser or bypass-rls role)"
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("skipping gate driver RLS test: could not inspect role ({e})");
+            return;
+        }
+    }
+
+    let tenant_id = format!("gate-driver-tenant-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    // Insert tenant + attempts row under the tenant's own RLS context.
+    let tx = client
+        .transaction()
+        .await
+        .expect("start gate driver setup transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&tenant_id],
+    )
+    .await
+    .expect("insert tenant row");
+    tx.execute(
+        "INSERT INTO trace_gate_evaluation_attempts (tenant_id, submission_id, attempts) \
+         VALUES ($1, $2, 1)",
+        &[&tenant_id, &submission_id],
+    )
+    .await
+    .expect("insert gate evaluation attempts row");
+    tx.commit().await.expect("commit gate driver setup transaction");
+
+    // Default role, no tenant context: forced RLS must hide the row entirely.
+    let rows = client
+        .query(
+            "SELECT 1 FROM trace_gate_evaluation_attempts WHERE submission_id = $1",
+            &[&submission_id],
+        )
+        .await
+        .expect("query attempts row with no tenant context");
+    assert!(
+        rows.is_empty(),
+        "default role without tenant context must not see the gate evaluation attempts row"
+    );
+
+    // trace_gate_driver role: the permissive cross-tenant SELECT policy must allow the
+    // read even with no tenant context set.
+    match client.batch_execute("SET ROLE trace_gate_driver").await {
+        Ok(()) => {
+            let rows = client
+                .query(
+                    "SELECT attempts FROM trace_gate_evaluation_attempts WHERE submission_id = $1",
+                    &[&submission_id],
+                )
+                .await
+                .expect("query attempts row as trace_gate_driver");
+            assert_eq!(
+                rows.len(),
+                1,
+                "trace_gate_driver must read the attempts row across tenants via the permissive policy"
+            );
+            let attempts: i32 = rows[0].get(0);
+            assert_eq!(attempts, 1);
+
+            client
+                .batch_execute("RESET ROLE")
+                .await
+                .expect("reset role after gate driver assertion");
+        }
+        Err(e) => {
+            eprintln!(
+                "skipping trace_gate_driver permissive-read assertion: cannot SET ROLE ({e})"
+            );
+        }
+    }
+
+    // Cleanup.
+    let tx = client
+        .transaction()
+        .await
+        .expect("start gate driver cleanup transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context for cleanup");
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await;
+    tx.commit().await.expect("commit gate driver cleanup transaction");
+}
