@@ -70,14 +70,25 @@ list_submissions_needing_gate_decision(limit: i64)
     -> Result<Vec<GateWorkItem>>   // { tenant_id, submission_id }
 ```
 
-Service-scoped, cross-tenant query returning submissions that (a) have an active
+Cross-tenant enumeration query returning submissions that (a) have an active
 `SubmittedEnvelope` object ref, (b) have **no** row in `trace_gate_decisions`,
 (c) whose attempt counter is below `MAX_ATTEMPTS` and whose backoff has elapsed,
-ordered oldest-first, limited to `limit`. Runs on the service/raw pool — the
-driver is a service actor, not a tenant actor — using the same RLS-bypass path
-the existing schedulers use (a role-scoped policy per the repo's RLS-resolver
-convention; a superuser test connection hides the policy gap, so the PG-gated
-test must `SET ROLE` to the driver's role to exercise it).
+ordered oldest-first, limited to `limit`.
+
+Correction (2026-07-09 research): the repo has NO shared RLS-bypass pool and the
+existing schedulers operate per-tenant, not cross-tenant. So this slice adds a
+dedicated **`trace_gate_driver`** Postgres role (NOLOGIN NOBYPASSRLS) with a
+role-scoped **permissive** cross-tenant SELECT policy on the four tables the
+enumeration reads (`trace_submissions`, `trace_gate_decisions`,
+`trace_object_refs`, `trace_gate_evaluation_attempts`), following the
+`trace_login_resolver` pattern already in the repo (V30/V32/V33). The driver
+uses a dedicated pool from `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` connected as
+that role. Because the role stays `NOBYPASSRLS`, the permissive `USING (true)`
+policy (not BYPASSRLS) is what authorizes the read; a superuser test connection
+hides the policy gap, so the PG-gated test must connect/`SET ROLE` as
+`trace_gate_driver` to exercise it. Only ENUMERATION is cross-tenant; all
+per-submission work (decrypt, score, insert decision, bump attempts) runs
+per-tenant via the normal `db_mirror` once the tenant id is known.
 
 Backfill is automatic: on the first enabled tick the existing submissions are
 simply the oldest members of this set.
