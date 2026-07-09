@@ -597,6 +597,19 @@ const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED: &str = "TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS";
+const TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS: &str =
+    "TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -801,6 +814,11 @@ const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON: &str =
     "scheduled trace benchmark pipeline";
 const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE: f32 = 1.0;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_INTERVAL_SECONDS: u64 = 45;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE: i64 = 5;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS: i32 = 5;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS: i64 = 900_000;
+const TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
@@ -907,6 +925,7 @@ async fn main() -> anyhow::Result<()> {
         state.retention_maintenance_scheduler.clone(),
     );
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
+    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1022,6 +1041,11 @@ struct AppState {
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     retention_maintenance_scheduler: Option<TraceRetentionMaintenanceSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
+    /// Task 5: the in-process perplexity-scoring driver loop config.
+    /// `None` (the default) means the driver is disabled; existing
+    /// deployments and CI are unaffected until an operator opts in via
+    /// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`.
+    perplexity_score_driver: Option<PerplexityScoreDriverConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -1178,6 +1202,28 @@ struct TraceVectorIndexSchedulerConfig {
     limit: usize,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process driver loop config (Task 5). Unlike the other schedulers here,
+/// this one has no worker bearer token: it runs entirely in-process against
+/// `state.db_mirror`'s cross-tenant gate-driver pool and never goes through
+/// an HTTP handler.
+#[derive(Clone)]
+struct PerplexityScoreDriverConfig {
+    interval: StdDuration,
+    batch_size: i64,
+    knobs: PerplexityDriverKnobs,
+    backoff_base_seconds: i64,
+}
+
+/// Per-tick outcome tally returned by `run_perplexity_score_driver_tick` and
+/// logged by `spawn_perplexity_score_driver_task`.
+#[derive(Debug, Default, Clone, Copy)]
+struct PerplexityDriverTickSummary {
+    scored: usize,
+    skipped_duplicate: usize,
+    cached: usize,
+    failed: usize,
 }
 
 #[derive(Clone)]
@@ -2928,6 +2974,7 @@ impl AppState {
         let retention_maintenance_scheduler =
             parse_trace_retention_maintenance_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
+        let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -3181,6 +3228,7 @@ impl AppState {
             export_job_scheduler,
             retention_maintenance_scheduler,
             vector_index_scheduler,
+            perplexity_score_driver,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -5243,6 +5291,63 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
         registry_ref_prefix,
         min_score,
         reason,
+    }))
+}
+
+/// Task 5: the in-process perplexity-scoring driver. Unlike the other
+/// schedulers in this file, it has no bearer-token gate — it drives
+/// `state.db_mirror`'s cross-tenant gate-driver enumeration directly, so
+/// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` alone turns it on. Off by
+/// default (`Ok(None)` when unset), so existing deployments and CI are
+/// unaffected until an operator explicitly opts in.
+fn parse_perplexity_score_driver_config_from_env()
+-> anyhow::Result<Option<PerplexityScoreDriverConfig>> {
+    if !env_truthy(TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED) {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE,
+        1,
+        1_000,
+    )?;
+    let max_attempts = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS,
+        i64::from(TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS),
+        1,
+        1_000,
+    )?;
+    let skip_duplicates = parse_optional_scheduler_bool_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES,
+        true,
+    )?;
+    let skip_duplicate_threshold_micros = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
+        0,
+        1_000_000,
+    )?;
+    let backoff_base_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS,
+        TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS,
+        0,
+        86_400,
+    )?;
+    Ok(Some(PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        batch_size,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates,
+            skip_duplicate_threshold_micros,
+            max_attempts: max_attempts as i32,
+        },
+        backoff_base_seconds,
     }))
 }
 
@@ -7807,6 +7912,50 @@ fn spawn_trace_vector_index_scheduler_task(
                         status = %status,
                         error_hash = %safe_display_error_hash(&error.error),
                         "Trace Commons vector index scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Task 5: spawn the in-process perplexity-scoring driver loop. Mirrors the
+/// shape of the other `spawn_*` schedulers in this file (sleep, tick, log,
+/// repeat) but calls `run_perplexity_score_driver_tick` directly instead of
+/// going through an HTTP handler, since there is no bearer-token worker
+/// route for this driver.
+fn spawn_perplexity_score_driver_task(
+    state: &Arc<AppState>,
+    config: Option<PerplexityScoreDriverConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        batch_size = config.batch_size,
+        max_attempts = config.knobs.max_attempts,
+        skip_duplicates = config.knobs.skip_duplicates,
+        "Trace Commons perplexity score driver enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_perplexity_score_driver_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        scored = summary.scored,
+                        skipped_duplicate = summary.skipped_duplicate,
+                        cached = summary.cached,
+                        failed = summary.failed,
+                        "Trace Commons perplexity score driver tick completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_hash = %safe_display_error_hash(&error),
+                        "Trace Commons perplexity score driver tick failed"
                     );
                 }
             }
@@ -35243,6 +35392,43 @@ async fn run_trace_vector_index_scheduler_tick(
     )
     .await?;
     Ok(response)
+}
+
+/// Task 5: one pass of the in-process perplexity-scoring driver. Enumerates
+/// ungated submissions via the cross-tenant gate-driver pool, then scores
+/// each sequentially (no concurrency) through `score_one_submission`'s
+/// cost-control wrapper. Fail-safe by construction: when `db_mirror` is
+/// absent or the gate-driver pool is unconfigured,
+/// `list_submissions_needing_gate_decision` returns an `Err` that propagates
+/// here via `?` — the caller (`spawn_perplexity_score_driver_task`'s loop)
+/// logs a warning and continues on the next tick rather than panicking the
+/// process.
+async fn run_perplexity_score_driver_tick(
+    state: Arc<AppState>,
+    config: &PerplexityScoreDriverConfig,
+) -> anyhow::Result<PerplexityDriverTickSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("perplexity score driver requires a configured DB mirror"))?;
+    let items = db
+        .list_submissions_needing_gate_decision(
+            Utc::now(),
+            config.knobs.max_attempts,
+            config.backoff_base_seconds,
+            config.batch_size,
+        )
+        .await?;
+    let mut summary = PerplexityDriverTickSummary::default();
+    for item in &items {
+        match score_one_submission(state.as_ref(), item, &config.knobs).await {
+            GateOutcome::Scored { .. } => summary.scored += 1,
+            GateOutcome::SkippedDuplicate { .. } => summary.skipped_duplicate += 1,
+            GateOutcome::Cached { .. } => summary.cached += 1,
+            GateOutcome::Failed { .. } => summary.failed += 1,
+        }
+    }
+    Ok(summary)
 }
 
 async fn run_trace_benchmark_registry_scheduler_tick(

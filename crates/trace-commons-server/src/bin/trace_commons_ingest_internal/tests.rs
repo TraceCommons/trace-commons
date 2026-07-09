@@ -4003,6 +4003,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         export_job_scheduler: None,
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
+        perplexity_score_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -23394,6 +23395,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         export_job_scheduler: None,
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
+        perplexity_score_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -63005,6 +63007,888 @@ async fn score_one_submission_failed_scorer_bumps_attempt_count() {
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// -----------------------------------------------------------------------
+// Task 5: in-process perplexity-scoring driver loop tests
+// -----------------------------------------------------------------------
+
+/// In-memory `Database` double for the driver-loop integration test. Unlike
+/// the PG-backed Task 4 tests above, this test needs NO real database: it
+/// only exercises `run_perplexity_score_driver_tick` -> `score_one_submission`
+/// -> `evaluate_and_record_gate`, which together touch exactly
+/// `get_trace_submission`, `get_latest_active_trace_object_ref`,
+/// `insert_trace_gate_decision`, and (via `Database`)
+/// `list_submissions_needing_gate_decision`. Every other `TraceCorpusStore` /
+/// `Database` method is an unreachable stub, following the same pattern as
+/// `PerUserTestDeviceKeyDb` above.
+///
+/// `insert_trace_gate_decision` removes the matching item from the ungated
+/// backlog, so a second `list_submissions_needing_gate_decision` call
+/// reflects the drained backlog — this is what lets the test assert the
+/// second tick returns zero.
+struct PerplexityDriverTestDb {
+    submissions:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
+    object_refs:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
+    gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
+    ungated: std::sync::RwLock<Vec<GateWorkItem>>,
+}
+
+impl PerplexityDriverTestDb {
+    fn new() -> Self {
+        Self {
+            submissions: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_refs: std::sync::RwLock::new(std::collections::HashMap::new()),
+            gate_decisions: std::sync::RwLock::new(Vec::new()),
+            ungated: std::sync::RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Seed one ungated submission: a submission record (no
+    /// `canonical_summary_hash`, so `score_one_submission`'s cross-submission
+    /// cache branch is a no-op) plus its active `SubmittedEnvelope` object
+    /// ref, and register it in the ungated backlog.
+    fn seed_ungated_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        object_ref: StorageTraceObjectRefRecord,
+    ) {
+        let now = Utc::now();
+        self.submissions.write().unwrap().insert(
+            (tenant_id.to_string(), submission_id),
+            StorageTraceSubmissionRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                status: StorageTraceCorpusStatus::Accepted,
+                auth_principal_ref: principal_storage_ref("perplexity-driver-test"),
+                contributor_pseudonym: Some("perplexity-driver-test-pseudonym".to_string()),
+                submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+                schema_version: "trace_contribution.v1".to_string(),
+                consent_policy_version: "trace-consent-v1".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["evaluation".to_string()],
+                retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+                privacy_risk: "low".to_string(),
+                redaction_pipeline_version: "test-redactor-v1".to_string(),
+                redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+                redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+                canonical_summary_hash: None,
+                submission_score: None,
+                credit_points_pending: None,
+                credit_points_final: None,
+                received_at: now,
+                updated_at: now,
+                reviewed_at: None,
+                review_assigned_to_principal_ref: None,
+                review_assigned_at: None,
+                review_lease_expires_at: None,
+                review_due_at: None,
+                revoked_at: None,
+                expires_at: None,
+                purged_at: None,
+            },
+        );
+        self.object_refs
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id), object_ref);
+        self.ungated.write().unwrap().push(GateWorkItem {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+        });
+    }
+
+    fn gate_decision_count(&self) -> usize {
+        self.gate_decisions.read().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerplexityDriverTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        _: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        Ok(self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _: &str,
+        _: &str,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCorpusStatus,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        _: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        Ok(self
+            .object_refs
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        let submission_id = decision.submission_id;
+        self.gate_decisions
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), decision));
+        self.ungated
+            .write()
+            .unwrap()
+            .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
+        Ok(())
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for PerplexityDriverTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        _now: DateTime<Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .ungated
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+/// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
+/// each with a real v2 KEK-wrapped envelope written into `artifact_store` so
+/// `evaluate_and_record_gate` can decrypt and score it end-to-end.
+fn seed_perplexity_driver_test_db(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    count: usize,
+) -> Arc<PerplexityDriverTestDb> {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    for _ in 0..count {
+        let submission_id = Uuid::new_v4();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({"safe": true})).expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        // `evaluate_and_record_gate` reconstructs the `EncryptedTraceArtifactReceipt`
+        // from the object ref, using `object_ref.created_at` as `encrypted_at`. That
+        // reconstructed receipt must equal the one `put_serialized_json` returned
+        // (checked by `read_artifact`'s `artifact.receipt == *receipt`), so
+        // `created_at` here MUST be `receipt.encrypted_at`, not a fresh `Utc::now()`.
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+    }
+    db
+}
+
+/// Task 5 payoff: `run_perplexity_score_driver_tick` drains a backlog of
+/// ungated submissions in one tick (sequential `score_one_submission` calls),
+/// and a second tick against the now-empty backlog returns all zeros. Uses
+/// an in-memory `Database` double (no Postgres required) plus a real
+/// encrypted artifact store and the default in-memory gate service, so the
+/// whole `evaluate_and_record_gate` path runs for real.
+#[tokio::test]
+async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 3);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // `test_state_with_configured_artifact_store_policies_and_export_guardrails`
+    // already wires `gate_service: InMemoryGateService`, which always scores a
+    // passing decision — exactly what this test needs.
+
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+
+    let first = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("first tick succeeds");
+    assert_eq!(
+        first.scored + first.skipped_duplicate + first.cached,
+        3,
+        "first tick must account for all 3 seeded submissions: {first:?}"
+    );
+    assert_eq!(first.failed, 0, "no submission should fail: {first:?}");
+    assert_eq!(
+        db.gate_decision_count(),
+        3,
+        "3 gate decision rows must be written"
+    );
+
+    let second = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("second tick succeeds");
+    assert_eq!(
+        (
+            second.scored,
+            second.skipped_duplicate,
+            second.cached,
+            second.failed
+        ),
+        (0, 0, 0, 0),
+        "second tick must find the backlog already drained: {second:?}"
+    );
 }
 
 // -----------------------------------------------------------------------
