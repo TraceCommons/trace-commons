@@ -189,6 +189,11 @@ pub struct SignedClaimRequest {
 /// Build and sign the upload-claim request body for `cfg`, using `device`'s
 /// key. The body is serialized exactly once; the returned `body` string is
 /// the same bytes the signature covers.
+///
+/// Uses `cfg.consent_scopes` (validated) and their implied allowed uses.
+/// Callers that need a different scopes/uses request (e.g. an empty request
+/// for a status read-back, which the server resolves to the full grant
+/// ceiling) should use [`build_signed_claim_request_with_scopes`] directly.
 pub fn build_signed_claim_request(
     cfg: &ContributorConfig,
     device: &DeviceIdentity,
@@ -197,13 +202,30 @@ pub fn build_signed_claim_request(
     let consent_scopes = crate::consent::validate_scopes(&cfg.consent_scopes)
         .context("invalid consent scopes in stored config (re-run login to fix)")?;
     let allowed_uses = crate::consent::scopes_to_allowed_uses(&consent_scopes);
+    build_signed_claim_request_with_scopes(cfg, device, now, &consent_scopes, &allowed_uses)
+}
+
+/// Build and sign the upload-claim request body for `cfg`, using `device`'s
+/// key, but with explicit `scopes`/`uses` instead of deriving them from
+/// `cfg.consent_scopes`. An empty `scopes`/`uses` pair is a valid request:
+/// the issuer resolves an empty request to the caller's full grant ceiling
+/// (see `trace_upload_claim_issuer::resolve_granted_uses`), which is exactly
+/// what a status read-back wants regardless of what scopes were narrowed for
+/// submission.
+pub fn build_signed_claim_request_with_scopes(
+    cfg: &ContributorConfig,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+    scopes: &[String],
+    uses: &[String],
+) -> Result<SignedClaimRequest> {
     let subject = user_subject_hash(&cfg.user_subject);
     let payload = serde_json::json!({
         "schema_version": CLAIM_REQUEST_SCHEMA_VERSION,
         "tenant_id": cfg.tenant_id,
         "audience": cfg.audience,
-        "consent_scopes": consent_scopes,
-        "allowed_uses": allowed_uses,
+        "consent_scopes": scopes,
+        "allowed_uses": uses,
         "subject": subject,
         "requested_at": now.to_rfc3339(),
     });

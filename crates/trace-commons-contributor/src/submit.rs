@@ -21,7 +21,9 @@ use crate::envelope::{
     envelope_size_ok, near_ai_settings_from_env, parse_scope_names, parse_use_names,
     redact_to_envelope,
 };
-use crate::identity::{DeviceIdentity, build_signed_claim_request};
+use crate::identity::{
+    DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
+};
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
 
@@ -228,7 +230,11 @@ pub async fn status(
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
     let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
         .context("building issuer client")?;
-    let token = mint_claim(&issuer, cfg, &device, Utc::now())
+    // Mint with an empty scopes/uses request rather than the submit path's
+    // consent_scopes: the issuer resolves an empty request to the caller's
+    // full grant ceiling, so status read-back works regardless of what
+    // scopes were narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for status lookup")?;
     let client = build_ingest_client(cfg, &token).context("building ingest client")?;
@@ -269,6 +275,20 @@ async fn mint_claim(
 ) -> Result<ClaimToken> {
     let signed =
         build_signed_claim_request(cfg, device, now).context("building signed claim request")?;
+    issuer.mint_claim(&cfg.issuer_url, &signed).await
+}
+
+/// Mint a claim for a status read-back: an empty consent_scopes/allowed_uses
+/// request, which the issuer resolves to the caller's full grant ceiling
+/// regardless of what was requested for submission.
+async fn mint_status_claim(
+    issuer: &IssuerClient,
+    cfg: &ContributorConfig,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+) -> Result<ClaimToken> {
+    let signed = build_signed_claim_request_with_scopes(cfg, device, now, &[], &[])
+        .context("building signed status claim request")?;
     issuer.mint_claim(&cfg.issuer_url, &signed).await
 }
 
@@ -878,6 +898,90 @@ mod tests {
                 .iter()
                 .any(|u| u == &serde_json::json!("model_training")),
             "retried envelope must not retain model_training from the stale claim: {restamped}"
+        );
+    }
+
+    /// Records every claim-request body it receives (as raw JSON) before
+    /// responding with a fixed claim, so tests can inspect what scopes/uses
+    /// were actually requested.
+    fn stub_issuer_recording_requests(received: Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move |body: String| {
+                let received = received.clone();
+                async move {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    received.lock().unwrap().push(parsed);
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": ["debugging_evaluation", "model_training"],
+                        "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                    }))
+                }
+            }),
+        )
+    }
+
+    fn stub_submission_status_ingest() -> Router {
+        Router::new().route(
+            "/v1/contributors/me/submission-status",
+            post(|Json(req): Json<serde_json::Value>| async move {
+                let ids = req["submission_ids"].as_array().unwrap();
+                let updates: Vec<serde_json::Value> = ids
+                    .iter()
+                    .map(|id| {
+                        serde_json::json!({
+                            "submission_id": id,
+                            "trace_id": id,
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                        })
+                    })
+                    .collect();
+                Json(updates)
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn status_mints_claim_with_empty_scopes_and_uses() {
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_submission_status_ingest()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        // Seed a receipt so status() actually mints a claim and calls out.
+        store
+            .append_receipt(&crate::config::Receipt {
+                submission_id: Uuid::new_v4(),
+                session_hash: "sha256:test".to_string(),
+                source: "claude-code".to_string(),
+                submitted_at: Utc::now(),
+                status: "submitted".to_string(),
+            })
+            .unwrap();
+
+        let updates = status(&store, &cfg).await.unwrap();
+        assert_eq!(updates.len(), 1);
+
+        let requests = claim_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert_eq!(
+            req["consent_scopes"],
+            serde_json::json!([]),
+            "status claim request must not request the submit-path's scopes: {req}"
+        );
+        assert_eq!(
+            req["allowed_uses"],
+            serde_json::json!([]),
+            "status claim request must not request the submit-path's uses: {req}"
         );
     }
 
