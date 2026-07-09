@@ -3575,7 +3575,16 @@ impl Database for PgBackend {
         // what authorize this read across every tenant's submissions.
         let rows = client
             .query(
-                "SELECT s.tenant_id, s.submission_id
+                // DISTINCT: a submission can carry more than one active
+                // submitted_envelope object ref, so the INNER JOIN can fan out
+                // to multiple rows per submission. Deduplicate to one work item
+                // per (tenant, submission) — otherwise a multi-ref submission
+                // wastes LIMIT slots and gets scored/attempted concurrently
+                // more than once. `received_at` is included in the projection
+                // only so it is a legal DISTINCT + ORDER BY target; it is a
+                // per-submission constant, so it does not change dedup
+                // cardinality, and it is dropped when mapping to GateWorkItem.
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
                  FROM trace_submissions s
                  JOIN trace_object_refs o
                    ON o.tenant_id = s.tenant_id

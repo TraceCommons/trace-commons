@@ -5367,6 +5367,27 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
             .expect("append submitted-envelope object ref");
     }
 
+    // Tenant B carries a SECOND active submitted-envelope object ref (real:
+    // multi-ref submissions exist, hence get_latest_active_trace_object_ref).
+    // The INNER JOIN would fan out to two rows without DISTINCT; the
+    // enumeration must still return tenant B exactly once.
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_b.clone(),
+            object_ref_id: Uuid::new_v4(),
+            submission_id: submission_b,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "s3://private-corpus".to_string(),
+            object_key: format!("{tenant_b}/submission-second.json"),
+            content_sha256: format!("sha256:{tenant_b}:object-second"),
+            encryption_key_ref: format!("kms:{tenant_b}"),
+            size_bytes: 2048,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append tenant B second submitted-envelope object ref");
+
     // Tenant A already has a gate decision: must be excluded.
     backend
         .insert_trace_gate_decision(
@@ -5429,9 +5450,13 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
         tenant_id: tenant_b.clone(),
         submission_id: submission_b,
     };
-    assert!(
-        work_items.contains(&tenant_b_item),
-        "ungated tenant B submission must be returned"
+    let tenant_b_count = work_items
+        .iter()
+        .filter(|item| **item == tenant_b_item)
+        .count();
+    assert_eq!(
+        tenant_b_count, 1,
+        "ungated tenant B submission must be returned exactly once despite two active envelope refs"
     );
     assert!(
         !work_items
