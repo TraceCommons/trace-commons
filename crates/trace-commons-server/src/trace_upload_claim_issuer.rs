@@ -574,6 +574,10 @@ struct TraceUploadClaimResponse {
     token_type: &'static str,
     expires_at: DateTime<Utc>,
     expires_in: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consent_scopes: Vec<ConsentScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_uses: Vec<TraceAllowedUse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1429,6 +1433,58 @@ impl TraceUploadClaimIssuerState {
         .await
     }
 
+    /// Ceiling for a device principal: parsed scopes from active contributor
+    /// grants when a grant DB is configured and rows exist; otherwise the
+    /// hardcoded pilot floor. PublicAttribution is always included.
+    async fn resolve_device_scope_ceiling(
+        &self,
+        tenant_id: &str,
+        grant_principal_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ConsentScope>, Vec<TraceAllowedUse>), IssuerError> {
+        let hardcoded_floor = || (device_key_allowed_consent_scopes(), device_key_allowed_uses());
+        let Some(db) = self.tenant_access_grant_db.as_ref() else {
+            return Ok(hardcoded_floor());
+        };
+        let grants = db
+            .list_active_trace_tenant_access_grants_for_principal(tenant_id, grant_principal_ref, now)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        let matching_grants: Vec<&TraceTenantAccessGrantRecord> = grants
+            .iter()
+            .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+            .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
+            .collect();
+        if matching_grants.is_empty() {
+            return Ok(hardcoded_floor());
+        }
+        let mut scope_union: BTreeSet<ConsentScope> = BTreeSet::new();
+        let mut use_union: BTreeSet<TraceAllowedUse> = BTreeSet::new();
+        for grant in matching_grants {
+            if grant.allowed_consent_scopes.is_empty() {
+                scope_union.extend(device_key_allowed_consent_scopes());
+            } else {
+                scope_union.extend(parse_storage_grant_values::<ConsentScope>(
+                    &grant.allowed_consent_scopes,
+                    "tenant_access_grant.allowed_consent_scopes",
+                )?);
+            }
+            if grant.allowed_uses.is_empty() {
+                use_union.extend(device_key_allowed_uses());
+            } else {
+                use_union.extend(parse_storage_grant_values::<TraceAllowedUse>(
+                    &grant.allowed_uses,
+                    "tenant_access_grant.allowed_uses",
+                )?);
+            }
+        }
+        scope_union.insert(ConsentScope::PublicAttribution);
+        Ok((
+            scope_union.into_iter().collect(),
+            use_union.into_iter().collect(),
+        ))
+    }
+
     async fn issue_claim_for_device_key(
         &self,
         auth: DeviceClaimAuth,
@@ -1467,13 +1523,26 @@ impl TraceUploadClaimIssuerState {
             }
             None => device_key_id,
         };
+        let (ceiling_scopes, ceiling_uses) = self
+            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .await?;
+        let granted_scopes = intersect_requested_with_ceiling(
+            &request.consent_scopes,
+            &ceiling_scopes,
+            "consent scopes not permitted",
+        )?;
+        let granted_uses =
+            resolve_granted_uses(&request.allowed_uses, &granted_scopes, &ceiling_uses)?;
+        let mut request = request;
+        request.consent_scopes = granted_scopes.clone();
+        request.allowed_uses = granted_uses.clone();
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
                 tenant_id,
                 grant_principal_ref,
-                allowed_consent_scopes: device_key_allowed_consent_scopes(),
-                allowed_uses: device_key_allowed_uses(),
+                allowed_consent_scopes: granted_scopes,
+                allowed_uses: granted_uses,
                 policy_label: None,
             },
             request,
@@ -1510,13 +1579,26 @@ impl TraceUploadClaimIssuerState {
         validate_device_workload_claims(&claims, &tenant_id)?;
         let actor = auth.device_key_id;
         let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        let (ceiling_scopes, ceiling_uses) = self
+            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .await?;
+        let granted_scopes = intersect_requested_with_ceiling(
+            &request.consent_scopes,
+            &ceiling_scopes,
+            "consent scopes not permitted",
+        )?;
+        let granted_uses =
+            resolve_granted_uses(&request.allowed_uses, &granted_scopes, &ceiling_uses)?;
+        let mut request = request;
+        request.consent_scopes = granted_scopes.clone();
+        request.allowed_uses = granted_uses.clone();
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
                 tenant_id: tenant_id.to_string(),
                 grant_principal_ref,
-                allowed_consent_scopes: device_key_allowed_consent_scopes(),
-                allowed_uses: device_key_allowed_uses(),
+                allowed_consent_scopes: granted_scopes,
+                allowed_uses: granted_uses,
                 policy_label: None,
             },
             request,
@@ -1583,6 +1665,8 @@ impl TraceUploadClaimIssuerState {
         let expires_at = now
             .checked_add_signed(Duration::seconds(self.max_ttl_seconds))
             .ok_or_else(IssuerError::internal)?;
+        let granted_consent_scopes = consent_scopes.clone();
+        let granted_allowed_uses = allowed_uses.clone();
         let claims = UploadClaimClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
@@ -1608,6 +1692,8 @@ impl TraceUploadClaimIssuerState {
             token_type: "Bearer",
             expires_at,
             expires_in: self.max_ttl_seconds,
+            consent_scopes: granted_consent_scopes,
+            allowed_uses: granted_allowed_uses,
         })
     }
 
@@ -2201,6 +2287,84 @@ fn device_key_allowed_uses() -> Vec<TraceAllowedUse> {
     ]
 }
 
+/// Spec intersection: empty requested -> full ceiling; else intersection
+/// preserving ceiling order; empty intersection -> Err (403 with
+/// `empty_label` as the error message).
+fn intersect_requested_with_ceiling<T: PartialEq + Copy>(
+    requested: &[T],
+    ceiling: &[T],
+    empty_label: &'static str,
+) -> Result<Vec<T>, IssuerError> {
+    if requested.is_empty() {
+        return Ok(ceiling.to_vec());
+    }
+    let intersected = ceiling
+        .iter()
+        .filter(|item| requested.contains(item))
+        .copied()
+        .collect::<Vec<_>>();
+    if intersected.is_empty() {
+        return Err(IssuerError::forbidden(empty_label));
+    }
+    Ok(intersected)
+}
+
+/// The allowed-uses implied by a set of granted consent scopes. Used to cap
+/// what an empty `allowed_uses` request can be granted so that a device
+/// claim scoped only to (say) `debugging_evaluation` cannot walk away with
+/// `model_training` merely because the ceiling happens to include it.
+/// `aggregate_analytics` is always implied regardless of scopes. Order is
+/// stable (first-seen) and deduped.
+fn uses_implied_by_scopes(scopes: &[ConsentScope]) -> Vec<TraceAllowedUse> {
+    let mut implied = Vec::new();
+    for scope in scopes {
+        let uses: &[TraceAllowedUse] = match scope {
+            ConsentScope::DebuggingEvaluation => {
+                &[TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation]
+            }
+            ConsentScope::BenchmarkOnly => &[TraceAllowedUse::BenchmarkGeneration],
+            ConsentScope::RankingTraining => &[TraceAllowedUse::RankingModelTraining],
+            ConsentScope::ModelTraining => &[TraceAllowedUse::ModelTraining],
+            ConsentScope::PublicAttribution => &[],
+        };
+        for use_ in uses {
+            if !implied.contains(use_) {
+                implied.push(*use_);
+            }
+        }
+    }
+    if !implied.contains(&TraceAllowedUse::AggregateAnalytics) {
+        implied.push(TraceAllowedUse::AggregateAnalytics);
+    }
+    implied
+}
+
+/// Resolve the allowed-uses grant for a device-principal claim. When the
+/// request's `allowed_uses` is empty, the grant is capped to what the
+/// granted consent scopes imply (intersected with the ceiling) rather than
+/// the full ceiling — an empty-uses request must not silently expand beyond
+/// what the contributor consented to. Non-empty requests keep the existing
+/// clip/intersect-with-ceiling behavior.
+fn resolve_granted_uses(
+    requested_uses: &[TraceAllowedUse],
+    granted_scopes: &[ConsentScope],
+    ceiling_uses: &[TraceAllowedUse],
+) -> Result<Vec<TraceAllowedUse>, IssuerError> {
+    if requested_uses.is_empty() {
+        let implied = uses_implied_by_scopes(granted_scopes);
+        let intersected: Vec<TraceAllowedUse> = ceiling_uses
+            .iter()
+            .filter(|use_| implied.contains(use_))
+            .copied()
+            .collect();
+        if intersected.is_empty() {
+            return Err(IssuerError::forbidden("allowed uses not permitted"));
+        }
+        return Ok(intersected);
+    }
+    intersect_requested_with_ceiling(requested_uses, ceiling_uses, "allowed uses not permitted")
+}
+
 fn device_public_key_bytes(
     public_key: &str,
     expected_device_key_id: &str,
@@ -2591,6 +2755,103 @@ mod tests {
     use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 
     #[test]
+    fn intersect_empty_request_grants_full_ceiling() {
+        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::ModelTraining];
+        let got = intersect_requested_with_ceiling(&[], &ceiling, "consent scopes not permitted").unwrap();
+        assert_eq!(got, ceiling);
+    }
+
+    #[test]
+    fn intersect_clips_to_ceiling_and_rejects_empty() {
+        let ceiling = vec![ConsentScope::DebuggingEvaluation, ConsentScope::PublicAttribution];
+        let got = intersect_requested_with_ceiling(
+            &[ConsentScope::ModelTraining, ConsentScope::DebuggingEvaluation],
+            &ceiling,
+            "consent scopes not permitted",
+        )
+        .unwrap();
+        assert_eq!(got, vec![ConsentScope::DebuggingEvaluation]);
+        let err = intersect_requested_with_ceiling(&[ConsentScope::ModelTraining], &ceiling, "consent scopes not permitted")
+            .unwrap_err();
+        // IssuerError renders {"error": label}; assert the label text.
+        assert!(format!("{err:?}").contains("consent scopes not permitted"));
+    }
+
+    #[test]
+    fn uses_implied_by_scopes_maps_each_scope_and_always_appends_aggregate_analytics() {
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::DebuggingEvaluation]),
+            vec![
+                TraceAllowedUse::Debugging,
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::BenchmarkOnly]),
+            vec![
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::RankingTraining]),
+            vec![
+                TraceAllowedUse::RankingModelTraining,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::ModelTraining]),
+            vec![
+                TraceAllowedUse::ModelTraining,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::PublicAttribution]),
+            vec![TraceAllowedUse::AggregateAnalytics]
+        );
+    }
+
+    #[test]
+    fn resolve_granted_uses_caps_empty_request_to_scope_implied_uses() {
+        // Ceiling includes model_training, but the granted scopes only cover
+        // debugging_evaluation — an empty allowed_uses request must not walk
+        // away with model_training just because the ceiling allows it.
+        let ceiling = vec![
+            TraceAllowedUse::Debugging,
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::ModelTraining,
+            TraceAllowedUse::AggregateAnalytics,
+        ];
+        let granted_scopes = vec![ConsentScope::DebuggingEvaluation];
+        let got = resolve_granted_uses(&[], &granted_scopes, &ceiling).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                TraceAllowedUse::Debugging,
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert!(!got.contains(&TraceAllowedUse::ModelTraining));
+    }
+
+    #[test]
+    fn resolve_granted_uses_keeps_intersection_behavior_for_non_empty_request() {
+        let ceiling = vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation];
+        let granted_scopes = vec![ConsentScope::DebuggingEvaluation];
+        let got = resolve_granted_uses(
+            &[TraceAllowedUse::Debugging],
+            &granted_scopes,
+            &ceiling,
+        )
+        .unwrap();
+        assert_eq!(got, vec![TraceAllowedUse::Debugging]);
+    }
+
+    #[test]
     fn normalize_subject_accepts_pseudonymous_token() {
         let s = normalize_subject("  tenant_sha256:ab12CD_-  ").expect("valid");
         assert_eq!(s, "tenant_sha256:ab12CD_-");
@@ -2838,6 +3099,35 @@ mod tests {
         );
         assert_eq!(claims["allowed_uses"], json!(["debugging"]));
         assert!(claims["jti"].as_str().is_some_and(|jti| !jti.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn claim_response_echoes_granted_scopes() {
+        let (status, body) = post_claim(
+            test_config(),
+            workload_token("workload-issuer", "trace-claim-issuer"),
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let token = body["access_token"].as_str().expect("access token");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&["trace-commons-upload-issuer"]);
+        validation.set_audience(&["trace-commons-upload"]);
+        let claims = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+                .expect("issuer public key parses"),
+            &validation,
+        )
+        .expect("issuer token verifies")
+        .claims;
+
+        assert_eq!(body["consent_scopes"], claims["allowed_consent_scopes"]);
+        assert_eq!(body["allowed_uses"], claims["allowed_uses"]);
+        assert_eq!(body["consent_scopes"], json!(["debugging_evaluation"]));
+        assert_eq!(body["allowed_uses"], json!(["debugging"]));
     }
 
     #[tokio::test]
@@ -4698,6 +4988,29 @@ mod tests {
             claims["principal_ref"].as_str(),
             Some(expected.as_str()),
             "principal_ref must be namespaced with subject"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_request_on_hardcoded_floor_grants_exactly_implied_uses() {
+        // Regression pin: a device-key claim with no registered tenant
+        // access grant falls back to the hardcoded pilot floor
+        // (debugging_evaluation + public_attribution scopes). An empty
+        // consent_scopes/allowed_uses request must resolve to exactly the
+        // uses those floor scopes imply — [debugging, evaluation,
+        // aggregate_analytics] — never the full uses ceiling by coincidence.
+        let tenant_id = "test-device-tenant-floor";
+        let mut body = device_claim_request_body(tenant_id, None);
+        body["consent_scopes"] = json!([]);
+        body["allowed_uses"] = json!([]);
+        let (status, response, _device_key_id) =
+            post_signed_device_claim_for_tenant(tenant_id, body).await;
+        assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
+        let claims = decode_issued_claims(&response);
+        assert_eq!(
+            claims["allowed_uses"],
+            json!(["debugging", "evaluation", "aggregate_analytics"]),
+            "empty request on hardcoded floor must grant exactly the implied uses"
         );
     }
 

@@ -273,18 +273,23 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
         .to_string_lossy();
     let tmp_path = dir.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
     {
+        #[cfg(unix)]
+        let mut tmp = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .with_context(|| format!("creating temp file {}", tmp_path.display()))?
+        };
+        #[cfg(not(unix))]
         let mut tmp = std::fs::File::create(&tmp_path)
             .with_context(|| format!("creating temp file {}", tmp_path.display()))?;
         tmp.write_all(body)
             .with_context(|| format!("writing temp file {}", tmp_path.display()))?;
         tmp.sync_all()
             .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting permissions on {}", tmp_path.display()))?;
     }
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);

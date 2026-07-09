@@ -14,6 +14,7 @@ use trace_commons_protocol::onboarding::user_subject_hash;
 use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
+use crate::consent::{prompt_consent_answers, scopes_from_answers, validate_scopes};
 use crate::identity::{
     DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
 };
@@ -21,6 +22,7 @@ use crate::issuer_client::IssuerClient;
 use crate::picker;
 use crate::source::{SessionRef, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
+use trace_commons_protocol::trace_contribution::ConsentScope;
 
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
@@ -28,11 +30,19 @@ use crate::submit::{self, SubmitOptions, SubmitOutcome};
 /// When `allowed_hosts` is provided it takes precedence over the
 /// `TRACE_COMMONS_ALLOWED_HOSTS` env fallback and is persisted into the
 /// saved config so every later command enforces it.
+///
+/// `scopes` (a CSV of wire-name consent scopes) is validated before any
+/// network call. When absent, an interactive terminal prompts for consent
+/// choices; a non-interactive session falls back to the
+/// `debugging_evaluation` floor only.
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
     allowed_hosts: Option<&str>,
+    scopes: Option<&str>,
 ) -> Result<()> {
+    let consent_scopes = resolve_consent_scopes(scopes)?;
+
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
 
     let Some(grant_b64) = grant_b64 else {
@@ -62,7 +72,7 @@ pub async fn login(
         instance_id: grant.attestation.instance_id.clone(),
         user_subject: grant.attestation.user_subject.clone(),
         device_key_id: response.device_key_id,
-        consent_scopes: vec!["debugging_evaluation".to_string()],
+        consent_scopes: consent_scopes.clone(),
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
     };
@@ -72,12 +82,34 @@ pub async fn login(
 
     println!("enrolled: tenant_id={}", cfg.tenant_id);
     println!(
-        "Traces you submit carry the debugging_evaluation consent scope; secrets are removed \
-         locally (including tool payloads), and the server re-applies the same deterministic \
+        "Traces you submit carry the {} consent scope(s); secrets are removed locally \
+         (including tool payloads), and the server re-applies the same deterministic \
          redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
-         message text only."
+         message text only.",
+        consent_scopes.join(", ")
     );
     Ok(())
+}
+
+/// Resolve the consent scopes to request for this login: an explicit
+/// `--scopes` CSV wins (validated immediately, before any network call); a
+/// TTY prompts interactively; a non-interactive session with no `--scopes`
+/// falls back to the `debugging_evaluation` floor only.
+fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
+    if let Some(csv) = scopes {
+        let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
+        return validate_scopes(&names).context("invalid --scopes value");
+    }
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout();
+        let answers = prompt_consent_answers(&mut stdin, &mut stdout)
+            .context("reading interactive consent answers")?;
+        Ok(scopes_from_answers(answers))
+    } else {
+        Ok(vec!["debugging_evaluation".to_string()])
+    }
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
@@ -393,6 +425,24 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     Ok(())
 }
 
+/// Render a comma-joined list of wire-name consent scopes for the status
+/// table; an empty slice renders as `"-"`.
+pub(crate) fn scopes_cell(scopes: &[ConsentScope]) -> String {
+    if scopes.is_empty() {
+        return "-".to_string();
+    }
+    scopes
+        .iter()
+        .map(|scope| {
+            serde_json::to_value(scope)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Print server-side status for every locally recorded submission receipt.
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
@@ -412,6 +462,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
             vec![
                 u.submission_id.to_string(),
                 u.status.clone(),
+                scopes_cell(&u.consent_scopes),
                 format!("{:.2}", u.credit_points_pending),
                 u.credit_points_final
                     .map(|f| format!("{f:.2}"))
@@ -421,7 +472,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
         .collect();
     print_table(
         &mut std::io::stdout(),
-        &["SUBMISSION", "STATUS", "PENDING", "FINAL"],
+        &["SUBMISSION", "STATUS", "SCOPES", "PENDING", "FINAL"],
         &rows,
     )
     .context("printing status table")?;
@@ -431,6 +482,19 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scopes_cell_renders_wire_names() {
+        use trace_commons_protocol::trace_contribution::ConsentScope;
+        assert_eq!(scopes_cell(&[]), "-");
+        assert_eq!(
+            scopes_cell(&[
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::ModelTraining
+            ]),
+            "debugging_evaluation,model_training"
+        );
+    }
 
     #[test]
     fn submit_picker_marks_already_submitted_fixture_session() {
@@ -470,6 +534,27 @@ mod tests {
         assert_eq!(row.last().unwrap(), "?");
     }
 
+    #[test]
+    fn scopes_flag_error_is_flag_scoped_not_stored_config() {
+        let err = resolve_consent_scopes(Some("bogus")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--scopes"), "{msg}");
+        assert!(
+            msg.contains("bogus") && msg.contains("model_training"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stored config"), "{msg}");
+    }
+
+    #[test]
+    fn non_tty_default_falls_back_to_debugging_evaluation_only() {
+        // `cargo test` runs with stdin that is not a terminal, so this
+        // exercises the non-interactive silent-default branch rather than
+        // the interactive prompt path.
+        let scopes = resolve_consent_scopes(None).unwrap();
+        assert_eq!(scopes, vec!["debugging_evaluation".to_string()]);
+    }
+
     #[tokio::test]
     async fn login_rejects_issuer_host_off_allowlist_and_saves_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -490,7 +575,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), Some("api.example"))
+        let err = login(&store, Some(&grant.encode()), Some("api.example"), None)
             .await
             .unwrap_err();
         let msg = format!("{err:#}");

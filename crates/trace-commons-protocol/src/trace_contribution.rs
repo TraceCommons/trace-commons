@@ -3805,6 +3805,8 @@ pub struct TraceSubmissionStatusUpdate {
     pub explanation: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delayed_credit_explanations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consent_scopes: Vec<ConsentScope>,
 }
 
 pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelope) {

@@ -55,6 +55,21 @@ impl TraceSource for ClaudeCodeSource {
             if !is_dir {
                 continue;
             }
+            // Claude Code encodes the session's cwd as a directory name by
+            // replacing every '/' with '-' (e.g. `/Users/testuser/code/myproj`
+            // becomes `-Users-testuser-code-myproj`). As a best-effort
+            // placeholder for discovery listings, take the segment after the
+            // final '-' as the project basename. This is unreliable for
+            // hyphenated project names (a project literally named "my-proj"
+            // would only capture "proj" here) -- `load()` overrides this with
+            // the true cwd basename read from the session file itself, so
+            // this is only ever seen before a session has been loaded.
+            let encoded_dir_name = project_dir.file_name();
+            let discovery_project = encoded_dir_name
+                .to_str()
+                .and_then(|name| name.rsplit('-').next())
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| segment.to_string());
             let Ok(entries) = std::fs::read_dir(project_dir.path()) else {
                 continue;
             };
@@ -84,7 +99,7 @@ impl TraceSource for ClaudeCodeSource {
                 sessions.push(SessionRef {
                     source: SOURCE_CLAUDE_CODE,
                     path,
-                    project: None,
+                    project: discovery_project.clone(),
                     started_at,
                     size_bytes: metadata.len(),
                 });
@@ -364,6 +379,10 @@ mod tests {
         let found = src.discover().unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].source, "claude-code");
+        // Fixture dir is `-Users-testuser-code-myproj`; the discovery-time
+        // heuristic takes the segment after the final '-' as a best-effort
+        // project basename, ahead of `load()` reading the true cwd.
+        assert_eq!(found[0].project, Some("myproj".to_string()));
     }
 
     #[test]

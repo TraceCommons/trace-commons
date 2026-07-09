@@ -24,8 +24,8 @@ use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
     RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TokenCounts,
-    TraceChannel, TraceContributionEnvelope, TraceContributionEventType, TraceRedactor,
-    ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
+    TraceAllowedUse, TraceChannel, TraceContributionEnvelope, TraceContributionEventType,
+    TraceRedactor, ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
     synthetic_privacy_filter_canary_values,
 };
 
@@ -259,7 +259,14 @@ pub fn build_raw_contribution(
         },
         consent: ConsentMetadata {
             policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![ConsentScope::DebuggingEvaluation],
+            scopes: {
+                let parsed = parse_scope_names(&cfg.consent_scopes);
+                if parsed.is_empty() {
+                    vec![ConsentScope::DebuggingEvaluation]
+                } else {
+                    parsed
+                }
+            },
             message_text_included: true,
             tool_payloads_included: true,
             revocable: true,
@@ -282,6 +289,54 @@ pub fn build_raw_contribution(
         embedding_analysis: None,
         value: ValueMetadata::default(),
     }
+}
+
+/// Parse wire names to typed scopes; unknown names are skipped (they were
+/// validated at login/claim time) — never panics.
+pub fn parse_scope_names(names: &[String]) -> Vec<ConsentScope> {
+    names
+        .iter()
+        .filter_map(|name| match name.as_str() {
+            "debugging_evaluation" => Some(ConsentScope::DebuggingEvaluation),
+            "benchmark_only" => Some(ConsentScope::BenchmarkOnly),
+            "ranking_training" => Some(ConsentScope::RankingTraining),
+            "model_training" => Some(ConsentScope::ModelTraining),
+            "public_attribution" => Some(ConsentScope::PublicAttribution),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Same for allowed uses (wire names -> TraceAllowedUse, unknown skipped).
+pub fn parse_use_names(names: &[String]) -> Vec<TraceAllowedUse> {
+    names
+        .iter()
+        .filter_map(|name| match name.as_str() {
+            "debugging" => Some(TraceAllowedUse::Debugging),
+            "evaluation" => Some(TraceAllowedUse::Evaluation),
+            "benchmark_generation" => Some(TraceAllowedUse::BenchmarkGeneration),
+            "ranking_model_training" => Some(TraceAllowedUse::RankingModelTraining),
+            "model_training" => Some(TraceAllowedUse::ModelTraining),
+            "aggregate_analytics" => Some(TraceAllowedUse::AggregateAnalytics),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Overwrite the envelope's consent metadata and trace card with the
+/// claim-granted set. Called after redaction, before size check/upload.
+pub fn apply_granted_scopes(
+    envelope: &mut TraceContributionEnvelope,
+    granted_scopes: &[ConsentScope],
+    granted_uses: &[TraceAllowedUse],
+) {
+    envelope.consent.scopes = granted_scopes.to_vec();
+    envelope.trace_card.allowed_uses = granted_uses.to_vec();
+    envelope.trace_card.consent_scope = granted_scopes
+        .iter()
+        .find(|s| **s != ConsentScope::PublicAttribution)
+        .copied()
+        .unwrap_or(ConsentScope::DebuggingEvaluation);
 }
 
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
@@ -535,6 +590,32 @@ mod tests {
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
                 .unwrap();
         canary_self_test_async(&redactor).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn granted_scopes_overwrite_consent_and_trace_card() {
+        let t = fixture_transcript();
+        let cfg = test_config();
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        let scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ];
+        let uses = vec![
+            trace_commons_protocol::trace_contribution::TraceAllowedUse::Debugging,
+            trace_commons_protocol::trace_contribution::TraceAllowedUse::ModelTraining,
+        ];
+        apply_granted_scopes(&mut envelope, &scopes, &uses);
+        assert_eq!(envelope.consent.scopes, scopes);
+        assert_eq!(envelope.trace_card.allowed_uses, uses);
+        assert_eq!(
+            envelope.trace_card.consent_scope,
+            ConsentScope::DebuggingEvaluation
+        );
     }
 
     #[tokio::test]

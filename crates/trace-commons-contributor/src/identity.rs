@@ -189,18 +189,43 @@ pub struct SignedClaimRequest {
 /// Build and sign the upload-claim request body for `cfg`, using `device`'s
 /// key. The body is serialized exactly once; the returned `body` string is
 /// the same bytes the signature covers.
+///
+/// Uses `cfg.consent_scopes` (validated) and their implied allowed uses.
+/// Callers that need a different scopes/uses request (e.g. an empty request
+/// for a status read-back, which the server resolves to the full grant
+/// ceiling) should use [`build_signed_claim_request_with_scopes`] directly.
 pub fn build_signed_claim_request(
     cfg: &ContributorConfig,
     device: &DeviceIdentity,
     now: DateTime<Utc>,
+) -> Result<SignedClaimRequest> {
+    let consent_scopes = crate::consent::validate_scopes(&cfg.consent_scopes)
+        .context("invalid consent scopes in stored config (re-run login to fix)")?;
+    let allowed_uses = crate::consent::scopes_to_allowed_uses(&consent_scopes);
+    build_signed_claim_request_with_scopes(cfg, device, now, &consent_scopes, &allowed_uses)
+}
+
+/// Build and sign the upload-claim request body for `cfg`, using `device`'s
+/// key, but with explicit `scopes`/`uses` instead of deriving them from
+/// `cfg.consent_scopes`. An empty `scopes`/`uses` pair is a valid request:
+/// the issuer resolves an empty request to the caller's full grant ceiling
+/// (see `trace_upload_claim_issuer::resolve_granted_uses`), which is exactly
+/// what a status read-back wants regardless of what scopes were narrowed for
+/// submission.
+pub fn build_signed_claim_request_with_scopes(
+    cfg: &ContributorConfig,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+    scopes: &[String],
+    uses: &[String],
 ) -> Result<SignedClaimRequest> {
     let subject = user_subject_hash(&cfg.user_subject);
     let payload = serde_json::json!({
         "schema_version": CLAIM_REQUEST_SCHEMA_VERSION,
         "tenant_id": cfg.tenant_id,
         "audience": cfg.audience,
-        "consent_scopes": ["debugging_evaluation"],
-        "allowed_uses": ["debugging", "evaluation"],
+        "consent_scopes": scopes,
+        "allowed_uses": uses,
         "subject": subject,
         "requested_at": now.to_rfc3339(),
     });
@@ -294,7 +319,7 @@ mod tests {
             instance_id: "instance-1".into(),
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
+            consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
         };
@@ -305,6 +330,13 @@ mod tests {
             "ironclaw.trace_upload_claim_request.v1"
         );
         assert_eq!(parsed["tenant_id"], "tenant-abc");
+        assert_eq!(
+            parsed["consent_scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+        let allowed_uses = parsed["allowed_uses"].as_array().unwrap();
+        assert!(allowed_uses.contains(&serde_json::json!("model_training")));
+        assert!(allowed_uses.contains(&serde_json::json!("aggregate_analytics")));
         // Subject is the sha256 form, never the raw user_subject.
         let subject = parsed["subject"].as_str().unwrap();
         assert!(subject.starts_with("sha256:"));

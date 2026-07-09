@@ -17,10 +17,13 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    build_raw_contribution, build_redactor_with, canary_self_test_async, envelope_size_ok,
-    near_ai_settings_from_env, redact_to_envelope,
+    apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
+    envelope_size_ok, near_ai_settings_from_env, parse_scope_names, parse_use_names,
+    redact_to_envelope,
 };
-use crate::identity::{DeviceIdentity, build_signed_claim_request};
+use crate::identity::{
+    DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
+};
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
 
@@ -119,7 +122,7 @@ pub async fn submit_sessions(
 
         let now = Utc::now();
         let raw = build_raw_contribution(&transcript, &effective_cfg, now);
-        let envelope = match redact_to_envelope(&redactor, raw).await {
+        let mut envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {
                 outcomes.push(SubmitOutcome::Refused {
@@ -154,16 +157,48 @@ pub async fn submit_sessions(
         if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
             match mint_claim(&issuer, cfg, &device, now).await {
                 Ok(token) => claim = Some(token),
-                Err(_) => {
-                    outcomes.push(SubmitOutcome::Failed {
-                        reason_label: "claim-mint-failed".to_string(),
-                    });
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("consent scopes not permitted")
+                        || msg.contains("allowed uses not permitted")
+                    {
+                        println!("hint: re-run login --scopes with a narrower selection");
+                        outcomes.push(SubmitOutcome::Refused {
+                            reason_label: "scopes-not-permitted".to_string(),
+                        });
+                    } else {
+                        outcomes.push(SubmitOutcome::Failed {
+                            reason_label: "claim-mint-failed".to_string(),
+                        });
+                    }
                     continue;
                 }
             }
         }
 
-        match upload_with_retry(cfg, &issuer, &device, &mut claim, &envelope).await {
+        let token = claim
+            .as_ref()
+            .expect("a claim must be minted before applying granted scopes")
+            .clone();
+        stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
+
+        if envelope_size_ok(&envelope).is_err() {
+            outcomes.push(SubmitOutcome::Refused {
+                reason_label: "session-too-large".to_string(),
+            });
+            continue;
+        }
+
+        match upload_with_retry(
+            cfg,
+            &issuer,
+            &device,
+            &mut claim,
+            &mut envelope,
+            &effective_cfg,
+        )
+        .await
+        {
             Ok(receipt) => {
                 let r = Receipt {
                     submission_id: envelope.submission_id,
@@ -202,7 +237,11 @@ pub async fn status(
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
     let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
         .context("building issuer client")?;
-    let token = mint_claim(&issuer, cfg, &device, Utc::now())
+    // Mint with an empty scopes/uses request rather than the submit path's
+    // consent_scopes: the issuer resolves an empty request to the caller's
+    // full grant ceiling, so status read-back works regardless of what
+    // scopes were narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
         .await
         .context("minting upload claim for status lookup")?;
     let client = build_ingest_client(cfg, &token).context("building ingest client")?;
@@ -246,6 +285,47 @@ async fn mint_claim(
     issuer.mint_claim(&cfg.issuer_url, &signed).await
 }
 
+/// Mint a claim for a status read-back: an empty consent_scopes/allowed_uses
+/// request, which the issuer resolves to the caller's full grant ceiling
+/// regardless of what was requested for submission.
+async fn mint_status_claim(
+    issuer: &IssuerClient,
+    cfg: &ContributorConfig,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+) -> Result<ClaimToken> {
+    let signed = build_signed_claim_request_with_scopes(cfg, device, now, &[], &[])
+        .context("building signed status claim request")?;
+    issuer.mint_claim(&cfg.issuer_url, &signed).await
+}
+
+/// Stamp `envelope` with the granted consent scopes/uses from `token`,
+/// falling back to the requested (`effective_cfg`) scopes/uses when the
+/// issuer is old enough not to echo them back (empty `consent_scopes`).
+/// Shared between the initial stamp before the first upload attempt and the
+/// restamp after a claim re-mint, so both paths derive the grant the same
+/// way.
+fn stamp_granted_scopes(
+    envelope: &mut TraceContributionEnvelope,
+    effective_cfg: &ContributorConfig,
+    token: &ClaimToken,
+) {
+    let (granted_scopes, granted_uses) = if token.consent_scopes.is_empty() {
+        (
+            parse_scope_names(&effective_cfg.consent_scopes),
+            parse_use_names(&crate::consent::scopes_to_allowed_uses(
+                &effective_cfg.consent_scopes,
+            )),
+        )
+    } else {
+        (
+            parse_scope_names(&token.consent_scopes),
+            parse_use_names(&token.allowed_uses),
+        )
+    };
+    apply_granted_scopes(envelope, &granted_scopes, &granted_uses);
+}
+
 fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
@@ -262,12 +342,20 @@ fn build_ingest_client(
 /// Upload `envelope`, retrying transient transport failures up to 3 attempts
 /// total (1s then 4s backoff) and, on a 401/403, re-minting the claim once
 /// and retrying once more before giving up.
+///
+/// A re-mint can return narrower (or otherwise different) granted scopes
+/// than the claim that was active when `envelope` was first stamped. To
+/// avoid resending an envelope stamped with a stale grant, the envelope is
+/// restamped with the new token's granted scopes/uses (via
+/// `stamp_granted_scopes`, the same helper used before the first attempt)
+/// and re-checked for size before the retry.
 async fn upload_with_retry(
     cfg: &ContributorConfig,
     issuer: &IssuerClient,
     device: &DeviceIdentity,
     claim: &mut Option<ClaimToken>,
-    envelope: &TraceContributionEnvelope,
+    envelope: &mut TraceContributionEnvelope,
+    effective_cfg: &ContributorConfig,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -287,7 +375,7 @@ async fn upload_with_retry(
                 Method::POST,
                 "/v1/traces",
                 &[],
-                Some(envelope),
+                Some(&*envelope),
             )
             .await;
 
@@ -307,7 +395,13 @@ async fn upload_with_retry(
                 }
                 remint_attempted = true;
                 match mint_claim(issuer, cfg, device, Utc::now()).await {
-                    Ok(new_token) => *claim = Some(new_token),
+                    Ok(new_token) => {
+                        stamp_granted_scopes(envelope, effective_cfg, &new_token);
+                        if envelope_size_ok(envelope).is_err() {
+                            return Err("session-too-large".to_string());
+                        }
+                        *claim = Some(new_token);
+                    }
                     Err(_) => return Err("auth-failed".to_string()),
                 }
             }
@@ -358,7 +452,33 @@ mod tests {
                     "token_type": "Bearer",
                     "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
                     "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation", "model_training"],
+                    "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
                 }))
+            }),
+        )
+    }
+
+    fn stub_issuer_refuses_scopes() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "consent scopes not permitted"})),
+                )
+            }),
+        )
+    }
+
+    fn stub_issuer_refuses_uses() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "allowed uses not permitted"})),
+                )
             }),
         )
     }
@@ -415,7 +535,7 @@ mod tests {
             instance_id: "instance-1".into(),
             user_subject: "alice".into(),
             device_key_id: device_key_id.into(),
-            consent_scopes: vec!["debugging_evaluation".into()],
+            consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
         }
@@ -451,6 +571,10 @@ mod tests {
                 !serde_json::to_string(sent)
                     .unwrap()
                     .contains("sk-fake-fixture-secret-1234")
+            );
+            assert_eq!(
+                sent["consent"]["scopes"],
+                serde_json::json!(["debugging_evaluation", "model_training"])
             );
         }
 
@@ -509,6 +633,367 @@ mod tests {
             .await
             .unwrap();
         assert!(store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    /// Grants strictly less than requested: config asks for
+    /// debugging_evaluation + model_training, issuer grants only
+    /// debugging_evaluation.
+    fn stub_issuer_narrows_grant() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation"],
+                    "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+                }))
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_stamped_with_narrowed_grant_when_server_grants_less() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_narrows_grant()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        // cfg_for requests debugging_evaluation + model_training; the stub
+        // issuer grants only debugging_evaluation. The envelope must carry
+        // the granted (narrower) set, never the requested one.
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 1);
+        let sent = &received_guard[0];
+        assert_eq!(
+            sent["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation"])
+        );
+        let allowed_uses = sent["trace_card"]["allowed_uses"].as_array().unwrap();
+        assert!(
+            !allowed_uses
+                .iter()
+                .any(|u| u == &serde_json::json!("model_training"))
+        );
+    }
+
+    /// An issuer that predates the consent_scopes/allowed_uses echo: the
+    /// claim response omits both fields entirely.
+    fn stub_issuer_omits_scope_echo() -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                }))
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_stamped_with_requested_scopes_when_issuer_omits_echo() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_omits_scope_echo()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        // cfg_for requests debugging_evaluation + model_training; the stub
+        // issuer's claim response has no consent_scopes/allowed_uses fields
+        // at all, so the fallback must stamp the requested set verbatim.
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 1);
+        let sent = &received_guard[0];
+        assert_eq!(
+            sent["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_refuses_scopes()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Refused { reason_label } => {
+                assert_eq!(reason_label, "scopes-not-permitted");
+            }
+            other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uses_refusal_from_issuer_yields_refused_outcome_with_no_deliveries() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_refuses_uses()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Refused { reason_label } => {
+                assert_eq!(reason_label, "scopes-not-permitted");
+            }
+            other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    /// Mints `["debugging_evaluation", "model_training"]` on the first call
+    /// and the narrower `["debugging_evaluation"]` on every call after —
+    /// simulating a grant narrowed between the first and second mint.
+    fn stub_issuer_narrows_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let mint_calls = mint_calls.clone();
+                async move {
+                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        Json(serde_json::json!({
+                            "access_token": "stub-claim-jwt",
+                            "token_type": "Bearer",
+                            "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                            "expires_in": 300,
+                            "consent_scopes": ["debugging_evaluation", "model_training"],
+                            "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "access_token": "stub-claim-jwt",
+                            "token_type": "Bearer",
+                            "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                            "expires_in": 300,
+                            "consent_scopes": ["debugging_evaluation"],
+                            "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+                        }))
+                    }
+                }
+            }),
+        )
+    }
+
+    /// Refuses the first POST with 401 (forcing a claim re-mint + retry) and
+    /// accepts every POST after, recording every received body so the test
+    /// can inspect what the *retried* request actually carried.
+    fn stub_ingest_401_then_200(
+        received: Arc<Mutex<Vec<serde_json::Value>>>,
+        post_calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Router {
+        use axum::response::IntoResponse;
+        Router::new().route(
+            "/v1/traces",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let received = received.clone();
+                let post_calls = post_calls.clone();
+                async move {
+                    let n = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    received.lock().unwrap().push(body);
+                    if n == 0 {
+                        axum::http::StatusCode::UNAUTHORIZED.into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn envelope_is_restamped_after_claim_remint_on_auth_failure() {
+        use std::sync::atomic::AtomicUsize;
+
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+
+        let issuer = spawn(stub_issuer_narrows_on_remint(mint_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(
+            received.clone(),
+            post_calls.clone(),
+        ))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcomes[0], SubmitOutcome::Submitted { .. }),
+            "expected Submitted after remint+retry, got {:?}",
+            outcomes[0]
+        );
+        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let received_guard = received.lock().unwrap();
+        assert_eq!(
+            received_guard.len(),
+            2,
+            "the 401 attempt and the successful retry must both reach ingest"
+        );
+        // The envelope actually delivered on the second (200) POST must carry
+        // the NEW token's narrower grant, not the original wider one it was
+        // first stamped with.
+        let restamped = &received_guard[1];
+        assert_eq!(
+            restamped["consent"]["scopes"],
+            serde_json::json!(["debugging_evaluation"]),
+            "retried envelope must be restamped with the re-minted (narrower) scopes: {restamped}"
+        );
+        let allowed_uses = restamped["trace_card"]["allowed_uses"].as_array().unwrap();
+        assert!(
+            !allowed_uses
+                .iter()
+                .any(|u| u == &serde_json::json!("model_training")),
+            "retried envelope must not retain model_training from the stale claim: {restamped}"
+        );
+    }
+
+    /// Records every claim-request body it receives (as raw JSON) before
+    /// responding with a fixed claim, so tests can inspect what scopes/uses
+    /// were actually requested.
+    fn stub_issuer_recording_requests(received: Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move |body: String| {
+                let received = received.clone();
+                async move {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    received.lock().unwrap().push(parsed);
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": ["debugging_evaluation", "model_training"],
+                        "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                    }))
+                }
+            }),
+        )
+    }
+
+    fn stub_submission_status_ingest() -> Router {
+        Router::new().route(
+            "/v1/contributors/me/submission-status",
+            post(|Json(req): Json<serde_json::Value>| async move {
+                let ids = req["submission_ids"].as_array().unwrap();
+                let updates: Vec<serde_json::Value> = ids
+                    .iter()
+                    .map(|id| {
+                        serde_json::json!({
+                            "submission_id": id,
+                            "trace_id": id,
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                        })
+                    })
+                    .collect();
+                Json(updates)
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn status_mints_claim_with_empty_scopes_and_uses() {
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_submission_status_ingest()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        // Seed a receipt so status() actually mints a claim and calls out.
+        store
+            .append_receipt(&crate::config::Receipt {
+                submission_id: Uuid::new_v4(),
+                session_hash: "sha256:test".to_string(),
+                source: "claude-code".to_string(),
+                submitted_at: Utc::now(),
+                status: "submitted".to_string(),
+            })
+            .unwrap();
+
+        let updates = status(&store, &cfg).await.unwrap();
+        assert_eq!(updates.len(), 1);
+
+        let requests = claim_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert_eq!(
+            req["consent_scopes"],
+            serde_json::json!([]),
+            "status claim request must not request the submit-path's scopes: {req}"
+        );
+        assert_eq!(
+            req["allowed_uses"],
+            serde_json::json!([]),
+            "status claim request must not request the submit-path's uses: {req}"
+        );
     }
 
     #[tokio::test]
