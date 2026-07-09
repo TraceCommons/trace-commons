@@ -66,7 +66,7 @@ use trace_commons_server::trace_artifact_store::{
 #[cfg(test)]
 use trace_commons_server::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
 use trace_commons_server::trace_corpus_storage::{
-    TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
+    GateWorkItem, TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
     TraceAuditAction as StorageTraceAuditAction,
     TraceAuditEventRecord as StorageTraceAuditEventRecord,
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
@@ -104,7 +104,6 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
-    GateWorkItem,
     TraceGateDecisionRow as StorageTraceGateDecisionRow,
     TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
@@ -5323,10 +5322,8 @@ fn parse_perplexity_score_driver_config_from_env()
         1,
         1_000,
     )?;
-    let skip_duplicates = parse_optional_scheduler_bool_env(
-        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES,
-        true,
-    )?;
+    let skip_duplicates =
+        parse_optional_scheduler_bool_env(TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES, true)?;
     let skip_duplicate_threshold_micros = parse_optional_scheduler_i64_env(
         TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
         TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
@@ -35407,10 +35404,9 @@ async fn run_perplexity_score_driver_tick(
     state: Arc<AppState>,
     config: &PerplexityScoreDriverConfig,
 ) -> anyhow::Result<PerplexityDriverTickSummary> {
-    let db = state
-        .db_mirror
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("perplexity score driver requires a configured DB mirror"))?;
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("perplexity score driver requires a configured DB mirror")
+    })?;
     let items = db
         .list_submissions_needing_gate_decision(
             Utc::now(),
@@ -44844,7 +44840,8 @@ async fn evaluate_and_record_gate(
             .to_string(),
         encrypted_at: object_ref.created_at,
     };
-    let artifact = artifact_store.read_encrypted_artifact(&tenant_storage_ref(tenant_id), &receipt)?;
+    let artifact =
+        artifact_store.read_encrypted_artifact(&tenant_storage_ref(tenant_id), &receipt)?;
     let ciphertext =
         base64::engine::general_purpose::STANDARD.decode(artifact.ciphertext_base64.as_bytes())?;
     let wrapped_dek = artifact
@@ -45062,12 +45059,8 @@ async fn score_one_submission(
             .await
         {
             Ok(Some(cached)) => {
-                let row = build_cost_control_decision_row(
-                    item.submission_id,
-                    now,
-                    "cached",
-                    cached,
-                );
+                let row =
+                    build_cost_control_decision_row(item.submission_id, now, "cached", cached);
                 let decision_id = row.decision_id;
                 return match db.insert_trace_gate_decision(&item.tenant_id, row).await {
                     Ok(()) => GateOutcome::Cached { decision_id },
@@ -45130,7 +45123,9 @@ async fn gate_evaluate_worker_handler(
             let msg = format!("{err}");
             if msg.contains("DstackGateServiceUnavailable") {
                 api_error(StatusCode::SERVICE_UNAVAILABLE, msg)
-            } else if msg == TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF || msg == "trace submission not found" {
+            } else if msg == TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF
+                || msg == "trace submission not found"
+            {
                 api_error(StatusCode::NOT_FOUND, msg)
             } else if msg == "trace gate worker requires a configured DB mirror"
                 || msg == "trace gate worker requires a configured artifact store"
@@ -45144,35 +45139,41 @@ async fn gate_evaluate_worker_handler(
             }
         })?;
 
-    let (decision_id, perplexity_passed, novelty_passed, vector_entry_id, gate_policy_version, gate_version_hash) =
-        match outcome {
-            GateOutcome::Scored {
-                decision_id,
-                perplexity_passed,
-                novelty_passed,
-                vector_entry_id,
-                gate_policy_version,
-                gate_version_hash,
-            } => (
-                decision_id,
-                perplexity_passed,
-                novelty_passed,
-                vector_entry_id,
-                gate_policy_version,
-                gate_version_hash,
-            ),
-            GateOutcome::Failed { label } => {
-                return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
-            }
-            GateOutcome::SkippedDuplicate { .. } | GateOutcome::Cached { .. } => {
-                // evaluate_and_record_gate never produces these variants; the
-                // cost-control wrapper that would is not yet wired into this
-                // HTTP handler.
-                return Err(internal_error(anyhow::anyhow!(
-                    "unexpected gate outcome variant from evaluate_and_record_gate"
-                )));
-            }
-        };
+    let (
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+    ) = match outcome {
+        GateOutcome::Scored {
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version,
+            gate_version_hash,
+        } => (
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version,
+            gate_version_hash,
+        ),
+        GateOutcome::Failed { label } => {
+            return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
+        }
+        GateOutcome::SkippedDuplicate { .. } | GateOutcome::Cached { .. } => {
+            // evaluate_and_record_gate never produces these variants; the
+            // cost-control wrapper that would is not yet wired into this
+            // HTTP handler.
+            return Err(internal_error(anyhow::anyhow!(
+                "unexpected gate outcome variant from evaluate_and_record_gate"
+            )));
+        }
+    };
 
     // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
     // credit-ledger event through the same pipeline that the operator-facing

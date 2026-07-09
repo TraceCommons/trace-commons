@@ -235,12 +235,11 @@ impl PgBackend {
         // pool. Mirrors the login-resolver pool above exactly.
         let gate_driver_pool = match config.gate_driver_url() {
             Some(gate_driver_url) => {
-                let gate_driver_config =
-                    gate_driver_url
-                        .parse::<tokio_postgres::Config>()
-                        .map_err(|e| {
-                            DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
-                        })?;
+                let gate_driver_config = gate_driver_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
+                    })?;
                 let gate_driver_manager =
                     deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
                 let gate_driver_pool = Pool::builder(gate_driver_manager).max_size(2).build()?;
@@ -3566,9 +3565,10 @@ impl Database for PgBackend {
         backoff_base_seconds: i64,
         limit: i64,
     ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
-        let pool = self.gate_driver_pool.as_ref().ok_or_else(|| {
-            DatabaseError::Pool("gate-driver pool not configured".to_string())
-        })?;
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
         // role's permissive cross-tenant SELECT policies (migration V36) are

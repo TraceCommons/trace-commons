@@ -130,6 +130,7 @@ procedure.
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | optional | — | Rate-limit budget per tenant. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
 | `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. |
+| `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver`. See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
 
 ## 8. Auth / signed-token surface
 
@@ -303,6 +304,24 @@ procedure.
 | `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX` | optional | `false` | Drive NEAR outbox confirm. |
 | `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID` | optional | — | NEAR contract id. |
 | `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_LIMIT` | optional | — | Row cap. |
+
+### 12a. Perplexity scoring driver
+
+Unlike the other schedulers above, this driver has no bearer-token gate — it is
+driven entirely by `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` plus the separate
+`TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` pool (§7). See
+[`perplexity-scoring-driver.md`](perplexity-scoring-driver.md) for the full
+runbook, including why the floor stays 0.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` | optional | `false` | Toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | optional | `5` | Submissions enumerated per tick. Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it. Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Novelty-score threshold (micros) above which a submission is treated as a cache-cost duplicate and skipped. Clamped to `[0, 1000000]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a scoring failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
 
 ## 13. External worker adapter surface
 

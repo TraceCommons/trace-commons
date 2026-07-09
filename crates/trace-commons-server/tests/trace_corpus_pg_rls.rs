@@ -19,14 +19,13 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceGateDecisionRow, TraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
-    TraceRankingCalibrationDatasetWrite,
-    TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
-    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
-    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite,
-    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
-    TraceRankingWorkerRunWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
+    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemStatus, TraceRetentionJobItemWrite, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
@@ -5252,7 +5251,9 @@ async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated
     )
     .await
     .expect("insert gate evaluation attempts row");
-    tx.commit().await.expect("commit gate driver setup transaction");
+    tx.commit()
+        .await
+        .expect("commit gate driver setup transaction");
 
     // Default role, no tenant context: forced RLS must hide the row entirely.
     let rows = client
@@ -5315,7 +5316,9 @@ async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated
             &[&tenant_id],
         )
         .await;
-    tx.commit().await.expect("commit gate driver cleanup transaction");
+    tx.commit()
+        .await
+        .expect("commit gate driver cleanup transaction");
 }
 
 /// The perplexity scoring driver's enumeration query

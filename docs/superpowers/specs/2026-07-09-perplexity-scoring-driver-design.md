@@ -1,7 +1,7 @@
 # Perplexity Scoring Driver — Design
 
 Date: 2026-07-09
-Status: Approved
+Status: Implemented
 
 ## Purpose
 
