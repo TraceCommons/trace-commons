@@ -2776,13 +2776,25 @@ mod tests {
     #[test]
     fn tenant_access_grant_env_decouples_read_from_require() {
         // Neither env: no DB attached, no enforcement (unchanged default).
-        assert_eq!(super::tenant_access_grant_env_decision(false, false), (false, false));
+        assert_eq!(
+            super::tenant_access_grant_env_decision(false, false),
+            (false, false)
+        );
         // REQUIRE alone: attach DB and enforce (legacy behavior preserved).
-        assert_eq!(super::tenant_access_grant_env_decision(true, false), (true, true));
+        assert_eq!(
+            super::tenant_access_grant_env_decision(true, false),
+            (true, true)
+        );
         // GRANT_DB alone: attach DB for reading, do NOT enforce (the new path).
-        assert_eq!(super::tenant_access_grant_env_decision(false, true), (true, false));
+        assert_eq!(
+            super::tenant_access_grant_env_decision(false, true),
+            (true, false)
+        );
         // Both: attach and enforce.
-        assert_eq!(super::tenant_access_grant_env_decision(true, true), (true, true));
+        assert_eq!(
+            super::tenant_access_grant_env_decision(true, true),
+            (true, true)
+        );
     }
     use std::collections::BTreeMap;
     use tower::ServiceExt;
