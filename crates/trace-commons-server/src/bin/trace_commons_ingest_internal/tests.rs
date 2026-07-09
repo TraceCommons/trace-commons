@@ -71087,7 +71087,12 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
             role: StorageTraceTenantAccessGrantRole::Contributor,
             status: StorageTraceTenantAccessGrantStatus::Active,
             allowed_consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
-            allowed_uses: vec!["debugging".into(), "evaluation".into(), "model_training".into()],
+            allowed_uses: vec![
+                "debugging".into(),
+                "evaluation".into(),
+                "model_training".into(),
+                "aggregate_analytics".into(),
+            ],
             issuer: None,
             audience: None,
             subject: None,
@@ -71137,6 +71142,18 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         tenant_id: &str,
         consent_scopes: &[&str],
     ) -> (axum::http::StatusCode, serde_json::Value) {
+        post_device_claim_with_uses(config, device_key_id, device_kp, tenant_id, consent_scopes, &[])
+            .await
+    }
+
+    async fn post_device_claim_with_uses(
+        config: TraceUploadClaimIssuerConfig,
+        device_key_id: &str,
+        device_kp: &ring::signature::Ed25519KeyPair,
+        tenant_id: &str,
+        consent_scopes: &[&str],
+        allowed_uses: &[&str],
+    ) -> (axum::http::StatusCode, serde_json::Value) {
         let body_json = serde_json::json!({
             "schema_version": TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION,
             "tenant_id": tenant_id,
@@ -71144,6 +71161,7 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
             "trace_id": Uuid::new_v4(),
             "submission_id": Uuid::new_v4(),
             "consent_scopes": consent_scopes,
+            "allowed_uses": allowed_uses,
             "requested_at": Utc::now(),
         });
         let body_str = body_json.to_string();
@@ -71245,5 +71263,34 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         body["consent_scopes"],
         serde_json::json!(["debugging_evaluation", "public_attribution"]),
         "no-grant device key must fall back to the exact hardcoded floor: {body}"
+    );
+
+    // Assertion 4: an empty allowed_uses request must not expand beyond what
+    // the consented scopes imply, even though the grant's ceiling uses
+    // includes model_training. Requesting only debugging_evaluation with an
+    // empty allowed_uses array must grant exactly [debugging, evaluation,
+    // aggregate_analytics] — never model_training.
+    let (status, body) = post_device_claim_with_uses(
+        config(),
+        &granted_device_key_id,
+        &granted_kp,
+        tenant_id,
+        &["debugging_evaluation"],
+        &[],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(
+        !body["allowed_uses"]
+            .as_array()
+            .expect("allowed_uses array")
+            .iter()
+            .any(|v| v.as_str() == Some("model_training")),
+        "empty allowed_uses request must not expand beyond consented scopes: {body}"
+    );
+    assert_eq!(
+        body["allowed_uses"],
+        serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]),
+        "empty allowed_uses request must grant exactly the scope-implied uses: {body}"
     );
 }

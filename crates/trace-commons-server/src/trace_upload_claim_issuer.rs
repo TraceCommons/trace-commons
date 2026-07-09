@@ -1531,11 +1531,8 @@ impl TraceUploadClaimIssuerState {
             &ceiling_scopes,
             "consent scopes not permitted",
         )?;
-        let granted_uses = intersect_requested_with_ceiling(
-            &request.allowed_uses,
-            &ceiling_uses,
-            "allowed uses not permitted",
-        )?;
+        let granted_uses =
+            resolve_granted_uses(&request.allowed_uses, &granted_scopes, &ceiling_uses)?;
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
@@ -1590,11 +1587,8 @@ impl TraceUploadClaimIssuerState {
             &ceiling_scopes,
             "consent scopes not permitted",
         )?;
-        let granted_uses = intersect_requested_with_ceiling(
-            &request.allowed_uses,
-            &ceiling_uses,
-            "allowed uses not permitted",
-        )?;
+        let granted_uses =
+            resolve_granted_uses(&request.allowed_uses, &granted_scopes, &ceiling_uses)?;
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
@@ -2315,6 +2309,62 @@ fn intersect_requested_with_ceiling<T: PartialEq + Copy>(
     Ok(intersected)
 }
 
+/// The allowed-uses implied by a set of granted consent scopes. Used to cap
+/// what an empty `allowed_uses` request can be granted so that a device
+/// claim scoped only to (say) `debugging_evaluation` cannot walk away with
+/// `model_training` merely because the ceiling happens to include it.
+/// `aggregate_analytics` is always implied regardless of scopes. Order is
+/// stable (first-seen) and deduped.
+fn uses_implied_by_scopes(scopes: &[ConsentScope]) -> Vec<TraceAllowedUse> {
+    let mut implied = Vec::new();
+    for scope in scopes {
+        let uses: &[TraceAllowedUse] = match scope {
+            ConsentScope::DebuggingEvaluation => {
+                &[TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation]
+            }
+            ConsentScope::BenchmarkOnly => &[TraceAllowedUse::BenchmarkGeneration],
+            ConsentScope::RankingTraining => &[TraceAllowedUse::RankingModelTraining],
+            ConsentScope::ModelTraining => &[TraceAllowedUse::ModelTraining],
+            ConsentScope::PublicAttribution => &[],
+        };
+        for use_ in uses {
+            if !implied.contains(use_) {
+                implied.push(*use_);
+            }
+        }
+    }
+    if !implied.contains(&TraceAllowedUse::AggregateAnalytics) {
+        implied.push(TraceAllowedUse::AggregateAnalytics);
+    }
+    implied
+}
+
+/// Resolve the allowed-uses grant for a device-principal claim. When the
+/// request's `allowed_uses` is empty, the grant is capped to what the
+/// granted consent scopes imply (intersected with the ceiling) rather than
+/// the full ceiling — an empty-uses request must not silently expand beyond
+/// what the contributor consented to. Non-empty requests keep the existing
+/// clip/intersect-with-ceiling behavior.
+fn resolve_granted_uses(
+    requested_uses: &[TraceAllowedUse],
+    granted_scopes: &[ConsentScope],
+    ceiling_uses: &[TraceAllowedUse],
+) -> Result<Vec<TraceAllowedUse>, IssuerError> {
+    if requested_uses.is_empty() {
+        let implied = uses_implied_by_scopes(granted_scopes);
+        let intersected: Vec<TraceAllowedUse> = ceiling_uses
+            .iter()
+            .filter(|use_| implied.contains(use_))
+            .copied()
+            .collect();
+        if intersected.is_empty() {
+            return Err(IssuerError::forbidden("allowed uses not permitted"));
+        }
+        return Ok(intersected);
+    }
+    intersect_requested_with_ceiling(requested_uses, ceiling_uses, "allowed uses not permitted")
+}
+
 fn device_public_key_bytes(
     public_key: &str,
     expected_device_key_id: &str,
@@ -2725,6 +2775,80 @@ mod tests {
             .unwrap_err();
         // IssuerError renders {"error": label}; assert the label text.
         assert!(format!("{err:?}").contains("consent scopes not permitted"));
+    }
+
+    #[test]
+    fn uses_implied_by_scopes_maps_each_scope_and_always_appends_aggregate_analytics() {
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::DebuggingEvaluation]),
+            vec![
+                TraceAllowedUse::Debugging,
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::BenchmarkOnly]),
+            vec![
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::RankingTraining]),
+            vec![
+                TraceAllowedUse::RankingModelTraining,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::ModelTraining]),
+            vec![
+                TraceAllowedUse::ModelTraining,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert_eq!(
+            uses_implied_by_scopes(&[ConsentScope::PublicAttribution]),
+            vec![TraceAllowedUse::AggregateAnalytics]
+        );
+    }
+
+    #[test]
+    fn resolve_granted_uses_caps_empty_request_to_scope_implied_uses() {
+        // Ceiling includes model_training, but the granted scopes only cover
+        // debugging_evaluation — an empty allowed_uses request must not walk
+        // away with model_training just because the ceiling allows it.
+        let ceiling = vec![
+            TraceAllowedUse::Debugging,
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::ModelTraining,
+            TraceAllowedUse::AggregateAnalytics,
+        ];
+        let granted_scopes = vec![ConsentScope::DebuggingEvaluation];
+        let got = resolve_granted_uses(&[], &granted_scopes, &ceiling).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                TraceAllowedUse::Debugging,
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::AggregateAnalytics
+            ]
+        );
+        assert!(!got.contains(&TraceAllowedUse::ModelTraining));
+    }
+
+    #[test]
+    fn resolve_granted_uses_keeps_intersection_behavior_for_non_empty_request() {
+        let ceiling = vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation];
+        let granted_scopes = vec![ConsentScope::DebuggingEvaluation];
+        let got = resolve_granted_uses(
+            &[TraceAllowedUse::Debugging],
+            &granted_scopes,
+            &ceiling,
+        )
+        .unwrap();
+        assert_eq!(got, vec![TraceAllowedUse::Debugging]);
     }
 
     #[test]
@@ -4864,6 +4988,29 @@ mod tests {
             claims["principal_ref"].as_str(),
             Some(expected.as_str()),
             "principal_ref must be namespaced with subject"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_request_on_hardcoded_floor_grants_exactly_implied_uses() {
+        // Regression pin: a device-key claim with no registered tenant
+        // access grant falls back to the hardcoded pilot floor
+        // (debugging_evaluation + public_attribution scopes). An empty
+        // consent_scopes/allowed_uses request must resolve to exactly the
+        // uses those floor scopes imply — [debugging, evaluation,
+        // aggregate_analytics] — never the full uses ceiling by coincidence.
+        let tenant_id = "test-device-tenant-floor";
+        let mut body = device_claim_request_body(tenant_id, None);
+        body["consent_scopes"] = json!([]);
+        body["allowed_uses"] = json!([]);
+        let (status, response, _device_key_id) =
+            post_signed_device_claim_for_tenant(tenant_id, body).await;
+        assert_eq!(status, StatusCode::OK, "claim must succeed: {:?}", response);
+        let claims = decode_issued_claims(&response);
+        assert_eq!(
+            claims["allowed_uses"],
+            json!(["debugging", "evaluation", "aggregate_analytics"]),
+            "empty request on hardcoded floor must grant exactly the implied uses"
         );
     }
 
