@@ -44558,6 +44558,13 @@ struct TraceGateEvaluateWorkerResponse {
     credit_withheld_reason: Option<String>,
 }
 
+/// Stable, label-only `credit_withheld_reason` sentinel written to the
+/// `trace_gate_decisions` audit row when novelty-utility credit computation
+/// fails with a hard error (as opposed to a policy/ABAC withhold, which has
+/// its own labels). Keeps the persisted row honest instead of leaving it at
+/// `None` after the pre-credit insert.
+const CREDIT_CHECK_ERROR_LABEL: &str = "credit_check_error";
+
 /// Outcome of `evaluate_and_record_gate`.
 ///
 /// `Scored` is the only variant this fn's Task-3 implementation produces on
@@ -44790,13 +44797,36 @@ async fn gate_evaluate_worker_handler(
             attestation_chain_hash: String::new(),
             vector_entry_id,
         };
-        let (emitted, withheld_reason) = attempt_emit_novelty_utility_credit(
+        let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),
             &tenant,
             &decision,
             body.submission_id,
         )
-        .await?;
+        .await;
+        let (emitted, withheld_reason) = match emit_result {
+            Ok((emitted, withheld_reason)) => (emitted, withheld_reason),
+            Err(err) => {
+                // Credit computation hit a hard error (e.g. tenant-policy or
+                // utility-record DB failure). The audit row was already
+                // written by `evaluate_and_record_gate` with
+                // `credit_withheld_reason = None`, which would misrepresent a
+                // failed request as a clean non-withheld outcome. Best-effort
+                // patch the row to a fixed sentinel so the persisted audit
+                // trail is honest, then propagate the *original* error
+                // unchanged (identical client-visible status/body). The patch
+                // is best-effort: if it too fails we still surface the
+                // original error rather than masking it.
+                let _ = db
+                    .update_trace_gate_decision_credit_withheld_reason(
+                        &tenant.tenant_id,
+                        decision_id,
+                        Some(CREDIT_CHECK_ERROR_LABEL.to_string()),
+                    )
+                    .await;
+                return Err(err);
+            }
+        };
         if withheld_reason.is_some() {
             // The initial row written inside `evaluate_and_record_gate` was
             // recorded before credit eligibility was known (credit emission

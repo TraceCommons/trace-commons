@@ -2325,15 +2325,24 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `evaluate_and_record_gate` writes the initial row: credit-emission
     /// eligibility is only known once `attempt_emit_novelty_utility_credit`
     /// runs, which needs `TenantAuth` and so cannot live in the non-auth
-    /// scoring core. Defaults to a no-op; only the production Postgres
-    /// backend needs a real implementation, since it is the only backend
-    /// gate-worker credit-withholding tests exercise.
+    /// scoring core. Defaults to a log-once warning + no-op; only the
+    /// production Postgres backend has a real implementation today. The
+    /// default deliberately does not panic (so a backend that never withholds
+    /// credit stays usable) but does warn (label-only, no tenant/decision
+    /// identifiers) so a future non-Postgres backend that actually exercises
+    /// the withheld path cannot silently drop the update.
     async fn update_trace_gate_decision_credit_withheld_reason(
         &self,
         _tenant_id: &str,
         _decision_id: Uuid,
         _credit_withheld_reason: Option<String>,
     ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_credit_withheld_reason called on a backend without a real impl"
+            );
+        });
         Ok(())
     }
 
