@@ -202,6 +202,38 @@ pub async fn redact_to_envelope(
         .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))
 }
 
+/// Reconstruct the pre-redaction text of a session (every event's content
+/// plus its structured payload rendered as JSON), for leaked-token
+/// comparison against the finalized envelope.
+pub fn session_original_text(t: &SessionTranscript) -> String {
+    let mut buf = String::new();
+    for event in &t.events {
+        if let Some(content) = &event.content {
+            buf.push_str(content);
+            buf.push(' ');
+        }
+        buf.push_str(&event.structured.to_string());
+        buf.push(' ');
+    }
+    buf
+}
+
+/// Serialize `envelope` and return the sha256 hashes of any >=4-char
+/// whitespace token from `original` that still appears verbatim in it.
+/// Empty = clean. This is a per-session, defense-in-depth check: even if the
+/// redaction pipeline misses a format, a session whose secret survives is
+/// refused rather than uploaded.
+pub fn envelope_leaked_tokens(
+    original: &str,
+    envelope: &TraceContributionEnvelope,
+) -> Result<Vec<String>> {
+    let json = serde_json::to_string(envelope)
+        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
+    Ok(trace_commons_operator_client::canary_leaked_tokens(
+        original, &json,
+    ))
+}
+
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {

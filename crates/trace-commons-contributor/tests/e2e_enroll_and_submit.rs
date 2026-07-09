@@ -892,8 +892,13 @@ async fn enroll_mint_submit_round_trip() {
     // The issuer normalizes a bare origin to the submit endpoint.
     assert_eq!(cfg.ingest_url, format!("{ingest_url}/v1/traces"));
 
-    // Submit the Claude Code fixture through the real claim path.
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+    // Submit the Claude Code fixture through the real claim path. Uses the
+    // guard-clean `claude-code-submit-happy` fixture (no Opaque events,
+    // <4-char message tokens only) so the per-session leaked-token guard
+    // (see submit.rs's `session_with_surviving_secret_is_refused_not_uploaded`)
+    // does not trip on ordinary surviving prose/record-type markers.
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/claude-code-submit-happy");
     let src = trace_commons_contributor::source::claude_code::ClaudeCodeSource::new(root.clone());
     let r = src.discover().unwrap().remove(0);
     let outcomes = trace_commons_contributor::submit::submit_sessions(

@@ -18,8 +18,8 @@ use trace_commons_protocol::trace_contribution::{
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
     apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
-    envelope_size_ok, near_ai_settings_from_env, parse_scope_names, parse_use_names,
-    redact_to_envelope,
+    envelope_leaked_tokens, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
+    parse_use_names, redact_to_envelope, session_original_text,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -143,6 +143,17 @@ pub async fn submit_sessions(
         };
 
         if opts.dry_run {
+            let leaked = envelope_leaked_tokens(&session_original_text(&transcript), &envelope)?;
+            if !leaked.is_empty() {
+                tracing::warn!(
+                    leaked_token_count = leaked.len(),
+                    "refusing session: secret survived redaction"
+                );
+                outcomes.push(SubmitOutcome::Refused {
+                    reason_label: "secret-leak-detected".to_string(),
+                });
+                continue;
+            }
             println!(
                 "dry-run: submission_id={} bytes={size}",
                 envelope.submission_id
@@ -181,6 +192,18 @@ pub async fn submit_sessions(
             .expect("a claim must be minted before applying granted scopes")
             .clone();
         stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
+
+        let leaked = envelope_leaked_tokens(&session_original_text(&transcript), &envelope)?;
+        if !leaked.is_empty() {
+            tracing::warn!(
+                leaked_token_count = leaked.len(),
+                "refusing session: secret survived redaction"
+            );
+            outcomes.push(SubmitOutcome::Refused {
+                reason_label: "secret-leak-detected".to_string(),
+            });
+            continue;
+        }
 
         if envelope_size_ok(&envelope).is_err() {
             outcomes.push(SubmitOutcome::Refused {
@@ -506,12 +529,24 @@ mod tests {
         )
     }
 
+    /// Happy-path fixture for submit-pipeline tests (allowlist, scope
+    /// narrowing, remint/retry, idempotency, ...). Deliberately distinct
+    /// from `fixtures/claude-code` (used by the source/envelope parsing
+    /// tests): its message content is built entirely from <4-char tokens
+    /// and it carries no `Opaque` (system/attachment/unknown-record)
+    /// events, so the per-session leaked-token guard added in
+    /// `session_with_surviving_secret_is_refused_not_uploaded` never trips
+    /// on it -- every non-secret token here is short enough (or the whole
+    /// event structured-payload is redacted, per the fake API key) that
+    /// none of it can appear as a >=4-char survivor in the finalized
+    /// envelope. Tests below assert `Submitted` because this fixture's
+    /// secret is expected to be caught by redaction, not the guard.
     fn fixture_selection() -> Vec<(
         Box<dyn crate::source::TraceSource>,
         crate::source::SessionRef,
     )> {
-        let root =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/claude-code-submit-happy");
         let src = crate::source::claude_code::ClaudeCodeSource::new(root.clone());
         let r = src.discover().unwrap().remove(0);
         vec![(
@@ -587,6 +622,65 @@ mod tests {
             SubmitOutcome::AlreadySubmitted { .. }
         ));
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// Builds a one-off `ClaudeCodeSource` selection over a session whose
+    /// user-message content contains a distinctive >=4-char token
+    /// (`ZZmarker4242`) that is not secret-shaped (no known prefix/PEM
+    /// header) and is not path- or email-shaped, so it survives the
+    /// deterministic redactor untouched and appears verbatim in both the
+    /// original text and the finalized envelope.
+    fn leaked_token_fixture_selection(
+        root: &std::path::Path,
+    ) -> Vec<(
+        Box<dyn crate::source::TraceSource>,
+        crate::source::SessionRef,
+    )> {
+        let project_dir = root.join("-tmp-fixture-leaktest");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("33333333-3333-3333-3333-333333333333.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"plain token ZZmarker4242 stays\"},\"cwd\":\"/tmp/fixture/leaktest\",\"timestamp\":\"2026-07-01T10:00:00Z\",\"version\":\"2.0.1\",\"sessionId\":\"33333333-3333-3333-3333-333333333333\",\"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+        let src = crate::source::claude_code::ClaudeCodeSource::new(root.to_path_buf());
+        let r = src.discover().unwrap().remove(0);
+        vec![(
+            Box::new(crate::source::claude_code::ClaudeCodeSource::new(
+                root.to_path_buf(),
+            )) as Box<dyn crate::source::TraceSource>,
+            r,
+        )]
+    }
+
+    #[tokio::test]
+    async fn session_with_surviving_secret_is_refused_not_uploaded() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let fixture_root = tempfile::tempdir().unwrap();
+        let selection = leaked_token_fixture_selection(fixture_root.path());
+
+        let outcomes = submit_sessions(&store, &cfg, selection, &opts)
+            .await
+            .unwrap();
+        match &outcomes[0] {
+            SubmitOutcome::Refused { reason_label } => {
+                assert_eq!(reason_label, "secret-leak-detected");
+            }
+            other => panic!("expected Refused(secret-leak-detected), got {other:?}"),
+        }
+        assert_eq!(received.lock().unwrap().len(), 0);
+        assert!(store.load_receipts().unwrap().is_empty());
     }
 
     #[tokio::test]
