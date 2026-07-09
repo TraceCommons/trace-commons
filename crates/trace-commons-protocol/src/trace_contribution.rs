@@ -2079,7 +2079,7 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
             SecretLeakPattern {
                 name: "github_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
                     .expect("hardcoded GitHub token regex must compile"),
             },
             SecretLeakPattern {
@@ -2095,10 +2095,30 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                     .expect("hardcoded provider token regex must compile"),
             },
             SecretLeakPattern {
-                name: "pem_private_key",
+                name: "jwt",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-                    .expect("hardcoded private key regex must compile"),
+                regex: Regex::new(
+                    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                )
+                .expect("hardcoded JWT regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "npm_token",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b")
+                    .expect("hardcoded npm token regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "google_api_key",
+                severity: SecretLeakSeverity::High,
+                regex: Regex::new(r"\bAIza[0-9A-Za-z_-]{35,}\b")
+                    .expect("hardcoded Google API key regex must compile"),
+            },
+            SecretLeakPattern {
+                name: "pem_header_orphan",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*")
+                    .expect("hardcoded orphan private key header regex must compile"),
             },
         ]
     });
@@ -2236,6 +2256,7 @@ impl DeterministicTraceRedactor {
         let mut redacted = self.redact_private_emails(input, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
+        redacted = apply_pem_block_redaction(&redacted, &mut report);
 
         let scan = self.leak_detector.scan(&redacted);
         if scan.is_clean() {
@@ -3653,6 +3674,26 @@ fn apply_redaction_ranges(input: &str, ranges: &[std::ops::Range<usize>]) -> Str
     apply_labeled_ranges(input, ranges, "[REDACTED]")
 }
 
+/// Whole-block PEM redaction. Runs before the leak scan so an entire
+/// `-----BEGIN ... PRIVATE KEY-----` .. `-----END ... PRIVATE KEY-----`
+/// block (header, base64 body, and footer) is replaced in one pass rather
+/// than leaving the base64 body to survive header-only redaction.
+fn apply_pem_block_redaction(input: &str, report: &mut RedactionReport) -> String {
+    let ranges: Vec<std::ops::Range<usize>> = pem_block_regex()
+        .find_iter(input)
+        .map(|matched| matched.start()..matched.end())
+        .collect();
+    if ranges.is_empty() {
+        return input.to_string();
+    }
+    for _ in &ranges {
+        report.increment("secret");
+        report.increment("secret:pem_private_key");
+        report.blocked_secret_detected = true;
+    }
+    apply_labeled_ranges(input, &ranges, "<REDACTED_PRIVATE_KEY>")
+}
+
 fn apply_placeholder_regex(
     input: &str,
     regex: &Regex,
@@ -3718,6 +3759,15 @@ fn private_email_regex() -> &'static Regex {
             .expect("hardcoded private email regex must compile")
     });
     &PRIVATE_EMAIL_REGEX
+}
+
+fn pem_block_regex() -> &'static Regex {
+    static PEM_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
+            .expect("hardcoded PEM block regex must compile")
+    });
+    &PEM_BLOCK_REGEX
 }
 
 fn local_path_regex() -> &'static Regex {
@@ -4104,5 +4154,42 @@ mod tests {
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    #[test]
+    fn redact_text_strips_broadened_secret_shapes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // JWT (three base64url segments)
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+        let (out, rep) = r.redact_text(&format!("Authorization: Bearer {jwt}"));
+        assert!(!out.contains(jwt), "jwt survived: {out}");
+        assert!(rep.blocked_secret_detected);
+        // npm + google
+        let (o2, _) = r.redact_text("token npm_abcdefghijklmnopqrstuvwxyz0123456789 done");
+        assert!(!o2.contains("npm_abcdefghijklmnopqrstuvwxyz0123456789"));
+        let (o3, _) = r.redact_text("key AIzaSyA1234567890abcdefghijklmnopqrstuvw end");
+        assert!(!o3.contains("AIzaSyA1234567890abcdefghijklmnopqrstuvw"));
+    }
+
+    #[test]
+    fn redact_text_removes_entire_pem_block_not_just_header() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
+        let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
+        assert!(!out.contains("1234secretbody5678"), "pem body survived: {out}");
+        assert!(!out.contains("abcDEFghiJKL"), "pem body line 2 survived: {out}");
+        assert!(out.contains("trailing"));
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn redact_text_catches_orphan_pem_header_without_end() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
+        let (out, _) = r.redact_text(truncated);
+        assert!(!out.contains("secretbytes"), "orphan pem body survived: {out}");
     }
 }
