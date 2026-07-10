@@ -165,15 +165,22 @@ impl NearAiPerplexityScorer {
         let req = self.build_request(plaintext)?;
         let url = format!("{}/completions", self.cfg.base_url);
 
+        // Strip the URL from any reqwest transport error before it enters an
+        // error chain: reqwest's Display embeds the request URL, and error
+        // labels are recorded/logged under the hash-only convention (no raw
+        // URLs). `without_url` keeps the error kind (timeout/connect/decode)
+        // while dropping the endpoint.
         let resp = self
             .client
             .post(&url)
             .bearer_auth(&self.cfg.api_key)
             .json(&req)
             .send()
-            .context("NearAiScorerHttpSendFailed")?;
+            .map_err(|e| anyhow!("NearAiScorerHttpSendFailed: {}", e.without_url()))?;
         let status = resp.status();
-        let body = resp.text().context("NearAiScorerHttpBodyReadFailed")?;
+        let body = resp
+            .text()
+            .map_err(|e| anyhow!("NearAiScorerHttpBodyReadFailed: {}", e.without_url()))?;
         if !status.is_success() {
             // Body may contain a vLLM validation message; surface its
             // length only, not its content (provider strings are not
