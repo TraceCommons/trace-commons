@@ -21,6 +21,25 @@ pub struct PerplexityResult {
     pub tokens_scored: u64,
 }
 
+/// Raw per-chunk scoring material for whole-trace aggregation. Unlike
+/// [`PerplexityResult`] (already collapsed to micros), this keeps the sums
+/// so the orchestrator can compute the token-weighted whole-trace mean
+/// `exp(sum over chunks of sum_nll / sum over chunks of n)` exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkPerplexity {
+    /// `-sum(logprob)` over the chunk's usable tokens (token 0 dropped).
+    pub sum_nll: f64,
+    /// Usable token count for the chunk (`n_c`).
+    pub tokens: u64,
+    /// Count of usable tokens with `logprob < tail_logprob_cutoff`.
+    pub tail_tokens: u64,
+    /// The usable (post-BOS-drop) per-token logprobs, for global top-K
+    /// rarity across chunks. Empty when the scorer cannot expose raw
+    /// logprobs (e.g. the mock) — rarity then simply has no contribution
+    /// from that chunk.
+    pub logprobs: Vec<f32>,
+}
+
 /// Score a plaintext trace for perplexity. Real implementations run a local
 /// LLM inside the enclave; the mock here is purely deterministic.
 ///
@@ -29,6 +48,34 @@ pub struct PerplexityResult {
 /// pass any positive floor. Callers MUST propagate the error.
 pub trait PerplexityScorer: Send + Sync {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult>;
+
+    /// Score one bounded chunk and return raw aggregation material. The
+    /// default derives `(sum_nll, n, tail_tokens)` from [`score`]'s
+    /// collapsed micros (exact within f64 ln/exp round-trip tolerance) and
+    /// exposes no raw logprobs. Real scorers that hold per-token logprobs
+    /// SHOULD override this to return them losslessly.
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+        let r = self.score(chunk)?;
+        let tokens = r.tokens_scored;
+        if tokens == 0 {
+            return Ok(ChunkPerplexity {
+                sum_nll: 0.0,
+                tokens: 0,
+                tail_tokens: 0,
+                logprobs: Vec::new(),
+            });
+        }
+        let perp = r.aggregate_perplexity_micros as f64 / 1_000_000.0;
+        let mean_nll = if perp > 0.0 { perp.ln() } else { 0.0 };
+        let tail_fraction = r.tail_fraction_micros as f64 / 1_000_000.0;
+        let tail_tokens = ((tail_fraction * tokens as f64).round() as u64).min(tokens);
+        Ok(ChunkPerplexity {
+            sum_nll: mean_nll * tokens as f64,
+            tokens,
+            tail_tokens,
+            logprobs: Vec::new(),
+        })
+    }
 }
 
 /// Deterministic mock: result is a hash-derived projection of the plaintext.
@@ -221,5 +268,41 @@ mod tests {
         let pr = p.score(b"hello world").unwrap();
         let rr = r.score_rarity(b"hello world", 10).unwrap();
         assert_ne!(pr.aggregate_perplexity_micros, rr.token_rarity_micros);
+    }
+
+    #[test]
+    fn default_score_chunk_derives_from_score_within_tolerance() {
+        // exp(sum_nll / tokens) must reproduce score()'s aggregate within
+        // f64 ln/exp round-trip tolerance.
+        let s = MockPerplexityScorer::new();
+        let whole = s.score(b"hello world").unwrap();
+        let chunk = s.score_chunk(b"hello world").unwrap();
+        assert_eq!(chunk.tokens, whole.tokens_scored);
+        let rebuilt = ((chunk.sum_nll / chunk.tokens as f64).exp() * 1_000_000.0) as u64;
+        let diff = rebuilt.abs_diff(whole.aggregate_perplexity_micros);
+        assert!(diff <= 2, "ln/exp round trip drifted by {diff} micros");
+        // Mock cannot expose raw logprobs.
+        assert!(chunk.logprobs.is_empty());
+        // tail_tokens is clamped to tokens even though the mock's
+        // tail_fraction_micros band can exceed 1.0.
+        assert!(chunk.tail_tokens <= chunk.tokens);
+    }
+
+    #[test]
+    fn default_score_chunk_zero_tokens_is_all_zero() {
+        struct ZeroScorer;
+        impl PerplexityScorer for ZeroScorer {
+            fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+                Ok(PerplexityResult {
+                    aggregate_perplexity_micros: 0,
+                    tail_fraction_micros: 0,
+                    tokens_scored: 0,
+                })
+            }
+        }
+        let c = ZeroScorer.score_chunk(b"").unwrap();
+        assert_eq!(c.tokens, 0);
+        assert_eq!(c.sum_nll, 0.0);
+        assert_eq!(c.tail_tokens, 0);
     }
 }
