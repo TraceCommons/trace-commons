@@ -32,9 +32,28 @@ only the realized token's logprob.
 
 ## Revocation
 
-Revoking a submission enqueues one `invalidate_vector` propagation item per
-recorded chunk entry (plus the legacy single-entry flows for pre-V37 rows).
-The propagation worker is unchanged: one vector-entry id per item.
+Revocation drives two distinct vector-invalidation mechanisms, not one:
+
+- **Per-chunk entries (V37+)**: `enqueue_vector_entry_invalidation_items_for_revocation`
+  reads `trace_gate_chunk_vector_entries` for the submission and enqueues one
+  `InvalidateVector` propagation-queue item per recorded chunk entry
+  (idempotent per entry id). These items are retry/attempt-tracked like the
+  rest of the revocation propagation queue; the propagation worker's
+  `InvalidateVector` branch consumes them unchanged, one vector-entry id per
+  item.
+- **Legacy pre-V37 rows**: `invalidate_trace_vector_entries_for_submission`
+  is a synchronous, direct `UPDATE trace_vector_entries ... SET status =
+  invalidated` executed inline during revocation. It does **not** create a
+  propagation-queue row and carries no retry/attempt tracking — it either
+  commits as part of the revocation request or the request fails. Pre-V37
+  decisions have no chunk rows in `trace_gate_chunk_vector_entries`, so this
+  is the only invalidation path that reaches them; for V37+ submissions this
+  call is a no-op because their entries live in the per-chunk table instead.
+
+Operators diagnosing a stuck revocation should check chunk-entry propagation
+items (queued, retried, may lag) separately from the legacy single-entry
+update (synchronous, either already done or the revocation call itself
+failed).
 
 ## Failure semantics
 

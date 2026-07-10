@@ -902,6 +902,30 @@ mod enclave_gate_service_tests {
         let decryptor = fixture_decryptor();
         let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
         let tenant = TenantCtx::new("tenant-e2e");
+
+        // Seed the tenant's index with a standalone trace whose sole chunk
+        // is byte-identical to the main trace's chunk 0 (same rendered
+        // event text). This makes chunk 0 a genuine near-duplicate *within*
+        // the scored call below, while chunks 1..15 stay fresh — otherwise
+        // every chunk in a single `evaluate()` call is scored against the
+        // same pre-call index snapshot and peak == representative
+        // trivially, which would not catch a peak-novelty regression.
+        let seed_plaintext = serde_json::to_vec(&serde_json::json!({
+            "events": [events[0].clone()],
+        }))
+        .unwrap();
+        let (seed_dek, seed_wrapped) =
+            wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let seed_ciphertext =
+            aead_encrypt_with_dek(&seed_dek, &seed_plaintext).expect("encrypt seed fixture");
+        svc.evaluate_trace(
+            &tenant,
+            &seed_ciphertext,
+            &seed_wrapped,
+            TraceArtifactKind::ContributionEnvelope,
+        )
+        .expect("seed evaluate_trace succeeds");
+
         let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
         let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
 
@@ -918,12 +942,24 @@ mod enclave_gate_service_tests {
         assert!(d.chunks_capped);
         assert!(d.perplexity_micros > 0);
         assert!(d.peak_perplexity_micros >= d.perplexity_micros || d.chunk_count == 1);
-        assert!(d.peak_novelty_micros >= d.novelty_score_micros);
-        // Fresh tenant: everything is novel, both gates pass at zero floors,
-        // and per-chunk entries land (16 chunks, all above the insert
-        // threshold on an empty index).
+        // Chunk 0 duplicates the seed trace's sole chunk (near-zero
+        // novelty); chunks 1..15 are fresh against the index snapshot taken
+        // before this call. Peak must reflect a fresh chunk while the
+        // representative is dragged down by the one duplicate — a strict
+        // inequality, exercising peak-vs-representative divergence the same
+        // way the perplexity assertion above does.
+        assert!(
+            d.peak_novelty_micros > d.novelty_score_micros,
+            "peak novelty must strictly exceed the representative when one \
+             of 16 chunks is a near-duplicate seeded ahead of this call"
+        );
+        // Both gates still pass at zero floors: only 1 of 16 chunks is a
+        // near-duplicate, so the token-weighted representative stays well
+        // above zero. The duplicate chunk (index 0) clears the perplexity
+        // and novelty *gates* but falls below the insert-dedup threshold,
+        // so only 15 of 16 chunks land new per-chunk entries.
         assert!(d.perplexity_passed && d.novelty_passed);
-        assert_eq!(d.chunk_vector_entries.len(), 16);
+        assert_eq!(d.chunk_vector_entries.len(), 15);
         assert_eq!(
             d.vector_entry_id,
             Some(d.chunk_vector_entries[0].vector_entry_id)
