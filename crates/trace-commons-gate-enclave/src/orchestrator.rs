@@ -411,9 +411,7 @@ mod tests {
     }
     impl crate::perplexity::PerplexityScorer for FailOnNthScorer {
         fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
-            let call = self
-                .n
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let call = self.n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if call == self.fail_at {
                 anyhow::bail!("ChunkScorerInjectedFailure");
             }
@@ -556,7 +554,10 @@ mod tests {
         let d = orch
             .evaluate(&two_distinct_chunk_envelope("alpha", "delta"), "tenant_a")
             .unwrap();
-        assert!(d.peak_novelty_micros > 900_000, "fresh chunk drives the peak");
+        assert!(
+            d.peak_novelty_micros > 900_000,
+            "fresh chunk drives the peak"
+        );
         assert!(
             d.novelty_score_micros < d.peak_novelty_micros,
             "representative must be dragged down by the duplicate chunk"

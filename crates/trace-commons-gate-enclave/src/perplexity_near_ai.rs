@@ -238,7 +238,10 @@ fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) ->
     }
     let usable = &logprobs[1..];
     let sum_nll: f64 = usable.iter().map(|lp| -(*lp as f64)).sum();
-    let tail_tokens = usable.iter().filter(|&&lp| lp < tail_logprob_cutoff).count() as u64;
+    let tail_tokens = usable
+        .iter()
+        .filter(|&&lp| lp < tail_logprob_cutoff)
+        .count() as u64;
     ChunkPerplexity {
         sum_nll,
         tokens: usable.len() as u64,

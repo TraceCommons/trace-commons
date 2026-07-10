@@ -31,10 +31,14 @@ pub struct ChunkerConfig {
 
 impl ChunkerConfig {
     fn target_chars(&self) -> usize {
-        self.target_tokens.saturating_mul(APPROX_CHARS_PER_TOKEN).max(1)
+        self.target_tokens
+            .saturating_mul(APPROX_CHARS_PER_TOKEN)
+            .max(1)
     }
     fn max_chars(&self) -> usize {
-        self.max_tokens.saturating_mul(APPROX_CHARS_PER_TOKEN).max(1)
+        self.max_tokens
+            .saturating_mul(APPROX_CHARS_PER_TOKEN)
+            .max(1)
     }
 }
 
@@ -319,9 +323,12 @@ mod tests {
 
     #[test]
     fn json_without_events_falls_back() {
-        let plan =
-            chunk_envelope_plaintext(br#"{"schema_version":"x"}"#, &cfg(2048, 3072, 16));
-        assert_eq!(plan.chunks.len(), 1, "no-events JSON falls back to raw text");
+        let plan = chunk_envelope_plaintext(br#"{"schema_version":"x"}"#, &cfg(2048, 3072, 16));
+        assert_eq!(
+            plan.chunks.len(),
+            1,
+            "no-events JSON falls back to raw text"
+        );
     }
 
     #[test]

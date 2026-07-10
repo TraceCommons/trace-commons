@@ -45029,9 +45029,7 @@ async fn evaluate_and_record_gate(
         peak_perplexity_micros: Some(
             i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
         ),
-        peak_novelty_micros: Some(
-            i64::try_from(decision.peak_novelty_micros).unwrap_or(i64::MAX),
-        ),
+        peak_novelty_micros: Some(i64::try_from(decision.peak_novelty_micros).unwrap_or(i64::MAX)),
         chunk_count: Some(i32::try_from(decision.chunk_count).unwrap_or(i32::MAX)),
         chunks_capped: Some(decision.chunks_capped),
     };

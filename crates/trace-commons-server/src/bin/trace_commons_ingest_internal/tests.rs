@@ -73843,7 +73843,8 @@ fn gate_chunking_env_rejects_target_greater_than_max() {
     let err = validate_gate_chunking_knobs(4096, 3072, 16)
         .expect_err("target > max must fail closed, never clamp or proceed");
     assert!(
-        err.to_string().contains("TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS"),
+        err.to_string()
+            .contains("TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS"),
         "error must name the offending control: {err}"
     );
 }

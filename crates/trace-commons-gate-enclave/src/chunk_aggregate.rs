@@ -144,7 +144,10 @@ mod tests {
         let agg = aggregate_chunked_perplexity(&[c], 1);
         let want = (1.0_f64.exp() * 1_000_000.0) as u64;
         assert!(agg.representative_perplexity_micros.abs_diff(want) <= 2);
-        assert_eq!(agg.peak_perplexity_micros, agg.representative_perplexity_micros);
+        assert_eq!(
+            agg.peak_perplexity_micros,
+            agg.representative_perplexity_micros
+        );
         assert_eq!(agg.tail_fraction_micros, 0);
         assert_eq!(agg.tokens_scored, 4);
     }
@@ -178,7 +181,10 @@ mod tests {
     fn peak_falls_back_to_representative_when_no_chunk_is_eligible() {
         let a = chunk(10.0, 10, 0, vec![]);
         let agg = aggregate_chunked_perplexity(&[a], 64);
-        assert_eq!(agg.peak_perplexity_micros, agg.representative_perplexity_micros);
+        assert_eq!(
+            agg.peak_perplexity_micros,
+            agg.representative_perplexity_micros
+        );
     }
 
     #[test]
@@ -223,11 +229,8 @@ mod tests {
     fn novelty_representative_is_token_weighted_and_peak_guarded() {
         // Chunk novelties 0.2 (100 tok), 0.8 (100 tok), 1.0 (4 tok, guarded
         // out of peak). Representative = (0.2*100 + 0.8*100 + 1.0*4)/204.
-        let (rep, peak) = aggregate_chunked_novelty(
-            &[200_000, 800_000, 1_000_000],
-            &[100, 100, 4],
-            64,
-        );
+        let (rep, peak) =
+            aggregate_chunked_novelty(&[200_000, 800_000, 1_000_000], &[100, 100, 4], 64);
         let want_rep = ((0.2 * 100.0 + 0.8 * 100.0 + 1.0 * 4.0) / 204.0 * 1_000_000.0) as u64;
         assert!(rep.abs_diff(want_rep) <= 1);
         assert_eq!(peak, 800_000);
