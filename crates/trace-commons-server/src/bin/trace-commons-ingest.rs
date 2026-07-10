@@ -4674,12 +4674,16 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
             "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
         )
     })?;
-    let crypto = SecretsCrypto::new(SecretString::from(master_key))
-        .context("failed to initialize gate-service KEK wrapper")?;
-    let wrapper: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
-        crypto,
-        "trace-commons-gate-enclave-near-ai-v1",
-    ));
+    // Decrypt each submission's DEK with the SAME KEK the artifact store used to
+    // wrap it, selected by TRACE_COMMONS_KEK_PROVIDER. Hardcoding
+    // LocalMasterKeyWrapper here broke every KMS-backed deployment: the stored
+    // wrapped_dek carries the KMS wrapper_kind, so a local unwrapper fails with
+    // "KekUnwrapFailed: wrapper kind mismatch" on every evaluation. For
+    // local_master_key deployments this still resolves to a local wrapper (kind
+    // "local_master_key"), keyed by the gate-service master key as before.
+    let wrapper: Arc<dyn KmsKeyWrapper + Send + Sync> =
+        Arc::from(build_selected_kek_wrapper_async(SecretString::from(master_key)).await?);
+    let wrapper: Arc<dyn KmsKeyWrapper> = wrapper;
 
     let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
         format!(
