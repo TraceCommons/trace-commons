@@ -45156,7 +45156,13 @@ async fn score_one_submission(
     match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
         Ok(outcome) => outcome,
         Err(err) => {
-            let label = format!("{err}");
+            // `{err:#}` records the full anyhow chain (outer context + inner
+            // cause), so a scorer failure surfaces the specific hash-safe label
+            // (e.g. `NearAiScorerHttpStatusError status=400 body_len=N`) rather
+            // than the generic `PerplexityScorerInferenceFailed` wrapper. All
+            // leaf errors on this path are hash-only by construction (reqwest
+            // URLs are stripped at the scorer).
+            let label = format!("{err:#}");
             bump_gate_evaluation_attempt_and_log_exhaustion(
                 db,
                 &item.tenant_id,
