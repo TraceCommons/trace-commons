@@ -1808,6 +1808,18 @@ pub struct TraceGateDecisionRow {
     pub chunks_capped: Option<bool>,
 }
 
+/// One per-chunk vector-index entry row (`trace_gate_chunk_vector_entries`,
+/// migration V37). Keyed `(tenant_id, decision_id, chunk_index)`; the
+/// complete authoritative entry set for a decision. The decision row's
+/// legacy `vector_entry_id` column keeps holding the FIRST entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceGateChunkVectorEntryRow {
+    pub decision_id: Uuid,
+    pub submission_id: Uuid,
+    pub chunk_index: i32,
+    pub vector_entry_id: Uuid,
+}
+
 /// A single submission awaiting a gate decision, as enumerated by
 /// [`crate::db::Database::list_submissions_needing_gate_decision`]. Cross-tenant
 /// by construction (the enumeration runs on the narrow `trace_gate_driver`
@@ -2331,6 +2343,29 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         decision: TraceGateDecisionRow,
     ) -> Result<(), DatabaseError>;
+
+    /// Insert a gate-decision row together with its per-chunk vector-entry
+    /// rows, atomically (one transaction). The default delegates to
+    /// `insert_trace_gate_decision` and DROPS the chunk entries — acceptable
+    /// only for non-PG test doubles; the PG impl overrides this.
+    async fn insert_trace_gate_decision_with_chunk_entries(
+        &self,
+        tenant_id: &str,
+        decision: TraceGateDecisionRow,
+        _chunk_entries: Vec<TraceGateChunkVectorEntryRow>,
+    ) -> Result<(), DatabaseError> {
+        self.insert_trace_gate_decision(tenant_id, decision).await
+    }
+
+    /// List all per-chunk vector entries recorded for a submission (all of
+    /// its decisions). Default returns empty for non-PG test doubles.
+    async fn list_trace_gate_chunk_vector_entries(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Vec<TraceGateChunkVectorEntryRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
 
     /// Update the label-only `credit_withheld_reason` on an already-inserted
     /// `trace_gate_decisions` row. Used by the gate-worker HTTP handler after

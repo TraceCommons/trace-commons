@@ -17,7 +17,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantStatus,
     TraceExportAccessGrantWrite, TraceExportJobStatus, TraceExportJobStatusUpdate,
     TraceExportJobWrite, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
-    TraceExportManifestWrite, TraceGateDecisionRow, TraceNearCreditOutboxItemWrite,
+    TraceExportManifestWrite, TraceGateChunkVectorEntryRow, TraceGateDecisionRow,
+    TraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
     TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
@@ -4063,4 +4064,59 @@ async fn instance_ledger_rls_ready_true_on_migrated_db() {
             .expect("query instance ledger RLS readiness"),
         "trace_instance_enrollments must have forced RLS + trace_instance_isolation policy"
     );
+}
+
+#[tokio::test]
+async fn chunk_vector_entries_insert_atomically_and_list_by_submission() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-chunk-vec-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-chunk-vec-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_alpha, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    let decision = sample_gate_decision(submission_id);
+    let decision_id = decision.decision_id;
+    let entries = vec![
+        TraceGateChunkVectorEntryRow {
+            decision_id,
+            submission_id,
+            chunk_index: 0,
+            vector_entry_id: Uuid::new_v4(),
+        },
+        TraceGateChunkVectorEntryRow {
+            decision_id,
+            submission_id,
+            chunk_index: 1,
+            vector_entry_id: Uuid::new_v4(),
+        },
+    ];
+
+    backend
+        .insert_trace_gate_decision_with_chunk_entries(&tenant_alpha, decision, entries.clone())
+        .await
+        .expect("atomic insert of decision + chunk entries");
+
+    let listed = backend
+        .list_trace_gate_chunk_vector_entries(&tenant_alpha, submission_id)
+        .await
+        .expect("list chunk entries for tenant_alpha");
+    assert_eq!(listed, entries);
+
+    // Tenant isolation: a different tenant must see nothing (RLS).
+    let cross = backend
+        .list_trace_gate_chunk_vector_entries(&tenant_beta, submission_id)
+        .await
+        .expect("list chunk entries for tenant_beta");
+    assert!(cross.is_empty());
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
 }

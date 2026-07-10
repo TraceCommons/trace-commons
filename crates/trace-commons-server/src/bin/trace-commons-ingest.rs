@@ -104,6 +104,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
+    TraceGateChunkVectorEntryRow as StorageTraceGateChunkVectorEntryRow,
     TraceGateDecisionRow as StorageTraceGateDecisionRow,
     TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
@@ -45034,7 +45035,18 @@ async fn evaluate_and_record_gate(
         chunk_count: Some(i32::try_from(decision.chunk_count).unwrap_or(i32::MAX)),
         chunks_capped: Some(decision.chunks_capped),
     };
-    db.insert_trace_gate_decision(tenant_id, row).await?;
+    let chunk_entries: Vec<StorageTraceGateChunkVectorEntryRow> = decision
+        .chunk_vector_entries
+        .iter()
+        .map(|e| StorageTraceGateChunkVectorEntryRow {
+            decision_id,
+            submission_id,
+            chunk_index: i32::try_from(e.chunk_index).unwrap_or(i32::MAX),
+            vector_entry_id: e.vector_entry_id,
+        })
+        .collect();
+    db.insert_trace_gate_decision_with_chunk_entries(tenant_id, row, chunk_entries)
+        .await?;
 
     Ok(GateOutcome::Scored {
         decision_id,
@@ -45433,6 +45445,7 @@ async fn gate_evaluate_worker_handler(
             peak_novelty_micros: 0,
             chunk_count: 1,
             chunks_capped: false,
+            chunk_vector_entries: Vec::new(),
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),
@@ -50060,6 +50073,13 @@ async fn mirror_revocation_to_db(
     )
     .await
     .context("failed to enqueue worker queue invalidation propagation items")?;
+    let vector_entry_items_enqueued = enqueue_vector_entry_invalidation_items_for_revocation(
+        db.as_ref(),
+        &tenant.tenant_id,
+        submission_id,
+    )
+    .await
+    .context("failed to enqueue vector entry invalidation propagation items")?;
 
     let audit_source = record
         .map(|record| {
@@ -50090,7 +50110,8 @@ async fn mirror_revocation_to_db(
             || export_manifest_items_invalidated > 0
             || credit_reversal_items_enqueued > 0
             || object_delete_items_enqueued > 0
-            || worker_queue_items_enqueued > 0)
+            || worker_queue_items_enqueued > 0
+            || vector_entry_items_enqueued > 0)
     {
         let mut action_counts = lifecycle_invalidation_action_counts(
             invalidation_counts,
@@ -50115,6 +50136,12 @@ async fn mirror_revocation_to_db(
             action_counts.insert(
                 "worker_queue_items_enqueued".to_string(),
                 worker_queue_items_enqueued.min(u32::MAX as usize) as u32,
+            );
+        }
+        if vector_entry_items_enqueued > 0 {
+            action_counts.insert(
+                "vector_entry_items_enqueued".to_string(),
+                vector_entry_items_enqueued.min(u32::MAX as usize) as u32,
             );
         }
         if let Some(ledger) = retention_ledger {
@@ -50241,6 +50268,69 @@ async fn enqueue_worker_queue_invalidation_items_for_revocation(
         })
         .await
         .context("failed to upsert worker queue invalidation propagation item")?;
+        enqueued += 1;
+    }
+    Ok(enqueued)
+}
+
+/// Enqueue one `InvalidateVector` propagation item per per-chunk vector
+/// entry recorded for the submission (V37 `trace_gate_chunk_vector_entries`).
+/// The existing propagation worker's `InvalidateVector` branch consumes the
+/// items unchanged — one entry id per item. Legacy pre-V37 decisions carry
+/// no chunk rows and are unaffected. Idempotent per entry id.
+async fn enqueue_vector_entry_invalidation_items_for_revocation(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<usize> {
+    let existing_idempotency_keys = db
+        .list_trace_revocation_propagation_items(tenant_id, submission_id)
+        .await
+        .context("failed to read existing revocation propagation items")?
+        .into_iter()
+        .map(|item| item.idempotency_key)
+        .collect::<BTreeSet<_>>();
+    let mut enqueued = 0usize;
+    for entry in db
+        .list_trace_gate_chunk_vector_entries(tenant_id, submission_id)
+        .await
+        .context("failed to read chunk vector entries for revocation")?
+    {
+        let idempotency_key = sha256_prefixed(&format!(
+            "trace_revocation_chunk_vector_entry_invalidation:v1:{tenant_id}:{submission_id}:{}",
+            entry.vector_entry_id
+        ));
+        if existing_idempotency_keys.contains(&idempotency_key) {
+            continue;
+        }
+        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+            tenant_id: tenant_id.to_string(),
+            propagation_item_id: deterministic_trace_uuid_for_external_ref(
+                "revocation-chunk-vector-entry-invalidation",
+                tenant_id,
+                submission_id,
+                &entry.vector_entry_id.to_string(),
+            ),
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: entry.vector_entry_id,
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateVector,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key,
+            reason: "revoked trace per-chunk vector entry invalidation".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::from([(
+                "source".to_string(),
+                "mirror_revocation_to_db".to_string(),
+            )]),
+        })
+        .await
+        .context("failed to upsert chunk vector entry invalidation propagation item")?;
         enqueued += 1;
     }
     Ok(enqueued)

@@ -24,7 +24,8 @@ use crate::trace_corpus_storage::{
     TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceGateDecisionRow, TraceNearCreditOutboxItemRecord,
+    TraceExportManifestWrite, TraceGateChunkVectorEntryRow, TraceGateDecisionRow,
+    TraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind, TraceObjectRefRecord,
     TraceObjectRefWrite, TraceRankingCalibrationDatasetRecord,
     TraceRankingCalibrationDatasetStatus, TraceRankingCalibrationDatasetStatusUpdate,
@@ -5390,6 +5391,97 @@ impl TraceCorpusStore for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn insert_trace_gate_decision_with_chunk_entries(
+        &self,
+        tenant_id: &str,
+        decision: TraceGateDecisionRow,
+        chunk_entries: Vec<TraceGateChunkVectorEntryRow>,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 decided_at, vector_entry_id, credit_withheld_reason,
+                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+            &[
+                &tenant_id,
+                &decision.decision_id,
+                &decision.submission_id,
+                &decision.gate_policy_version,
+                &decision.gate_version_hash,
+                &decision.perplexity_micros,
+                &decision.tail_fraction_micros,
+                &decision.perplexity_passed,
+                &decision.novelty_score_micros,
+                &decision.nearest_neighbor_hash,
+                &decision.novelty_passed,
+                &decision.embedding_evidence_hash,
+                &decision.attestation_chain_hash,
+                &decision.decided_at,
+                &decision.vector_entry_id,
+                &decision.credit_withheld_reason,
+                &decision.peak_perplexity_micros,
+                &decision.peak_novelty_micros,
+                &decision.chunk_count,
+                &decision.chunks_capped,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        for entry in &chunk_entries {
+            tx.execute(
+                "INSERT INTO trace_gate_chunk_vector_entries (
+                     tenant_id, decision_id, submission_id, chunk_index, vector_entry_id
+                 ) VALUES ($1,$2,$3,$4,$5)",
+                &[
+                    &tenant_id,
+                    &entry.decision_id,
+                    &entry.submission_id,
+                    &entry.chunk_index,
+                    &entry.vector_entry_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn list_trace_gate_chunk_vector_entries(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<TraceGateChunkVectorEntryRow>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT decision_id, submission_id, chunk_index, vector_entry_id
+                 FROM trace_gate_chunk_vector_entries
+                 WHERE tenant_id = $1 AND submission_id = $2
+                 ORDER BY decision_id, chunk_index",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| TraceGateChunkVectorEntryRow {
+                decision_id: row.get("decision_id"),
+                submission_id: row.get("submission_id"),
+                chunk_index: row.get("chunk_index"),
+                vector_entry_id: row.get("vector_entry_id"),
+            })
+            .collect())
     }
 
     async fn update_trace_gate_decision_credit_withheld_reason(

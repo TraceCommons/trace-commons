@@ -67,6 +67,13 @@ impl TenantCtx {
     }
 }
 
+/// One inserted per-chunk vector-index entry, host-facing form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateChunkVectorEntry {
+    pub chunk_index: u32,
+    pub vector_entry_id: Uuid,
+}
+
 /// Result of running a trace through the gate service. The fields here mirror
 /// the columns of `trace_gate_decisions` so callers can persist the decision
 /// row without re-deriving any field.
@@ -96,6 +103,10 @@ pub struct GateDecision {
     pub chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
+    /// Every per-chunk vector-index entry the gate inserted. Empty for
+    /// deterministic/legacy services and failed gates. The host persists
+    /// these as (submission_id, chunk_index)-tagged rows for revocation.
+    pub chunk_vector_entries: Vec<GateChunkVectorEntry>,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -243,6 +254,7 @@ fn build_deterministic_decision(
         peak_novelty_micros: novelty_score_micros,
         chunk_count: 1,
         chunks_capped: false,
+        chunk_vector_entries: Vec::new(),
     }
 }
 
@@ -541,6 +553,14 @@ where
             peak_novelty_micros: decision.peak_novelty_micros,
             chunk_count: decision.chunk_count,
             chunks_capped: decision.chunks_capped,
+            chunk_vector_entries: decision
+                .inserted_chunk_entries
+                .iter()
+                .map(|e| GateChunkVectorEntry {
+                    chunk_index: e.chunk_index,
+                    vector_entry_id: e.entry_id,
+                })
+                .collect(),
         })
     }
 
