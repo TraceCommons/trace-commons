@@ -276,7 +276,10 @@ const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEO
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 #[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 5;
+// Chunked scoring sends one bounded request per chunk; perplexity needs
+// only the realized token's logprob, so k=1 cuts TEE backend memory and
+// response size ~5x vs the OpenAI-canonical 5 (large-trace OOM root cause).
+const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 1;
 // fastembed embedder (Phase A3). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
 // feature is compiled in.

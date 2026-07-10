@@ -64,11 +64,10 @@ pub struct NearAiScorerConfig {
     /// `aggregate_perplexity_metrics`. Mirrors the local scorer's
     /// `tail_logprob_cutoff` argument.
     pub tail_logprob_cutoff: f32,
-    /// Per-call `logprobs` value sent to the API. Five is the OpenAI-canonical
-    /// upper bound and is what NEAR AI's hosted vLLM accepts; the rarity
-    /// metric only needs `top_logprobs` for the K-rarest computation when
-    /// inspecting alternatives, not the realized-token NLL we use for both
-    /// metrics here.
+    /// Per-call `logprobs` value sent to the API. Production default is 1:
+    /// both metrics here consume only the realized-token NLL, and
+    /// `echo + prompt_logprobs` memory on the TEE backend scales with this
+    /// value. NEAR AI's hosted vLLM accepts 1..=5.
     pub logprobs_top_k: u32,
     /// HTTP timeout for a single scoring request.
     pub timeout: Duration,
@@ -299,7 +298,11 @@ mod tests {
             model: "Qwen/Qwen3-30B-A3B-Instruct-2507".to_string(),
             api_key: "sk-test".to_string(),
             tail_logprob_cutoff: -8.0,
-            logprobs_top_k: 5,
+            // Production default (mirrors
+            // TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K = 1): perplexity
+            // needs only the realized token's logprob; k=1 cuts backend
+            // memory + response size ~5x vs the old 5.
+            logprobs_top_k: 1,
             timeout: Duration::from_secs(30),
         }
     }
@@ -337,7 +340,7 @@ mod tests {
         let s = NearAiPerplexityScorer::try_new(ok_cfg()).unwrap();
         let req = s.build_request(b"The capital of France is Paris.").unwrap();
         assert!(req.echo);
-        assert_eq!(req.logprobs, 5);
+        assert_eq!(req.logprobs, 1);
         assert!(!req.stream);
         assert_eq!(req.temperature, 0.0);
         assert_eq!(req.model, "Qwen/Qwen3-30B-A3B-Instruct-2507");
