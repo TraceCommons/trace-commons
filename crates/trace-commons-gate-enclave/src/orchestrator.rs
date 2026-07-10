@@ -19,6 +19,17 @@ pub struct EnclaveGateOrchestratorConfig {
     pub tail_fraction_floor_micros: u64,
     pub novelty_floor_micros: u64,
     pub top_k: usize,
+    /// Greedy chunk-packing target, in tokens (char proxy). Default 2048.
+    pub chunk_target_tokens: usize,
+    /// Hard per-chunk max, in tokens. Default 3072.
+    pub chunk_max_tokens: usize,
+    /// Hard cap on chunks per trace. Default 16.
+    pub chunk_cap: usize,
+    /// Min scored tokens for a chunk to be peak-eligible. Default 64.
+    pub chunk_min_tokens: u64,
+    /// Per-chunk index-insert dedup threshold: a chunk whose novelty is
+    /// below this is a near-duplicate and is not inserted. Default 50000.
+    pub embed_insert_novelty_micros: u64,
 }
 
 impl EnclaveGateOrchestratorConfig {
@@ -32,6 +43,11 @@ impl EnclaveGateOrchestratorConfig {
             tail_fraction_floor_micros: 0,
             novelty_floor_micros: 0,
             top_k: 8,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            embed_insert_novelty_micros: 50_000,
         }
     }
 }
@@ -54,6 +70,16 @@ pub struct OrchestrationDecision {
     /// `Some(id)` when both gates passed and the orchestrator inserted the
     /// embedding into the vector index; `None` otherwise.
     pub inserted_entry_id: Option<Uuid>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity.
+    /// Equals `perplexity_micros` for single-chunk traces.
+    pub peak_perplexity_micros: u64,
+    /// Peak (most-novel min-content-guarded chunk) novelty. Equals
+    /// `novelty_score_micros` for single-chunk traces.
+    pub peak_novelty_micros: u64,
+    /// Number of chunks scored (>= 1).
+    pub chunk_count: u32,
+    /// True when the per-trace chunk cap dropped trailing chunks.
+    pub chunks_capped: bool,
 }
 
 /// Pipelines a plaintext through perplexity + embedding + novelty gates and
@@ -113,13 +139,43 @@ where
         plaintext: &[u8],
         tenant_storage_ref: &str,
     ) -> anyhow::Result<OrchestrationDecision> {
-        // Fail-closed inference: a scorer / embedder error refuses the
-        // evaluation. Returning Ok with zero-valued fallbacks would let any
-        // positive floor be defeated silently, falsely passing the gate.
-        let perp = self
-            .perplexity
-            .score(plaintext)
-            .context("PerplexityScorerInferenceFailed")?;
+        // Chunk the parsed envelope. Every backend request downstream is now
+        // bounded — the root-cause fix for the TEE OOM crashes.
+        let chunker_cfg = crate::chunker::ChunkerConfig {
+            target_tokens: self.cfg.chunk_target_tokens,
+            max_tokens: self.cfg.chunk_max_tokens,
+            chunk_cap: self.cfg.chunk_cap,
+        };
+        let plan = crate::chunker::chunk_envelope_plaintext(plaintext, &chunker_cfg);
+        if plan.chunks_capped {
+            // Hash-only: counts and a fixed label only. Never chunk content.
+            tracing::warn!(
+                error_class = "TraceChunkCapExceeded",
+                chunk_count = plan.chunks.len(),
+                dropped_chunk_count = plan.dropped_chunk_count,
+                "trace chunk cap enforced"
+            );
+        }
+
+        // Fail-closed inference: any chunk's scorer error refuses the whole
+        // evaluation (v1 semantics). Sequential — never a concurrent burst
+        // against one pinned backend.
+        let mut chunk_scores: Vec<crate::perplexity::ChunkPerplexity> =
+            Vec::with_capacity(plan.chunks.len());
+        for chunk in &plan.chunks {
+            let cs = self
+                .perplexity
+                .score_chunk(chunk.text.as_bytes())
+                .context("PerplexityScorerInferenceFailed")?;
+            chunk_scores.push(cs);
+        }
+        let perp_agg = crate::chunk_aggregate::aggregate_chunked_perplexity(
+            &chunk_scores,
+            self.cfg.chunk_min_tokens,
+        );
+
+        // Embedding path: whole-plaintext for now (per-chunk embedding lands
+        // with the embedding half of the chunked-scoring slice).
         let embedding = self
             .embedder
             .embed(plaintext)
@@ -143,9 +199,9 @@ where
         };
         let novelty_score_micros = (novelty_score_f.clamp(0.0, 2.0) * 1_000_000.0) as u64;
 
-        let perplexity_passed = perp.aggregate_perplexity_micros
+        let perplexity_passed = perp_agg.representative_perplexity_micros
             >= self.cfg.perplexity_floor_micros
-            && perp.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
+            && perp_agg.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
         let novelty_passed = novelty_score_micros >= self.cfg.novelty_floor_micros;
 
         let nearest_neighbor_hash = hash_neighbors(&neighbors);
@@ -168,8 +224,8 @@ where
         Ok(OrchestrationDecision {
             gate_policy_version: self.cfg.gate_policy_version.clone(),
             gate_version_hash: self.cfg.gate_version_hash.clone(),
-            perplexity_micros: perp.aggregate_perplexity_micros,
-            tail_fraction_micros: perp.tail_fraction_micros,
+            perplexity_micros: perp_agg.representative_perplexity_micros,
+            tail_fraction_micros: perp_agg.tail_fraction_micros,
             perplexity_passed,
             novelty_score_micros,
             nearest_neighbor_hash,
@@ -177,6 +233,12 @@ where
             embedding_evidence_hash,
             attestation_chain_hash,
             inserted_entry_id,
+            peak_perplexity_micros: perp_agg.peak_perplexity_micros,
+            // Real per-chunk novelty peak lands with the embedding half;
+            // until then peak == representative (exact for 1 chunk).
+            peak_novelty_micros: novelty_score_micros,
+            chunk_count: plan.chunks.len() as u32,
+            chunks_capped: plan.chunks_capped,
         })
     }
 }
@@ -289,6 +351,109 @@ mod tests {
         );
         // Failed → orchestrator did NOT insert.
         assert!(second.inserted_entry_id.is_none());
+    }
+
+    use crate::perplexity::PerplexityResult;
+
+    /// Fixed-value scorer for exact-identity assertions.
+    struct StubScorer;
+    impl crate::perplexity::PerplexityScorer for StubScorer {
+        fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            Ok(PerplexityResult {
+                aggregate_perplexity_micros: 2_718_281,
+                tail_fraction_micros: 250_000,
+                tokens_scored: 100,
+            })
+        }
+    }
+
+    /// Scorer that fails on its Nth call — proves fail-closed mid-loop.
+    struct FailOnNthScorer {
+        n: std::sync::atomic::AtomicUsize,
+        fail_at: usize,
+    }
+    impl crate::perplexity::PerplexityScorer for FailOnNthScorer {
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            let call = self
+                .n
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == self.fail_at {
+                anyhow::bail!("ChunkScorerInjectedFailure");
+            }
+            MockPerplexityScorer::new().score(plaintext)
+        }
+    }
+
+    fn multi_chunk_envelope(event_count: usize, event_chars: usize) -> Vec<u8> {
+        let content = "a".repeat(event_chars);
+        let events: Vec<serde_json::Value> = (0..event_count)
+            .map(|_| {
+                serde_json::json!({
+                    "event_type": "assistant_message",
+                    "redacted_content": content,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap()
+    }
+
+    #[test]
+    fn single_chunk_trace_matches_whole_call_on_rendered_text() {
+        // A small trace is one chunk; its representative and peak must equal
+        // the scorer's single-call values on that same chunk text (identity
+        // within ln/exp round-trip tolerance for the derived default
+        // score_chunk path).
+        let mut cfg = EnclaveGateOrchestratorConfig::mock_default();
+        cfg.chunk_min_tokens = 1;
+        let orch = EnclaveGateOrchestrator::new(
+            StubScorer,
+            MockEmbedder::new(),
+            MockVectorIndex::new(),
+            cfg,
+        );
+        let d = orch
+            .evaluate(&multi_chunk_envelope(1, 40), "tenant_a")
+            .unwrap();
+        assert_eq!(d.chunk_count, 1);
+        assert!(!d.chunks_capped);
+        assert!(d.perplexity_micros.abs_diff(2_718_281) <= 2);
+        assert!(d.peak_perplexity_micros.abs_diff(2_718_281) <= 2);
+        assert!(d.tail_fraction_micros.abs_diff(250_000) <= 2_500);
+        assert_eq!(d.peak_novelty_micros, d.novelty_score_micros);
+    }
+
+    #[test]
+    fn large_trace_produces_multiple_chunks_and_cap() {
+        // 20 events of 8000 chars each: every event fills a ~2048-token
+        // (8192-char) target chunk alone -> 20 chunks -> capped at 16.
+        let orch = orch_with_floors(0, 0, 0);
+        let d = orch
+            .evaluate(&multi_chunk_envelope(20, 8_000), "tenant_a")
+            .unwrap();
+        assert_eq!(d.chunk_count, 16);
+        assert!(d.chunks_capped);
+    }
+
+    #[test]
+    fn chunk_scorer_error_fails_the_whole_evaluation() {
+        let mut cfg = EnclaveGateOrchestratorConfig::mock_default();
+        cfg.chunk_min_tokens = 1;
+        let orch = EnclaveGateOrchestrator::new(
+            FailOnNthScorer {
+                n: std::sync::atomic::AtomicUsize::new(0),
+                fail_at: 2,
+            },
+            MockEmbedder::new(),
+            MockVectorIndex::new(),
+            cfg,
+        );
+        let err = orch
+            .evaluate(&multi_chunk_envelope(20, 8_000), "tenant_a")
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PerplexityScorerInferenceFailed"),
+            "fail-closed error context missing: {err:#}"
+        );
     }
 
     #[test]
