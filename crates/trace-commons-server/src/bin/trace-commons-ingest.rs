@@ -224,6 +224,114 @@ const TRACE_COMMONS_GATE_POLICY_VERSION: &str = "TRACE_COMMONS_GATE_POLICY_VERSI
 const TRACE_COMMONS_GATE_TOP_K: &str = "TRACE_COMMONS_GATE_TOP_K";
 #[allow(dead_code)]
 const TRACE_COMMONS_GATE_DEFAULT_TOP_K: usize = 5;
+// Large-trace chunked scoring (Task 5). Chunking knobs shared by every
+// enclave gate-service flavor. Values are operator-set and safe to surface
+// in error strings and logs (no secrets). Only read by the feature-gated
+// enclave gate-service builders below, so (like the gate-floor consts above)
+// each gets `#[allow(dead_code)]` for default (no-feature) builds.
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS: &str = "TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS: &str = "TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_CHUNK_CAP: &str = "TRACE_COMMONS_GATE_CHUNK_CAP";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS: &str = "TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS: &str =
+    "TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_CHUNK_TARGET_TOKENS: usize = 2048;
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_CHUNK_MAX_TOKENS: usize = 3072;
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_CHUNK_CAP: usize = 16;
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_CHUNK_MIN_TOKENS: usize = 64;
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS: usize = 50_000;
+
+/// Chunking knobs shared by every enclave gate-service flavor. Values are
+/// operator-set and safe to surface in error strings (no secrets).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct GateChunkingEnvConfig {
+    chunk_target_tokens: usize,
+    chunk_max_tokens: usize,
+    chunk_cap: usize,
+    chunk_min_tokens: u64,
+    embed_insert_novelty_micros: u64,
+}
+
+/// Parse and validate the chunk-knob env vars, reusing `parse_usize_env` for
+/// the raw per-variable parse. Fails closed (refuses startup) rather than
+/// clamping: if an operator sets `TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS` >
+/// `TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS`, the chunker's oversized-event split
+/// uses `target` as its window and can exceed the hard `max` bound — the
+/// entire backend-safety point of this feature — so that combination must
+/// never silently proceed.
+///
+/// Not feature-gated: this is called both by the feature-gated enclave
+/// builders below and by a plain unit test (`gate_chunking_env_defaults_and_validation`)
+/// that must run under the default (no-feature) CI `cargo test` path.
+#[allow(dead_code)]
+fn parse_gate_chunking_config_from_env() -> anyhow::Result<GateChunkingEnvConfig> {
+    let chunk_target_tokens = parse_usize_env(
+        TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS,
+        TRACE_COMMONS_GATE_DEFAULT_CHUNK_TARGET_TOKENS,
+    )?;
+    let chunk_max_tokens = parse_usize_env(
+        TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS,
+        TRACE_COMMONS_GATE_DEFAULT_CHUNK_MAX_TOKENS,
+    )?;
+    let chunk_cap = parse_usize_env(
+        TRACE_COMMONS_GATE_CHUNK_CAP,
+        TRACE_COMMONS_GATE_DEFAULT_CHUNK_CAP,
+    )?;
+    let chunk_min_tokens = parse_usize_env(
+        TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS,
+        TRACE_COMMONS_GATE_DEFAULT_CHUNK_MIN_TOKENS,
+    )?;
+    let embed_insert_novelty_micros = parse_usize_env(
+        TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
+        TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
+    )?;
+    validate_gate_chunking_knobs(chunk_target_tokens, chunk_max_tokens, chunk_cap)?;
+    Ok(GateChunkingEnvConfig {
+        chunk_target_tokens,
+        chunk_max_tokens,
+        chunk_cap,
+        chunk_min_tokens: chunk_min_tokens as u64,
+        embed_insert_novelty_micros: embed_insert_novelty_micros as u64,
+    })
+}
+
+/// Pure validation of already-parsed chunk knobs, split out from
+/// `parse_gate_chunking_config_from_env` so unit tests can exercise the
+/// target-vs-max fail-closed invariant directly on plain `usize` values
+/// instead of mutating process-global env vars (which would race with other
+/// tests reading the same env keys under `cargo test`'s default
+/// multi-threaded runner).
+#[allow(dead_code)]
+fn validate_gate_chunking_knobs(
+    chunk_target_tokens: usize,
+    chunk_max_tokens: usize,
+    chunk_cap: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        chunk_target_tokens > 0,
+        "{TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS} must be greater than zero"
+    );
+    anyhow::ensure!(
+        chunk_max_tokens >= chunk_target_tokens,
+        "{TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS} must be >= {TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS}"
+    );
+    anyhow::ensure!(
+        chunk_cap >= 1,
+        "{TRACE_COMMONS_GATE_CHUNK_CAP} must be at least 1"
+    );
+    Ok(())
+}
 // Phase A5 novelty_utility credit emission tuning. See
 // docs/superpowers/specs/2026-05-13-novelty-utility-credit-emission-design.md.
 const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
@@ -4611,6 +4719,7 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
         TRACE_COMMONS_GATE_POLICY_VERSION,
     );
     let top_k = parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?;
+    let chunking = parse_gate_chunking_config_from_env()?;
 
     let gate_version_hash = compute_gate_version_hash(
         &gate_policy_version,
@@ -4627,6 +4736,11 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
         embedder_max_tokens,
         embedder_matryoshka_dim,
         vector_index_dim,
+        chunking.chunk_target_tokens,
+        chunking.chunk_max_tokens,
+        chunking.chunk_cap,
+        chunking.chunk_min_tokens,
+        chunking.embed_insert_novelty_micros,
     );
 
     let cfg = EnclaveGateOrchestratorConfig {
@@ -4636,6 +4750,11 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
         tail_fraction_floor_micros,
         novelty_floor_micros,
         top_k,
+        chunk_target_tokens: chunking.chunk_target_tokens,
+        chunk_max_tokens: chunking.chunk_max_tokens,
+        chunk_cap: chunking.chunk_cap,
+        chunk_min_tokens: chunking.chunk_min_tokens,
+        embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
     };
     let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
@@ -4862,6 +4981,7 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         TRACE_COMMONS_GATE_POLICY_VERSION,
     );
     let top_k = parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?;
+    let chunking = parse_gate_chunking_config_from_env()?;
 
     // Gate version hash mixes in the perplexity *model id* (which here is
     // the NEAR AI hosted model name) so rotating the hosted model produces a
@@ -4881,6 +5001,11 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         embedder_max_tokens,
         embedder_matryoshka_dim,
         vector_index_dim,
+        chunking.chunk_target_tokens,
+        chunking.chunk_max_tokens,
+        chunking.chunk_cap,
+        chunking.chunk_min_tokens,
+        chunking.embed_insert_novelty_micros,
     );
 
     let cfg = EnclaveGateOrchestratorConfig {
@@ -4890,6 +5015,11 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         tail_fraction_floor_micros,
         novelty_floor_micros,
         top_k,
+        chunk_target_tokens: chunking.chunk_target_tokens,
+        chunk_max_tokens: chunking.chunk_max_tokens,
+        chunk_cap: chunking.chunk_cap,
+        chunk_min_tokens: chunking.chunk_min_tokens,
+        embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
     };
     let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
@@ -4933,6 +5063,11 @@ fn compute_gate_version_hash(
     embedder_max_tokens: usize,
     embedder_matryoshka_dim: Option<usize>,
     vector_index_dim: usize,
+    chunk_target_tokens: usize,
+    chunk_max_tokens: usize,
+    chunk_cap: usize,
+    chunk_min_tokens: u64,
+    embed_insert_novelty_micros: u64,
 ) -> String {
     let canonical = format!(
         "trace_commons_gate_version.v1\n\
@@ -4941,7 +5076,8 @@ fn compute_gate_version_hash(
          top_k={top_k}\n\
          perplexity={perplexity_model_id}:{perplexity_max_tokens}:{perplexity_tail_cutoff}\n\
          embedder={embedder_model_id}:{embedder_max_tokens}:{embedder_matryoshka_dim:?}\n\
-         vector_dim={vector_index_dim}",
+         vector_dim={vector_index_dim}\n\
+         chunking={chunk_target_tokens},{chunk_max_tokens},{chunk_cap},{chunk_min_tokens},{embed_insert_novelty_micros}",
     );
     let mut h = Sha256::new();
     h.update(canonical.as_bytes());
@@ -4950,7 +5086,11 @@ fn compute_gate_version_hash(
 
 /// Parse `T = usize` from an env var with a default fallback. Trim + strict
 /// integer parse; empty / unset → default; malformed → fail-closed.
-#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+///
+/// Not feature-gated (unlike its sibling gate-config parsers): the chunk-knob
+/// parser that reuses this reads env unconditionally so its defaults are
+/// exercised by the plain `cargo test` CI path regardless of which optional
+/// gate-service feature (if any) is compiled in.
 fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
     match std::env::var(var) {
         Ok(raw) => {
@@ -44885,6 +45025,14 @@ async fn evaluate_and_record_gate(
         decided_at: Utc::now(),
         vector_entry_id: decision.vector_entry_id,
         credit_withheld_reason: None,
+        peak_perplexity_micros: Some(
+            i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
+        ),
+        peak_novelty_micros: Some(
+            i64::try_from(decision.peak_novelty_micros).unwrap_or(i64::MAX),
+        ),
+        chunk_count: Some(i32::try_from(decision.chunk_count).unwrap_or(i32::MAX)),
+        chunks_capped: Some(decision.chunks_capped),
     };
     db.insert_trace_gate_decision(tenant_id, row).await?;
 
@@ -45052,6 +45200,10 @@ async fn score_one_submission(
                             decided_at: now,
                             vector_entry_id: None,
                             credit_withheld_reason: None,
+                            peak_perplexity_micros: None,
+                            peak_novelty_micros: None,
+                            chunk_count: None,
+                            chunks_capped: None,
                         },
                     );
                     let decision_id = row.decision_id;
@@ -45277,6 +45429,10 @@ async fn gate_evaluate_worker_handler(
             embedding_evidence_hash: String::new(),
             attestation_chain_hash: String::new(),
             vector_entry_id,
+            peak_perplexity_micros: 0,
+            peak_novelty_micros: 0,
+            chunk_count: 1,
+            chunks_capped: false,
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),

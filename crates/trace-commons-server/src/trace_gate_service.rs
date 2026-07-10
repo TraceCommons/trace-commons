@@ -88,6 +88,14 @@ pub struct GateDecision {
     /// revocation worker). It is stored in `trace_gate_decisions` via a
     /// nullable `vector_entry_id` column (migration V24).
     pub vector_entry_id: Option<Uuid>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity.
+    pub peak_perplexity_micros: u64,
+    /// Peak per-chunk novelty.
+    pub peak_novelty_micros: u64,
+    /// Number of chunks scored (>= 1; deterministic services report 1).
+    pub chunk_count: u32,
+    /// True when the per-trace chunk cap dropped trailing chunks.
+    pub chunks_capped: bool,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -229,6 +237,12 @@ fn build_deterministic_decision(
         // Deterministic services do not actually insert into a vector index,
         // so there is no entry id to surface.
         vector_entry_id: None,
+        // Deterministic services score the whole trace as a single chunk;
+        // peak == representative.
+        peak_perplexity_micros: perplexity_micros,
+        peak_novelty_micros: novelty_score_micros,
+        chunk_count: 1,
+        chunks_capped: false,
     }
 }
 
@@ -523,6 +537,10 @@ where
             embedding_evidence_hash: decision.embedding_evidence_hash,
             attestation_chain_hash: decision.attestation_chain_hash,
             vector_entry_id: decision.inserted_entry_id,
+            peak_perplexity_micros: decision.peak_perplexity_micros,
+            peak_novelty_micros: decision.peak_novelty_micros,
+            chunk_count: decision.chunk_count,
+            chunks_capped: decision.chunks_capped,
         })
     }
 

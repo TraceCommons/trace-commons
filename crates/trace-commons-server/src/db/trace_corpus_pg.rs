@@ -5259,7 +5259,8 @@ impl TraceCorpusStore for PgBackend {
                         perplexity_micros, tail_fraction_micros, perplexity_passed, \
                         novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
-                        vector_entry_id, credit_withheld_reason \
+                        vector_entry_id, credit_withheld_reason, \
+                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
                    AND vector_entry_id IS NOT NULL \
@@ -5276,7 +5277,8 @@ impl TraceCorpusStore for PgBackend {
                         perplexity_micros, tail_fraction_micros, perplexity_passed, \
                         novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
-                        vector_entry_id, credit_withheld_reason \
+                        vector_entry_id, credit_withheld_reason, \
+                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
                    AND vector_entry_id IS NOT NULL \
@@ -5305,6 +5307,10 @@ impl TraceCorpusStore for PgBackend {
                 decided_at: row.get("decided_at"),
                 vector_entry_id: row.get("vector_entry_id"),
                 credit_withheld_reason: row.get("credit_withheld_reason"),
+                peak_perplexity_micros: row.get("peak_perplexity_micros"),
+                peak_novelty_micros: row.get("peak_novelty_micros"),
+                chunk_count: row.get("chunk_count"),
+                chunks_capped: row.get("chunks_capped"),
             })
             .collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -5354,8 +5360,9 @@ impl TraceCorpusStore for PgBackend {
                  gate_version_hash, perplexity_micros, tail_fraction_micros,
                  perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
-                 decided_at, vector_entry_id, credit_withheld_reason
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                 decided_at, vector_entry_id, credit_withheld_reason,
+                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5373,6 +5380,10 @@ impl TraceCorpusStore for PgBackend {
                 &decision.decided_at,
                 &decision.vector_entry_id,
                 &decision.credit_withheld_reason,
+                &decision.peak_perplexity_micros,
+                &decision.peak_novelty_micros,
+                &decision.chunk_count,
+                &decision.chunks_capped,
             ],
         )
         .await
@@ -5441,7 +5452,8 @@ impl TraceCorpusStore for PgBackend {
                         d.perplexity_micros, d.tail_fraction_micros, d.perplexity_passed,
                         d.novelty_score_micros, d.nearest_neighbor_hash, d.novelty_passed,
                         d.embedding_evidence_hash, d.attestation_chain_hash, d.decided_at,
-                        d.vector_entry_id, d.credit_withheld_reason
+                        d.vector_entry_id, d.credit_withheld_reason,
+                        d.peak_perplexity_micros, d.peak_novelty_micros, d.chunk_count, d.chunks_capped
                  FROM trace_gate_decisions d
                  JOIN trace_submissions s
                    ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
@@ -5471,6 +5483,10 @@ impl TraceCorpusStore for PgBackend {
             decided_at: row.get(12),
             vector_entry_id: row.get(13),
             credit_withheld_reason: row.get(14),
+            peak_perplexity_micros: row.get(15),
+            peak_novelty_micros: row.get(16),
+            chunk_count: row.get(17),
+            chunks_capped: row.get(18),
         }))
     }
 }

@@ -1794,6 +1794,18 @@ pub struct TraceGateDecisionRow {
     /// `"policy_mismatch"`, `"central_issuer_denied"`,
     /// `"non_production_gate"`, and `"submission_not_accepted"`.
     pub credit_withheld_reason: Option<String>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity in
+    /// micros (migration V37). `None` on pre-chunking rows — readers treat
+    /// `None` as "peak == representative" (single-chunk semantics).
+    pub peak_perplexity_micros: Option<i64>,
+    /// Peak per-chunk novelty in micros (migration V37). Same `None`
+    /// semantics as `peak_perplexity_micros`.
+    pub peak_novelty_micros: Option<i64>,
+    /// Number of chunks scored (migration V37). `None` reads as 1.
+    pub chunk_count: Option<i32>,
+    /// True when the per-trace chunk cap dropped trailing chunks
+    /// (migration V37). `None` reads as false.
+    pub chunks_capped: Option<bool>,
 }
 
 /// A single submission awaiting a gate decision, as enumerated by

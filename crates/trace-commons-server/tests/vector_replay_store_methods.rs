@@ -101,6 +101,10 @@ fn sample_gate_decision(
             None
         },
         credit_withheld_reason: None,
+        peak_perplexity_micros: None,
+        peak_novelty_micros: None,
+        chunk_count: None,
+        chunks_capped: None,
     }
 }
 

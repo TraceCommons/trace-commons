@@ -73819,3 +73819,36 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         "empty allowed_uses request must grant exactly the scope-implied uses: {body}"
     );
 }
+
+#[test]
+fn gate_chunking_env_defaults_and_validation() {
+    // Defaults with no env set (tests must not set global env — the
+    // parser reads process env, so only assert the default path, which
+    // is what CI exercises).
+    let cfg = parse_gate_chunking_config_from_env().expect("defaults parse");
+    assert_eq!(cfg.chunk_target_tokens, 2048);
+    assert_eq!(cfg.chunk_max_tokens, 3072);
+    assert_eq!(cfg.chunk_cap, 16);
+    assert_eq!(cfg.chunk_min_tokens, 64);
+    assert_eq!(cfg.embed_insert_novelty_micros, 50_000);
+}
+
+// Deliberately does NOT mutate process-global env (unlike some other tests
+// in this module): `cargo test` runs tests in parallel threads by default,
+// and env var mutation would race with `gate_chunking_env_defaults_and_validation`
+// above, which asserts the *unset* default path. Testing the pure validation
+// function directly on plain `usize` values sidesteps that entirely.
+#[test]
+fn gate_chunking_env_rejects_target_greater_than_max() {
+    let err = validate_gate_chunking_knobs(4096, 3072, 16)
+        .expect_err("target > max must fail closed, never clamp or proceed");
+    assert!(
+        err.to_string().contains("TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS"),
+        "error must name the offending control: {err}"
+    );
+}
+
+#[test]
+fn gate_chunking_env_accepts_target_equal_to_max() {
+    validate_gate_chunking_knobs(3072, 3072, 16).expect("target == max is a valid boundary");
+}
