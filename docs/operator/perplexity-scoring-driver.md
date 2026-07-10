@@ -134,6 +134,27 @@ real row contents (trace bodies, contributor identity, raw scores tied to a
 specific submission) into tickets or logs; the count above is safe because
 it carries no per-row content.
 
+## Resetting retry bookkeeping after a fix
+
+When a submission fails scoring, the driver bumps
+`trace_gate_evaluation_attempts` and backs off; after
+`TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` failures it drops out of the
+work set entirely. If you deploy a fix and want the previously-failed
+submissions re-scored from scratch — rather than raising `MAX_ATTEMPTS` to
+sidestep the cap — clear their attempt rows with:
+
+```bash
+sudo deploy/pilot-gcp/reset-gate-attempts.sh                 # all stuck rows
+sudo deploy/pilot-gcp/reset-gate-attempts.sh <submission_id> # one submission
+```
+
+It only deletes attempt rows for submissions that still have **no** gate
+decision (the stuck set); successfully-scored submissions are never touched.
+It enumerates cross-tenant via the read-only `trace_gate_driver` role and
+deletes per-tenant via the `app` role under RLS, so it needs no extra
+grants. Run it **after** deploying the fix — otherwise the driver re-attempts
+the same submissions against the unfixed binary and the rows repopulate.
+
 ## Floor stays 0 until calibration
 
 Enabling this driver makes perplexity scoring **run and record decisions**.
