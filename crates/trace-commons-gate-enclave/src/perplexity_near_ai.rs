@@ -38,7 +38,9 @@
 
 #![cfg(feature = "near-ai-scorer")]
 
-use crate::perplexity::{PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer};
+use crate::perplexity::{
+    ChunkPerplexity, PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
+};
 use crate::perplexity_local::{aggregate_perplexity_metrics, per_token_rarity_micros};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -64,11 +66,10 @@ pub struct NearAiScorerConfig {
     /// `aggregate_perplexity_metrics`. Mirrors the local scorer's
     /// `tail_logprob_cutoff` argument.
     pub tail_logprob_cutoff: f32,
-    /// Per-call `logprobs` value sent to the API. Five is the OpenAI-canonical
-    /// upper bound and is what NEAR AI's hosted vLLM accepts; the rarity
-    /// metric only needs `top_logprobs` for the K-rarest computation when
-    /// inspecting alternatives, not the realized-token NLL we use for both
-    /// metrics here.
+    /// Per-call `logprobs` value sent to the API. Production default is 1:
+    /// both metrics here consume only the realized-token NLL, and
+    /// `echo + prompt_logprobs` memory on the TEE backend scales with this
+    /// value. NEAR AI's hosted vLLM accepts 1..=5.
     pub logprobs_top_k: u32,
     /// HTTP timeout for a single scoring request.
     pub timeout: Duration,
@@ -222,10 +223,45 @@ impl NearAiPerplexityScorer {
     }
 }
 
+/// Convert a raw logprob slice (element 0 = BOS placeholder, dropped) into
+/// [`ChunkPerplexity`]. Factored out of `score_chunk` so it unit-tests
+/// without HTTP. Fail-closed parallel to `aggregate_perplexity_metrics`:
+/// short or non-finite input collapses to a zero-token chunk.
+fn chunk_perplexity_from_logprobs(logprobs: &[f32], tail_logprob_cutoff: f32) -> ChunkPerplexity {
+    if logprobs.len() < 2 || logprobs[1..].iter().any(|lp| !lp.is_finite()) {
+        return ChunkPerplexity {
+            sum_nll: 0.0,
+            tokens: 0,
+            tail_tokens: 0,
+            logprobs: Vec::new(),
+        };
+    }
+    let usable = &logprobs[1..];
+    let sum_nll: f64 = usable.iter().map(|lp| -(*lp as f64)).sum();
+    let tail_tokens = usable
+        .iter()
+        .filter(|&&lp| lp < tail_logprob_cutoff)
+        .count() as u64;
+    ChunkPerplexity {
+        sum_nll,
+        tokens: usable.len() as u64,
+        tail_tokens,
+        logprobs: usable.to_vec(),
+    }
+}
+
 impl PerplexityScorer for NearAiPerplexityScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
         let logprobs = self.fetch_logprobs(plaintext)?;
         Ok(aggregate_perplexity_metrics(
+            &logprobs,
+            self.cfg.tail_logprob_cutoff,
+        ))
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+        let logprobs = self.fetch_logprobs(chunk)?;
+        Ok(chunk_perplexity_from_logprobs(
             &logprobs,
             self.cfg.tail_logprob_cutoff,
         ))
@@ -299,7 +335,11 @@ mod tests {
             model: "Qwen/Qwen3-30B-A3B-Instruct-2507".to_string(),
             api_key: "sk-test".to_string(),
             tail_logprob_cutoff: -8.0,
-            logprobs_top_k: 5,
+            // Production default (mirrors
+            // TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K = 1): perplexity
+            // needs only the realized token's logprob; k=1 cuts backend
+            // memory + response size ~5x vs the old 5.
+            logprobs_top_k: 1,
             timeout: Duration::from_secs(30),
         }
     }
@@ -337,7 +377,7 @@ mod tests {
         let s = NearAiPerplexityScorer::try_new(ok_cfg()).unwrap();
         let req = s.build_request(b"The capital of France is Paris.").unwrap();
         assert!(req.echo);
-        assert_eq!(req.logprobs, 5);
+        assert_eq!(req.logprobs, 1);
         assert!(!req.stream);
         assert_eq!(req.temperature, 0.0);
         assert_eq!(req.model, "Qwen/Qwen3-30B-A3B-Instruct-2507");
@@ -370,5 +410,31 @@ mod tests {
         assert_eq!(lp.token_logprobs.len(), 7);
         assert!(lp.token_logprobs[0].is_none());
         assert_eq!(lp.token_logprobs[1], Some(-13.17));
+    }
+
+    #[test]
+    fn chunk_perplexity_from_logprobs_matches_helpers() {
+        // Unit-test the pure conversion (no HTTP): the same fixture logprob
+        // slice must produce sum_nll / tokens / tail_tokens consistent with
+        // aggregate_perplexity_metrics.
+        let logprobs = vec![0.0_f32, -1.0, -2.0, -20.0, -1.0];
+        let chunk = chunk_perplexity_from_logprobs(&logprobs, -8.0);
+        assert_eq!(chunk.tokens, 4);
+        assert!((chunk.sum_nll - 24.0).abs() < 1e-6);
+        assert_eq!(chunk.tail_tokens, 1); // only -20.0 < -8.0
+        assert_eq!(chunk.logprobs, vec![-1.0, -2.0, -20.0, -1.0]);
+        let rebuilt = ((chunk.sum_nll / chunk.tokens as f64).exp() * 1_000_000.0) as u64;
+        let reference = aggregate_perplexity_metrics(&logprobs, -8.0);
+        let diff = rebuilt.abs_diff(reference.aggregate_perplexity_micros);
+        // At this fixture's magnitude (perplexity ~403, ~4e8 micros), the
+        // reference path's f32 mean/exp/scale arithmetic loses close to a
+        // full f32 ULP (~48 at this scale) versus this function's f64 path.
+        // That dwarfs the <=2 tolerance that holds for the small-magnitude
+        // mock-scorer round trip in perplexity.rs (values there stay under
+        // 1e7, where f32 ULP is comparably tiny). Observed drift here is 7;
+        // 64 leaves headroom for the same fixture on other toolchains/targets
+        // while still catching a real algorithmic divergence (which would be
+        // orders of magnitude larger).
+        assert!(diff <= 64, "chunk-form perplexity drifted by {diff} micros");
     }
 }

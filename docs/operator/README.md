@@ -98,6 +98,8 @@ Every runbook in this directory, with a one-line description.
   builder.
 - [`./key-rotation.md`](./key-rotation.md) — Cloud KMS key-version rotation
   procedure, including drill validation and rollback.
+- [Large-trace chunked scoring](large-trace-chunked-scoring.md) — chunking
+  knobs, peak/representative columns, per-chunk revocation.
 - [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
   perplexity model or embedder and the gate-version implications.
 - [`./operational-summary.md`](./operational-summary.md) — field-by-field

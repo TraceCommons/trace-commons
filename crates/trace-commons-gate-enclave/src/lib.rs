@@ -11,6 +11,8 @@
 //! crate depends on this one and adapts the orchestrator's `OrchestrationDecision`
 //! to its own audit-row shape.
 
+pub mod chunk_aggregate;
+pub mod chunker;
 pub mod embedder;
 pub mod embedder_fastembed;
 pub mod orchestrator;

@@ -1794,6 +1794,30 @@ pub struct TraceGateDecisionRow {
     /// `"policy_mismatch"`, `"central_issuer_denied"`,
     /// `"non_production_gate"`, and `"submission_not_accepted"`.
     pub credit_withheld_reason: Option<String>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity in
+    /// micros (migration V37). `None` on pre-chunking rows — readers treat
+    /// `None` as "peak == representative" (single-chunk semantics).
+    pub peak_perplexity_micros: Option<i64>,
+    /// Peak per-chunk novelty in micros (migration V37). Same `None`
+    /// semantics as `peak_perplexity_micros`.
+    pub peak_novelty_micros: Option<i64>,
+    /// Number of chunks scored (migration V37). `None` reads as 1.
+    pub chunk_count: Option<i32>,
+    /// True when the per-trace chunk cap dropped trailing chunks
+    /// (migration V37). `None` reads as false.
+    pub chunks_capped: Option<bool>,
+}
+
+/// One per-chunk vector-index entry row (`trace_gate_chunk_vector_entries`,
+/// migration V37). Keyed `(tenant_id, decision_id, chunk_index)`; the
+/// complete authoritative entry set for a decision. The decision row's
+/// legacy `vector_entry_id` column keeps holding the FIRST entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceGateChunkVectorEntryRow {
+    pub decision_id: Uuid,
+    pub submission_id: Uuid,
+    pub chunk_index: i32,
+    pub vector_entry_id: Uuid,
 }
 
 /// A single submission awaiting a gate decision, as enumerated by
@@ -2319,6 +2343,29 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         decision: TraceGateDecisionRow,
     ) -> Result<(), DatabaseError>;
+
+    /// Insert a gate-decision row together with its per-chunk vector-entry
+    /// rows, atomically (one transaction). The default delegates to
+    /// `insert_trace_gate_decision` and DROPS the chunk entries — acceptable
+    /// only for non-PG test doubles; the PG impl overrides this.
+    async fn insert_trace_gate_decision_with_chunk_entries(
+        &self,
+        tenant_id: &str,
+        decision: TraceGateDecisionRow,
+        _chunk_entries: Vec<TraceGateChunkVectorEntryRow>,
+    ) -> Result<(), DatabaseError> {
+        self.insert_trace_gate_decision(tenant_id, decision).await
+    }
+
+    /// List all per-chunk vector entries recorded for a submission (all of
+    /// its decisions). Default returns empty for non-PG test doubles.
+    async fn list_trace_gate_chunk_vector_entries(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Vec<TraceGateChunkVectorEntryRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
 
     /// Update the label-only `credit_withheld_reason` on an already-inserted
     /// `trace_gate_decisions` row. Used by the gate-worker HTTP handler after

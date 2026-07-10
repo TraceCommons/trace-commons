@@ -27,7 +27,10 @@ hf-hub = { version = "0.4.3", optional = true }
 # Used by mistralrs's tokenize API (`Either::Right(text)`).
 either = { version = "1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
-serde_json = { version = "1", optional = true }
+# Required (not optional): the always-compiled TraceChunker parses the
+# contribution-envelope JSON to chunk on event boundaries. Already a
+# workspace dep; no new crate. Flagged in the PR description.
+serde_json = "1"
 # Phase A4: usearch HNSW vector index + lru-bounded per-tenant handle cache.
 usearch = { version = "2.25.2", optional = true }
 lru = { version = "0.18.0", optional = true }
@@ -62,7 +65,6 @@ local-gpu-models = [
     "dep:hf-hub",
     "dep:either",
     "dep:serde",
-    "dep:serde_json",
     "dep:fastembed",
     "dep:tokio",
     "dep:usearch",
@@ -81,7 +83,6 @@ local-gpu-models-cuda = [
 near-ai-scorer = [
     "dep:reqwest",
     "dep:serde",
-    "dep:serde_json",
     "dep:fastembed",
     "dep:tokenizers",
     "dep:hf-hub",

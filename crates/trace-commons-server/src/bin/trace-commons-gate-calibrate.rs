@@ -458,6 +458,13 @@ mod calibrate_impl {
             tail_fraction_floor_micros: 0,
             novelty_floor_micros: 0,
             top_k,
+            // Chunking knobs at their production defaults; calibration scores
+            // through the same chunked path as the gate.
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            embed_insert_novelty_micros: 50_000,
         };
         let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, index, cfg);
 

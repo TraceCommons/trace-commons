@@ -19,6 +19,17 @@ pub struct EnclaveGateOrchestratorConfig {
     pub tail_fraction_floor_micros: u64,
     pub novelty_floor_micros: u64,
     pub top_k: usize,
+    /// Greedy chunk-packing target, in tokens (char proxy). Default 2048.
+    pub chunk_target_tokens: usize,
+    /// Hard per-chunk max, in tokens. Default 3072.
+    pub chunk_max_tokens: usize,
+    /// Hard cap on chunks per trace. Default 16.
+    pub chunk_cap: usize,
+    /// Min scored tokens for a chunk to be peak-eligible. Default 64.
+    pub chunk_min_tokens: u64,
+    /// Per-chunk index-insert dedup threshold: a chunk whose novelty is
+    /// below this is a near-duplicate and is not inserted. Default 50000.
+    pub embed_insert_novelty_micros: u64,
 }
 
 impl EnclaveGateOrchestratorConfig {
@@ -32,6 +43,11 @@ impl EnclaveGateOrchestratorConfig {
             tail_fraction_floor_micros: 0,
             novelty_floor_micros: 0,
             top_k: 8,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            embed_insert_novelty_micros: 50_000,
         }
     }
 }
@@ -54,6 +70,28 @@ pub struct OrchestrationDecision {
     /// `Some(id)` when both gates passed and the orchestrator inserted the
     /// embedding into the vector index; `None` otherwise.
     pub inserted_entry_id: Option<Uuid>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity.
+    /// Equals `perplexity_micros` for single-chunk traces.
+    pub peak_perplexity_micros: u64,
+    /// Peak (most-novel min-content-guarded chunk) novelty. Equals
+    /// `novelty_score_micros` for single-chunk traces.
+    pub peak_novelty_micros: u64,
+    /// Number of chunks scored (>= 1).
+    pub chunk_count: u32,
+    /// True when the per-trace chunk cap dropped trailing chunks.
+    pub chunks_capped: bool,
+    /// Every chunk entry inserted into the vector index (both gates passed,
+    /// per-chunk novelty at or above the insert threshold). Empty on fail.
+    pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
+}
+
+/// A per-chunk vector-index entry the orchestrator inserted. The host maps
+/// these to `(submission_id, chunk_index)` rows in
+/// `trace_gate_chunk_vector_entries` for revocation tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InsertedChunkEntry {
+    pub chunk_index: u32,
+    pub entry_id: Uuid,
 }
 
 /// Pipelines a plaintext through perplexity + embedding + novelty gates and
@@ -113,63 +151,114 @@ where
         plaintext: &[u8],
         tenant_storage_ref: &str,
     ) -> anyhow::Result<OrchestrationDecision> {
-        // Fail-closed inference: a scorer / embedder error refuses the
-        // evaluation. Returning Ok with zero-valued fallbacks would let any
-        // positive floor be defeated silently, falsely passing the gate.
-        let perp = self
-            .perplexity
-            .score(plaintext)
-            .context("PerplexityScorerInferenceFailed")?;
-        let embedding = self
-            .embedder
-            .embed(plaintext)
-            .context("EmbedderInferenceFailed")?;
-        let neighbors = self
-            .index
-            .nearest(tenant_storage_ref, &embedding, self.cfg.top_k)?;
-
-        // novelty_score = 1 - max similarity, scaled to micros. Cosine sim
-        // lives in [-1, 1]; clamp before mapping so the micros stay in
-        // [0, 2_000_000].
-        let max_sim = neighbors
-            .iter()
-            .map(|n| n.similarity)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let novelty_score_f = if max_sim.is_finite() {
-            (1.0 - max_sim).max(0.0)
-        } else {
-            // No existing entries → maximally novel.
-            1.0
+        // Chunk the parsed envelope. Every backend request downstream is now
+        // bounded — the root-cause fix for the TEE OOM crashes.
+        let chunker_cfg = crate::chunker::ChunkerConfig {
+            target_tokens: self.cfg.chunk_target_tokens,
+            max_tokens: self.cfg.chunk_max_tokens,
+            chunk_cap: self.cfg.chunk_cap,
         };
-        let novelty_score_micros = (novelty_score_f.clamp(0.0, 2.0) * 1_000_000.0) as u64;
+        let plan = crate::chunker::chunk_envelope_plaintext(plaintext, &chunker_cfg);
+        if plan.chunks_capped {
+            // Hash-only: counts and a fixed label only. Never chunk content.
+            tracing::warn!(
+                error_class = "TraceChunkCapExceeded",
+                chunk_count = plan.chunks.len(),
+                dropped_chunk_count = plan.dropped_chunk_count,
+                "trace chunk cap enforced"
+            );
+        }
 
-        let perplexity_passed = perp.aggregate_perplexity_micros
+        // Fail-closed inference: any chunk's scorer error refuses the whole
+        // evaluation (v1 semantics). Sequential — never a concurrent burst
+        // against one pinned backend.
+        let mut chunk_scores: Vec<crate::perplexity::ChunkPerplexity> =
+            Vec::with_capacity(plan.chunks.len());
+        for chunk in &plan.chunks {
+            let cs = self
+                .perplexity
+                .score_chunk(chunk.text.as_bytes())
+                .context("PerplexityScorerInferenceFailed")?;
+            chunk_scores.push(cs);
+        }
+        let perp_agg = crate::chunk_aggregate::aggregate_chunked_perplexity(
+            &chunk_scores,
+            self.cfg.chunk_min_tokens,
+        );
+
+        // Per-chunk embedding: mean-pooled sub-windows so the vector covers
+        // the whole chunk (no 512-token truncation), then per-chunk novelty
+        // against the tenant's existing per-chunk entries. Fail-closed: any
+        // chunk's embedder/index error refuses the evaluation.
+        let mut chunk_embeddings: Vec<Vec<f32>> = Vec::with_capacity(plan.chunks.len());
+        let mut chunk_novelty_micros: Vec<u64> = Vec::with_capacity(plan.chunks.len());
+        let mut all_neighbors: Vec<crate::vector_index::NearestNeighbor> = Vec::new();
+        for chunk in &plan.chunks {
+            let emb = crate::embedder::embed_chunk_mean_pooled(&self.embedder, &chunk.text)
+                .context("EmbedderInferenceFailed")?;
+            let neighbors = self
+                .index
+                .nearest(tenant_storage_ref, &emb, self.cfg.top_k)?;
+            let max_sim = neighbors
+                .iter()
+                .map(|n| n.similarity)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let novelty_f = if max_sim.is_finite() {
+                (1.0 - max_sim).max(0.0)
+            } else {
+                1.0
+            };
+            chunk_novelty_micros.push((novelty_f.clamp(0.0, 2.0) * 1_000_000.0) as u64);
+            all_neighbors.extend(neighbors);
+            chunk_embeddings.push(emb);
+        }
+        let chunk_token_counts: Vec<u64> = chunk_scores.iter().map(|c| c.tokens).collect();
+        let (novelty_score_micros, peak_novelty_micros) =
+            crate::chunk_aggregate::aggregate_chunked_novelty(
+                &chunk_novelty_micros,
+                &chunk_token_counts,
+                self.cfg.chunk_min_tokens,
+            );
+
+        let perplexity_passed = perp_agg.representative_perplexity_micros
             >= self.cfg.perplexity_floor_micros
-            && perp.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
+            && perp_agg.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
         let novelty_passed = novelty_score_micros >= self.cfg.novelty_floor_micros;
 
-        let nearest_neighbor_hash = hash_neighbors(&neighbors);
-        let embedding_evidence_hash = hash_embedding_evidence(
+        let nearest_neighbor_hash = hash_neighbors(&all_neighbors);
+        let embedding_evidence_hash = hash_chunk_embedding_evidence(
             &self.cfg.gate_policy_version,
             tenant_storage_ref,
-            &embedding,
+            &chunk_embeddings,
         );
         let attestation_chain_hash =
             hash_attestation_chain(&self.cfg.gate_policy_version, &self.cfg.gate_version_hash);
 
-        let mut inserted_entry_id = None;
+        // Insert per-chunk entries: both gates passed AND the chunk clears
+        // the near-duplicate threshold. Novelties were all computed against
+        // the pre-trace index (matches the design pseudocode), so intra-
+        // trace duplicate chunks each measure against prior traces only.
+        let mut inserted_chunk_entries: Vec<InsertedChunkEntry> = Vec::new();
         if perplexity_passed && novelty_passed {
-            let entry_id = Uuid::new_v4();
-            self.index
-                .insert(entry_id, tenant_storage_ref, &embedding)?;
-            inserted_entry_id = Some(entry_id);
+            for (i, emb) in chunk_embeddings.iter().enumerate() {
+                if chunk_novelty_micros[i] < self.cfg.embed_insert_novelty_micros {
+                    continue;
+                }
+                let entry_id = Uuid::new_v4();
+                self.index.insert(entry_id, tenant_storage_ref, emb)?;
+                inserted_chunk_entries.push(InsertedChunkEntry {
+                    chunk_index: plan.chunks[i].chunk_index,
+                    entry_id,
+                });
+            }
         }
+        let inserted_entry_id = inserted_chunk_entries.first().map(|e| e.entry_id);
 
         Ok(OrchestrationDecision {
             gate_policy_version: self.cfg.gate_policy_version.clone(),
             gate_version_hash: self.cfg.gate_version_hash.clone(),
-            perplexity_micros: perp.aggregate_perplexity_micros,
-            tail_fraction_micros: perp.tail_fraction_micros,
+            perplexity_micros: perp_agg.representative_perplexity_micros,
+            tail_fraction_micros: perp_agg.tail_fraction_micros,
             perplexity_passed,
             novelty_score_micros,
             nearest_neighbor_hash,
@@ -177,6 +266,11 @@ where
             embedding_evidence_hash,
             attestation_chain_hash,
             inserted_entry_id,
+            peak_perplexity_micros: perp_agg.peak_perplexity_micros,
+            peak_novelty_micros,
+            chunk_count: plan.chunks.len() as u32,
+            chunks_capped: plan.chunks_capped,
+            inserted_chunk_entries,
         })
     }
 }
@@ -191,19 +285,24 @@ fn hash_neighbors(neighbors: &[crate::vector_index::NearestNeighbor]) -> String 
     format!("sha256:{:x}", h.finalize())
 }
 
-fn hash_embedding_evidence(
+fn hash_chunk_embedding_evidence(
     gate_policy_version: &str,
     tenant_storage_ref: &str,
-    embedding: &[f32],
+    chunk_embeddings: &[Vec<f32>],
 ) -> String {
     let mut h = Sha256::new();
-    h.update(b"trace_gate_enclave.embedding_evidence.v1\n");
+    h.update(b"trace_gate_enclave.embedding_evidence.v2\n");
     h.update(gate_policy_version.as_bytes());
     h.update(b"\n");
     h.update(tenant_storage_ref.as_bytes());
     h.update(b"\n");
-    for x in embedding {
-        h.update(x.to_be_bytes());
+    for (i, embedding) in chunk_embeddings.iter().enumerate() {
+        h.update((i as u32).to_be_bytes());
+        h.update(b"\n");
+        for x in embedding {
+            h.update(x.to_be_bytes());
+        }
+        h.update(b"\n");
     }
     format!("sha256:{:x}", h.finalize())
 }
@@ -291,6 +390,108 @@ mod tests {
         assert!(second.inserted_entry_id.is_none());
     }
 
+    use crate::perplexity::PerplexityResult;
+
+    /// Fixed-value scorer for exact-identity assertions.
+    struct StubScorer;
+    impl crate::perplexity::PerplexityScorer for StubScorer {
+        fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            Ok(PerplexityResult {
+                aggregate_perplexity_micros: 2_718_281,
+                tail_fraction_micros: 250_000,
+                tokens_scored: 100,
+            })
+        }
+    }
+
+    /// Scorer that fails on its Nth call — proves fail-closed mid-loop.
+    struct FailOnNthScorer {
+        n: std::sync::atomic::AtomicUsize,
+        fail_at: usize,
+    }
+    impl crate::perplexity::PerplexityScorer for FailOnNthScorer {
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            let call = self.n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == self.fail_at {
+                anyhow::bail!("ChunkScorerInjectedFailure");
+            }
+            MockPerplexityScorer::new().score(plaintext)
+        }
+    }
+
+    fn multi_chunk_envelope(event_count: usize, event_chars: usize) -> Vec<u8> {
+        let content = "a".repeat(event_chars);
+        let events: Vec<serde_json::Value> = (0..event_count)
+            .map(|_| {
+                serde_json::json!({
+                    "event_type": "assistant_message",
+                    "redacted_content": content,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap()
+    }
+
+    #[test]
+    fn single_chunk_trace_matches_whole_call_on_rendered_text() {
+        // A small trace is one chunk; its representative and peak must equal
+        // the scorer's single-call values on that same chunk text (identity
+        // within ln/exp round-trip tolerance for the derived default
+        // score_chunk path).
+        let mut cfg = EnclaveGateOrchestratorConfig::mock_default();
+        cfg.chunk_min_tokens = 1;
+        let orch = EnclaveGateOrchestrator::new(
+            StubScorer,
+            MockEmbedder::new(),
+            MockVectorIndex::new(),
+            cfg,
+        );
+        let d = orch
+            .evaluate(&multi_chunk_envelope(1, 40), "tenant_a")
+            .unwrap();
+        assert_eq!(d.chunk_count, 1);
+        assert!(!d.chunks_capped);
+        assert!(d.perplexity_micros.abs_diff(2_718_281) <= 2);
+        assert!(d.peak_perplexity_micros.abs_diff(2_718_281) <= 2);
+        assert!(d.tail_fraction_micros.abs_diff(250_000) <= 2_500);
+        assert_eq!(d.peak_novelty_micros, d.novelty_score_micros);
+        assert_eq!(d.inserted_chunk_entries.len(), 1);
+    }
+
+    #[test]
+    fn large_trace_produces_multiple_chunks_and_cap() {
+        // 20 events of 8000 chars each: every event fills a ~2048-token
+        // (8192-char) target chunk alone -> 20 chunks -> capped at 16.
+        let orch = orch_with_floors(0, 0, 0);
+        let d = orch
+            .evaluate(&multi_chunk_envelope(20, 8_000), "tenant_a")
+            .unwrap();
+        assert_eq!(d.chunk_count, 16);
+        assert!(d.chunks_capped);
+    }
+
+    #[test]
+    fn chunk_scorer_error_fails_the_whole_evaluation() {
+        let mut cfg = EnclaveGateOrchestratorConfig::mock_default();
+        cfg.chunk_min_tokens = 1;
+        let orch = EnclaveGateOrchestrator::new(
+            FailOnNthScorer {
+                n: std::sync::atomic::AtomicUsize::new(0),
+                fail_at: 2,
+            },
+            MockEmbedder::new(),
+            MockVectorIndex::new(),
+            cfg,
+        );
+        let err = orch
+            .evaluate(&multi_chunk_envelope(20, 8_000), "tenant_a")
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PerplexityScorerInferenceFailed"),
+            "fail-closed error context missing: {err:#}"
+        );
+    }
+
     #[test]
     fn impossible_perplexity_floor_fails() {
         let orch = orch_with_floors(u64::MAX, 0, 0);
@@ -309,5 +510,88 @@ mod tests {
         // novelty stays at 1.0.
         let b = orch.evaluate(b"hello world", "tenant_b").unwrap();
         assert!(b.novelty_passed);
+    }
+
+    #[test]
+    fn duplicate_chunk_is_deduped_on_insert_but_novel_chunks_insert_per_chunk() {
+        // First trace: 2 distinct large chunks -> both insert.
+        let orch = orch_with_floors(0, 0, 0);
+        let first = orch
+            .evaluate(&two_distinct_chunk_envelope("alpha", "beta"), "tenant_a")
+            .unwrap();
+        assert_eq!(first.chunk_count, 2);
+        assert_eq!(first.inserted_chunk_entries.len(), 2);
+        assert_eq!(first.inserted_chunk_entries[0].chunk_index, 0);
+        assert_eq!(first.inserted_chunk_entries[1].chunk_index, 1);
+        assert_eq!(
+            first.inserted_entry_id,
+            Some(first.inserted_chunk_entries[0].entry_id)
+        );
+
+        // Second trace: chunk 0 duplicates the first trace's chunk 0
+        // (novelty ~0 < insert threshold -> skipped); chunk 1 is new.
+        let second = orch
+            .evaluate(&two_distinct_chunk_envelope("alpha", "gamma"), "tenant_a")
+            .unwrap();
+        assert_eq!(second.chunk_count, 2);
+        assert_eq!(
+            second.inserted_chunk_entries.len(),
+            1,
+            "near-duplicate chunk must be skipped at the insert threshold"
+        );
+        assert_eq!(second.inserted_chunk_entries[0].chunk_index, 1);
+    }
+
+    #[test]
+    fn peak_novelty_is_max_over_chunks_and_representative_is_weighted() {
+        let orch = orch_with_floors(0, 0, 0);
+        // Seed the index with one trace.
+        orch.evaluate(&two_distinct_chunk_envelope("alpha", "beta"), "tenant_a")
+            .unwrap();
+        // Re-submit: chunk "alpha" is a duplicate (novelty ~0), chunk
+        // "delta" is fresh (novelty ~1.0). Peak must reflect the fresh
+        // chunk; representative must sit strictly between.
+        let d = orch
+            .evaluate(&two_distinct_chunk_envelope("alpha", "delta"), "tenant_a")
+            .unwrap();
+        assert!(
+            d.peak_novelty_micros > 900_000,
+            "fresh chunk drives the peak"
+        );
+        assert!(
+            d.novelty_score_micros < d.peak_novelty_micros,
+            "representative must be dragged down by the duplicate chunk"
+        );
+    }
+
+    #[test]
+    fn failed_gate_inserts_no_chunk_entries() {
+        let orch = orch_with_floors(u64::MAX, 0, 0);
+        let d = orch
+            .evaluate(&two_distinct_chunk_envelope("alpha", "beta"), "tenant_a")
+            .unwrap();
+        assert!(!d.perplexity_passed);
+        assert!(d.inserted_chunk_entries.is_empty());
+        assert!(d.inserted_entry_id.is_none());
+    }
+
+    /// Envelope with exactly two chunks: each event's rendered form fills a
+    /// whole target chunk (8192 chars at the default 2048-token target).
+    fn two_distinct_chunk_envelope(seed_a: &str, seed_b: &str) -> Vec<u8> {
+        let pad = |seed: &str| {
+            let mut s = String::new();
+            while s.len() < 8_000 {
+                s.push_str(seed);
+                s.push(' ');
+            }
+            s
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "events": [
+                { "event_type": "assistant_message", "redacted_content": pad(seed_a) },
+                { "event_type": "assistant_message", "redacted_content": pad(seed_b) },
+            ]
+        }))
+        .unwrap()
     }
 }

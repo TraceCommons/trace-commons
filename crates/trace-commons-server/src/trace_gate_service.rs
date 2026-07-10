@@ -67,6 +67,13 @@ impl TenantCtx {
     }
 }
 
+/// One inserted per-chunk vector-index entry, host-facing form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateChunkVectorEntry {
+    pub chunk_index: u32,
+    pub vector_entry_id: Uuid,
+}
+
 /// Result of running a trace through the gate service. The fields here mirror
 /// the columns of `trace_gate_decisions` so callers can persist the decision
 /// row without re-deriving any field.
@@ -88,6 +95,18 @@ pub struct GateDecision {
     /// revocation worker). It is stored in `trace_gate_decisions` via a
     /// nullable `vector_entry_id` column (migration V24).
     pub vector_entry_id: Option<Uuid>,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity.
+    pub peak_perplexity_micros: u64,
+    /// Peak per-chunk novelty.
+    pub peak_novelty_micros: u64,
+    /// Number of chunks scored (>= 1; deterministic services report 1).
+    pub chunk_count: u32,
+    /// True when the per-trace chunk cap dropped trailing chunks.
+    pub chunks_capped: bool,
+    /// Every per-chunk vector-index entry the gate inserted. Empty for
+    /// deterministic/legacy services and failed gates. The host persists
+    /// these as (submission_id, chunk_index)-tagged rows for revocation.
+    pub chunk_vector_entries: Vec<GateChunkVectorEntry>,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -229,6 +248,13 @@ fn build_deterministic_decision(
         // Deterministic services do not actually insert into a vector index,
         // so there is no entry id to surface.
         vector_entry_id: None,
+        // Deterministic services score the whole trace as a single chunk;
+        // peak == representative.
+        peak_perplexity_micros: perplexity_micros,
+        peak_novelty_micros: novelty_score_micros,
+        chunk_count: 1,
+        chunks_capped: false,
+        chunk_vector_entries: Vec::new(),
     }
 }
 
@@ -523,6 +549,18 @@ where
             embedding_evidence_hash: decision.embedding_evidence_hash,
             attestation_chain_hash: decision.attestation_chain_hash,
             vector_entry_id: decision.inserted_entry_id,
+            peak_perplexity_micros: decision.peak_perplexity_micros,
+            peak_novelty_micros: decision.peak_novelty_micros,
+            chunk_count: decision.chunk_count,
+            chunks_capped: decision.chunks_capped,
+            chunk_vector_entries: decision
+                .inserted_chunk_entries
+                .iter()
+                .map(|e| GateChunkVectorEntry {
+                    chunk_index: e.chunk_index,
+                    vector_entry_id: e.entry_id,
+                })
+                .collect(),
         })
     }
 
@@ -840,6 +878,111 @@ mod enclave_gate_service_tests {
         assert!(
             format!("{err:#}").contains("KekContextMismatch"),
             "expected KekContextMismatch, got: {err}"
+        );
+    }
+
+    /// End-to-end: a large multi-chunk trace through the mock enclave
+    /// pipeline exercises cap enforcement, per-chunk dedup insert, and
+    /// representative-vs-peak recording all at once.
+    #[test]
+    fn multi_chunk_trace_records_representative_and_peak_end_to_end() {
+        // Build a multi-chunk envelope: 20 events x 8000 chars -> 20 target
+        // chunks -> capped at 16.
+        let pad = "a".repeat(8_000);
+        let events: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "event_type": "assistant_message",
+                    "redacted_content": format!("{i}:{pad}"),
+                })
+            })
+            .collect();
+        let plaintext = serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap();
+
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-e2e");
+
+        // Seed the tenant's index with a standalone trace whose sole chunk
+        // is byte-identical to the main trace's chunk 0 (same rendered
+        // event text). This makes chunk 0 a genuine near-duplicate *within*
+        // the scored call below, while chunks 1..15 stay fresh — otherwise
+        // every chunk in a single `evaluate()` call is scored against the
+        // same pre-call index snapshot and peak == representative
+        // trivially, which would not catch a peak-novelty regression.
+        let seed_plaintext = serde_json::to_vec(&serde_json::json!({
+            "events": [events[0].clone()],
+        }))
+        .unwrap();
+        let (seed_dek, seed_wrapped) =
+            wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let seed_ciphertext =
+            aead_encrypt_with_dek(&seed_dek, &seed_plaintext).expect("encrypt seed fixture");
+        svc.evaluate_trace(
+            &tenant,
+            &seed_ciphertext,
+            &seed_wrapped,
+            TraceArtifactKind::ContributionEnvelope,
+        )
+        .expect("seed evaluate_trace succeeds");
+
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
+
+        let d = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("multi-chunk evaluate_trace succeeds");
+
+        assert_eq!(d.chunk_count, 16, "cap must bound the chunk count");
+        assert!(d.chunks_capped);
+        assert!(d.perplexity_micros > 0);
+        assert!(d.peak_perplexity_micros >= d.perplexity_micros || d.chunk_count == 1);
+        // Chunk 0 duplicates the seed trace's sole chunk (near-zero
+        // novelty); chunks 1..15 are fresh against the index snapshot taken
+        // before this call. Peak must reflect a fresh chunk while the
+        // representative is dragged down by the one duplicate — a strict
+        // inequality, exercising peak-vs-representative divergence the same
+        // way the perplexity assertion above does.
+        assert!(
+            d.peak_novelty_micros > d.novelty_score_micros,
+            "peak novelty must strictly exceed the representative when one \
+             of 16 chunks is a near-duplicate seeded ahead of this call"
+        );
+        // Both gates still pass at zero floors: only 1 of 16 chunks is a
+        // near-duplicate, so the token-weighted representative stays well
+        // above zero. The duplicate chunk (index 0) clears the perplexity
+        // and novelty *gates* but falls below the insert-dedup threshold,
+        // so only 15 of 16 chunks land new per-chunk entries.
+        assert!(d.perplexity_passed && d.novelty_passed);
+        assert_eq!(d.chunk_vector_entries.len(), 15);
+        assert_eq!(
+            d.vector_entry_id,
+            Some(d.chunk_vector_entries[0].vector_entry_id)
+        );
+
+        // Re-submit the same trace: every chunk is now a near-duplicate.
+        let (dek2, wrapped2) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext2 = aead_encrypt_with_dek(&dek2, &plaintext).expect("encrypt fixture");
+        let d2 = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext2,
+                &wrapped2,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("duplicate evaluate_trace succeeds");
+        assert!(
+            d2.novelty_score_micros < 50_000,
+            "duplicate trace novelty must collapse below the insert threshold"
+        );
+        assert!(
+            d2.chunk_vector_entries.is_empty() || !d2.novelty_passed,
+            "duplicate chunks must be deduped on insert"
         );
     }
 }

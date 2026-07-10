@@ -5411,6 +5411,10 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
                 decided_at: Utc::now(),
                 vector_entry_id: Some(Uuid::new_v4()),
                 credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                chunks_capped: None,
             },
         )
         .await
