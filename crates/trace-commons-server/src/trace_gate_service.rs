@@ -880,4 +880,73 @@ mod enclave_gate_service_tests {
             "expected KekContextMismatch, got: {err}"
         );
     }
+
+    /// End-to-end: a large multi-chunk trace through the mock enclave
+    /// pipeline exercises cap enforcement, per-chunk dedup insert, and
+    /// representative-vs-peak recording all at once.
+    #[test]
+    fn multi_chunk_trace_records_representative_and_peak_end_to_end() {
+        // Build a multi-chunk envelope: 20 events x 8000 chars -> 20 target
+        // chunks -> capped at 16.
+        let pad = "a".repeat(8_000);
+        let events: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "event_type": "assistant_message",
+                    "redacted_content": format!("{i}:{pad}"),
+                })
+            })
+            .collect();
+        let plaintext = serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap();
+
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-e2e");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
+
+        let d = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("multi-chunk evaluate_trace succeeds");
+
+        assert_eq!(d.chunk_count, 16, "cap must bound the chunk count");
+        assert!(d.chunks_capped);
+        assert!(d.perplexity_micros > 0);
+        assert!(d.peak_perplexity_micros >= d.perplexity_micros || d.chunk_count == 1);
+        assert!(d.peak_novelty_micros >= d.novelty_score_micros);
+        // Fresh tenant: everything is novel, both gates pass at zero floors,
+        // and per-chunk entries land (16 chunks, all above the insert
+        // threshold on an empty index).
+        assert!(d.perplexity_passed && d.novelty_passed);
+        assert_eq!(d.chunk_vector_entries.len(), 16);
+        assert_eq!(
+            d.vector_entry_id,
+            Some(d.chunk_vector_entries[0].vector_entry_id)
+        );
+
+        // Re-submit the same trace: every chunk is now a near-duplicate.
+        let (dek2, wrapped2) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext2 = aead_encrypt_with_dek(&dek2, &plaintext).expect("encrypt fixture");
+        let d2 = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext2,
+                &wrapped2,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("duplicate evaluate_trace succeeds");
+        assert!(
+            d2.novelty_score_micros < 50_000,
+            "duplicate trace novelty must collapse below the insert threshold"
+        );
+        assert!(
+            d2.chunk_vector_entries.is_empty() || !d2.novelty_passed,
+            "duplicate chunks must be deduped on insert"
+        );
+    }
 }
