@@ -19,6 +19,18 @@ pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
+/// Maximum input bytes per `privacy/classify` request. The hosted endpoint
+/// returns 502 for oversized requests (observed to fail above ~30 KiB), so
+/// large field text is split into windows no bigger than this before it is
+/// sent. Kept well under the observed ceiling to leave room for request
+/// overhead and multibyte expansion.
+pub const CLASSIFY_CHUNK_BYTES: usize = 20_000;
+
+/// How many times a single `privacy/classify` request is attempted before
+/// giving up. The hosted endpoint returns transient 502s, so retry a few
+/// times with exponential backoff before failing the window closed.
+pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
+
 #[derive(Clone)]
 struct SecretApiKey(String);
 
@@ -162,58 +174,172 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             });
         }
 
+        // The hosted endpoint rejects oversized requests, so split large
+        // field text into windows and classify each. Every window's spans
+        // are reported in that window's own codepoint coordinates; shift
+        // them into full-text codepoints before merging so the single
+        // apply_spans pass validates and redacts against the whole field.
+        let ranges = chunk_byte_ranges(text, CLASSIFY_CHUNK_BYTES);
+        let mut windows: Vec<(usize, Vec<ClassifySpan>)> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let window = &text[range.clone()];
+            let spans = self.classify_window(window).await?;
+            let codepoint_start = text[..range.start].chars().count();
+            windows.push((codepoint_start, spans));
+        }
+
+        apply_windowed_spans(text, &windows)
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// POST one window of text to the classifier and return its raw spans
+    /// (in that window's codepoint coordinates). Fail-closed on any
+    /// transport error, non-2xx status, malformed body, or empty data
+    /// array.
+    async fn classify_window(
+        &self,
+        text: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
             input: text,
         };
-        let response = self
-            .client
-            .post(&endpoint)
-            .bearer_auth(&self.api_key.0)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|err| TraceContributionError::RedactionFailed {
-                reason: format!("near-ai privacy classifier transport error: {}", err),
-            })?;
 
-        let status = response.status();
-        if !status.is_success() {
-            // Hash the body for audit; do not include it verbatim.
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            let body_hash = format!(
-                "sha256:{}",
-                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
-            );
-            return Err(TraceContributionError::RedactionFailed {
-                reason: format!(
-                    "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
-                    status.as_u16(),
-                    body_hash,
-                    body_bytes.len()
-                ),
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            // Transient failures (transport errors, 5xx) are retried with
+            // exponential backoff; 4xx and body-shape failures are not.
+            let send_result = self
+                .client
+                .post(&endpoint)
+                .bearer_auth(&self.api_key.0)
+                .json(&request_body)
+                .send()
+                .await;
+            let response = match send_result {
+                Ok(response) => response,
+                Err(err) => {
+                    if attempt < MAX_CLASSIFY_ATTEMPTS {
+                        backoff(attempt).await;
+                        continue;
+                    }
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: format!("near-ai privacy classifier transport error: {}", err),
+                    });
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                if status.is_server_error() && attempt < MAX_CLASSIFY_ATTEMPTS {
+                    backoff(attempt).await;
+                    continue;
+                }
+                // Hash the body for audit; do not include it verbatim.
+                let body_bytes = response.bytes().await.unwrap_or_default();
+                let body_hash = format!(
+                    "sha256:{}",
+                    hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
+                );
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
+                        status.as_u16(),
+                        body_hash,
+                        body_bytes.len()
+                    ),
+                });
+            }
+
+            let parsed: ClassifyResponse =
+                response
+                    .json()
+                    .await
+                    .map_err(|err| TraceContributionError::RedactionFailed {
+                        reason: format!("near-ai privacy classifier response parse error: {}", err),
+                    })?;
+            let entry =
+                parsed
+                    .data
+                    .into_iter()
+                    .next()
+                    .ok_or(TraceContributionError::RedactionFailed {
+                        reason: "near-ai privacy classifier returned empty data array".to_string(),
+                    })?;
+            return Ok(entry.spans);
+        }
+    }
+}
+
+/// Exponential backoff before retrying a classify attempt: 250ms, 500ms,
+/// 1s, ... keyed on the just-failed attempt number (1-based).
+async fn backoff(failed_attempt: usize) {
+    let millis = 250u64.saturating_mul(1u64 << (failed_attempt.saturating_sub(1)).min(5));
+    tokio::time::sleep(Duration::from_millis(millis)).await;
+}
+
+/// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
+/// always on char boundaries and covering the whole input. Windows prefer to
+/// end at a newline within the limit (PII rarely spans lines); a run with no
+/// newline under the limit is hard-split at the nearest lower char boundary.
+fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
+    let max_bytes = max_bytes.max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        if text.len() - start <= max_bytes {
+            ranges.push(start..text.len());
+            break;
+        }
+        // Provisional hard cap, walked back to a char boundary.
+        let mut end = start + max_bytes;
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Prefer to break just after the last newline inside the window.
+        if let Some(nl) = text[start..end].rfind('\n') {
+            end = start + nl + 1;
+        }
+        // Guard against no progress (e.g. a single multibyte char wider
+        // than the char-boundary walk left us): force at least one char.
+        if end <= start {
+            end = start + max_bytes;
+            while end < text.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    if ranges.is_empty() {
+        ranges.push(0..text.len());
+    }
+    ranges
+}
+
+/// Merge per-window spans into a single redaction over `text`. Each window
+/// carries its starting codepoint index; its spans are reported relative to
+/// that window, so shift them into full-text codepoint coordinates before
+/// the shared `apply_spans` validation/redaction pass.
+fn apply_windowed_spans(
+    text: &str,
+    windows: &[(usize, Vec<ClassifySpan>)],
+) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+    let mut all_spans = Vec::new();
+    for (codepoint_start, spans) in windows {
+        for span in spans {
+            all_spans.push(ClassifySpan {
+                category: span.category.clone(),
+                start: codepoint_start + span.start,
+                end: codepoint_start + span.end,
+                score: span.score,
             });
         }
-
-        let parsed: ClassifyResponse =
-            response
-                .json()
-                .await
-                .map_err(|err| TraceContributionError::RedactionFailed {
-                    reason: format!("near-ai privacy classifier response parse error: {}", err),
-                })?;
-        let entry =
-            parsed
-                .data
-                .into_iter()
-                .next()
-                .ok_or(TraceContributionError::RedactionFailed {
-                    reason: "near-ai privacy classifier returned empty data array".to_string(),
-                })?;
-
-        apply_spans(text, &entry.spans)
     }
+    apply_spans(text, &all_spans)
 }
 
 fn apply_spans(
@@ -224,19 +350,30 @@ fn apply_spans(
     let mut by_label = std::collections::BTreeMap::new();
     let span_count = spans.len() as u32;
 
-    // Validate offsets and labels; populate summary book-keeping per
-    // raw span (matches sidecar accounting).
+    // NEAR AI reports span offsets as Unicode codepoint indices, not byte
+    // offsets. Build a codepoint -> byte-offset table once so we can both
+    // validate the offsets and translate them before any byte slicing.
+    // `boundaries[i]` is the byte offset of codepoint `i`; the final entry
+    // is `text.len()`, so a valid end index is `<= boundaries.len() - 1`.
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    boundaries.push(text.len());
+
+    // Validate offsets and labels; populate summary book-keeping per raw
+    // span (matches sidecar accounting). Offsets are converted from
+    // codepoint indices to byte offsets here.
+    let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.start > span.end || span.end > text.len() {
+        if span.start > span.end || span.end >= boundaries.len() {
             return Err(TraceContributionError::RedactionFailed {
                 reason: "near-ai privacy classifier returned out-of-range span".to_string(),
             });
         }
-        if !text.is_char_boundary(span.start) || !text.is_char_boundary(span.end) {
-            return Err(TraceContributionError::RedactionFailed {
-                reason: "near-ai privacy classifier returned non-utf8 span boundary".to_string(),
-            });
-        }
+        byte_spans.push(ClassifySpan {
+            category: span.category.clone(),
+            start: boundaries[span.start],
+            end: boundaries[span.end],
+            score: span.score,
+        });
         let label = safe_privacy_filter_label(Some(&span.category), &mut report);
         *by_label.entry(label.clone()).or_insert(0u32) += 1;
         report.increment(format!("privacy_filter:{label}"));
@@ -249,8 +386,9 @@ fn apply_spans(
     }
 
     // Build redacted text. Collapse overlapping spans: sort by start,
-    // pick widest end; on overlap pick the highest-score category.
-    let mut sorted: Vec<ClassifySpan> = spans.to_vec();
+    // pick widest end; on overlap pick the highest-score category. Offsets
+    // below are byte offsets (already translated from codepoint indices).
+    let mut sorted: Vec<ClassifySpan> = byte_spans;
     sorted.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
 
     let mut collapsed: Vec<ClassifySpan> = Vec::new();
@@ -327,6 +465,73 @@ mod tests {
     }
 
     #[test]
+    fn chunk_byte_ranges_cover_text_and_respect_limit() {
+        let text = "line one\nline two\nline three\n";
+        let ranges = chunk_byte_ranges(text, 12);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, text.len());
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev, "ranges must be contiguous");
+            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(joined, text, "windows must reconstruct the input");
+        // Newline-preferring: no window splits mid-line here.
+        for r in &ranges {
+            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
+        // A single line longer than the limit must still be split, on a
+        // char boundary, into covering windows.
+        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
+        let ranges = chunk_byte_ranges(&text, 8);
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev);
+            assert!(r.end - r.start <= 8);
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        assert_eq!(prev, text.len());
+    }
+
+    #[test]
+    fn windowed_spans_shift_into_full_text_codepoints() {
+        // Two windows over multibyte text. Window 2 starts at codepoint 4
+        // ("café") and reports an email at window-local codepoints 1..16.
+        let text = "café bob@example.com!";
+        let windows = vec![
+            (0usize, vec![]),
+            (4usize, vec![span("private_email", 1, 16, 0.99)]),
+        ];
+        let result = apply_windowed_spans(text, &windows).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "café [REDACTED:private_email]!");
+        assert_eq!(result.summary.span_count, 1);
+    }
+
+    #[test]
+    fn maps_codepoint_offsets_over_multibyte_text() {
+        // NEAR AI returns Unicode codepoint offsets, not byte offsets. When
+        // multibyte characters precede the span, treating the offsets as
+        // byte indices slices the wrong region. Offsets below are codepoint
+        // indices exactly as the API emits them ('cafe' with an accented e
+        // plus an emoji before the email).
+        let text = "café 😀 reach me jane@example.com now";
+        let spans = vec![span("private_email", 15, 32, 0.99)];
+        let result = apply_spans(text, &spans).unwrap().unwrap();
+        assert_eq!(
+            result.redacted_text,
+            "café 😀 reach me[REDACTED:private_email] now"
+        );
+    }
+
+    #[test]
     fn collapses_overlapping_spans_keeps_highest_score() {
         let text = "abcdefghij";
         let spans = vec![
@@ -340,19 +545,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_char_boundary() {
+    fn redacts_multibyte_codepoint_span_without_splitting() {
+        // Codepoint indices always land on character boundaries, so a span
+        // over a multibyte character redacts the whole character. 'héllo':
+        // 'é' is codepoint index 1.
         let text = "héllo";
-        // 'é' starts at byte 1, ends at byte 3 (UTF-8 two bytes).
-        // Splitting at byte 2 is mid-codepoint.
         let spans = vec![span("private_name", 1, 2, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
-        assert!(err.to_string().contains("non-utf8 span boundary"));
+        let result = apply_spans(text, &spans).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "h[REDACTED:private_name]llo");
     }
 
     #[test]
     fn rejects_out_of_range_span() {
+        // Codepoint index 9999 is far beyond the 5-codepoint string.
         let text = "short";
         let spans = vec![span("private_name", 0, 9999, 0.9)];
+        let err = apply_spans(text, &spans).unwrap_err();
+        assert!(err.to_string().contains("out-of-range"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_span_over_multibyte_text() {
+        // 'café' is 4 codepoints; index 5 is out of range even though the
+        // byte length is 5 (the trailing accented byte must not be treated
+        // as a valid codepoint index).
+        let text = "café";
+        let spans = vec![span("private_name", 0, 5, 0.9)];
         let err = apply_spans(text, &spans).unwrap_err();
         assert!(err.to_string().contains("out-of-range"));
     }

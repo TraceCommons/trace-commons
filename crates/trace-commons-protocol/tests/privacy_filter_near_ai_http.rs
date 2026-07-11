@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
@@ -46,6 +46,102 @@ async fn classifies_and_redacts_single_span() {
         "email me at [REDACTED:private_email] please"
     );
     assert_eq!(result.summary.span_count, 1);
+}
+
+#[tokio::test]
+async fn large_field_is_chunked_and_span_offsets_are_merged() {
+    // Field text larger than CLASSIFY_CHUNK_BYTES (20_000) is split into
+    // windows and classified per window. The email lands in the second
+    // window; its window-local offsets must be shifted into full-text
+    // coordinates so the right region is redacted.
+    let filler = "clean line\n".repeat(1818); // 19_998 bytes, ends on a newline
+    let text = format!("{filler}contact bob@example.com now");
+
+    let server = MockServer::start().await;
+    // Window carrying the email: return a span at the email's window-local
+    // codepoint offsets ("contact " = 8, "bob@example.com" = 15 -> 8..23).
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .and(body_string_contains("bob@example.com"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
+            ]}]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // Every other window (the filler): no PII.
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [] }]
+        })))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
+    let expected = format!("{filler}contact [REDACTED:private_email] now");
+    assert_eq!(result.redacted_text, expected);
+    assert_eq!(result.summary.span_count, 1);
+}
+
+#[tokio::test]
+async fn retries_on_5xx_then_succeeds() {
+    // The hosted endpoint returns transient 502s; the adapter should retry
+    // a few times before giving up. First two calls 502, third succeeds.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("upstream hiccup"))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text("email me at alice@example.com please")
+        .await
+        .expect("should succeed after retrying transient 5xx")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        "email me at [REDACTED:private_email] please"
+    );
+}
+
+#[tokio::test]
+async fn does_not_retry_4xx() {
+    // A 4xx is not transient (bad auth/request); fail fast without retry.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .expect(1) // must be hit exactly once (no retries)
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello")
+        .await
+        .expect_err("4xx must error");
+    assert!(err.to_string().contains("status=401"));
+    // server.verify() on drop asserts expect(1)
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
     apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
     envelope_has_residual_secret, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
-    parse_use_names, redact_to_envelope,
+    parse_use_names, raw_contribution_size_ok, redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -122,6 +122,16 @@ pub async fn submit_sessions(
 
         let now = Utc::now();
         let raw = build_raw_contribution(&transcript, &effective_cfg, now);
+        // Skip sessions that already exceed the envelope limit before the
+        // expensive redaction/privacy-filter pass; they would be refused for
+        // size after redaction anyway (envelope_size_ok below is the
+        // authoritative check).
+        if raw_contribution_size_ok(&raw).is_err() {
+            outcomes.push(SubmitOutcome::Refused {
+                reason_label: "session-too-large".to_string(),
+            });
+            continue;
+        }
         let mut envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {

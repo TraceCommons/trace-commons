@@ -222,6 +222,21 @@ pub fn envelope_has_residual_secret(
     Ok(report.blocked_secret_detected)
 }
 
+/// Serialize `raw` and refuse (label-only) if the pre-redaction payload
+/// already exceeds `MAX_ENVELOPE_BYTES`. The finished envelope carries the
+/// same event content plus additional metadata (trace card, consent, etc.),
+/// so an over-limit raw contribution cannot serialize to an in-limit
+/// envelope. Checking here lets `submit` skip the expensive chunked,
+/// networked privacy-filter pass on sessions that would be refused for size
+/// anyway; `envelope_size_ok` remains the authoritative post-redaction guard.
+pub fn raw_contribution_size_ok(raw: &RawTraceContribution) -> Result<usize> {
+    let bytes = serde_json::to_vec(raw).map_err(|_| anyhow::anyhow!("raw-serialize-failed"))?;
+    if bytes.len() > MAX_ENVELOPE_BYTES {
+        anyhow::bail!("session too large");
+    }
+    Ok(bytes.len())
+}
+
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
@@ -656,5 +671,24 @@ mod tests {
                 .unwrap();
         let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         assert!(envelope_size_ok(&envelope).is_err());
+    }
+
+    #[test]
+    fn oversized_raw_is_refused_before_redaction() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events.push(crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        });
+        let big = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        assert!(raw_contribution_size_ok(&big).is_err());
+
+        let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
+        assert!(raw_contribution_size_ok(&small).is_ok());
     }
 }
