@@ -224,19 +224,30 @@ fn apply_spans(
     let mut by_label = std::collections::BTreeMap::new();
     let span_count = spans.len() as u32;
 
-    // Validate offsets and labels; populate summary book-keeping per
-    // raw span (matches sidecar accounting).
+    // NEAR AI reports span offsets as Unicode codepoint indices, not byte
+    // offsets. Build a codepoint -> byte-offset table once so we can both
+    // validate the offsets and translate them before any byte slicing.
+    // `boundaries[i]` is the byte offset of codepoint `i`; the final entry
+    // is `text.len()`, so a valid end index is `<= boundaries.len() - 1`.
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    boundaries.push(text.len());
+
+    // Validate offsets and labels; populate summary book-keeping per raw
+    // span (matches sidecar accounting). Offsets are converted from
+    // codepoint indices to byte offsets here.
+    let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.start > span.end || span.end > text.len() {
+        if span.start > span.end || span.end >= boundaries.len() {
             return Err(TraceContributionError::RedactionFailed {
                 reason: "near-ai privacy classifier returned out-of-range span".to_string(),
             });
         }
-        if !text.is_char_boundary(span.start) || !text.is_char_boundary(span.end) {
-            return Err(TraceContributionError::RedactionFailed {
-                reason: "near-ai privacy classifier returned non-utf8 span boundary".to_string(),
-            });
-        }
+        byte_spans.push(ClassifySpan {
+            category: span.category.clone(),
+            start: boundaries[span.start],
+            end: boundaries[span.end],
+            score: span.score,
+        });
         let label = safe_privacy_filter_label(Some(&span.category), &mut report);
         *by_label.entry(label.clone()).or_insert(0u32) += 1;
         report.increment(format!("privacy_filter:{label}"));
@@ -249,8 +260,9 @@ fn apply_spans(
     }
 
     // Build redacted text. Collapse overlapping spans: sort by start,
-    // pick widest end; on overlap pick the highest-score category.
-    let mut sorted: Vec<ClassifySpan> = spans.to_vec();
+    // pick widest end; on overlap pick the highest-score category. Offsets
+    // below are byte offsets (already translated from codepoint indices).
+    let mut sorted: Vec<ClassifySpan> = byte_spans;
     sorted.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
 
     let mut collapsed: Vec<ClassifySpan> = Vec::new();
@@ -327,6 +339,22 @@ mod tests {
     }
 
     #[test]
+    fn maps_codepoint_offsets_over_multibyte_text() {
+        // NEAR AI returns Unicode codepoint offsets, not byte offsets. When
+        // multibyte characters precede the span, treating the offsets as
+        // byte indices slices the wrong region. Offsets below are codepoint
+        // indices exactly as the API emits them ('cafe' with an accented e
+        // plus an emoji before the email).
+        let text = "café 😀 reach me jane@example.com now";
+        let spans = vec![span("private_email", 15, 32, 0.99)];
+        let result = apply_spans(text, &spans).unwrap().unwrap();
+        assert_eq!(
+            result.redacted_text,
+            "café 😀 reach me[REDACTED:private_email] now"
+        );
+    }
+
+    #[test]
     fn collapses_overlapping_spans_keeps_highest_score() {
         let text = "abcdefghij";
         let spans = vec![
@@ -340,19 +368,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_char_boundary() {
+    fn redacts_multibyte_codepoint_span_without_splitting() {
+        // Codepoint indices always land on character boundaries, so a span
+        // over a multibyte character redacts the whole character. 'héllo':
+        // 'é' is codepoint index 1.
         let text = "héllo";
-        // 'é' starts at byte 1, ends at byte 3 (UTF-8 two bytes).
-        // Splitting at byte 2 is mid-codepoint.
         let spans = vec![span("private_name", 1, 2, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
-        assert!(err.to_string().contains("non-utf8 span boundary"));
+        let result = apply_spans(text, &spans).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "h[REDACTED:private_name]llo");
     }
 
     #[test]
     fn rejects_out_of_range_span() {
+        // Codepoint index 9999 is far beyond the 5-codepoint string.
         let text = "short";
         let spans = vec![span("private_name", 0, 9999, 0.9)];
+        let err = apply_spans(text, &spans).unwrap_err();
+        assert!(err.to_string().contains("out-of-range"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_span_over_multibyte_text() {
+        // 'café' is 4 codepoints; index 5 is out of range even though the
+        // byte length is 5 (the trailing accented byte must not be treated
+        // as a valid codepoint index).
+        let text = "café";
+        let spans = vec![span("private_name", 0, 5, 0.9)];
         let err = apply_spans(text, &spans).unwrap_err();
         assert!(err.to_string().contains("out-of-range"));
     }
