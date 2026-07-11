@@ -92,6 +92,59 @@ async fn large_field_is_chunked_and_span_offsets_are_merged() {
 }
 
 #[tokio::test]
+async fn retries_on_5xx_then_succeeds() {
+    // The hosted endpoint returns transient 502s; the adapter should retry
+    // a few times before giving up. First two calls 502, third succeeds.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("upstream hiccup"))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text("email me at alice@example.com please")
+        .await
+        .expect("should succeed after retrying transient 5xx")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        "email me at [REDACTED:private_email] please"
+    );
+}
+
+#[tokio::test]
+async fn does_not_retry_4xx() {
+    // A 4xx is not transient (bad auth/request); fail fast without retry.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .expect(1) // must be hit exactly once (no retries)
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello")
+        .await
+        .expect_err("4xx must error");
+    assert!(err.to_string().contains("status=401"));
+    // server.verify() on drop asserts expect(1)
+}
+
+#[tokio::test]
 async fn surfaces_http_5xx_as_redaction_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

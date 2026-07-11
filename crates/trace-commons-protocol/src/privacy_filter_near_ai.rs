@@ -26,6 +26,11 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// overhead and multibyte expansion.
 pub const CLASSIFY_CHUNK_BYTES: usize = 20_000;
 
+/// How many times a single `privacy/classify` request is attempted before
+/// giving up. The hosted endpoint returns transient 502s, so retry a few
+/// times with exponential backoff before failing the window closed.
+pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
+
 #[derive(Clone)]
 struct SecretApiKey(String);
 
@@ -201,52 +206,79 @@ impl NearAiPrivacyFilterAdapter {
             model: &self.model,
             input: text,
         };
-        let response = self
-            .client
-            .post(&endpoint)
-            .bearer_auth(&self.api_key.0)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|err| TraceContributionError::RedactionFailed {
-                reason: format!("near-ai privacy classifier transport error: {}", err),
-            })?;
 
-        let status = response.status();
-        if !status.is_success() {
-            // Hash the body for audit; do not include it verbatim.
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            let body_hash = format!(
-                "sha256:{}",
-                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
-            );
-            return Err(TraceContributionError::RedactionFailed {
-                reason: format!(
-                    "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
-                    status.as_u16(),
-                    body_hash,
-                    body_bytes.len()
-                ),
-            });
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            // Transient failures (transport errors, 5xx) are retried with
+            // exponential backoff; 4xx and body-shape failures are not.
+            let send_result = self
+                .client
+                .post(&endpoint)
+                .bearer_auth(&self.api_key.0)
+                .json(&request_body)
+                .send()
+                .await;
+            let response = match send_result {
+                Ok(response) => response,
+                Err(err) => {
+                    if attempt < MAX_CLASSIFY_ATTEMPTS {
+                        backoff(attempt).await;
+                        continue;
+                    }
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: format!("near-ai privacy classifier transport error: {}", err),
+                    });
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                if status.is_server_error() && attempt < MAX_CLASSIFY_ATTEMPTS {
+                    backoff(attempt).await;
+                    continue;
+                }
+                // Hash the body for audit; do not include it verbatim.
+                let body_bytes = response.bytes().await.unwrap_or_default();
+                let body_hash = format!(
+                    "sha256:{}",
+                    hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
+                );
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
+                        status.as_u16(),
+                        body_hash,
+                        body_bytes.len()
+                    ),
+                });
+            }
+
+            let parsed: ClassifyResponse =
+                response
+                    .json()
+                    .await
+                    .map_err(|err| TraceContributionError::RedactionFailed {
+                        reason: format!("near-ai privacy classifier response parse error: {}", err),
+                    })?;
+            let entry =
+                parsed
+                    .data
+                    .into_iter()
+                    .next()
+                    .ok_or(TraceContributionError::RedactionFailed {
+                        reason: "near-ai privacy classifier returned empty data array".to_string(),
+                    })?;
+            return Ok(entry.spans);
         }
-
-        let parsed: ClassifyResponse =
-            response
-                .json()
-                .await
-                .map_err(|err| TraceContributionError::RedactionFailed {
-                    reason: format!("near-ai privacy classifier response parse error: {}", err),
-                })?;
-        let entry =
-            parsed
-                .data
-                .into_iter()
-                .next()
-                .ok_or(TraceContributionError::RedactionFailed {
-                    reason: "near-ai privacy classifier returned empty data array".to_string(),
-                })?;
-        Ok(entry.spans)
     }
+}
+
+/// Exponential backoff before retrying a classify attempt: 250ms, 500ms,
+/// 1s, ... keyed on the just-failed attempt number (1-based).
+async fn backoff(failed_attempt: usize) {
+    let millis = 250u64.saturating_mul(1u64 << (failed_attempt.saturating_sub(1)).min(5));
+    tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
 /// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
