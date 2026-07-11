@@ -19,6 +19,13 @@ pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
+/// Maximum input bytes per `privacy/classify` request. The hosted endpoint
+/// returns 502 for oversized requests (observed to fail above ~30 KiB), so
+/// large field text is split into windows no bigger than this before it is
+/// sent. Kept well under the observed ceiling to leave room for request
+/// overhead and multibyte expansion.
+pub const CLASSIFY_CHUNK_BYTES: usize = 20_000;
+
 #[derive(Clone)]
 struct SecretApiKey(String);
 
@@ -162,6 +169,33 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             });
         }
 
+        // The hosted endpoint rejects oversized requests, so split large
+        // field text into windows and classify each. Every window's spans
+        // are reported in that window's own codepoint coordinates; shift
+        // them into full-text codepoints before merging so the single
+        // apply_spans pass validates and redacts against the whole field.
+        let ranges = chunk_byte_ranges(text, CLASSIFY_CHUNK_BYTES);
+        let mut windows: Vec<(usize, Vec<ClassifySpan>)> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let window = &text[range.clone()];
+            let spans = self.classify_window(window).await?;
+            let codepoint_start = text[..range.start].chars().count();
+            windows.push((codepoint_start, spans));
+        }
+
+        apply_windowed_spans(text, &windows)
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// POST one window of text to the classifier and return its raw spans
+    /// (in that window's codepoint coordinates). Fail-closed on any
+    /// transport error, non-2xx status, malformed body, or empty data
+    /// array.
+    async fn classify_window(
+        &self,
+        text: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
@@ -211,9 +245,69 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
                 .ok_or(TraceContributionError::RedactionFailed {
                     reason: "near-ai privacy classifier returned empty data array".to_string(),
                 })?;
-
-        apply_spans(text, &entry.spans)
+        Ok(entry.spans)
     }
+}
+
+/// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
+/// always on char boundaries and covering the whole input. Windows prefer to
+/// end at a newline within the limit (PII rarely spans lines); a run with no
+/// newline under the limit is hard-split at the nearest lower char boundary.
+fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
+    let max_bytes = max_bytes.max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        if text.len() - start <= max_bytes {
+            ranges.push(start..text.len());
+            break;
+        }
+        // Provisional hard cap, walked back to a char boundary.
+        let mut end = start + max_bytes;
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Prefer to break just after the last newline inside the window.
+        if let Some(nl) = text[start..end].rfind('\n') {
+            end = start + nl + 1;
+        }
+        // Guard against no progress (e.g. a single multibyte char wider
+        // than the char-boundary walk left us): force at least one char.
+        if end <= start {
+            end = start + max_bytes;
+            while end < text.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    if ranges.is_empty() {
+        ranges.push(0..text.len());
+    }
+    ranges
+}
+
+/// Merge per-window spans into a single redaction over `text`. Each window
+/// carries its starting codepoint index; its spans are reported relative to
+/// that window, so shift them into full-text codepoint coordinates before
+/// the shared `apply_spans` validation/redaction pass.
+fn apply_windowed_spans(
+    text: &str,
+    windows: &[(usize, Vec<ClassifySpan>)],
+) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+    let mut all_spans = Vec::new();
+    for (codepoint_start, spans) in windows {
+        for span in spans {
+            all_spans.push(ClassifySpan {
+                category: span.category.clone(),
+                start: codepoint_start + span.start,
+                end: codepoint_start + span.end,
+                score: span.score,
+            });
+        }
+    }
+    apply_spans(text, &all_spans)
 }
 
 fn apply_spans(
@@ -336,6 +430,57 @@ mod tests {
         );
         assert_eq!(result.summary.span_count, 1);
         assert_eq!(result.summary.by_label.get("private_email"), Some(&1));
+    }
+
+    #[test]
+    fn chunk_byte_ranges_cover_text_and_respect_limit() {
+        let text = "line one\nline two\nline three\n";
+        let ranges = chunk_byte_ranges(text, 12);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, text.len());
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev, "ranges must be contiguous");
+            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(joined, text, "windows must reconstruct the input");
+        // Newline-preferring: no window splits mid-line here.
+        for r in &ranges {
+            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
+        // A single line longer than the limit must still be split, on a
+        // char boundary, into covering windows.
+        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
+        let ranges = chunk_byte_ranges(&text, 8);
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev);
+            assert!(r.end - r.start <= 8);
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        assert_eq!(prev, text.len());
+    }
+
+    #[test]
+    fn windowed_spans_shift_into_full_text_codepoints() {
+        // Two windows over multibyte text. Window 2 starts at codepoint 4
+        // ("café") and reports an email at window-local codepoints 1..16.
+        let text = "café bob@example.com!";
+        let windows = vec![
+            (0usize, vec![]),
+            (4usize, vec![span("private_email", 1, 16, 0.99)]),
+        ];
+        let result = apply_windowed_spans(text, &windows).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "café [REDACTED:private_email]!");
+        assert_eq!(result.summary.span_count, 1);
     }
 
     #[test]
