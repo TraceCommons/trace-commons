@@ -51,25 +51,58 @@ The backstop reuses the same infrastructure the scoring driver uses: the
 `tc_gate_driver`-style DB role and its permissive read policies, the
 `FOR UPDATE SKIP LOCKED` work-claim pattern, and per-item attempt bookkeeping.
 
+## Release mechanism — hold via status, not a new consumer predicate
+
+Consumer visibility in this codebase is **not centrally gated**: export, benchmark,
+ranker-training, process-evaluation, utility-credit, and DB-mirror paths each test
+`status == TraceCorpusStatus::Accepted` inline (~20 call sites). Adding a separate
+"backstop-done" predicate would require patching all of them, and any missed site
+would *fail open* (release an un-backstopped trace).
+
+Instead, the backstop **holds the trace in a non-`Accepted` status until it
+completes**, so every existing `status == Accepted` check holds it by construction
+(fail-closed if a site is missed). Concretely, add a new corpus status
+`AwaitingPiiBackstop`:
+
+- At ingest, a submission that would become `Accepted` (`status_for_risk` →
+  `Accepted`) **and** has `consent.message_text_included = true` is instead stored
+  as `AwaitingPiiBackstop` when the backstop is enabled. Submissions that ingest as
+  `Quarantined` (risk-based) keep that status and the existing reviewer flow.
+- The backstop driver processes `AwaitingPiiBackstop` submissions; on `done` it
+  re-runs `status_for_risk` against the post-backstop risk and transitions to
+  `Accepted` (or `Quarantined` if the backstop *raised* risk to Medium/High).
+- `AwaitingPiiBackstop` is treated as "not consumer-visible" everywhere `Accepted`
+  is the gate — no per-site predicate edits. Reviewer/quarantine surfaces are
+  unaffected (they key on `Quarantined`).
+
 ## Data flow
 
-1. **Ingest (behavior unchanged):** deterministic rescrub → store envelope. When
-   the envelope has `privacy.message_text_included = true`, the submission is
-   enrolled as `pii_backstop = pending`. Envelopes without message text are marked
-   `not_applicable` (nothing to scan) and never block release.
-2. **Backstop tick (async):** claim a batch of `pending` submissions →
-   for each, load the stored (post-deterministic-rescrub) envelope → extract the
-   `content` / `human_correction` message-text fields → run the **chunked** NEAR AI
-   pass via `trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter`
-   (the codepoint-safe, chunking, retrying adapter) → apply the returned spans to
-   re-redact the text → write a new `RescrubbedEnvelope` storage artifact with
-   `privacy.redaction_pipeline_version` suffixed `+near-ai-pii-backstop-v1` →
-   update `privacy.redaction_counts` / `pii_labels_present` / `residual_pii_risk`
-   → mark `pii_backstop = done`.
-3. **Release gate:** a trace with `pii_backstop = pending` (or `failed`) is
-   **held** — not consumer-readable, not exportable, not eligible to leave the
-   quarantine lane — until `done` or an operator waiver. Envelopes marked
-   `not_applicable`/`done` pass the gate.
+1. **Ingest (behavior mostly unchanged):** deterministic rescrub → compute status
+   via `status_for_risk`. If the result is `Accepted`, the envelope has
+   `consent.message_text_included = true`, and the backstop is enabled, store as
+   `AwaitingPiiBackstop` and enrol a `trace_pii_backstop` row as `pending`.
+   Otherwise behave exactly as today (Low→Accepted, Medium/High→Quarantined).
+2. **Backstop tick (async):** claim a batch of `pending` submissions → for each,
+   load the stored (post-deterministic-rescrub) envelope via
+   `read_envelope_by_record` → run the **chunked NEAR AI prose filter** over the
+   redactable text fields (`events[*].redacted_content`, `outcome.human_correction`)
+   using `NearAiPrivacyFilterAdapter` (the codepoint-safe, chunking, retrying
+   adapter) → re-redact those fields, merge `redaction_counts` / `pii_labels_present`,
+   bump `residual_pii_risk` monotonically, append `+near-ai-pii-backstop-v1` to
+   `redaction_pipeline_version`, recompute `redaction_hash` → re-store via
+   `store_envelope(.., "rescrubbed-envelope", ..)` + mirror a `RescrubbedEnvelope`
+   object ref → transition status via `status_for_risk` (post-backstop risk) →
+   mark `trace_pii_backstop = done`. This mirrors the reviewer-approve re-store flow
+   (ingest.rs:33882-33892).
+3. **Hold:** because the trace is `AwaitingPiiBackstop` until step 2 finishes, the
+   existing `status == Accepted` gates hold it out of every consumer/export path
+   automatically. On failure (below) it stays held.
+
+Note: the backstop uses the **async prose-filter path**, not `rescrub_trace_envelope`
+(which is synchronous and deterministic-only by design). A new protocol helper
+`rescrub_envelope_prose_pii_with(adapter, envelope).await` performs step 2's
+field-level re-redaction + metadata merge, analogous to `rescrub_trace_envelope_with`
+but running the async privacy-filter adapter.
 
 ## Components (independently testable)
 
@@ -77,16 +110,25 @@ The backstop reuses the same infrastructure the scoring driver uses: the
   bookkeeping, and the re-redaction + metadata-update logic. Pure re-redaction
   (envelope + spans → rescrubbed envelope) is a separate unit from the DB/driver
   plumbing so it is testable without a DB or network.
-- **State**: a dedicated `trace_pii_backstop` table (keeps the backstop's
-  bookkeeping separate from gate-scoring state): `submission_id` (PK),
-  `status` (`pending`|`done`|`failed`|`not_applicable`), `attempt_count`,
-  `last_error_hash`, `updated_at`. Forced RLS with a driver-role read/claim
-  policy, mirroring the gate-driver attempts table added in the perplexity
-  scoring-driver work.
+- **State**: a dedicated `trace_pii_backstop` table (tenant_id, submission_id PK,
+  `attempts`, `last_attempt_at`, `last_error_label`) — the driver's attempt
+  bookkeeping, cloned from `trace_gate_evaluation_attempts` (V36). The *hold* state
+  is the corpus `status = AwaitingPiiBackstop` on the submission itself, not a
+  column here. Forced RLS + a permissive `FOR SELECT ... USING (true)` reader
+  policy, mirroring V36.
+- **Reader role**: a dedicated `trace_pii_backstop_driver` role (NOBYPASSRLS,
+  `statement_timeout`, permissive SELECT policies on the tables it enumerates),
+  minted the same way as `trace_gate_driver` in V36 — kept separate so the backstop
+  does not widen the gate driver's grants. Its URL comes from
+  `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL`.
 - **Reused as-is**: the protocol NEAR AI adapter (with its once-per-cycle
   `run_privacy_filter_canary` self-test before processing real traces), the
-  `RescrubbedEnvelope` storage path, the driver DB role, the release/visibility
-  check (extended with the backstop-status predicate).
+  `store_envelope` + reviewer-approve re-store pattern, the `RescrubbedEnvelope`
+  object-ref kind (already defined, currently unwritten), and the existing
+  `status == Accepted` gates (held by `AwaitingPiiBackstop` without per-site edits).
+- **Writes** (attempt bumps + status transition + re-store) go through the
+  tenant-scoped runtime pool with tenant context, never the cross-tenant reader
+  pool — matching `bump_gate_evaluation_attempt`.
 
 ## Fail posture
 
@@ -94,9 +136,11 @@ The backstop reuses the same infrastructure the scoring driver uses: the
   its existing checks); the backstop runs afterward.
 - NEAR AI transient failure → the adapter's own retry/backoff, then the driver's
   attempt bookkeeping re-queues the submission on the next tick.
-- After `max_attempts`, status becomes `failed`: the trace stays **held** and
-  flagged, surfaced to operators (review/quarantine surface). It is never released
-  with unredacted residual PII.
+- After `max_attempts`, the driver stops re-queuing: the trace stays
+  `AwaitingPiiBackstop` (**held** — never reaches `Accepted`, so no consumer/export
+  path sees it) and is surfaced to operators via the backstop attempts table
+  (`last_error_label`, `attempts >= max`). It is never released with unredacted
+  residual PII. An operator can re-drive it (reset attempts) once NEAR AI recovers.
 - If the backstop is enabled but `TRACE_NEAR_AI_PRIVACY_API_KEY` is missing/blank,
   refuse at boot with a safe missing-control name (fail-closed configuration, per
   repo convention) rather than silently disabling the backstop.
@@ -109,7 +153,11 @@ Server crate enables the protocol `near-ai-privacy-filter` feature.
 - `TRACE_NEAR_AI_PRIVACY_API_KEY` (+ optional `TRACE_NEAR_AI_PRIVACY_BASE_URL` /
   `_MODEL` / `_TIMEOUT_MS` / `_MAX_INPUT_BYTES`) — read from env, never persisted.
 - `TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS` (default 5),
-  `..._BATCH_SIZE`, `..._TICK_INTERVAL_SECONDS` — mirror the scoring driver knobs.
+  `..._BATCH_SIZE`, `..._TICK_INTERVAL_SECONDS`, `..._BACKOFF_BASE_SECONDS` —
+  mirror the scoring driver knobs (`parse_optional_scheduler_*_env`).
+- `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` — the cross-tenant reader URL
+  for the `trace_pii_backstop_driver` role (fail-closed: the driver stays off if
+  unset even when `..._ENABLED=1`; boot refuses if enabled without it).
 - Scope: `message_text_included` envelopes only.
 
 ## Audit / privacy
