@@ -198,6 +198,7 @@ fn expected_trace_rls_tables() -> Vec<&'static str> {
         "trace_ranking_preference_labels",
         "trace_ranking_calibration_runs",
         "trace_ranking_worker_runs",
+        "trace_pii_backstop",
     ]
 }
 
@@ -1456,6 +1457,10 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(
         &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
             .expect("read NEAR account outbox production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
+            .expect("read PII backstop production hardening migration"),
     );
     for table in expected_trace_rls_tables() {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
