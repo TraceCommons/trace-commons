@@ -35858,23 +35858,36 @@ async fn process_one_pii_backstop(
         PII_BACKSTOP_REDACTION_LABEL,
         &envelope,
     )?;
-    record.status = target_status;
+    // Repoint the record's object pointers to the rescrubbed artifact but
+    // deliberately DO NOT flip `record.status` to the target yet. The DB
+    // submission upsert below derives its `status` column from `record.status`
+    // (`storage_submission_write_from_record` -> `status = excluded.status`),
+    // so leaving `record.status` on `AwaitingPiiBackstop` keeps the DB hold in
+    // place while we mirror the rescrubbed metadata and write the rescrubbed
+    // object ref. The authoritative release happens later via
+    // `update_trace_submission_status`, only after the rescrubbed ref is active.
     record.object_key = stored.object_key;
     record.artifact_receipt = stored.artifact_receipt;
     record.artifact_object_store = stored.artifact_object_store;
-    // Partial-failure window: this flips the on-disk record to
-    // Accepted/Quarantined before the DB hold is cleared below. If any of the
-    // DB mirror steps fail, the file record shows the released status while the
-    // DB still reads `awaiting_pii_backstop`. The next tick re-enumerates off
-    // the DB status (still held, submitted_envelope ref still active), reloads
-    // via the now-rescrubbed record pointer, and self-heals by re-running the
-    // release. Nothing is exported off the file status alone, so the transient
-    // skew is safe.
-    write_submission_record(&state.root, &record)?;
 
-    // Mirror the rescrubbed envelope into the DB: refresh the submission
-    // metadata pointers, append a `RescrubbedEnvelope` object ref, then release
-    // the hold via the tenant-scoped status setter.
+    // Concurrent-read invariant: no DB write may set `status =
+    // Accepted/Quarantined` until an active `RescrubbedEnvelope` object ref
+    // already exists. `read_envelope_from_active_db_object_ref` (the object-ref
+    // read path used by review-decision / process-eval / replay-export /
+    // export-source reads for `require_object_refs` / object-primary tenants)
+    // gates on `status == Accepted` and then PREFERS the `RescrubbedEnvelope`
+    // ref, falling back to the still-active `SubmittedEnvelope` ref. If the DB
+    // status flipped to the target before the rescrubbed ref existed, a
+    // concurrent object-ref read in that window would pass its status gate,
+    // find no rescrubbed ref, and fall through to the pre-backstop
+    // `submitted_envelope` bytes — exactly the residual PII the backstop exists
+    // to remove. So the DB status must not become consumer-visible as released
+    // until the rescrubbed ref is durably written.
+    //
+    // Step 1: mirror the rescrubbed submission metadata with the status STILL
+    // held (`record.status == AwaitingPiiBackstop`). This is a no-op on the
+    // status column (it already reads `awaiting_pii_backstop`) but refreshes the
+    // redaction hash / counts / privacy risk / canonical summary pointers.
     db.upsert_trace_submission(storage_submission_write_from_record(
         &record,
         &envelope,
@@ -35885,6 +35898,10 @@ async fn process_one_pii_backstop(
     )?)
     .await
     .context("failed to mirror rescrubbed trace submission metadata")?;
+
+    // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
+    // release, so it is already active the instant the status becomes
+    // Accepted/Quarantined below.
     let (object_ref, _) = trace_object_ref_write_from_record(
         state,
         "rescrubbed-envelope",
@@ -35895,6 +35912,23 @@ async fn process_one_pii_backstop(
     db.append_trace_object_ref(object_ref)
         .await
         .context("failed to mirror rescrubbed trace object ref")?;
+
+    // Step 3: now flip the on-disk record and release the DB hold. The file
+    // record's object_key was already repointed to the rescrubbed artifact
+    // above, so the file-record read path is safe regardless of ordering here;
+    // the DB status release is the single authoritative status write to the
+    // target (the earlier upsert wrote the still-held status).
+    //
+    // Partial-failure window: this flips the on-disk record to
+    // Accepted/Quarantined together with clearing the DB hold. If the DB
+    // release fails, the file record shows the released status while the DB
+    // still reads `awaiting_pii_backstop`. The next tick re-enumerates off the
+    // DB status (still held, submitted_envelope ref still active), reloads via
+    // the now-rescrubbed record pointer, and self-heals by re-running the
+    // release. Nothing is exported off the file status alone, so the transient
+    // skew is safe.
+    record.status = target_status;
+    write_submission_record(&state.root, &record)?;
     db.update_trace_submission_status(
         &item.tenant_id,
         item.submission_id,
