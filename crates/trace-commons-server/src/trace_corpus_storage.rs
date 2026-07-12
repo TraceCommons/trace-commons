@@ -2393,6 +2393,35 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
+    /// Re-score maintenance: update ONLY the perplexity columns
+    /// (`perplexity_micros`, `peak_perplexity_micros`, `perplexity_passed`) on
+    /// the `trace_gate_decisions` row for `(tenant_id, submission_id)`. Novelty,
+    /// tail-fraction, vector-entry, gate status, credit, and every other column
+    /// are left untouched. Implementations MUST scope the update by `tenant_id`
+    /// (the V23 table has forced RLS bound to `trace_current_tenant_id()`).
+    ///
+    /// Defaults to a log-once warning + no-op; only the production Postgres
+    /// backend has a real implementation. The default deliberately does not
+    /// panic but does warn (label-only, no tenant/submission identifiers) so a
+    /// future non-Postgres backend that exercises the re-score path cannot
+    /// silently drop the update.
+    async fn update_trace_gate_decision_perplexity(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _perplexity_micros: i64,
+        _peak_perplexity_micros: Option<i64>,
+        _perplexity_passed: bool,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_perplexity called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
     /// Upsert per-`(tenant_id, submission_id)` gate-evaluation attempt
     /// bookkeeping used by the perplexity-scoring driver's cost-control
     /// wrapper (`score_one_submission`, Task 4). Increments the `attempts`

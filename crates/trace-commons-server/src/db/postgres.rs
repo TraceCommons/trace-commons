@@ -3635,6 +3635,47 @@ impl Database for PgBackend {
             })
             .collect())
     }
+
+    async fn list_submissions_with_gate_decision(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant context is set on this connection: the trace_gate_driver
+        // role's permissive cross-tenant SELECT policies (migration V36) are
+        // what authorize this read across every tenant's decisions.
+        //
+        // DISTINCT + `received_at` in the projection mirrors the sibling
+        // `list_submissions_needing_gate_decision` query: `received_at` is a
+        // legal DISTINCT + ORDER BY target and a per-submission constant, so it
+        // does not change dedup cardinality and is dropped when mapping to
+        // GateWorkItem. A submission with a decision necessarily has a decision
+        // row, so the INNER JOIN never fans out beyond the one decision.
+        let rows = client
+            .query(
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                 FROM trace_submissions s
+                 JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 ORDER BY s.received_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateWorkItem {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

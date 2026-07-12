@@ -941,6 +941,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "gate-driver pool not configured".to_string(),
         ))
     }
+
+    /// Enumerate submissions that ALREADY have a `trace_gate_decisions` row,
+    /// cross-tenant, ordered oldest-received first, capped at `limit`. This is
+    /// the sibling of [`Self::list_submissions_needing_gate_decision`] used by
+    /// the perplexity re-score maintenance task: it targets the historical
+    /// decisions that need their perplexity recomputed. Like the enumeration it
+    /// mirrors, it reads through the gate-driver reader pool with NO tenant GUC
+    /// set — the `trace_gate_driver` role's permissive cross-tenant SELECT
+    /// policies authorize the read.
+    ///
+    /// The default returns an empty list, which is correct for any [`Database`]
+    /// impl that never wires a gate-driver pool (e.g. test doubles).
+    /// [`postgres::PgBackend`] overrides this with the real query.
+    async fn list_submissions_with_gate_decision(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

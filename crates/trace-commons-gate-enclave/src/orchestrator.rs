@@ -85,6 +85,27 @@ pub struct OrchestrationDecision {
     pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
 }
 
+/// Output of [`EnclaveGateOrchestrator::evaluate_perplexity_only`]. Carries
+/// only the perplexity-derived fields — there is deliberately no novelty,
+/// embedding, or vector-entry state, because the perplexity-only path never
+/// touches the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerplexityOnlyOutcome {
+    /// Representative (token-weighted) perplexity in micros.
+    pub perplexity_micros: u64,
+    /// Peak (most-surprising min-content-guarded chunk) perplexity in micros.
+    pub peak_perplexity_micros: u64,
+    /// Tail-fraction in micros, aggregated across chunks.
+    pub tail_fraction_micros: u64,
+    /// Whether the representative perplexity clears the configured floor (and
+    /// tail-fraction clears its floor) — the same predicate `evaluate` uses.
+    pub perplexity_passed: bool,
+    /// Number of chunks scored (>= 1).
+    pub chunk_count: u32,
+    /// True when the per-trace chunk cap dropped trailing chunks.
+    pub chunks_capped: bool,
+}
+
 /// A per-chunk vector-index entry the orchestrator inserted. The host maps
 /// these to `(submission_id, chunk_index)` rows in
 /// `trace_gate_chunk_vector_entries` for revocation tracking.
@@ -136,21 +157,21 @@ where
         self.index.delete(tenant_storage_ref, entry_id)
     }
 
-    /// Evaluate `plaintext` under the orchestrator's gate policy.
-    ///
-    /// Steps:
-    ///  1. Score for perplexity.
-    ///  2. Embed.
-    ///  3. Query top-k nearest neighbors and compute novelty as
-    ///     `1 - max(cosine_similarity)`.
-    ///  4. Apply floors → bool pass flags.
-    ///  5. If both pass, insert embedding into the index so future traces see
-    ///     it; otherwise leave the index untouched.
-    pub fn evaluate(
+    /// Chunk `plaintext` and score every chunk for perplexity, returning the
+    /// chunk plan, the per-chunk scores, and the aggregated perplexity. This is
+    /// the perplexity-only prefix shared by [`Self::evaluate`] and
+    /// [`Self::evaluate_perplexity_only`]; it performs NO embedding and NEVER
+    /// reads from or writes to the vector index, so callers that only need
+    /// perplexity are guaranteed to run the exact same chunking + scoring path
+    /// as a full evaluation without any novelty/vector side effects.
+    fn chunk_and_score_perplexity(
         &self,
         plaintext: &[u8],
-        tenant_storage_ref: &str,
-    ) -> anyhow::Result<OrchestrationDecision> {
+    ) -> anyhow::Result<(
+        crate::chunker::ChunkPlan,
+        Vec<crate::perplexity::ChunkPerplexity>,
+        crate::chunk_aggregate::ChunkedPerplexityAggregate,
+    )> {
         // Chunk the parsed envelope. Every backend request downstream is now
         // bounded — the root-cause fix for the TEE OOM crashes.
         let chunker_cfg = crate::chunker::ChunkerConfig {
@@ -185,6 +206,54 @@ where
             &chunk_scores,
             self.cfg.chunk_min_tokens,
         );
+        Ok((plan, chunk_scores, perp_agg))
+    }
+
+    /// Compute ONLY the perplexity portion of a gate evaluation.
+    ///
+    /// Runs the identical chunking + per-chunk scoring + aggregation the full
+    /// [`Self::evaluate`] pipeline runs (via the shared
+    /// [`Self::chunk_and_score_perplexity`]) and applies the same configured
+    /// perplexity/tail floors to derive `perplexity_passed`. It does NOT embed,
+    /// does NOT query nearest neighbors, and does NOT insert into the vector
+    /// index — the novelty/embedding state is left completely untouched. This
+    /// is the surgical path the perplexity re-score maintenance task calls so
+    /// re-scored values are byte-comparable to production perplexity without
+    /// mutating the vector index.
+    pub fn evaluate_perplexity_only(
+        &self,
+        plaintext: &[u8],
+    ) -> anyhow::Result<PerplexityOnlyOutcome> {
+        let (plan, _chunk_scores, perp_agg) = self.chunk_and_score_perplexity(plaintext)?;
+        let perplexity_passed = perp_agg.representative_perplexity_micros
+            >= self.cfg.perplexity_floor_micros
+            && perp_agg.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
+        Ok(PerplexityOnlyOutcome {
+            perplexity_micros: perp_agg.representative_perplexity_micros,
+            peak_perplexity_micros: perp_agg.peak_perplexity_micros,
+            tail_fraction_micros: perp_agg.tail_fraction_micros,
+            perplexity_passed,
+            chunk_count: plan.chunks.len() as u32,
+            chunks_capped: plan.chunks_capped,
+        })
+    }
+
+    /// Evaluate `plaintext` under the orchestrator's gate policy.
+    ///
+    /// Steps:
+    ///  1. Score for perplexity.
+    ///  2. Embed.
+    ///  3. Query top-k nearest neighbors and compute novelty as
+    ///     `1 - max(cosine_similarity)`.
+    ///  4. Apply floors → bool pass flags.
+    ///  5. If both pass, insert embedding into the index so future traces see
+    ///     it; otherwise leave the index untouched.
+    pub fn evaluate(
+        &self,
+        plaintext: &[u8],
+        tenant_storage_ref: &str,
+    ) -> anyhow::Result<OrchestrationDecision> {
+        let (plan, chunk_scores, perp_agg) = self.chunk_and_score_perplexity(plaintext)?;
 
         // Per-chunk embedding: mean-pooled sub-windows so the vector covers
         // the whole chunk (no 512-token truncation), then per-chunk novelty
@@ -372,6 +441,41 @@ mod tests {
             "expected near-zero novelty after self-insert, got {}",
             second.novelty_score_micros
         );
+    }
+
+    #[test]
+    fn perplexity_only_matches_evaluate_perplexity_and_leaves_index_untouched() {
+        // A high novelty floor means a full re-evaluation of an already-indexed
+        // trace would FAIL novelty (and therefore not insert). We use this to
+        // prove the index is never mutated by evaluate_perplexity_only: after
+        // any number of perplexity-only calls, a subsequent full evaluate of a
+        // fresh trace still passes novelty (index still empty).
+        let orch = orch_with_floors(0, 0, 900_000);
+
+        // Reference full evaluation captures the production perplexity values.
+        let full = orch.evaluate(b"hello world", "tenant_a").unwrap();
+        assert!(full.perplexity_passed && full.novelty_passed);
+        assert!(full.inserted_entry_id.is_some());
+
+        // A brand-new orchestrator (empty index) drives perplexity-only many
+        // times; values must match the full path's perplexity fields exactly.
+        let orch2 = orch_with_floors(0, 0, 900_000);
+        for _ in 0..5 {
+            let po = orch2.evaluate_perplexity_only(b"hello world").unwrap();
+            assert_eq!(po.perplexity_micros, full.perplexity_micros);
+            assert_eq!(po.peak_perplexity_micros, full.peak_perplexity_micros);
+            assert_eq!(po.tail_fraction_micros, full.tail_fraction_micros);
+            assert_eq!(po.chunk_count, full.chunk_count);
+        }
+
+        // The index was never written by the perplexity-only calls: a fresh
+        // trace still measures full novelty and passes under the high floor.
+        let after = orch2.evaluate(b"hello world", "tenant_a").unwrap();
+        assert!(
+            after.novelty_passed,
+            "perplexity-only must not have inserted anything into the index"
+        );
+        assert!(after.inserted_entry_id.is_some());
     }
 
     #[test]
