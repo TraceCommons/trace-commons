@@ -64264,6 +64264,37 @@ impl Database for PerplexityDriverTestDb {
             )
             .collect())
     }
+
+    /// In-memory analogue of the Postgres `list_dedup_signals` enumeration:
+    /// one `DedupSignalRow` per decision row (any tenant, insertion order,
+    /// capped at `limit`), with `dedup_cluster_id`/`dedup_simhash` populated
+    /// from the `dedup` side table when a prior `update_trace_gate_decision_dedup`
+    /// call recorded one — `None` otherwise, mirroring rows that have not been
+    /// through a dedup pass yet.
+    async fn list_dedup_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::DedupSignalRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let dedup = self.dedup.read().unwrap();
+        Ok(self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .map(|(tenant_id, row)| {
+                let seen = dedup.get(&(tenant_id.clone(), row.decision_id));
+                trace_commons_server::trace_corpus_storage::DedupSignalRow {
+                    tenant_id: tenant_id.clone(),
+                    decision_id: row.decision_id,
+                    dedup_cluster_id: seen.map(|(_, c, _)| *c),
+                    dedup_simhash: seen.map(|(h, _, _)| *h),
+                }
+            })
+            .collect())
+    }
 }
 
 /// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
@@ -64750,6 +64781,188 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     );
     assert_eq!(after.row.chunk_count, before_row.chunk_count);
     assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+// -----------------------------------------------------------------------
+// Task 6: inline cross-trace dedup (simhash-only) tests
+// -----------------------------------------------------------------------
+
+/// Same fixture as `fixture_gate_worker_artifact_store` but also returns a
+/// `KmsKeyWrapper` decryptor built from the SAME underlying key material and
+/// key-ref label as the artifact store's KEK. `LocalMasterKeyWrapper`/
+/// `SecretsCrypto` derive their AES key from the master-key string plus a
+/// per-encryption salt carried inline in the wrapped output (see
+/// `SecretsCrypto::decrypt`), so a second, independently-constructed wrapper
+/// over the same key string can unwrap DEKs the store's own (moved-in) KEK
+/// wrapped — letting a caller build a real `EnclaveGateService` that decrypts
+/// the exact envelopes this store writes. The Task 6 dedup test needs this:
+/// it asserts on the ACTUAL decrypted plaintext's simhash, not a synthetic
+/// stand-in, so it must exercise the real `EnclaveGateService::evaluate_trace`
+/// decrypt path (Part A wires `dedup_simhash` from `plaintext` there).
+fn fixture_gate_worker_artifact_store_with_decryptor(
+    artifact_root: &Path,
+) -> (ConfiguredTraceArtifactStore, Arc<dyn KmsKeyWrapper>, String) {
+    let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
+    let kek_crypto =
+        SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture kek crypto");
+    let kek = LocalMasterKeyWrapper::new(kek_crypto, "trace-commons-gate-worker-test-v1");
+    let provider_config = TraceArtifactProviderConfig::service_owned_remote(object_store.clone())
+        .expect("provider config");
+    let provider = FileRemoteTraceArtifactProvider::new(artifact_root.to_path_buf());
+    let store = Arc::new(ServiceOwnedTraceArtifactStore::new(
+        provider_config,
+        crypto,
+        kek,
+        provider,
+    ));
+    let configured = ConfiguredTraceArtifactStore::new(object_store.clone(), store);
+    let decryptor_crypto = SecretsCrypto::new(SecretString::from(key)).expect("decryptor crypto");
+    let decryptor: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
+        decryptor_crypto,
+        "trace-commons-gate-worker-test-v1",
+    ));
+    (configured, decryptor, object_store)
+}
+
+/// Like `seed_perplexity_driver_test_db` but takes one plaintext-JSON payload
+/// per submission (instead of a fixed `{"safe": true}` for every one), so a
+/// test can control which submissions carry byte-identical vs distinct
+/// canonical text. Returns the submission ids in the same order as `texts`.
+fn seed_perplexity_driver_test_db_with_texts(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    texts: &[&str],
+) -> (Arc<PerplexityDriverTestDb>, Vec<Uuid>) {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let mut submission_ids = Vec::with_capacity(texts.len());
+    for text in texts {
+        let submission_id = Uuid::new_v4();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({"text": text})).expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        // See `seed_perplexity_driver_test_db`: `created_at` must be
+        // `receipt.encrypted_at` so the reconstructed receipt round-trips.
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+        submission_ids.push(submission_id);
+    }
+    (db, submission_ids)
+}
+
+/// Task 6 payoff: `evaluate_and_record_gate` clusters duplicate traces by
+/// their gate-service-computed simhash. Drives THREE real
+/// `evaluate_and_record_gate` calls (real v2 KEK-wrapped envelopes, real
+/// `EnclaveGateService` decrypt path) — two submissions carry byte-identical
+/// canonical text, one carries unrelated text — and asserts, via
+/// `gate_decision_with_dedup_by_id`, that the two duplicates land in the same
+/// `dedup_cluster_id` with `dedup_cluster_size == 2` while the distinct trace
+/// gets its own singleton cluster (`dedup_cluster_size == 1`).
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let duplicate_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
+    let distinct_text = "an entirely unrelated trace about deploying kubernetes clusters";
+
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_texts(
+        &artifact_store,
+        tenant_id,
+        &[duplicate_text, duplicate_text, distinct_text],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let mut decision_ids = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, *submission_id)
+            .await
+            .expect("evaluate_and_record_gate succeeds");
+        let GateOutcome::Scored { decision_id, .. } = outcome else {
+            panic!("expected GateOutcome::Scored, got {outcome:?}");
+        };
+        decision_ids.push(decision_id);
+    }
+
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[0])
+        .expect("first decision row present");
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[1])
+        .expect("second decision row present");
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[2])
+        .expect("third decision row present");
+
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        first.dedup_cluster_id, second.dedup_cluster_id,
+        "byte-identical canonical text must land in the same dedup cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "second duplicate observes cluster size 2 (itself + the first)"
+    );
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "unrelated canonical text must land in a distinct dedup cluster"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the distinct trace is a singleton cluster"
+    );
 }
 
 /// Regression test for the multi-decision-row isolation bug: a single

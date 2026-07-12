@@ -45374,6 +45374,56 @@ async fn evaluate_and_record_gate(
         );
     }
 
+    // Shadow-mode cross-trace dedup (simhash-only in v1; embedding side deferred).
+    // Best-effort: a failure logs hash-only and never blocks the gate decision.
+    let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
+    let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
+    let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    for s in &signals {
+        if let Some(cid) = s.dedup_cluster_id {
+            *sizes.entry(cid).or_insert(0) += 1;
+        }
+    }
+    let mut candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = Vec::new();
+    for s in &signals {
+        if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
+            candidates.push(trace_commons_server::dedup_assign::ClusterCandidate {
+                cluster_id: cid,
+                size: *sizes.get(&cid).unwrap_or(&0),
+                simhash: sh as u64,
+                embed_cosine_micros: None,
+            });
+        }
+    }
+    let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
+        dedup_simhash as u64,
+        &candidates,
+        &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+    ) {
+        trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
+        trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
+    };
+    let new_size =
+        i32::try_from(sizes.get(&cluster_id).copied().unwrap_or(0) + 1).unwrap_or(i32::MAX);
+    // Inline only sets THIS row's size snapshot; existing members' sizes are
+    // refreshed by the Task 7 batch route.
+    if let Err(error) = db
+        .update_trace_gate_decision_dedup(
+            tenant_id,
+            decision_id,
+            dedup_simhash,
+            cluster_id,
+            new_size,
+        )
+        .await
+    {
+        tracing::warn!(
+            tenant_hash = %sha256_prefixed(tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "shadow dedup inline write failed (non-fatal)"
+        );
+    }
+
     Ok(GateOutcome::Scored {
         decision_id,
         perplexity_passed: decision.perplexity_passed,
@@ -46074,6 +46124,12 @@ async fn gate_evaluate_worker_handler(
             chunk_count: 1,
             chunks_capped: false,
             chunk_vector_entries: Vec::new(),
+            // This is a synthetic re-hydration of the already-persisted
+            // decision for the credit-emission call below (no ciphertext or
+            // plaintext in scope here) — dedup clustering already ran inline
+            // in `evaluate_and_record_gate` against the real decision, so
+            // there is nothing meaningful to compute for this throwaway copy.
+            dedup_simhash: 0,
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),
