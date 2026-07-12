@@ -5241,6 +5241,33 @@ impl TraceCorpusStore for PgBackend {
         Ok(deleted)
     }
 
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let artifact_kind = enum_to_storage(artifact_kind)?;
+        let invalidated = tx
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND artifact_kind = $3
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &artifact_kind],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(invalidated)
+    }
+
     async fn stream_trace_gate_decisions_for_replay(
         &self,
         tenant_id: &str,

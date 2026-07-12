@@ -11362,6 +11362,20 @@ async fn submit_trace_handler(
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
     }
 
+    // PII-backstop hold: an Accepted, message-text-bearing trace is held on
+    // `AwaitingPiiBackstop` (not the corpus) until the driver re-redacts it,
+    // whenever the backstop driver is configured. The credit-zeroing block above
+    // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
+    // keeps its pending credit intact for the eventual release to Accepted; the
+    // consumer/Accepted gates enforce the hold purely off the stored status.
+    // No enrol row is written: the `awaiting_pii_backstop` status is the
+    // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+    let corpus_status = corpus_status_with_pii_backstop_hold(
+        corpus_status,
+        envelope.consent.message_text_included,
+        state.pii_backstop_driver.is_some(),
+    );
+
     let stored_envelope = store_envelope(
         &state,
         tenant.tenant_id(),
@@ -35848,6 +35862,14 @@ async fn process_one_pii_backstop(
     record.object_key = stored.object_key;
     record.artifact_receipt = stored.artifact_receipt;
     record.artifact_object_store = stored.artifact_object_store;
+    // Partial-failure window: this flips the on-disk record to
+    // Accepted/Quarantined before the DB hold is cleared below. If any of the
+    // DB mirror steps fail, the file record shows the released status while the
+    // DB still reads `awaiting_pii_backstop`. The next tick re-enumerates off
+    // the DB status (still held, submitted_envelope ref still active), reloads
+    // via the now-rescrubbed record pointer, and self-heals by re-running the
+    // release. Nothing is exported off the file status alone, so the transient
+    // skew is safe.
     write_submission_record(&state.root, &record)?;
 
     // Mirror the rescrubbed envelope into the DB: refresh the submission
@@ -35882,6 +35904,29 @@ async fn process_one_pii_backstop(
     )
     .await
     .context("failed to release PII backstop hold")?;
+
+    // Defensive ref invalidation, done AFTER the hold is released: retire the
+    // pre-backstop `submitted_envelope` object ref(s) now that the rescrubbed
+    // ref is written and the status is no longer `awaiting_pii_backstop`. The
+    // primary read path resolves the record pointer (rescrubbed), so a stale
+    // `submitted_envelope` ref is not a leak on the main path, but invalidating
+    // it ensures no export-by-ref path can resolve pre-backstop bytes.
+    //
+    // Ordering matters: this runs only after the status release. The driver
+    // enumeration INNER JOINs an active `submitted_envelope` ref, so invalidating
+    // that ref before a (possibly failing) release could hide a still-held
+    // submission from the next tick. Releasing first keeps the submission
+    // re-enumerable until it is truly Accepted/Quarantined. If this invalidation
+    // itself fails the submission is already released, so it will not be
+    // reprocessed; the stale ref stays active but is unreachable on the primary
+    // read path.
+    db.invalidate_trace_object_refs_by_kind(
+        &item.tenant_id,
+        item.submission_id,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope,
+    )
+    .await
+    .context("failed to invalidate pre-backstop submitted-envelope object ref")?;
 
     Ok(())
 }
@@ -49624,6 +49669,30 @@ fn status_for_risk(
         ResidualPiiRisk::Low => TraceCorpusStatus::Accepted,
         ResidualPiiRisk::Medium if accept_medium_risk_submissions => TraceCorpusStatus::Accepted,
         ResidualPiiRisk::Medium | ResidualPiiRisk::High => TraceCorpusStatus::Quarantined,
+    }
+}
+
+/// Decide the stored corpus status for a freshly-submitted trace, applying the
+/// PII-backstop hold. When the risk-derived status is `Accepted`, the trace
+/// carries raw message text, and the backstop driver is enabled, the trace is
+/// held on `AwaitingPiiBackstop` until the driver re-redacts it through the
+/// NEAR AI prose PII filter and releases the hold. Every other case
+/// (non-Accepted risk, no message text, or backstop disabled) is returned
+/// unchanged so those paths behave exactly as before the backstop existed.
+///
+/// The `awaiting_pii_backstop` status IS the enrolment: the driver's
+/// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
+/// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
+/// bookkeeping row on first failure. No explicit enrol write is required here.
+fn corpus_status_with_pii_backstop_hold(
+    risk_status: TraceCorpusStatus,
+    message_text_included: bool,
+    backstop_enabled: bool,
+) -> TraceCorpusStatus {
+    if risk_status == TraceCorpusStatus::Accepted && message_text_included && backstop_enabled {
+        TraceCorpusStatus::AwaitingPiiBackstop
+    } else {
+        risk_status
     }
 }
 

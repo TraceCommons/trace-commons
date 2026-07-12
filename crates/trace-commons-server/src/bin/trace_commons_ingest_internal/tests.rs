@@ -74670,6 +74670,36 @@ fn pii_backstop_target_status_follows_post_backstop_risk() {
     );
 }
 
+// Task 7: the ingest hold decision. Only an Accepted, message-text-bearing
+// trace with the backstop driver enabled is held on `AwaitingPiiBackstop`;
+// flipping any one of the three conditions leaves the risk-derived status
+// unchanged. This is a pure-logic check; the full submit-handler + DB path
+// (that the held status is persisted and the trace stays out of the corpus)
+// is covered by Task 8.
+#[test]
+fn pii_backstop_hold_only_holds_accepted_message_text_when_enabled() {
+    // All three conditions true -> held.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, true),
+        TraceCorpusStatus::AwaitingPiiBackstop
+    );
+    // Backstop disabled -> unchanged (Accepted lands in the corpus as today).
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, false),
+        TraceCorpusStatus::Accepted
+    );
+    // No message text -> unchanged.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, false, true),
+        TraceCorpusStatus::Accepted
+    );
+    // Non-Accepted risk (Quarantined) is never rerouted, even with text + enabled.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Quarantined, true, true),
+        TraceCorpusStatus::Quarantined
+    );
+}
+
 // Task 6: the per-tick tally starts empty and counts released vs. held items
 // independently.
 #[test]

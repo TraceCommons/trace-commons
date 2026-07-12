@@ -1953,6 +1953,22 @@ pub trait TraceCorpusStore: Send + Sync {
         artifact_kind: TraceObjectArtifactKind,
     ) -> Result<Option<TraceObjectRefRecord>, DatabaseError>;
 
+    /// Invalidate every currently-active object ref of `artifact_kind` for a
+    /// submission by stamping `invalidated_at`. Used defensively by the PII
+    /// backstop driver to retire the pre-backstop `submitted_envelope` bytes
+    /// once the rescrubbed envelope ref is written, so no export-by-ref path
+    /// can resolve pre-backstop bytes. Returns the number of refs invalidated.
+    /// The default is a no-op (0); the Postgres store overrides it with a
+    /// scoped, tenant-context UPDATE.
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        Ok(0)
+    }
+
     async fn append_trace_derived_record(
         &self,
         derived_record: TraceDerivedRecordWrite,
