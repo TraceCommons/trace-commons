@@ -6841,6 +6841,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/score-credit-quality",
             post(score_credit_quality_handler),
         )
+        .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
@@ -45731,6 +45732,184 @@ async fn score_credit_quality_handler(
         }
     });
     Ok(Json(ScoreCreditQualityAck {
+        accepted: true,
+        limit,
+    }))
+}
+
+/// Query params for the dedup recluster batch admin route. `limit` bounds a
+/// run (useful for a `?limit=5` pilot smoke before a full pass); absent means
+/// the whole decision backlog.
+#[derive(Debug, Deserialize)]
+struct ReclusterDedupQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the dedup recluster batch admin route. The
+/// work runs in a spawned background task; the route returns immediately.
+#[derive(Debug, Serialize)]
+struct ReclusterDedupAck {
+    accepted: bool,
+    limit: Option<i64>,
+}
+
+/// Running tally for one dedup recluster batch pass.
+#[derive(Debug, Default)]
+struct ReclusterDedupSummary {
+    /// Decision rows whose dedup columns were recomputed and updated.
+    reclustered: u64,
+    /// Decision rows skipped because the write failed (left as-is).
+    failed: u64,
+}
+
+/// One full dedup recluster batch pass. SIMHASH-ONLY in v1 (embedding-side
+/// recluster is a follow-up, consistent with the inline gate path in
+/// `evaluate_and_record_gate`).
+///
+/// Enumerates dedup signal rows cross-tenant (`decided_at ASC`, per
+/// `list_dedup_signals`), then recomputes cluster assignments over that whole
+/// snapshot in a SINGLE deterministic sweep: walking rows in order, each row
+/// with a recorded simhash is assigned against the clusters formed so far
+/// (via `assign_cluster`, simhash-only candidates — `embed_cosine_micros:
+/// None`), joining an existing cluster or minting a new one. Rows without a
+/// recorded simhash cannot be clustered and are left untouched (not counted,
+/// not written).
+///
+/// Final cluster sizes are computed AFTER the full sweep completes, so every
+/// member of a cluster is written with the same total membership count — not
+/// its position-in-sweep size. A write failure on one decision is logged
+/// hash-only and skipped; the pass never aborts on one failure.
+async fn run_recluster_dedup_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+) -> anyhow::Result<ReclusterDedupSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("dedup recluster requires a configured DB mirror"))?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let rows = db.list_dedup_signals(effective_limit).await?;
+
+    // Pass 1: single deterministic sweep building cluster assignments over
+    // the snapshot. `reps` holds each cluster's representative simhash (the
+    // simhash of the row that created it); `counts` holds each cluster's
+    // running (and, after the loop, final) membership.
+    let mut reps: std::collections::HashMap<uuid::Uuid, u64> = std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    let mut assigned: Vec<(
+        &trace_commons_server::trace_corpus_storage::DedupSignalRow,
+        i64,
+        uuid::Uuid,
+    )> = Vec::new();
+
+    for row in &rows {
+        let Some(simhash_i64) = row.dedup_simhash else {
+            // No simhash recorded yet: cannot cluster this row. Skip it —
+            // leave it as-is, do not write it.
+            continue;
+        };
+        let simhash_u64 = simhash_i64 as u64;
+        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+            .iter()
+            .map(
+                |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+                    cluster_id: *cluster_id,
+                    size: *counts.get(cluster_id).unwrap_or(&0),
+                    simhash: *simhash,
+                    embed_cosine_micros: None,
+                },
+            )
+            .collect();
+        let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
+            simhash_u64,
+            &candidates,
+            &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+        ) {
+            trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
+            trace_commons_server::dedup_assign::ClusterAssignment::New => {
+                let id = uuid::Uuid::new_v4();
+                reps.insert(id, simhash_u64);
+                id
+            }
+        };
+        *counts.entry(cluster_id).or_insert(0) += 1;
+        assigned.push((row, simhash_i64, cluster_id));
+    }
+
+    // Pass 2: write every assigned row with its cluster's FINAL total
+    // membership count (computed after the whole sweep above).
+    let mut summary = ReclusterDedupSummary::default();
+    for (row, simhash_i64, cluster_id) in assigned {
+        let final_size =
+            i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
+        match db
+            .update_trace_gate_decision_dedup(
+                &row.tenant_id,
+                row.decision_id,
+                simhash_i64,
+                cluster_id,
+                final_size,
+            )
+            .await
+        {
+            Ok(()) => summary.reclustered += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&row.tenant_id),
+                    decision_hash = %sha256_prefixed(&row.decision_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "shadow dedup recluster skipped one decision"
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Admin route: trigger a batch backfill/recompute of cross-trace dedup
+/// cluster assignments and size snapshots over the whole corpus.
+/// SIMHASH-ONLY in v1 (embedding-side recluster is a follow-up).
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
+/// a background task and returns a hash-only ack immediately. An optional
+/// `?limit=N` bounds the run.
+async fn recluster_dedup_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReclusterDedupQuery>,
+) -> ApiResult<Json<ReclusterDedupAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dedup recluster requires a configured DB mirror",
+        ));
+    }
+    let limit = query.limit;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_recluster_dedup_pass(task_state, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    reclustered = summary.reclustered,
+                    failed = summary.failed,
+                    "Trace Commons dedup recluster pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons dedup recluster pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(ReclusterDedupAck {
         accepted: true,
         limit,
     }))

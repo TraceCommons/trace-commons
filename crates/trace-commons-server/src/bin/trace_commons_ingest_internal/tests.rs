@@ -64965,6 +64965,160 @@ async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
     );
 }
 
+/// Task 7 payoff: `run_recluster_dedup_pass` recomputes cluster assignments
+/// over the whole corpus snapshot in a single deterministic sweep. Seeds
+/// three decisions with `dedup_simhash` already set directly (no gate
+/// evaluation): two carry the SAME simhash across two DIFFERENT tenants
+/// (proving clustering is cross-tenant), one carries a distinct simhash.
+/// After the pass, the two same-simhash rows must share a `dedup_cluster_id`
+/// with `dedup_cluster_size == 2`; the distinct row must be a singleton
+/// (`dedup_cluster_size == 1`). Also asserts the perplexity/novelty/
+/// credit_quality columns are byte-identical before and after — the pass
+/// writes ONLY the dedup side table.
+#[tokio::test]
+async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_untouched() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    let distinct_simhash: i64 = 0x0f0f_0f0f_0f0f_0f0f;
+
+    let row_a = rescore_test_decision_row(Uuid::new_v4());
+    let row_b = rescore_test_decision_row(Uuid::new_v4());
+    let row_c = rescore_test_decision_row(Uuid::new_v4());
+
+    db.seed_gate_decision("tenant-a", row_a.clone());
+    db.seed_gate_decision("tenant-b", row_b.clone());
+    db.seed_gate_decision("tenant-a", row_c.clone());
+
+    // Seed initial dedup_simhash values directly (as if a prior inline gate
+    // pass had recorded them), with placeholder cluster assignments the
+    // recluster pass is expected to overwrite entirely.
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        row_a.decision_id,
+        shared_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_a dedup");
+    db.update_trace_gate_decision_dedup(
+        "tenant-b",
+        row_b.decision_id,
+        shared_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_b dedup");
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        row_c.decision_id,
+        distinct_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_c dedup");
+
+    let snapshot = [
+        ("tenant-a", row_a.clone()),
+        ("tenant-b", row_b.clone()),
+        ("tenant-a", row_c.clone()),
+    ];
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(
+        summary.reclustered, 3,
+        "all 3 rows must be reclustered: {summary:?}"
+    );
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_a = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_a.decision_id)
+        .expect("row_a present");
+    let after_b = db
+        .gate_decision_with_dedup_by_id("tenant-b", row_b.decision_id)
+        .expect("row_b present");
+    let after_c = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_c.decision_id)
+        .expect("row_c present");
+
+    assert!(
+        after_a.dedup_cluster_id.is_some(),
+        "row_a must be assigned a cluster"
+    );
+    assert_eq!(
+        after_a.dedup_cluster_id, after_b.dedup_cluster_id,
+        "same simhash across two different tenants must land in the same cluster"
+    );
+    assert_eq!(
+        after_a.dedup_cluster_size,
+        Some(2),
+        "shared-simhash cluster has 2 members"
+    );
+    assert_eq!(
+        after_b.dedup_cluster_size,
+        Some(2),
+        "shared-simhash cluster has 2 members"
+    );
+    assert_ne!(
+        after_c.dedup_cluster_id, after_a.dedup_cluster_id,
+        "distinct simhash must land in a different cluster"
+    );
+    assert_eq!(
+        after_c.dedup_cluster_size,
+        Some(1),
+        "distinct simhash is a singleton cluster"
+    );
+
+    // Isolation: perplexity/novelty/credit_quality columns are byte-identical
+    // before and after — the recluster pass writes ONLY the dedup side table.
+    for (tenant_id, original) in &snapshot {
+        let after = db
+            .gate_decision_with_dedup_by_id(tenant_id, original.decision_id)
+            .expect("row present");
+        assert_eq!(after.row.decision_id, original.decision_id);
+        assert_eq!(after.row.submission_id, original.submission_id);
+        assert_eq!(after.row.perplexity_micros, original.perplexity_micros);
+        assert_eq!(
+            after.row.peak_perplexity_micros,
+            original.peak_perplexity_micros
+        );
+        assert_eq!(after.row.perplexity_passed, original.perplexity_passed);
+        assert_eq!(
+            after.row.novelty_score_micros,
+            original.novelty_score_micros
+        );
+        assert_eq!(after.row.novelty_passed, original.novelty_passed);
+    }
+    let credit_after = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", row_a.decision_id)
+        .expect("row_a present");
+    assert_eq!(
+        credit_after.credit_quality_micros, None,
+        "recluster pass must never touch the credit-quality side table"
+    );
+}
+
 /// Regression test for the multi-decision-row isolation bug: a single
 /// submission can own MULTIPLE `trace_gate_decisions` rows (the `Cached`
 /// gate outcome inserts a fresh row on every cache hit — see
