@@ -74822,7 +74822,8 @@ struct PiiBackstopDriverTestDb {
     /// Authoritative corpus status per submission, updated by
     /// `upsert_trace_submission` and `update_trace_submission_status`. The
     /// backstop release flips `AwaitingPiiBackstop` -> `Accepted`/`Quarantined`.
-    statuses: std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceCorpusStatus>>,
+    statuses:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceCorpusStatus>>,
     /// Object refs the driver appended on release (expected: a
     /// `RescrubbedEnvelope`).
     appended_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
@@ -74880,10 +74881,13 @@ impl PiiBackstopDriverTestDb {
             submission_id,
             StorageTraceObjectArtifactKind::SubmittedEnvelope,
         ));
-        self.awaiting_pii_backstop.write().unwrap().push(GateWorkItem {
-            tenant_id: tenant_id.to_string(),
-            submission_id,
-        });
+        self.awaiting_pii_backstop
+            .write()
+            .unwrap()
+            .push(GateWorkItem {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+            });
     }
 
     fn status_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<StorageTraceCorpusStatus> {
@@ -75104,7 +75108,9 @@ fn near_ai_classify_response(
 ) -> wiremock::ResponseTemplate {
     let canary_values =
         trace_commons_protocol::trace_contribution::synthetic_privacy_filter_canary_values();
-    let is_canary = canary_values.iter().any(|value| input.contains(value.as_str()));
+    let is_canary = canary_values
+        .iter()
+        .any(|value| input.contains(value.as_str()));
     match mode {
         ClassifierMode::UnhealthyCanary => wiremock::ResponseTemplate::new(200)
             .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
@@ -75273,7 +75279,8 @@ async fn pii_backstop_process_one_error_leaves_submission_held() {
     let db_dyn: Arc<dyn Database> = db.clone();
     let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
 
-    let submission_id = seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
     db.seed_awaiting("tenant-a", submission_id);
     let item = GateWorkItem {
         tenant_id: "tenant-a".to_string(),
@@ -76358,9 +76365,13 @@ async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
     envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let submission_id = envelope.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(envelope))
-        .await
-        .expect("object-primary submission mirrors to DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
 
     // Before invalidation the read path resolves the submitted envelope.
     read_envelope_from_active_db_object_ref(state.as_ref(), "tenant-a", submission_id)
@@ -76380,8 +76391,10 @@ async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
     make_metadata_only_low_risk(&mut rescrubbed);
     rescrubbed.submission_id = submission_id;
     rescrubbed.contributor.tenant_scope_ref = Some(tenant_ref.clone());
-    rescrubbed.privacy.redaction_pipeline_version =
-        format!("{}+near-ai-pii-backstop-v1", rescrubbed.privacy.redaction_pipeline_version);
+    rescrubbed.privacy.redaction_pipeline_version = format!(
+        "{}+near-ai-pii-backstop-v1",
+        rescrubbed.privacy.redaction_pipeline_version
+    );
     let rescrubbed_receipt = store
         .put_json(
             &tenant_ref,

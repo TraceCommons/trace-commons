@@ -4619,8 +4619,10 @@ mod tests {
         struct Stub;
         #[async_trait::async_trait]
         impl PrivacyFilterAdapter for Stub {
-            async fn redact_text(&self, text: &str)
-                -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
                 if text.contains("jane@example.com") {
                     // Mirrors NearAiPrivacyFilterAdapter::apply_spans: report.counts
                     // uses the "privacy_filter:{label}" key while summary.by_label
@@ -4631,26 +4633,52 @@ mod tests {
                     Ok(Some(SafePrivacyFilterRedaction {
                         redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
                         summary: SafePrivacyFilterSummary {
-                            schema_version: 1, output_mode: "redacted_text_only".into(),
+                            schema_version: 1,
+                            output_mode: "redacted_text_only".into(),
                             span_count: 1,
-                            by_label: std::collections::BTreeMap::from([("private_email".into(), 1)]),
+                            by_label: std::collections::BTreeMap::from([(
+                                "private_email".into(),
+                                1,
+                            )]),
                             decoded_mismatch: false,
                         },
                         report,
                     }))
-                } else { Ok(None) }
+                } else {
+                    Ok(None)
+                }
             }
         }
         let mut env = sample_envelope_with_event_content("email jane@example.com now");
-        rescrub_envelope_prose_pii_with(&Stub, &mut env).await.unwrap();
-        assert!(env.events[0].redacted_content.as_deref().unwrap().contains("[REDACTED:private_email]"));
-        assert!(env.privacy.redaction_pipeline_version.contains("near-ai-pii-backstop-v1"));
-        assert!(env.privacy.pii_labels_present.iter().any(|l| l == "private_email"));
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert!(
+            env.events[0]
+                .redacted_content
+                .as_deref()
+                .unwrap()
+                .contains("[REDACTED:private_email]")
+        );
+        assert!(
+            env.privacy
+                .redaction_pipeline_version
+                .contains("near-ai-pii-backstop-v1")
+        );
+        assert!(
+            env.privacy
+                .pii_labels_present
+                .iter()
+                .any(|l| l == "private_email")
+        );
         // report.counts (report-keyed) must be folded into redaction_counts exactly
         // once, not doubled by also folding summary.by_label (which counts the same
         // span under the bare label).
         assert_eq!(
-            env.privacy.redaction_counts.get("privacy_filter:private_email").copied(),
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
             Some(1)
         );
         assert_eq!(env.privacy.redaction_counts.get("private_email"), None);
@@ -4658,13 +4686,24 @@ mod tests {
         let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
         assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
         // Idempotent suffix: running again does not double-append.
-        rescrub_envelope_prose_pii_with(&Stub, &mut env).await.unwrap();
-        assert_eq!(env.privacy.redaction_pipeline_version.matches("near-ai-pii-backstop-v1").count(), 1);
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.privacy
+                .redaction_pipeline_version
+                .matches("near-ai-pii-backstop-v1")
+                .count(),
+            1
+        );
         // Second pass finds no more "jane@example.com" (already redacted), so the
         // Stub returns None and the count stays at 1 — never doubled by summary
         // folding on either pass.
         assert_eq!(
-            env.privacy.redaction_counts.get("privacy_filter:private_email").copied(),
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
             Some(1)
         );
     }
