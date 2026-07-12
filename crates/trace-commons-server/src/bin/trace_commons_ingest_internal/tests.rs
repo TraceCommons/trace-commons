@@ -64965,6 +64965,199 @@ async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
     );
 }
 
+/// Like `seed_perplexity_driver_test_db_with_texts` but each entry is a full
+/// `TraceContributionEnvelope`-shaped JSON payload (an `events` array of
+/// `{event_type, tool_name, redacted_content}` plus per-submission-unique
+/// envelope metadata: `submission_id`, `trace_id`, `created_at`, and a
+/// per-event `event_id`/`timestamp`). This is the shape
+/// `parse_envelope_rendered_events` (chunker.rs:74) actually parses, and the
+/// shape `EnclaveGateService::evaluate_trace` decrypts in production — unlike
+/// `seed_perplexity_driver_test_db_with_texts`'s bare `{"text": ...}` stand-in,
+/// which never exercises the metadata-carrying envelope fields at all.
+fn seed_perplexity_driver_test_db_with_envelopes(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    // One entry per submission: the events (event_type, tool_name, content)
+    // that make up that submission's canonical rendered text.
+    events_per_submission: &[&[(&str, Option<&str>, &str)]],
+) -> (Arc<PerplexityDriverTestDb>, Vec<Uuid>) {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let mut submission_ids = Vec::with_capacity(events_per_submission.len());
+    for events in events_per_submission {
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let created_at = chrono::Utc::now() + chrono::Duration::milliseconds(rand_offset_ms());
+        let events_json: Vec<serde_json::Value> = events
+            .iter()
+            .map(|(event_type, tool_name, content)| {
+                serde_json::json!({
+                    "event_id": Uuid::new_v4().to_string(),
+                    "event_type": event_type,
+                    "tool_name": tool_name,
+                    "redacted_content": content,
+                    "timestamp": (chrono::Utc::now() + chrono::Duration::milliseconds(rand_offset_ms())).to_rfc3339(),
+                })
+            })
+            .collect();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "submission_id": submission_id.to_string(),
+            "trace_id": trace_id.to_string(),
+            "created_at": created_at.to_rfc3339(),
+            "events": events_json,
+        }))
+        .expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+        submission_ids.push(submission_id);
+    }
+    (db, submission_ids)
+}
+
+/// Small helper so successive `chrono::Utc::now()` calls in
+/// `seed_perplexity_driver_test_db_with_envelopes` don't collide when the
+/// clock resolution is coarse; not cryptographic, just a decorrelation nudge.
+fn rand_offset_ms() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static COUNTER: AtomicI64 = AtomicI64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// C1 regression: the dedup simhash must be computed over the CANONICAL
+/// RENDERED EVENT TEXT (metadata-free), not the raw envelope JSON. Two
+/// submissions with byte-identical events but different
+/// `submission_id`/`trace_id`/`created_at`/per-event `event_id`/`timestamp`
+/// must still cluster together. Before the fix, `evaluate_trace` hashed
+/// `String::from_utf8_lossy(&plaintext)` (the full envelope JSON including
+/// the unique metadata fields), so this test fails: the two "duplicate"
+/// submissions get different simhashes and land in different clusters.
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_duplicates_despite_distinct_envelope_metadata() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    // Same canonical events (content, event_type, tool_name) for the first
+    // two submissions; the third has unrelated content. Envelope-level
+    // metadata (submission_id, trace_id, created_at, event_id, timestamp) is
+    // regenerated fresh per submission by the seeding helper, so the two
+    // "duplicates" are byte-identical only in their rendered event text.
+    let shared_events: &[(&str, Option<&str>, &str)] = &[
+        ("user_message", None, "please refactor the auth module"),
+        (
+            "tool_call",
+            Some("Bash"),
+            "cargo test -p trace-commons-server",
+        ),
+        (
+            "assistant_message",
+            None,
+            "refactored auth module and tests pass",
+        ),
+    ];
+    let distinct_events: &[(&str, Option<&str>, &str)] = &[(
+        "user_message",
+        None,
+        "an entirely unrelated trace about deploying kubernetes clusters",
+    )];
+
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_envelopes(
+        &artifact_store,
+        tenant_id,
+        &[shared_events, shared_events, distinct_events],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let mut decision_ids = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, *submission_id)
+            .await
+            .expect("evaluate_and_record_gate succeeds");
+        let GateOutcome::Scored { decision_id, .. } = outcome else {
+            panic!("expected GateOutcome::Scored, got {outcome:?}");
+        };
+        decision_ids.push(decision_id);
+    }
+
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[0])
+        .expect("first decision row present");
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[1])
+        .expect("second decision row present");
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[2])
+        .expect("third decision row present");
+
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        first.dedup_cluster_id, second.dedup_cluster_id,
+        "same canonical event text with different envelope metadata must still cluster together"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "second duplicate observes cluster size 2 (itself + the first)"
+    );
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "unrelated canonical text must land in a distinct dedup cluster"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the distinct trace is a singleton cluster"
+    );
+}
+
 /// Task 7 payoff: `run_recluster_dedup_pass` recomputes cluster assignments
 /// over the whole corpus snapshot in a single deterministic sweep. Seeds
 /// three decisions with `dedup_simhash` already set directly (no gate

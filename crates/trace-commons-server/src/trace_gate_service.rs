@@ -644,8 +644,23 @@ where
             // `plaintext`) so the cross-trace dedup signal is derived inside
             // the same trust boundary as every other decrypted-content field
             // here — only the hash crosses back to the caller.
-            dedup_simhash: crate::dedup_simhash::trace_simhash(&String::from_utf8_lossy(&plaintext))
-                as i64,
+            //
+            // Must be over the CANONICAL RENDERED EVENT TEXT
+            // (metadata-free), not the raw envelope JSON: the envelope
+            // carries per-submission-unique fields (submission_id, trace_id,
+            // created_at, per-event event_id/timestamp), so hashing the raw
+            // JSON means byte-identical-content resubmissions never collide.
+            // This mirrors the same rendering the chunker uses to build the
+            // text the scorer/embedder actually consume
+            // (`chunk_envelope_plaintext` / `chunk_plaintext`), so the
+            // simhash is over the same metadata-free text.
+            dedup_simhash: {
+                let dedup_canonical_text =
+                    trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
+                        .map(|events| events.join("\n"))
+                        .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
+                crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
+            },
         })
     }
 

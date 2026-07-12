@@ -18,7 +18,11 @@ pub struct DedupConstants {
 
 pub const DEDUP_CONSTANTS_V1: DedupConstants = DedupConstants {
     tau_e_micros: 150_000, // cosine distance 0.15
-    tau_hamming: 3,
+    // The simhash tests observe ~7 Hamming distance for a one-token reword
+    // and ~9 for the A6 shim, while unrelated text sits at >=18. tau_hamming
+    // = 10 clusters near-duplicates/rewords/shims while still separating
+    // unrelated content. Starting value for shadow calibration.
+    tau_hamming: 10,
     version: 1,
 };
 

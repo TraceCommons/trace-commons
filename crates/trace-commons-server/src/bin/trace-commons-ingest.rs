@@ -45380,22 +45380,32 @@ async fn evaluate_and_record_gate(
     let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
     let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
     let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
+    // simhash — not one candidate per member decision. `list_dedup_signals`
+    // returns rows in `decided_at ASC` order, so the first-seen simhash per
+    // `cluster_id` here is the earliest-decided member, i.e. the
+    // representative. This matches the batch route
+    // (`run_recluster_dedup_pass`), which also assigns against one
+    // representative-keyed candidate per cluster; without this, inline and
+    // batch clustering could disagree on membership.
+    let mut reps: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
     for s in &signals {
-        if let Some(cid) = s.dedup_cluster_id {
+        if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
+            reps.entry(cid).or_insert(sh);
             *sizes.entry(cid).or_insert(0) += 1;
         }
     }
-    let mut candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = Vec::new();
-    for s in &signals {
-        if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
-            candidates.push(trace_commons_server::dedup_assign::ClusterCandidate {
-                cluster_id: cid,
-                size: *sizes.get(&cid).unwrap_or(&0),
-                simhash: sh as u64,
+    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+        .iter()
+        .map(
+            |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+                cluster_id: *cluster_id,
+                size: *sizes.get(cluster_id).unwrap_or(&0),
+                simhash: *simhash as u64,
                 embed_cosine_micros: None,
-            });
-        }
-    }
+            },
+        )
+        .collect();
     let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
         dedup_simhash as u64,
         &candidates,
