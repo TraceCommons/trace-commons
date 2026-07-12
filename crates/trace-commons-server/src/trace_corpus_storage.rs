@@ -2419,6 +2419,28 @@ pub trait TraceCorpusStore: Send + Sync {
         ))
     }
 
+    /// Upsert per-`(tenant_id, submission_id)` PII-backstop attempt
+    /// bookkeeping used by the server-side NEAR AI PII backstop driver's
+    /// cost-control wrapper (Task 6). Increments the `attempts` counter and
+    /// stamps `last_attempt_at`/`last_error_label`, returning the new attempt
+    /// count. Implementations MUST scope the upsert by `tenant_id`
+    /// (migration V38 forces RLS on `trace_pii_backstop` bound to
+    /// `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn bump_pii_backstop_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        Err(DatabaseError::Query(
+            "bump_pii_backstop_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
     /// Look up an existing `trace_gate_decisions` row belonging to a
     /// DIFFERENT submission in the same tenant that shares the given
     /// `canonical_summary_hash`, used by the perplexity-scoring driver's
