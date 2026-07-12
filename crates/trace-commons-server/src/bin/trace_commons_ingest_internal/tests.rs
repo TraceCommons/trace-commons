@@ -63167,6 +63167,17 @@ async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postg
 /// backlog, so a second `list_submissions_needing_gate_decision` call
 /// reflects the drained backlog — this is what lets the test assert the
 /// second tick returns zero.
+/// Test-only combined view of a `trace_gate_decisions` row plus its
+/// shadow-mode credit-quality columns (migration V39), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_credit_quality_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithCreditQuality {
+    row: StorageTraceGateDecisionRow,
+    credit_quality_micros: Option<i64>,
+    credit_quality_anomaly_ratio_micros: Option<i64>,
+    credit_quality_calibration_version: Option<i32>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -63186,6 +63197,14 @@ struct PerplexityDriverTestDb {
     /// table.
     gate_evaluation_attempts:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Shadow-mode credit-quality scores written by
+    /// `update_trace_gate_decision_credit_quality`, keyed by `(tenant_id,
+    /// decision_id)`. Kept as a side table (like `gate_evaluation_attempts`)
+    /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
+    /// isolation test can assert the base row is byte-identical before and
+    /// after the credit-quality write.
+    credit_quality_scores:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, i64, i32)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63197,6 +63216,7 @@ impl PerplexityDriverTestDb {
             ungated: std::sync::RwLock::new(Vec::new()),
             derived_records: std::sync::RwLock::new(Vec::new()),
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -63279,6 +63299,31 @@ impl PerplexityDriverTestDb {
             .iter()
             .find(|(t, row)| t == tenant_id && row.decision_id == decision_id)
             .map(|(_, row)| row.clone())
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any shadow-mode credit-quality score
+    /// recorded for it — used by the credit-quality isolation test to assert
+    /// the base row is byte-identical before and after the credit-quality
+    /// write.
+    fn gate_decision_with_credit_quality_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithCreditQuality> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let credit = self
+            .credit_quality_scores
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithCreditQuality {
+            row,
+            credit_quality_micros: credit.map(|(q, _, _)| q),
+            credit_quality_anomaly_ratio_micros: credit.map(|(_, r, _)| r),
+            credit_quality_calibration_version: credit.map(|(_, _, v)| v),
+        })
     }
 
     /// Current recorded attempt count for `(tenant_id, submission_id)`, as
@@ -63996,6 +64041,25 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         }
         Ok(())
     }
+    /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
+    /// impl: record the three credit-quality values in a side table keyed by
+    /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
+    /// without touching the stored `StorageTraceGateDecisionRow` at all — so
+    /// isolation is structural, not just asserted.
+    async fn update_trace_gate_decision_credit_quality(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        q_micros: i64,
+        anomaly_ratio_micros: i64,
+        calibration_version: i32,
+    ) -> Result<(), DatabaseError> {
+        self.credit_quality_scores.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (q_micros, anomaly_ratio_micros, calibration_version),
+        );
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64297,6 +64361,80 @@ async fn update_trace_gate_decision_perplexity_touches_only_perplexity_columns()
     assert_eq!(after.peak_novelty_micros, before.peak_novelty_micros);
     assert_eq!(after.chunk_count, before.chunk_count);
     assert_eq!(after.chunks_capped, before.chunks_capped);
+}
+
+/// Unit test for the isolation invariant: `update_trace_gate_decision_credit_quality`
+/// sets ONLY the three shadow-mode credit-quality values — the base decision
+/// row (perplexity, novelty, tail-fraction, status, credit) is byte-identical
+/// before and after.
+#[tokio::test]
+async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    db.update_trace_gate_decision_credit_quality("tenant-a", decision_id, 730_000, 2_500_000, 1)
+        .await
+        .expect("update succeeds");
+
+    let after = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The three credit-quality values changed to exactly what we passed.
+    assert_eq!(after.credit_quality_micros, Some(730_000));
+    assert_eq!(after.credit_quality_anomaly_ratio_micros, Some(2_500_000));
+    assert_eq!(after.credit_quality_calibration_version, Some(1));
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(
+        after.row.gate_policy_version,
+        before_row.gate_policy_version
+    );
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.tail_fraction_micros,
+        before_row.tail_fraction_micros
+    );
+    assert_eq!(after.row.perplexity_passed, before_row.perplexity_passed);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(
+        after.row.nearest_neighbor_hash,
+        before_row.nearest_neighbor_hash
+    );
+    assert_eq!(after.row.novelty_passed, before_row.novelty_passed);
+    assert_eq!(
+        after.row.embedding_evidence_hash,
+        before_row.embedding_evidence_hash
+    );
+    assert_eq!(
+        after.row.attestation_chain_hash,
+        before_row.attestation_chain_hash
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
+    assert_eq!(after.row.vector_entry_id, before_row.vector_entry_id);
+    assert_eq!(
+        after.row.credit_withheld_reason,
+        before_row.credit_withheld_reason
+    );
+    assert_eq!(
+        after.row.peak_perplexity_micros,
+        before_row.peak_perplexity_micros
+    );
+    assert_eq!(
+        after.row.peak_novelty_micros,
+        before_row.peak_novelty_micros
+    );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
 }
 
 /// Regression test for the multi-decision-row isolation bug: a single

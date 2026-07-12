@@ -3794,6 +3794,134 @@ async fn pg_store_update_trace_gate_decision_perplexity_scopes_to_latest_decisio
 }
 
 #[tokio::test]
+async fn pg_store_update_trace_gate_decision_credit_quality_touches_only_credit_columns() {
+    // `update_trace_gate_decision_credit_quality` targets the exact PK
+    // `(tenant_id, decision_id)` supplied by the caller (no "latest decision
+    // row" subquery, unlike the perplexity re-score path) and must set ONLY
+    // the three shadow-mode credit_quality columns (migration V39) — every
+    // other column, including perplexity/novelty/status on the SAME row,
+    // must be byte-identical before and after.
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-gate-credit-quality-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    let decision = sample_gate_decision(submission_id);
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision.clone())
+        .await
+        .expect("insert gate decision");
+
+    backend
+        .update_trace_gate_decision_credit_quality(&tenant_id, decision_id, 730_000, 2_500_000, 1)
+        .await
+        .expect("credit-quality update succeeds");
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get readback connection");
+    let tx = client
+        .transaction()
+        .await
+        .expect("start readback transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context for readback");
+    let row = tx
+        .query_one(
+            "SELECT credit_quality_micros, credit_quality_anomaly_ratio_micros, \
+                    credit_quality_calibration_version, \
+                    perplexity_micros, peak_perplexity_micros, perplexity_passed, \
+                    novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
+                    gate_policy_version, gate_version_hash, credit_withheld_reason \
+             FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant_id, &decision_id],
+        )
+        .await
+        .expect("read back gate decision row");
+    tx.commit().await.expect("commit readback transaction");
+
+    assert_eq!(
+        row.get::<_, Option<i64>>("credit_quality_micros"),
+        Some(730_000),
+        "credit_quality_micros was set"
+    );
+    assert_eq!(
+        row.get::<_, Option<i64>>("credit_quality_anomaly_ratio_micros"),
+        Some(2_500_000),
+        "credit_quality_anomaly_ratio_micros was set"
+    );
+    assert_eq!(
+        row.get::<_, Option<i32>>("credit_quality_calibration_version"),
+        Some(1),
+        "credit_quality_calibration_version was set"
+    );
+
+    // Every non-credit column on the SAME row is byte-identical to the
+    // seeded fixture.
+    assert_eq!(
+        row.get::<_, i64>("perplexity_micros"),
+        decision.perplexity_micros,
+        "perplexity_micros untouched"
+    );
+    assert_eq!(
+        row.get::<_, Option<i64>>("peak_perplexity_micros"),
+        decision.peak_perplexity_micros,
+        "peak_perplexity_micros untouched"
+    );
+    assert_eq!(
+        row.get::<_, bool>("perplexity_passed"),
+        decision.perplexity_passed,
+        "perplexity_passed untouched"
+    );
+    assert_eq!(
+        row.get::<_, i64>("novelty_score_micros"),
+        decision.novelty_score_micros,
+        "novelty_score_micros untouched"
+    );
+    assert_eq!(
+        row.get::<_, String>("nearest_neighbor_hash"),
+        decision.nearest_neighbor_hash,
+        "nearest_neighbor_hash untouched"
+    );
+    assert_eq!(
+        row.get::<_, bool>("novelty_passed"),
+        decision.novelty_passed,
+        "novelty_passed untouched"
+    );
+    assert_eq!(
+        row.get::<_, String>("gate_policy_version"),
+        decision.gate_policy_version,
+        "gate_policy_version untouched"
+    );
+    assert_eq!(
+        row.get::<_, String>("gate_version_hash"),
+        decision.gate_version_hash,
+        "gate_version_hash untouched"
+    );
+    assert_eq!(
+        row.get::<_, Option<String>>("credit_withheld_reason"),
+        decision.credit_withheld_reason,
+        "credit_withheld_reason untouched"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+#[tokio::test]
 async fn revocation_propagation_failure_audit_metadata_round_trips() {
     // Phase A6: the typed RevocationPropagationFailure audit-metadata variant
     // is serialized as JSON into trace_audit_events.metadata_json. Exercise
