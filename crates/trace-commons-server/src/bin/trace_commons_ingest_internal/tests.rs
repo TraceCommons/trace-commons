@@ -4033,6 +4033,12 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_id_map: Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
         near_access_key_checker_override: None,
     })
 }
@@ -23425,6 +23431,12 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_id_map: Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
         near_access_key_checker_override: None,
     });
 
@@ -65782,6 +65794,90 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
             || chain.contains("LocalPerplexityScorerLoadFailed"),
         "expected LocalPerplexityScorer* error class, got: {chain}"
     );
+}
+
+// ----- Cross-trace dedup: separate dedup vector index (Task 5) -------------
+//
+// Feature-gated because `UsearchVectorIndex` (and `AppState::dedup_vector_index`)
+// only compile under `local-gpu-models`/`near-ai-scorer`.
+
+/// `dedup_index_query`/`dedup_index_insert` must resolve a query against a
+/// live dedup index to the correct original `decision_id` (not the
+/// truncated/zero-padded `Uuid` the underlying `VectorIndex::nearest` trait
+/// method alone would give back), and the cosine distance for a near-
+/// identical vector must land under `DEDUP_CONSTANTS_V1.tau_e_micros`.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_index_query_finds_near_vector() {
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+
+    fn norm(mut v: Vec<f32>) -> Vec<f32> {
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n > 0.0 {
+            for x in v.iter_mut() {
+                *x /= n;
+            }
+        }
+        v
+    }
+
+    let index_temp = tempfile::tempdir().expect("index temp dir");
+    let dim = 8;
+    let idx = UsearchVectorIndex::try_new(index_temp.path(), dim, 16, 200, 50, 2, 32)
+        .expect("dedup index ctor");
+
+    let state_temp = tempfile::tempdir().expect("state temp dir");
+    let mut state = test_state(state_temp.path().to_path_buf());
+    {
+        // `test_state` just built this Arc, so we are the sole owner — safe
+        // to mutate the dedup index field in before inserting/querying.
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner of freshly built state");
+        state_mut.dedup_vector_index = Some(Arc::new(idx));
+    }
+
+    let id_near = Uuid::new_v4();
+    let id_far = Uuid::new_v4();
+    // vec_near is a small perturbation of the probe; vec_far is orthogonal.
+    let vec_near = norm(vec![1.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let vec_far = norm(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+
+    state.dedup_index_insert(id_near, &vec_near);
+    state.dedup_index_insert(id_far, &vec_far);
+
+    let probe = norm(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let results = state.dedup_index_query(&probe, 5);
+
+    assert!(
+        !results.is_empty(),
+        "expected at least one neighbor from the dedup index, got none"
+    );
+    let (top_id, top_distance_micros) = results[0];
+    assert_eq!(
+        top_id, id_near,
+        "nearest neighbor must resolve back to the real inserted decision_id"
+    );
+    assert!(
+        top_distance_micros < trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1.tau_e_micros,
+        "expected cosine-distance micros under tau_e_micros ({}), got {top_distance_micros}",
+        trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1.tau_e_micros
+    );
+}
+
+/// `dedup_index_query`/`dedup_index_insert` must fail open (no panic, no
+/// error) when the dedup index was never configured — the simhash-only
+/// dedup signal must keep working even when usearch init failed or the
+/// feature-gated index was never built.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_index_helpers_no_op_when_index_absent() {
+    let state_temp = tempfile::tempdir().expect("state temp dir");
+    let state = test_state(state_temp.path().to_path_buf());
+    assert!(state.dedup_vector_index.is_none());
+
+    // insert must not panic even though there's nothing to insert into.
+    state.dedup_index_insert(Uuid::new_v4(), &[1.0, 0.0, 0.0, 0.0]);
+    let results = state.dedup_index_query(&[1.0, 0.0, 0.0, 0.0], 5);
+    assert!(results.is_empty());
 }
 
 // -----------------------------------------------------------------------------

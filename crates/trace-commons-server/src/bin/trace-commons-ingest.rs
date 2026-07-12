@@ -438,6 +438,14 @@ const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
+// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex` instance
+// from the novelty index above, so dedup lookups never pollute novelty's
+// nearest-neighbor results. Same dim/hnsw/ef params as the novelty index
+// (`TRACE_COMMONS_VECTOR_INDEX_*`); only the root path is independently
+// configurable. Read only under the `local-gpu-models`/`near-ai-scorer`
+// features (usearch is not compiled in otherwise).
+#[allow(dead_code)]
+const TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -1211,6 +1219,41 @@ struct AppState {
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
     account_near_config: Option<Arc<NearConfig>>,
+    /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
+    /// instance from the novelty index — sharing the novelty index would
+    /// pollute its nearest-neighbor results and silently change novelty
+    /// scoring, so dedup gets its own disk-backed root
+    /// (`TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT`). `None` when built without
+    /// `local-gpu-models`/`near-ai-scorer` (usearch is not compiled in) or
+    /// when construction fails at startup — dedup is best-effort shadow
+    /// scoring, so a construction failure degrades to simhash-only rather
+    /// than failing the whole server closed.
+    // Not yet read outside tests: Task 6 (inline-at-gate dedup assignment)
+    // wires `dedup_index_query`/`dedup_index_insert` into
+    // `evaluate_and_record_gate`. `#[allow(dead_code)]` mirrors this file's
+    // existing convention for fields/consts staged ahead of their consumer
+    // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index:
+        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
+    /// public `VectorIndex::nearest()` only returns the high 8 bytes of the
+    /// inserted `Uuid` (zero-padded into the low 8 bytes — see that module's
+    /// `nearest()` doc comment), because usearch keys are `u64` and the
+    /// shared novelty-index code path never needed to resolve a hit back to
+    /// a real database row. Cross-trace dedup DOES need the real
+    /// `decision_id` back (Task 6 matches it against
+    /// `DedupSignalRow::decision_id`), so this in-process map from the
+    /// truncated key to the original full `Uuid` closes that gap.
+    /// In-memory only (not persisted): after a process restart, entries
+    /// inserted before the restart are unresolvable until reinserted — this
+    /// only degrades the embedding-similarity dedup signal; the simhash path
+    /// is unaffected. Guarded by a `std::sync::Mutex`, not `tokio::sync`,
+    /// since callers never hold it across an `.await`.
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index_id_map: Arc<std::sync::Mutex<std::collections::HashMap<u64, Uuid>>>,
     /// Test-only override for the NEAR access-key binding check (Slice 3a Task 6).
     /// When `Some`, the enroll-finish handler consults this stub instead of the
     /// live `view_access_key_list` JSON-RPC call, so the binding check is
@@ -3369,6 +3412,12 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_near_config,
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index: build_dedup_vector_index_from_env(),
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index_id_map: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(test)]
             near_access_key_checker_override: None,
         })
@@ -5029,6 +5078,189 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         "enclave_near_ai",
     )))
 }
+
+/// Build the cross-trace dedup vector index (shadow-only). A SEPARATE
+/// `UsearchVectorIndex` instance from the novelty index built above — the
+/// two must never share a root, or a dedup lookup would return novelty's
+/// neighbors (and vice versa), silently changing novelty scoring.
+///
+/// Uses the same dim/hnsw/ef/max_open/flush_every knobs as the novelty index
+/// (`TRACE_COMMONS_VECTOR_INDEX_*`) so the two indexes stay dimensionally
+/// compatible with the shared embedder, but reads its OWN root from
+/// `TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT`, defaulting to a sibling
+/// directory of the novelty root (`<novelty_root>/../dedup-index`).
+///
+/// Fail-open by design: dedup is shadow-only (no settlement, no gating), so
+/// a construction failure here must not take down the server. On error this
+/// logs a hash-only warning and returns `None`; `dedup_index_query`/
+/// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
+/// signal keeps working.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+fn build_dedup_vector_index_from_env()
+-> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+
+    let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
+    let dedup_root = std::env::var(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| format!("{novelty_root}/../dedup-index"));
+
+    let result = (|| -> anyhow::Result<UsearchVectorIndex> {
+        let dim = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_DIM,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
+        )?;
+        let max_open = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
+        )?;
+        let flush_every = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
+        )?;
+        let hnsw_m = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
+        )?;
+        let ef_construction = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
+        )?;
+        let ef_search = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
+        )?;
+        UsearchVectorIndex::try_new(
+            &dedup_root,
+            dim,
+            hnsw_m,
+            ef_construction,
+            ef_search,
+            max_open,
+            flush_every,
+        )
+        .with_context(|| format!("failed to initialize dedup UsearchVectorIndex (dim={dim})"))
+    })();
+
+    match result {
+        Ok(index) => Some(Arc::new(index)),
+        Err(error) => {
+            tracing::warn!(
+                error_class = "DedupVectorIndexInitFailed",
+                error_hash = %safe_runtime_error_hash(&error),
+                "dedup vector index init failed; falling back to simhash-only dedup"
+            );
+            None
+        }
+    }
+}
+
+/// Cross-trace dedup helpers (shadow-only). Both are fail-open: `None`
+/// index -> no-op/empty, and a live index still never returns an `Err` to
+/// the caller — any usearch failure is logged hash-only and treated as "no
+/// signal" so the simhash-only dedup path is unaffected.
+///
+/// Not yet called outside tests: Task 6 wires these into
+/// `evaluate_and_record_gate`.
+#[allow(dead_code)]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+impl AppState {
+    /// Query the dedup vector index for the `k` nearest neighbors of
+    /// `embedding`. Returns `(decision_id, cosine_distance_micros)` pairs,
+    /// nearest first (matching `UsearchVectorIndex::nearest`'s ordering).
+    /// `cosine_distance_micros = round((1.0 - cosine_similarity) * 1e6)`,
+    /// consistent with `dedup_assign::ClusterCandidate::embed_cosine_micros`
+    /// and `DEDUP_CONSTANTS_V1.tau_e_micros`.
+    ///
+    /// Empty when the index is `None` (not configured / failed to init at
+    /// startup) — the simhash signal still works without it. A neighbor
+    /// whose truncated usearch key has no entry in
+    /// `dedup_vector_index_id_map` (process-restart gap; see that field's
+    /// doc comment) is skipped rather than fabricating an id.
+    fn dedup_index_query(&self, embedding: &[f32], k: usize) -> Vec<(Uuid, i64)> {
+        let Some(index) = self.dedup_vector_index.as_ref() else {
+            return Vec::new();
+        };
+        // All dedup traffic shares one logical tenant namespace so matching
+        // is cross-tenant by construction (dedup dedups across tenants,
+        // unlike novelty which is per-tenant).
+        let neighbors = match trace_commons_gate_enclave::vector_index::VectorIndex::nearest(
+            index.as_ref(),
+            DEDUP_VECTOR_INDEX_NAMESPACE,
+            embedding,
+            k,
+        ) {
+            Ok(n) => n,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "DedupVectorIndexQueryFailed",
+                    error_hash = %safe_runtime_error_hash(&error),
+                    "dedup vector index query failed (non-fatal)"
+                );
+                return Vec::new();
+            }
+        };
+        let id_map = self
+            .dedup_vector_index_id_map
+            .lock()
+            .expect("dedup_vector_index_id_map mutex poisoned");
+        let mut out = Vec::with_capacity(neighbors.len());
+        for n in &neighbors {
+            let key_bytes: [u8; 8] = match n.entry_id.as_bytes()[0..8].try_into() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let key = u64::from_be_bytes(key_bytes);
+            let Some(&decision_id) = id_map.get(&key) else {
+                continue;
+            };
+            let distance_micros = ((1.0 - n.similarity) * 1_000_000.0).round() as i64;
+            out.push((decision_id, distance_micros));
+        }
+        out
+    }
+
+    /// Insert `embedding` under `id` into the dedup vector index. No-op when
+    /// the index is `None`. Non-fatal on failure: logs hash-only and
+    /// returns without propagating the error, matching the fail-open
+    /// contract the rest of the dedup shadow-scoring path relies on.
+    fn dedup_index_insert(&self, id: Uuid, embedding: &[f32]) {
+        let Some(index) = self.dedup_vector_index.as_ref() else {
+            return;
+        };
+        if let Err(error) = trace_commons_gate_enclave::vector_index::VectorIndex::insert(
+            index.as_ref(),
+            id,
+            DEDUP_VECTOR_INDEX_NAMESPACE,
+            embedding,
+        ) {
+            tracing::warn!(
+                error_class = "DedupVectorIndexInsertFailed",
+                error_hash = %safe_runtime_error_hash(&error),
+                "dedup vector index insert failed (non-fatal)"
+            );
+            return;
+        }
+        let key = u64::from_be_bytes(
+            id.as_bytes()[0..8]
+                .try_into()
+                .expect("Uuid is always 16 bytes"),
+        );
+        self.dedup_vector_index_id_map
+            .lock()
+            .expect("dedup_vector_index_id_map mutex poisoned")
+            .insert(key, id);
+    }
+}
+
+/// Fixed `VectorIndex` tenant-namespace key for the dedup index. Dedup is
+/// intentionally cross-tenant (it dedups traces across tenants), unlike the
+/// per-tenant novelty index, so every insert/query in the dedup index goes
+/// through this single shared namespace rather than the caller's real
+/// tenant id.
+#[allow(dead_code)]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+const DEDUP_VECTOR_INDEX_NAMESPACE: &str = "trace_commons_cross_trace_dedup_v1";
 
 /// Parse a required `u64` env var. Returns an error if the var is unset,
 /// empty, or doesn't parse. Used for the three gate floors that the
