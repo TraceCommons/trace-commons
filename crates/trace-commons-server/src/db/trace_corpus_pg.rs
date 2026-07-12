@@ -5502,6 +5502,50 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_perplexity(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        perplexity_micros: i64,
+        peak_perplexity_micros: Option<i64>,
+        perplexity_passed: bool,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the three perplexity columns, and ONLY on the latest
+        // decision row for this submission. A single submission can own
+        // multiple `trace_gate_decisions` rows (the `Cached` gate outcome
+        // inserts a fresh row on every cache hit), so this mirrors the
+        // `ORDER BY decided_at DESC LIMIT 1` selection used by
+        // `find_gate_decision_by_canonical_hash` — otherwise this UPDATE
+        // would blast the new perplexity value across every historical row
+        // for the submission, corrupting rows stamped with an older
+        // `gate_policy_version` / `gate_version_hash`. Novelty, tail-fraction,
+        // vector-entry, gate status, credit, and all other columns are left
+        // exactly as-is — the re-score maintenance path must never touch them.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET perplexity_micros = $3,
+                    peak_perplexity_micros = $4,
+                    perplexity_passed = $5
+             WHERE tenant_id = $1 AND decision_id = (
+                 SELECT decision_id FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  ORDER BY decided_at DESC LIMIT 1)",
+            &[
+                &tenant_id,
+                &submission_id,
+                &perplexity_micros,
+                &peak_perplexity_micros,
+                &perplexity_passed,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn bump_gate_evaluation_attempt(
         &self,
         tenant_id: &str,

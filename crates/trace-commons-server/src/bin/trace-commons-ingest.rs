@@ -56,7 +56,7 @@ use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
-    KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper,
+    KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper, WrappedDek,
 };
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
@@ -6562,6 +6562,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
+        .route(
+            "/v1/admin/rescore-perplexity",
+            post(rescore_perplexity_handler),
+        )
         .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
@@ -44936,26 +44940,23 @@ enum GateOutcome {
     },
 }
 
-/// Non-auth core of the gate worker: fetch submission → resolve the latest
-/// active submitted-envelope object ref → decrypt → score through the
-/// configured `TraceGateService` → build and insert the `trace_gate_decisions`
-/// audit row. Used by both the HTTP handler (`gate_evaluate_worker_handler`)
-/// and the in-process driver. Cost controls (skip_duplicates, cache) are
-/// applied by the caller-facing wrapper; this fn always scores.
-async fn evaluate_and_record_gate(
+/// Resolve the latest active submitted-envelope object ref for a submission and
+/// read back its ciphertext + wrapped DEK from the encrypted artifact store.
+///
+/// This is the exact envelope-load path `evaluate_and_record_gate` uses before
+/// scoring, factored out so the perplexity re-score maintenance task loads the
+/// identical ciphertext bytes and wrapped DEK. Keeping a single loader
+/// guarantees the re-score path decrypts and chunks byte-identical inputs to
+/// production scoring — the values are only comparable if the bytes are.
+async fn load_trace_ciphertext_and_wrapped_dek(
     state: &AppState,
     tenant_id: &str,
     submission_id: Uuid,
-) -> anyhow::Result<GateOutcome> {
+) -> anyhow::Result<(Vec<u8>, WrappedDek)> {
     let db = state
         .db_mirror
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured DB mirror"))?;
-    let _submission = db
-        .get_trace_submission(tenant_id, submission_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("trace submission not found"))?;
-
     let object_ref = db
         .get_latest_active_trace_object_ref(
             tenant_id,
@@ -44996,6 +44997,31 @@ async fn evaluate_and_record_gate(
         .wrapped_dek
         .clone()
         .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a v2 KEK-wrapped envelope"))?;
+    Ok((ciphertext, wrapped_dek))
+}
+
+/// Non-auth core of the gate worker: fetch submission → resolve the latest
+/// active submitted-envelope object ref → decrypt → score through the
+/// configured `TraceGateService` → build and insert the `trace_gate_decisions`
+/// audit row. Used by both the HTTP handler (`gate_evaluate_worker_handler`)
+/// and the in-process driver. Cost controls (skip_duplicates, cache) are
+/// applied by the caller-facing wrapper; this fn always scores.
+async fn evaluate_and_record_gate(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<GateOutcome> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("trace gate worker requires a configured DB mirror"))?;
+    let _submission = db
+        .get_trace_submission(tenant_id, submission_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("trace submission not found"))?;
+
+    let (ciphertext, wrapped_dek) =
+        load_trace_ciphertext_and_wrapped_dek(state, tenant_id, submission_id).await?;
 
     // Canonical tenant_storage_ref: the wrapped DEK was produced under this
     // ref by the artifact-store path. Passing a raw tenant id here would
@@ -45054,6 +45080,165 @@ async fn evaluate_and_record_gate(
         gate_policy_version: decision.gate_policy_version,
         gate_version_hash: decision.gate_version_hash,
     })
+}
+
+/// Query params for the perplexity re-score admin route. `limit` bounds a run
+/// (useful for a `?limit=5` pilot smoke before a full pass); absent means the
+/// whole decision backlog.
+#[derive(Debug, Deserialize)]
+struct RescorePerplexityQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the perplexity re-score admin route. The work
+/// runs in a spawned background task; the route returns immediately.
+#[derive(Debug, Serialize)]
+struct RescorePerplexityAck {
+    accepted: bool,
+    limit: Option<i64>,
+}
+
+/// Running tally for one perplexity re-score pass.
+#[derive(Debug, Default)]
+struct RescorePerplexitySummary {
+    /// Submissions whose perplexity columns were recomputed and updated.
+    rescored: usize,
+    /// Submissions skipped because load/scoring/update failed (left as-is).
+    failed: usize,
+}
+
+/// Re-score the perplexity of ONE already-decided submission and update only
+/// its perplexity columns. Loads the exact same ciphertext + wrapped DEK the
+/// gate driver scored (via `load_trace_ciphertext_and_wrapped_dek`), runs the
+/// gate service's perplexity-only path (no embedding, no nearest-neighbor
+/// query, no vector-index insert), then updates only `perplexity_micros`,
+/// `peak_perplexity_micros`, and `perplexity_passed`. Novelty, tail-fraction,
+/// vector-entry, gate status, and credit are never touched.
+async fn rescore_perplexity_one(state: &AppState, item: &GateWorkItem) -> anyhow::Result<()> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("perplexity re-score requires a configured DB mirror"))?;
+    let (ciphertext, wrapped_dek) =
+        load_trace_ciphertext_and_wrapped_dek(state, &item.tenant_id, item.submission_id).await?;
+    // Canonical tenant_storage_ref: the wrapped DEK was produced under this ref
+    // (matches `evaluate_and_record_gate`); anything else fails KekContextMismatch.
+    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&item.tenant_id));
+    let outcome = state.gate_service.evaluate_trace_perplexity_only(
+        &tenant_ctx,
+        &ciphertext,
+        &wrapped_dek,
+        TraceArtifactKind::ContributionEnvelope,
+    )?;
+    let perplexity_micros = i64::try_from(outcome.perplexity_micros).unwrap_or(i64::MAX);
+    let peak_perplexity_micros =
+        Some(i64::try_from(outcome.peak_perplexity_micros).unwrap_or(i64::MAX));
+    db.update_trace_gate_decision_perplexity(
+        &item.tenant_id,
+        item.submission_id,
+        perplexity_micros,
+        peak_perplexity_micros,
+        outcome.perplexity_passed,
+    )
+    .await?;
+    // Hash-only: identify the submission by hash, never the perplexity value.
+    tracing::info!(
+        tenant_hash = %sha256_prefixed(&item.tenant_id),
+        submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+        "perplexity re-score updated one submission"
+    );
+    Ok(())
+}
+
+/// One perplexity re-score pass. Enumerates submissions that already have a gate
+/// decision (cross-tenant, oldest-received first, capped at `limit`) and
+/// re-scores each sequentially. A load/scoring/update failure on one submission
+/// is logged hash-only and skipped — the pass never aborts on one failure, and
+/// the skipped submission keeps its prior perplexity value (idempotent: a
+/// re-trigger just recomputes the same deterministic values).
+async fn run_rescore_perplexity_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+) -> anyhow::Result<RescorePerplexitySummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("perplexity re-score requires a configured DB mirror"))?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let items = db
+        .list_submissions_with_gate_decision(effective_limit)
+        .await?;
+    let mut summary = RescorePerplexitySummary::default();
+    for item in &items {
+        match rescore_perplexity_one(state.as_ref(), item).await {
+            Ok(()) => summary.rescored += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&item.tenant_id),
+                    submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "perplexity re-score skipped one submission"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Admin route: trigger a perplexity-only re-score of existing gate decisions.
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns a
+/// background task and returns a hash-only ack immediately. An optional
+/// `?limit=N` bounds the run.
+async fn rescore_perplexity_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RescorePerplexityQuery>,
+) -> ApiResult<Json<RescorePerplexityAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    // Fail-closed preconditions: the re-score needs a DB mirror and an artifact
+    // store to enumerate and load envelopes. The scorer itself is exercised
+    // per-submission (a gate service that cannot isolate perplexity fails each
+    // submission closed via the `PerplexityOnlyRescoreUnsupported` bail).
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace perplexity re-score requires a configured DB mirror",
+        ));
+    }
+    if state.artifact_store.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace perplexity re-score requires a configured artifact store",
+        ));
+    }
+    let limit = query.limit;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_rescore_perplexity_pass(task_state, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    rescored = summary.rescored,
+                    failed = summary.failed,
+                    "Trace Commons perplexity re-score pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons perplexity re-score pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(RescorePerplexityAck {
+        accepted: true,
+        limit,
+    }))
 }
 
 /// Per-submission cost-control knobs for the in-process perplexity-scoring

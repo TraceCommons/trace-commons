@@ -63241,6 +63241,15 @@ impl PerplexityDriverTestDb {
         ));
     }
 
+    /// Directly seed a fully-populated `trace_gate_decisions` row (no scoring),
+    /// used by the re-score unit test to assert column-level isolation.
+    fn seed_gate_decision(&self, tenant_id: &str, row: StorageTraceGateDecisionRow) {
+        self.gate_decisions
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), row));
+    }
+
     /// Look up the `trace_gate_decisions` row written for `(tenant_id,
     /// submission_id)`, if any — used to assert `credit_withheld_reason`.
     fn gate_decision_for(
@@ -63253,6 +63262,22 @@ impl PerplexityDriverTestDb {
             .unwrap()
             .iter()
             .find(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .map(|(_, row)| row.clone())
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key
+    /// `(tenant_id, decision_id)` — used by tests that seed multiple
+    /// decision rows for the same submission and need to distinguish them.
+    fn gate_decision_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<StorageTraceGateDecisionRow> {
+        self.gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(t, row)| t == tenant_id && row.decision_id == decision_id)
             .map(|(_, row)| row.clone())
     }
 
@@ -63934,6 +63959,43 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
             .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
         Ok(())
     }
+    /// In-memory analogue of the Postgres `update_trace_gate_decision_perplexity`
+    /// impl: mutate ONLY the three perplexity columns on the LATEST (by
+    /// `decided_at`) stored decision row for `(tenant_id, submission_id)`,
+    /// leaving every other row and every other column byte-identical. A
+    /// single submission can own multiple decision rows (the `Cached` gate
+    /// outcome inserts a fresh row on every cache hit), so this mirrors the
+    /// `ORDER BY decided_at DESC LIMIT 1` selection used by
+    /// `find_gate_decision_by_canonical_hash` and the real Postgres SQL —
+    /// otherwise a re-score would corrupt the audit trail on historical rows
+    /// stamped with an older gate policy/version. This is what the re-score
+    /// unit + integration tests assert against.
+    async fn update_trace_gate_decision_perplexity(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        perplexity_micros: i64,
+        peak_perplexity_micros: Option<i64>,
+        perplexity_passed: bool,
+    ) -> Result<(), DatabaseError> {
+        let mut rows = self.gate_decisions.write().unwrap();
+        let latest_decision_id = rows
+            .iter()
+            .filter(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .max_by_key(|(_, row)| row.decided_at)
+            .map(|(_, row)| row.decision_id);
+        if let Some(decision_id) = latest_decision_id {
+            for (t, row) in rows.iter_mut() {
+                if t == tenant_id && row.decision_id == decision_id {
+                    row.perplexity_micros = perplexity_micros;
+                    row.peak_perplexity_micros = peak_perplexity_micros;
+                    row.perplexity_passed = perplexity_passed;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64009,6 +64071,26 @@ impl Database for PerplexityDriverTestDb {
             .iter()
             .take(limit)
             .cloned()
+            .collect())
+    }
+
+    /// Sibling enumeration for the re-score task: return one work item per
+    /// already-decided submission, oldest-inserted first, capped at `limit`.
+    async fn list_submissions_with_gate_decision(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .map(|(tenant_id, row)| GateWorkItem {
+                tenant_id: tenant_id.clone(),
+                submission_id: row.submission_id,
+            })
             .collect())
     }
 }
@@ -64137,6 +64219,279 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
         (0, 0, 0, 0),
         "second tick must find the backlog already drained: {second:?}"
     );
+}
+
+/// Build a fully-populated gate-decision row with distinctive novelty/status
+/// fields so a re-score that touches any non-perplexity column is detectable.
+fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow {
+    StorageTraceGateDecisionRow {
+        decision_id: Uuid::new_v4(),
+        submission_id,
+        gate_policy_version: "rescore_test_v1".to_string(),
+        gate_version_hash: "sha256:rescore_test_v1".to_string(),
+        perplexity_micros: 111,
+        tail_fraction_micros: 222,
+        perplexity_passed: false,
+        novelty_score_micros: 333_333,
+        nearest_neighbor_hash: "sha256:novelty-neighbor".to_string(),
+        novelty_passed: true,
+        embedding_evidence_hash: "sha256:embedding-evidence".to_string(),
+        attestation_chain_hash: "sha256:attestation-chain".to_string(),
+        decided_at: Utc::now(),
+        vector_entry_id: Some(Uuid::new_v4()),
+        credit_withheld_reason: Some("some_reason".to_string()),
+        peak_perplexity_micros: Some(444),
+        peak_novelty_micros: Some(555_555),
+        chunk_count: Some(7),
+        chunks_capped: Some(true),
+    }
+}
+
+/// Unit test for the isolation invariant: `update_trace_gate_decision_perplexity`
+/// changes ONLY `perplexity_micros`, `peak_perplexity_micros`, and
+/// `perplexity_passed` — every novelty / tail-fraction / vector / status /
+/// credit column is byte-identical before and after.
+#[tokio::test]
+async fn update_trace_gate_decision_perplexity_touches_only_perplexity_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before = rescore_test_decision_row(submission_id);
+    db.seed_gate_decision("tenant-a", before.clone());
+
+    db.update_trace_gate_decision_perplexity(
+        "tenant-a",
+        submission_id,
+        6_000_001,
+        Some(9_000_002),
+        true,
+    )
+    .await
+    .expect("update succeeds");
+
+    let after = db
+        .gate_decision_for("tenant-a", submission_id)
+        .expect("row still present");
+
+    // The three perplexity columns changed to exactly what we passed.
+    assert_eq!(after.perplexity_micros, 6_000_001);
+    assert_eq!(after.peak_perplexity_micros, Some(9_000_002));
+    assert!(after.perplexity_passed);
+
+    // Every other column is byte-identical to before.
+    assert_eq!(after.decision_id, before.decision_id);
+    assert_eq!(after.submission_id, before.submission_id);
+    assert_eq!(after.gate_policy_version, before.gate_policy_version);
+    assert_eq!(after.gate_version_hash, before.gate_version_hash);
+    assert_eq!(after.tail_fraction_micros, before.tail_fraction_micros);
+    assert_eq!(after.novelty_score_micros, before.novelty_score_micros);
+    assert_eq!(after.nearest_neighbor_hash, before.nearest_neighbor_hash);
+    assert_eq!(after.novelty_passed, before.novelty_passed);
+    assert_eq!(
+        after.embedding_evidence_hash,
+        before.embedding_evidence_hash
+    );
+    assert_eq!(after.attestation_chain_hash, before.attestation_chain_hash);
+    assert_eq!(after.decided_at, before.decided_at);
+    assert_eq!(after.vector_entry_id, before.vector_entry_id);
+    assert_eq!(after.credit_withheld_reason, before.credit_withheld_reason);
+    assert_eq!(after.peak_novelty_micros, before.peak_novelty_micros);
+    assert_eq!(after.chunk_count, before.chunk_count);
+    assert_eq!(after.chunks_capped, before.chunks_capped);
+}
+
+/// Regression test for the multi-decision-row isolation bug: a single
+/// submission can own MULTIPLE `trace_gate_decisions` rows (the `Cached`
+/// gate outcome inserts a fresh row on every cache hit — see
+/// `insert_trace_gate_decision` call sites in trace-commons-ingest.rs), and
+/// `find_gate_decision_by_canonical_hash` explicitly does
+/// `ORDER BY decided_at DESC LIMIT 1` because of this. The perplexity
+/// re-score UPDATE must apply that same "latest decision row only"
+/// selection instead of blasting the new perplexity value across every
+/// historical row for the submission — otherwise it corrupts the hash-only
+/// audit trail on rows stamped with an older `gate_policy_version` /
+/// `gate_version_hash`.
+#[tokio::test]
+async fn update_trace_gate_decision_perplexity_only_touches_latest_decision_row() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    let mut older = rescore_test_decision_row(submission_id);
+    older.decision_id = Uuid::new_v4();
+    older.decided_at = now - chrono::Duration::hours(1);
+    older.gate_policy_version = "gate_v35b".to_string();
+    older.gate_version_hash = "sha256:gate_v35b".to_string();
+    older.perplexity_micros = 111;
+    older.peak_perplexity_micros = Some(444);
+    older.perplexity_passed = false;
+
+    let mut newer = rescore_test_decision_row(submission_id);
+    newer.decision_id = Uuid::new_v4();
+    newer.decided_at = now;
+    newer.gate_policy_version = "gate_v27b".to_string();
+    newer.gate_version_hash = "sha256:gate_v27b".to_string();
+    newer.perplexity_micros = 222;
+    newer.peak_perplexity_micros = Some(555);
+    newer.perplexity_passed = false;
+
+    // Seed the older row first, then the newer one, mirroring insertion
+    // order across two `Cached` gate hits for the same submission.
+    db.seed_gate_decision("tenant-a", older.clone());
+    db.seed_gate_decision("tenant-a", newer.clone());
+
+    db.update_trace_gate_decision_perplexity(
+        "tenant-a",
+        submission_id,
+        6_000_001,
+        Some(9_000_002),
+        true,
+    )
+    .await
+    .expect("update succeeds");
+
+    let older_after = db
+        .gate_decision_by_id("tenant-a", older.decision_id)
+        .expect("older decision row still present");
+    let newer_after = db
+        .gate_decision_by_id("tenant-a", newer.decision_id)
+        .expect("newer decision row still present");
+
+    // Only the LATEST decision row's three perplexity columns changed.
+    assert_eq!(newer_after.perplexity_micros, 6_000_001);
+    assert_eq!(newer_after.peak_perplexity_micros, Some(9_000_002));
+    assert!(newer_after.perplexity_passed);
+
+    // The older decision row is byte-identical: both its perplexity
+    // columns AND its version-stamp columns are untouched.
+    assert_eq!(older_after, older);
+
+    // Novelty/status/credit columns on both rows are unchanged too.
+    assert_eq!(newer_after.novelty_score_micros, newer.novelty_score_micros);
+    assert_eq!(
+        newer_after.nearest_neighbor_hash,
+        newer.nearest_neighbor_hash
+    );
+    assert_eq!(newer_after.novelty_passed, newer.novelty_passed);
+    assert_eq!(
+        newer_after.credit_withheld_reason,
+        newer.credit_withheld_reason
+    );
+}
+
+/// Integration test for the re-score task end-to-end with the in-memory gate
+/// service: after a full gate drive populates decisions, corrupting the stored
+/// perplexity and running `run_rescore_perplexity_pass` restores the
+/// deterministic perplexity while leaving every novelty/vector/status column
+/// byte-identical to the post-drive snapshot. Proves the pass recomputes ONLY
+/// perplexity and never re-touches novelty or the vector index.
+#[tokio::test]
+async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouched() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 3);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    // Drive the gate once so every submission has a real decision row (the
+    // in-memory gate service scores perplexity + novelty deterministically).
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+    run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("initial drive succeeds");
+
+    // Snapshot the decision rows after the real drive.
+    let work_items = db
+        .list_submissions_with_gate_decision(100)
+        .await
+        .expect("enumeration succeeds");
+    assert_eq!(work_items.len(), 3, "all 3 submissions must have decisions");
+    let snapshot: Vec<StorageTraceGateDecisionRow> = work_items
+        .iter()
+        .map(|item| {
+            db.gate_decision_for(&item.tenant_id, item.submission_id)
+                .expect("decision present")
+        })
+        .collect();
+
+    // Corrupt the stored perplexity so a successful re-score is observable.
+    for item in &work_items {
+        db.update_trace_gate_decision_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            0,
+            Some(0),
+            false,
+        )
+        .await
+        .expect("corrupt update succeeds");
+    }
+
+    // Run the re-score pass.
+    let summary = run_rescore_perplexity_pass(state.clone(), None)
+        .await
+        .expect("re-score pass succeeds");
+    assert_eq!(summary.rescored, 3, "all 3 must re-score: {summary:?}");
+    assert_eq!(summary.failed, 0, "no submission should fail: {summary:?}");
+
+    // Assert: perplexity restored to the deterministic value; every other
+    // column byte-identical to the post-drive snapshot.
+    for original in &snapshot {
+        let after = db
+            .gate_decision_for("tenant-a", original.submission_id)
+            .expect("decision still present");
+        assert_eq!(
+            after.perplexity_micros, original.perplexity_micros,
+            "perplexity must be recomputed back to the deterministic value"
+        );
+        assert_eq!(
+            after.peak_perplexity_micros,
+            original.peak_perplexity_micros
+        );
+        assert_eq!(after.perplexity_passed, original.perplexity_passed);
+        // Novelty / vector / status columns untouched.
+        assert_eq!(after.novelty_score_micros, original.novelty_score_micros);
+        assert_eq!(after.nearest_neighbor_hash, original.nearest_neighbor_hash);
+        assert_eq!(after.novelty_passed, original.novelty_passed);
+        assert_eq!(after.peak_novelty_micros, original.peak_novelty_micros);
+        assert_eq!(after.vector_entry_id, original.vector_entry_id);
+        assert_eq!(after.tail_fraction_micros, original.tail_fraction_micros);
+        assert_eq!(
+            after.embedding_evidence_hash,
+            original.embedding_evidence_hash
+        );
+        assert_eq!(after.decision_id, original.decision_id);
+        assert_eq!(
+            after.credit_withheld_reason,
+            original.credit_withheld_reason
+        );
+        assert_eq!(after.chunk_count, original.chunk_count);
+        assert_eq!(after.chunks_capped, original.chunks_capped);
+    }
 }
 
 // -----------------------------------------------------------------------
