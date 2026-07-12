@@ -63178,6 +63178,17 @@ struct DecisionRowWithCreditQuality {
     credit_quality_calibration_version: Option<i32>,
 }
 
+/// Test-only combined view of a `trace_gate_decisions` row plus its
+/// cross-trace dedup columns (migration V40), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_dedup_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithDedup {
+    row: StorageTraceGateDecisionRow,
+    dedup_simhash: Option<i64>,
+    dedup_cluster_id: Option<Uuid>,
+    dedup_cluster_size: Option<i32>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -63205,6 +63216,13 @@ struct PerplexityDriverTestDb {
     /// after the credit-quality write.
     credit_quality_scores:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, i64, i32)>>,
+    /// Cross-trace dedup cluster assignments written by
+    /// `update_trace_gate_decision_dedup`, keyed by `(tenant_id,
+    /// decision_id)`. Kept as a side table (like `credit_quality_scores`)
+    /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
+    /// isolation test can assert the base row is byte-identical before and
+    /// after the dedup write.
+    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63217,6 +63235,7 @@ impl PerplexityDriverTestDb {
             derived_records: std::sync::RwLock::new(Vec::new()),
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -63323,6 +63342,30 @@ impl PerplexityDriverTestDb {
             credit_quality_micros: credit.map(|(q, _, _)| q),
             credit_quality_anomaly_ratio_micros: credit.map(|(_, r, _)| r),
             credit_quality_calibration_version: credit.map(|(_, _, v)| v),
+        })
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any cross-trace dedup assignment recorded
+    /// for it — used by the dedup isolation test to assert the base row is
+    /// byte-identical before and after the dedup write.
+    fn gate_decision_with_dedup_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithDedup> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let dedup = self
+            .dedup
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithDedup {
+            row,
+            dedup_simhash: dedup.map(|(h, _, _)| h),
+            dedup_cluster_id: dedup.map(|(_, c, _)| c),
+            dedup_cluster_size: dedup.map(|(_, _, s)| s),
         })
     }
 
@@ -64060,6 +64103,25 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         );
         Ok(())
     }
+    /// In-memory analogue of the Postgres `update_trace_gate_decision_dedup`
+    /// impl: record the three dedup values in a side table keyed by
+    /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
+    /// without touching the stored `StorageTraceGateDecisionRow` at all — so
+    /// isolation is structural, not just asserted.
+    async fn update_trace_gate_decision_dedup(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_simhash: i64,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        self.dedup.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (dedup_simhash, dedup_cluster_id, dedup_cluster_size),
+        );
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64549,6 +64611,81 @@ async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns()
     assert_eq!(after.credit_quality_micros, Some(730_000));
     assert_eq!(after.credit_quality_anomaly_ratio_micros, Some(2_500_000));
     assert_eq!(after.credit_quality_calibration_version, Some(1));
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(
+        after.row.gate_policy_version,
+        before_row.gate_policy_version
+    );
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.tail_fraction_micros,
+        before_row.tail_fraction_micros
+    );
+    assert_eq!(after.row.perplexity_passed, before_row.perplexity_passed);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(
+        after.row.nearest_neighbor_hash,
+        before_row.nearest_neighbor_hash
+    );
+    assert_eq!(after.row.novelty_passed, before_row.novelty_passed);
+    assert_eq!(
+        after.row.embedding_evidence_hash,
+        before_row.embedding_evidence_hash
+    );
+    assert_eq!(
+        after.row.attestation_chain_hash,
+        before_row.attestation_chain_hash
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
+    assert_eq!(after.row.vector_entry_id, before_row.vector_entry_id);
+    assert_eq!(
+        after.row.credit_withheld_reason,
+        before_row.credit_withheld_reason
+    );
+    assert_eq!(
+        after.row.peak_perplexity_micros,
+        before_row.peak_perplexity_micros
+    );
+    assert_eq!(
+        after.row.peak_novelty_micros,
+        before_row.peak_novelty_micros
+    );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+/// Unit test for the isolation invariant: `update_trace_gate_decision_dedup`
+/// sets ONLY the three cross-trace dedup values (migration V40) — the base
+/// decision row (perplexity, novelty, tail-fraction, status, credit) is
+/// byte-identical before and after.
+#[tokio::test]
+async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    let cluster = Uuid::from_u128(7);
+    db.update_trace_gate_decision_dedup("tenant-a", decision_id, 42i64, cluster, 3)
+        .await
+        .expect("dedup update succeeds");
+
+    let after = db
+        .gate_decision_with_dedup_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The three dedup values changed to exactly what we passed.
+    assert_eq!(after.dedup_simhash, Some(42));
+    assert_eq!(after.dedup_cluster_id, Some(cluster));
+    assert_eq!(after.dedup_cluster_size, Some(3));
 
     // Every base-row column is byte-identical to before.
     assert_eq!(after.row.decision_id, before_row.decision_id);

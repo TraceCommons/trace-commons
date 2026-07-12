@@ -5579,6 +5579,39 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_dedup(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_simhash: i64,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the three dedup columns on exactly this decision row.
+        // Perplexity, novelty, tail-fraction, vector-entry, gate status, and
+        // credit are left exactly as-is.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = $3,
+                    dedup_cluster_id = $4,
+                    dedup_cluster_size = $5
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[
+                &tenant_id,
+                &decision_id,
+                &dedup_simhash,
+                &dedup_cluster_id,
+                &dedup_cluster_size,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn bump_gate_evaluation_attempt(
         &self,
         tenant_id: &str,
