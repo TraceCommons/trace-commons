@@ -103,9 +103,12 @@ a = 1 − (r − R_SOFT)/(R_HARD − R_SOFT)   if R_SOFT < r < R_HARD   // linea
 a = 0  (+ record reason)          if r ≥ R_HARD
 ```
 
-`a` **defaults to 1.0** and only bites on a suspiciously spiky profile. When `a`
-drops below a threshold, persist a reason label (reusing the existing
-`credit_withheld_reason` label-only pattern — no raw content).
+`a` **defaults to 1.0** and only bites on a suspiciously spiky profile. In shadow
+mode the "withheld" condition is **not** written to `credit_withheld_reason` (that
+credit-adjacent column is off-limits under the isolation invariant); instead it is
+reconstructable from the persisted `credit_quality_anomaly_ratio_micros` — a
+decision is anomaly-withheld exactly when that ratio ≥ `R_HARD`. The scoring
+function still surfaces `anomaly_withheld` in its return value for callers/tests.
 
 **Per-trace cap is structural:** `clamp01` ⇒ `q ∈ [0,1]`; no single trace exceeds
 one unit of quality.
@@ -131,8 +134,10 @@ number against `migrations/` during planning — the shared test DB already has
   for observability even when `a` did not bite.
 - `credit_quality_calibration_version` — identifies the pinned constant-set that
   produced this `q`.
-- Anomaly withholds reuse the existing `credit_withheld_reason` column pattern
-  (label/enum only). No new reason column.
+- Anomaly withholds are **not** persisted to `credit_withheld_reason` in shadow
+  mode (isolation invariant forbids touching credit-adjacent columns); the
+  condition is reconstructable from `credit_quality_anomaly_ratio_micros ≥ R_HARD`.
+  No new reason column.
 
 RLS is forced on the table like every Trace Commons table; the new columns follow
 the existing tenant predicate. No new DB role.
