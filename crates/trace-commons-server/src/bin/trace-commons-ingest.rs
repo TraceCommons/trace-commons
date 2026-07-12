@@ -53572,20 +53572,43 @@ async fn read_envelope_from_active_db_object_ref(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(None);
     };
-    let Some(object_ref) = db
+    // Prefer an active `RescrubbedEnvelope` ref: once the PII backstop releases a
+    // held submission it writes a rescrubbed ref and invalidates the pre-backstop
+    // `submitted_envelope` ref, so a released-backstop trace only has an active
+    // rescrubbed ref. Non-backstopped traces have only a `submitted_envelope`
+    // ref, so they fall through to the same query as before. This keeps the
+    // `require_object_refs` hardening satisfiable for released-backstop traces.
+    let object_ref = match db
         .get_latest_active_trace_object_ref(
             tenant_id,
             submission_id,
-            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
         )
         .await
         .with_context(|| {
             format!(
-                "failed to read active submitted envelope object ref for submission {submission_id}"
+                "failed to read active rescrubbed envelope object ref for submission {submission_id}"
             )
-        })?
-    else {
-        return Ok(None);
+        })? {
+        Some(rescrubbed) => rescrubbed,
+        None => {
+            let Some(submitted) = db
+                .get_latest_active_trace_object_ref(
+                    tenant_id,
+                    submission_id,
+                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read active submitted envelope object ref for submission {submission_id}"
+                    )
+                })?
+            else {
+                return Ok(None);
+            };
+            submitted
+        }
     };
     let envelope = read_envelope_from_object_ref(state, tenant_id, &object_ref)?;
     Ok(Some(TraceEnvelopeBodyRead {
@@ -53607,6 +53630,7 @@ fn read_envelope_from_object_ref(
         matches!(
             object_ref.artifact_kind,
             StorageTraceObjectArtifactKind::SubmittedEnvelope
+                | StorageTraceObjectArtifactKind::RescrubbedEnvelope
                 | StorageTraceObjectArtifactKind::ReviewSnapshot
         ),
         "trace object ref artifact kind mismatch"
