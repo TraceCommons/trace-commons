@@ -74643,3 +74643,42 @@ fn pii_backstop_config_off_when_disabled() {
             .is_none()
     );
 }
+
+// Task 6: the driver's POST-backstop status transition is exactly
+// `status_for_risk` over the re-redacted envelope's residual risk. Low always
+// releases to Accepted; High always re-quarantines; Medium is gated on the
+// `accept_medium_risk_submissions` policy. A filter that fails to lower risk
+// therefore never silently accepts a still-risky trace. This is a pure-logic
+// check; the live re-redaction + release path is covered by Task 8.
+#[test]
+fn pii_backstop_target_status_follows_post_backstop_risk() {
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Low, false),
+        TraceCorpusStatus::Accepted
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::High, true),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, false),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, true),
+        TraceCorpusStatus::Accepted
+    );
+}
+
+// Task 6: the per-tick tally starts empty and counts released vs. held items
+// independently.
+#[test]
+fn pii_backstop_tick_summary_defaults_and_tallies() {
+    let mut summary = PiiBackstopDriverTickSummary::default();
+    assert_eq!(summary.done, 0);
+    assert_eq!(summary.failed, 0);
+    summary.done += 2;
+    summary.failed += 1;
+    assert_eq!(summary.done, 2);
+    assert_eq!(summary.failed, 1);
+}

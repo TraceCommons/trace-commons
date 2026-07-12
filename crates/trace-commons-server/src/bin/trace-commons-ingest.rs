@@ -31,7 +31,8 @@ use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
     TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
@@ -1048,6 +1049,7 @@ async fn main() -> anyhow::Result<()> {
     );
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
+    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1360,16 +1362,24 @@ struct PerplexityDriverTickSummary {
 /// backstop). Like `PerplexityScoreDriverConfig`, it has no worker bearer
 /// token: it runs entirely in-process against `state.db_mirror`'s
 /// cross-tenant PII-backstop-driver pool and never goes through an HTTP
-/// handler. The driver spawn/tick itself lands in a follow-up task; this
-/// struct and its parser are wired here so config plumbing and the reader
-/// pool are ready ahead of that.
+/// handler.
 #[derive(Clone)]
-#[allow(dead_code)]
 struct PiiBackstopDriverConfig {
     interval: StdDuration,
     batch_size: i64,
     max_attempts: i32,
     backoff_base_seconds: i64,
+}
+
+/// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
+/// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
+/// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
+/// counts submissions that stayed held on `AwaitingPiiBackstop` after an
+/// adapter/redaction error and had their attempt counter bumped.
+#[derive(Debug, Default, Clone, Copy)]
+struct PiiBackstopDriverTickSummary {
+    done: usize,
+    failed: usize,
 }
 
 #[derive(Clone)]
@@ -8198,6 +8208,47 @@ fn spawn_perplexity_score_driver_task(
                     tracing::warn!(
                         error_hash = %safe_display_error_hash(&error),
                         "Trace Commons perplexity score driver tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Task 6: spawn the in-process server-side NEAR AI PII-backstop driver loop.
+/// Mirrors the shape of `spawn_perplexity_score_driver_task` (sleep, tick,
+/// hash-only log, repeat) and, like it, has no bearer-token worker route: it
+/// runs entirely in-process against `state.db_mirror` and its cross-tenant
+/// PII-backstop-driver pool. A tick that fails (missing adapter key,
+/// unhealthy canary, pool not configured) leaves every held submission on
+/// `AwaitingPiiBackstop`; the loop logs a warning and retries next interval.
+fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBackstopDriverConfig>) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        batch_size = config.batch_size,
+        max_attempts = config.max_attempts,
+        backoff_base_seconds = config.backoff_base_seconds,
+        "Trace Commons PII backstop driver enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_pii_backstop_driver_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        done = summary.done,
+                        failed = summary.failed,
+                        "Trace Commons PII backstop driver tick completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_hash = %safe_display_error_hash(&error),
+                        "Trace Commons PII backstop driver tick failed"
                     );
                 }
             }
@@ -35670,6 +35721,169 @@ async fn run_perplexity_score_driver_tick(
         }
     }
     Ok(summary)
+}
+
+/// Audit actor label recorded for status transitions the PII-backstop driver
+/// performs. Label-only, never a secret or contributor identity.
+const PII_BACKSTOP_DRIVER_ACTOR_REF: &str = "trace-commons-pii-backstop-driver";
+/// Snapshot/audit label for the re-redacted envelope the driver produces.
+const PII_BACKSTOP_REDACTION_LABEL: &str = "near-ai-pii-backstop-v1";
+
+/// Task 6: one pass of the in-process server-side NEAR AI PII-backstop driver.
+///
+/// Fail-closed by construction. The whole tick refuses to touch any submission
+/// unless (a) the NEAR AI privacy-filter adapter builds from env, and (b) the
+/// synthetic canary round-trips healthy. Either failing returns `Err` before a
+/// single submission is loaded, so every held trace stays on
+/// `AwaitingPiiBackstop`; the caller logs a hash-only warning and retries next
+/// interval. The adapter is built once per tick and shared across the batch.
+async fn run_pii_backstop_driver_tick(
+    state: Arc<AppState>,
+    config: &PiiBackstopDriverConfig,
+) -> anyhow::Result<PiiBackstopDriverTickSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PII backstop driver requires a configured DB mirror"))?;
+
+    // Build the adapter ONCE per tick. A missing key fails the whole tick
+    // before any submission is loaded — nothing is processed, traces stay held.
+    let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
+        .map_err(|err| anyhow::anyhow!("PII backstop adapter unavailable: {err}"))?;
+
+    // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
+    // touching any real submission; abort without mutating anything when the
+    // filter is unhealthy or errors — never process real traces through a
+    // broken filter.
+    let canary = run_privacy_filter_canary(adapter.as_ref())
+        .await
+        .map_err(|err| anyhow::anyhow!("PII backstop canary errored: {err}"))?;
+    if !canary.healthy {
+        anyhow::bail!("PII backstop canary reported unhealthy filter; tick aborted");
+    }
+
+    let items = db
+        .list_submissions_awaiting_pii_backstop(
+            Utc::now(),
+            config.max_attempts,
+            config.backoff_base_seconds,
+            config.batch_size,
+        )
+        .await?;
+
+    let mut summary = PiiBackstopDriverTickSummary::default();
+    for item in &items {
+        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
+            Ok(()) => summary.done += 1,
+            Err(error) => {
+                // Leave the submission held on `AwaitingPiiBackstop` and bump
+                // its attempt counter with a hash-only error label. A bump
+                // failure is itself logged hash-only; the trace still stays
+                // held either way.
+                let error_label = safe_runtime_error_hash(&error);
+                if let Err(bump_error) = db
+                    .bump_pii_backstop_attempt(
+                        &item.tenant_id,
+                        item.submission_id,
+                        Utc::now(),
+                        &error_label,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error_hash = %safe_runtime_error_hash(&anyhow::Error::new(bump_error)),
+                        submission_id = %item.submission_id,
+                        "Trace Commons PII backstop attempt bump failed"
+                    );
+                }
+                tracing::warn!(
+                    error_hash = %error_label,
+                    submission_id = %item.submission_id,
+                    "Trace Commons PII backstop re-redaction failed; submission held"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Re-redact a single held submission through the NEAR AI prose PII filter and,
+/// on success, release the hold. Loads the record + envelope, runs
+/// `rescrub_envelope_prose_pii_with`, then re-stores the rescrubbed envelope,
+/// updates the record's object pointers, mirrors a `RescrubbedEnvelope` object
+/// ref, and transitions the submission to `Accepted`/`Quarantined` based on the
+/// POST-backstop residual PII risk. Any error propagates to the caller, which
+/// bumps the attempt counter and leaves the submission on
+/// `AwaitingPiiBackstop`.
+async fn process_one_pii_backstop(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    item: &GateWorkItem,
+    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
+) -> anyhow::Result<()> {
+    let mut record = read_submission_record(&state.root, &item.tenant_id, item.submission_id)?
+        .ok_or_else(|| anyhow::anyhow!("PII backstop submission record not found"))?;
+    let mut envelope = read_envelope_by_record(state, &record)?;
+
+    // Two-pass and atomic inside the protocol helper: any adapter error is
+    // returned before any field of `envelope` is mutated.
+    rescrub_envelope_prose_pii_with(adapter, &mut envelope).await?;
+
+    // Status is chosen from the POST-backstop residual risk: a filter that
+    // still leaves Medium/High risk re-quarantines rather than accepts.
+    let target_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
+
+    let stored = store_envelope(
+        state,
+        &item.tenant_id,
+        target_status,
+        PII_BACKSTOP_REDACTION_LABEL,
+        &envelope,
+    )?;
+    record.status = target_status;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    write_submission_record(&state.root, &record)?;
+
+    // Mirror the rescrubbed envelope into the DB: refresh the submission
+    // metadata pointers, append a `RescrubbedEnvelope` object ref, then release
+    // the hold via the tenant-scoped status setter.
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        &record,
+        &envelope,
+        envelope
+            .embedding_analysis
+            .as_ref()
+            .map(|analysis| analysis.canonical_summary_hash.clone()),
+    )?)
+    .await
+    .context("failed to mirror rescrubbed trace submission metadata")?;
+    let (object_ref, _) = trace_object_ref_write_from_record(
+        state,
+        "rescrubbed-envelope",
+        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+        &record,
+        &envelope,
+    )?;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .context("failed to mirror rescrubbed trace object ref")?;
+    db.update_trace_submission_status(
+        &item.tenant_id,
+        item.submission_id,
+        storage_corpus_status(target_status),
+        PII_BACKSTOP_DRIVER_ACTOR_REF,
+        Some(PII_BACKSTOP_REDACTION_LABEL),
+    )
+    .await
+    .context("failed to release PII backstop hold")?;
+
+    Ok(())
 }
 
 async fn run_trace_benchmark_registry_scheduler_tick(
