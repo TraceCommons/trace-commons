@@ -1238,22 +1238,45 @@ struct AppState {
     dedup_vector_index:
         Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
     /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
-    /// public `VectorIndex::nearest()` only returns the high 8 bytes of the
-    /// inserted `Uuid` (zero-padded into the low 8 bytes — see that module's
-    /// `nearest()` doc comment), because usearch keys are `u64` and the
-    /// shared novelty-index code path never needed to resolve a hit back to
-    /// a real database row. Cross-trace dedup DOES need the real
-    /// `decision_id` back (Task 6 matches it against
-    /// `DedupSignalRow::decision_id`), so this in-process map from the
-    /// truncated key to the original full `Uuid` closes that gap.
-    /// In-memory only (not persisted): after a process restart, entries
-    /// inserted before the restart are unresolvable until reinserted — this
-    /// only degrades the embedding-similarity dedup signal; the simhash path
-    /// is unaffected. Guarded by a `std::sync::Mutex`, not `tokio::sync`,
-    /// since callers never hold it across an `.await`.
+    /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
+    /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
+    /// doc comment), because usearch keys are `u64` and the shared
+    /// novelty-index code path never needed to resolve a hit back to a real
+    /// database row. Cross-trace dedup DOES need the real `decision_id` back
+    /// (Task 6 matches it against `DedupSignalRow::decision_id`), so this
+    /// in-process map from the usearch key to the original full `Uuid` closes
+    /// that gap.
+    ///
+    /// The key is a unique, monotonic per-process counter
+    /// (`dedup_vector_index_counter`), NOT `uuid_to_key(decision_id)` (the high
+    /// 8 bytes of the UUID). Keying by the truncated UUID would collide two
+    /// distinct decision_ids sharing that 8-byte prefix, silently overwriting
+    /// the map entry and letting a later `nearest()` return a FABRICATED wrong
+    /// decision_id. A dedicated counter makes key -> uuid exact and
+    /// collision-free.
+    ///
+    /// PROCESS-LOCAL: this map is not persisted. The on-disk usearch index
+    /// survives a restart, but the map does not, so after a restart a query
+    /// misses any vector inserted before the restart (its key is unknown and
+    /// is SKIPPED — never fabricated) until that decision is re-inserted. Only
+    /// the embedding-similarity dedup signal is affected; the simhash signal is
+    /// DB-persisted and unaffected (and the Task 7 batch recluster is
+    /// simhash-only). The map also grows unbounded for the process lifetime —
+    /// there is no eviction paired to the index's LRU. Acceptable at pilot
+    /// scale; follow-up options are evict-with-LRU or persist/rebuild-on-boot.
+    ///
+    /// Guarded by a `std::sync::Mutex`, not `tokio::sync`, since callers never
+    /// hold it across an `.await`.
     #[allow(dead_code)]
     #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
     dedup_vector_index_id_map: Arc<std::sync::Mutex<std::collections::HashMap<u64, Uuid>>>,
+    /// Monotonic per-process key allocator for `dedup_vector_index_id_map`.
+    /// Starts at 1; every `dedup_index_insert` claims a fresh key via
+    /// `fetch_add(1)`. See `dedup_vector_index_id_map` for why a counter is
+    /// used instead of `uuid_to_key(decision_id)`.
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only override for the NEAR access-key binding check (Slice 3a Task 6).
     /// When `Some`, the enroll-finish handler consults this stub instead of the
     /// live `view_access_key_list` JSON-RPC call, so the binding check is
@@ -3418,6 +3441,8 @@ impl AppState {
             dedup_vector_index_id_map: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(test)]
             near_access_key_checker_override: None,
         })
@@ -5173,10 +5198,12 @@ impl AppState {
     /// and `DEDUP_CONSTANTS_V1.tau_e_micros`.
     ///
     /// Empty when the index is `None` (not configured / failed to init at
-    /// startup) — the simhash signal still works without it. A neighbor
-    /// whose truncated usearch key has no entry in
-    /// `dedup_vector_index_id_map` (process-restart gap; see that field's
-    /// doc comment) is skipped rather than fabricating an id.
+    /// startup) — the simhash signal still works without it. Each neighbor's
+    /// usearch key (the high 8 bytes of the returned `Uuid`, which `insert`
+    /// set to a unique counter) is resolved to the real decision_id via
+    /// `dedup_vector_index_id_map`. A neighbor whose key has no map entry
+    /// (process-restart gap; see that field's doc comment) is SKIPPED rather
+    /// than fabricating an id — there are no silent wrong answers.
     fn dedup_index_query(&self, embedding: &[f32], k: usize) -> Vec<(Uuid, i64)> {
         let Some(index) = self.dedup_vector_index.as_ref() else {
             return Vec::new();
@@ -5224,13 +5251,30 @@ impl AppState {
     /// the index is `None`. Non-fatal on failure: logs hash-only and
     /// returns without propagating the error, matching the fail-open
     /// contract the rest of the dedup shadow-scoring path relies on.
+    ///
+    /// The usearch entry is keyed by a fresh unique monotonic counter
+    /// (`dedup_vector_index_counter`), NOT by `uuid_to_key(id)`. Keying by the
+    /// truncated UUID would collide two distinct decision_ids sharing the same
+    /// 8-byte prefix, silently clobbering the reverse-map entry and letting a
+    /// later query return a fabricated wrong decision_id. `VectorIndex::insert`
+    /// takes a `Uuid` and internally keys usearch via `uuid_to_key` (the high 8
+    /// bytes, big-endian), so we synthesize a `Uuid` whose high 8 bytes ARE the
+    /// counter — `Uuid::from_u128((counter as u128) << 64)` — making the
+    /// usearch key exactly `counter`. We record `counter -> id` so the query
+    /// side resolves the real decision_id back.
     fn dedup_index_insert(&self, id: Uuid, embedding: &[f32]) {
         let Some(index) = self.dedup_vector_index.as_ref() else {
             return;
         };
+        let key = self
+            .dedup_vector_index_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Synthesize a Uuid whose high 8 bytes (what `uuid_to_key` reads) equal
+        // `key`, so the usearch entry is keyed by the unique counter.
+        let key_uuid = Uuid::from_u128((key as u128) << 64);
         if let Err(error) = trace_commons_gate_enclave::vector_index::VectorIndex::insert(
             index.as_ref(),
-            id,
+            key_uuid,
             DEDUP_VECTOR_INDEX_NAMESPACE,
             embedding,
         ) {
@@ -5241,11 +5285,6 @@ impl AppState {
             );
             return;
         }
-        let key = u64::from_be_bytes(
-            id.as_bytes()[0..8]
-                .try_into()
-                .expect("Uuid is always 16 bytes"),
-        );
         self.dedup_vector_index_id_map
             .lock()
             .expect("dedup_vector_index_id_map mutex poisoned")

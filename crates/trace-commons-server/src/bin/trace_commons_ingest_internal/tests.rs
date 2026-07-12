@@ -4039,6 +4039,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         dedup_vector_index_id_map: Arc::new(
             std::sync::Mutex::new(std::collections::HashMap::new()),
         ),
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         near_access_key_checker_override: None,
     })
 }
@@ -23437,6 +23439,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         dedup_vector_index_id_map: Arc::new(
             std::sync::Mutex::new(std::collections::HashMap::new()),
         ),
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         near_access_key_checker_override: None,
     });
 
@@ -65802,10 +65806,17 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
 // only compile under `local-gpu-models`/`near-ai-scorer`.
 
 /// `dedup_index_query`/`dedup_index_insert` must resolve a query against a
-/// live dedup index to the correct original `decision_id` (not the
-/// truncated/zero-padded `Uuid` the underlying `VectorIndex::nearest` trait
-/// method alone would give back), and the cosine distance for a near-
-/// identical vector must land under `DEDUP_CONSTANTS_V1.tau_e_micros`.
+/// live dedup index to the correct original `decision_id`, and the cosine
+/// distance for a near-identical vector must land under
+/// `DEDUP_CONSTANTS_V1.tau_e_micros`.
+///
+/// Regression guard for the counter-key fix: the two inserted decision_ids
+/// deliberately SHARE the same high 8 bytes (they differ only in the low 8).
+/// Under the old scheme (keying usearch by `uuid_to_key(id)` = the high 8
+/// bytes) they collided — the second insert would overwrite the first's
+/// reverse-map entry and the query could return a fabricated wrong
+/// decision_id. With the unique monotonic counter key the two entries are
+/// distinct and the query resolves the true near id.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
 fn dedup_index_query_finds_near_vector() {
@@ -65835,8 +65846,15 @@ fn dedup_index_query_finds_near_vector() {
         state_mut.dedup_vector_index = Some(Arc::new(idx));
     }
 
-    let id_near = Uuid::new_v4();
-    let id_far = Uuid::new_v4();
+    // Same high 8 bytes, different low 8 bytes: these two would collide under
+    // the old `uuid_to_key`-based keying. The counter key keeps them distinct.
+    let id_near = Uuid::from_u128(0xAABB_CCDD_EEFF_0011_0000_0000_0000_0001);
+    let id_far = Uuid::from_u128(0xAABB_CCDD_EEFF_0011_0000_0000_0000_0002);
+    assert_eq!(
+        id_near.as_bytes()[0..8],
+        id_far.as_bytes()[0..8],
+        "test setup: ids must share the high 8 bytes to exercise the collision fix"
+    );
     // vec_near is a small perturbation of the probe; vec_far is orthogonal.
     let vec_near = norm(vec![1.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     let vec_far = norm(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
@@ -65854,7 +65872,13 @@ fn dedup_index_query_finds_near_vector() {
     let (top_id, top_distance_micros) = results[0];
     assert_eq!(
         top_id, id_near,
-        "nearest neighbor must resolve back to the real inserted decision_id"
+        "nearest neighbor must resolve back to the real inserted decision_id (not the colliding id_far)"
+    );
+    // Both distinct ids must be resolvable — proves neither reverse-map entry
+    // was clobbered by the shared-prefix collision.
+    assert!(
+        results.iter().any(|(id, _)| *id == id_far),
+        "the orthogonal id_far must also be resolvable, proving no reverse-map collision"
     );
     assert!(
         top_distance_micros < trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1.tau_e_micros,
