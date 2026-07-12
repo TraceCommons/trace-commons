@@ -1831,6 +1831,18 @@ pub struct GateWorkItem {
     pub submission_id: Uuid,
 }
 
+/// Numeric inputs for shadow credit-quality scoring of one decision row, read
+/// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
+/// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCreditInput {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub perplexity_micros: i64,
+    pub peak_perplexity_micros: i64,
+    pub novelty_score_micros: i64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
