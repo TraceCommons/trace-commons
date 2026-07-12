@@ -63167,6 +63167,17 @@ async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postg
 /// backlog, so a second `list_submissions_needing_gate_decision` call
 /// reflects the drained backlog — this is what lets the test assert the
 /// second tick returns zero.
+/// Test-only combined view of a `trace_gate_decisions` row plus its
+/// shadow-mode credit-quality columns (migration V39), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_credit_quality_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithCreditQuality {
+    row: StorageTraceGateDecisionRow,
+    credit_quality_micros: Option<i64>,
+    credit_quality_anomaly_ratio_micros: Option<i64>,
+    credit_quality_calibration_version: Option<i32>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -63186,6 +63197,14 @@ struct PerplexityDriverTestDb {
     /// table.
     gate_evaluation_attempts:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Shadow-mode credit-quality scores written by
+    /// `update_trace_gate_decision_credit_quality`, keyed by `(tenant_id,
+    /// decision_id)`. Kept as a side table (like `gate_evaluation_attempts`)
+    /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
+    /// isolation test can assert the base row is byte-identical before and
+    /// after the credit-quality write.
+    credit_quality_scores:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, i64, i32)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63197,6 +63216,7 @@ impl PerplexityDriverTestDb {
             ungated: std::sync::RwLock::new(Vec::new()),
             derived_records: std::sync::RwLock::new(Vec::new()),
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -63279,6 +63299,31 @@ impl PerplexityDriverTestDb {
             .iter()
             .find(|(t, row)| t == tenant_id && row.decision_id == decision_id)
             .map(|(_, row)| row.clone())
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any shadow-mode credit-quality score
+    /// recorded for it — used by the credit-quality isolation test to assert
+    /// the base row is byte-identical before and after the credit-quality
+    /// write.
+    fn gate_decision_with_credit_quality_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithCreditQuality> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let credit = self
+            .credit_quality_scores
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithCreditQuality {
+            row,
+            credit_quality_micros: credit.map(|(q, _, _)| q),
+            credit_quality_anomaly_ratio_micros: credit.map(|(_, r, _)| r),
+            credit_quality_calibration_version: credit.map(|(_, _, v)| v),
+        })
     }
 
     /// Current recorded attempt count for `(tenant_id, submission_id)`, as
@@ -63996,6 +64041,25 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         }
         Ok(())
     }
+    /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
+    /// impl: record the three credit-quality values in a side table keyed by
+    /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
+    /// without touching the stored `StorageTraceGateDecisionRow` at all — so
+    /// isolation is structural, not just asserted.
+    async fn update_trace_gate_decision_credit_quality(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        q_micros: i64,
+        anomaly_ratio_micros: i64,
+        calibration_version: i32,
+    ) -> Result<(), DatabaseError> {
+        self.credit_quality_scores.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (q_micros, anomaly_ratio_micros, calibration_version),
+        );
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64091,6 +64155,35 @@ impl Database for PerplexityDriverTestDb {
                 tenant_id: tenant_id.clone(),
                 submission_id: row.submission_id,
             })
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_gate_decisions_for_credit_scoring`
+    /// enumeration: one `GateCreditInput` per decision row (any tenant),
+    /// insertion order, capped at `limit`. Mirrors
+    /// `list_submissions_with_gate_decision` but carries the three numeric
+    /// signals the credit-quality pass needs instead of just the identifiers.
+    async fn list_gate_decisions_for_credit_scoring(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::GateCreditInput>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .map(
+                |(tenant_id, row)| trace_commons_server::trace_corpus_storage::GateCreditInput {
+                    tenant_id: tenant_id.clone(),
+                    decision_id: row.decision_id,
+                    perplexity_micros: row.perplexity_micros,
+                    peak_perplexity_micros: row.peak_perplexity_micros.unwrap_or(0),
+                    novelty_score_micros: row.novelty_score_micros,
+                },
+            )
             .collect())
     }
 }
@@ -64221,6 +64314,139 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
     );
 }
 
+/// Test-only gate service that reuses the deterministic in-memory builder for
+/// every hash/version field but overrides the perplexity/peak/novelty
+/// signals with fixed values, so a caller can assert an exact downstream
+/// `credit_quality` computation. Used by
+/// `evaluate_and_record_gate_writes_credit_quality_inline` (Task 5).
+struct FixedSignalGateService {
+    perplexity_micros: u64,
+    peak_perplexity_micros: u64,
+    novelty_score_micros: u64,
+}
+
+impl TraceGateService for FixedSignalGateService {
+    fn evaluate_trace(
+        &self,
+        tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        let in_memory =
+            InMemoryGateService::new("fixed_signal_for_tests", "sha256:fixed_signal_for_tests");
+        let mut decision =
+            in_memory.evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)?;
+        decision.perplexity_micros = self.perplexity_micros;
+        decision.peak_perplexity_micros = self.peak_perplexity_micros;
+        decision.novelty_score_micros = self.novelty_score_micros;
+        Ok(decision)
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "in_memory".into(),
+            gate_policy_version: "fixed_signal_for_tests".into(),
+            gate_version_hash: "sha256:fixed_signal_for_tests".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Task 5 payoff: `evaluate_and_record_gate` must compute and persist a
+/// shadow-mode credit-quality score inline, immediately after it writes the
+/// gate decision row — not only via the separate batch backfill. Drives the
+/// real `evaluate_and_record_gate` path (in-memory `Database` double + a
+/// gate service returning fixed perplexity/peak/novelty signals) and asserts
+/// the stored `credit_quality_micros`/`credit_quality_calibration_version`
+/// via `PerplexityDriverTestDb::gate_decision_with_credit_quality_by_id`
+/// (the canonical decision-row read-back does not carry credit-quality
+/// columns).
+#[tokio::test]
+async fn evaluate_and_record_gate_writes_credit_quality_inline() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // Perplexity 15.0, peak 18.0, novelty 0.85 (all in micros) — chosen to
+    // land strictly between `CREDIT_QUALITY_CONSTANTS_V1`'s floors/ceilings
+    // on every axis, so `credit_quality` produces a known non-zero `q`.
+    fn m(x: f64) -> i64 {
+        (x * 1_000_000.0).round() as i64
+    }
+    let perplexity_micros = m(15.0);
+    let peak_perplexity_micros = m(18.0);
+    let novelty_micros = m(0.85);
+    Arc::make_mut(&mut state).gate_service = Arc::new(FixedSignalGateService {
+        perplexity_micros: perplexity_micros as u64,
+        peak_perplexity_micros: peak_perplexity_micros as u64,
+        novelty_score_micros: novelty_micros as u64,
+    });
+
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let submission_id = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission")
+        .submission_id;
+
+    let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds with fixed-signal gate service");
+    let GateOutcome::Scored { decision_id, .. } = outcome else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+
+    let expected = trace_commons_server::credit_quality::credit_quality(
+        perplexity_micros,
+        peak_perplexity_micros,
+        novelty_micros,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+    );
+
+    let after = db
+        .gate_decision_with_credit_quality_by_id(tenant_id, decision_id)
+        .expect("decision row present");
+    assert_eq!(after.credit_quality_micros, Some(expected.q_micros));
+    assert_eq!(
+        after.credit_quality_calibration_version,
+        Some(trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version)
+    );
+    assert_eq!(
+        after.credit_quality_anomaly_ratio_micros,
+        Some(expected.anomaly_ratio_micros)
+    );
+}
+
 /// Build a fully-populated gate-decision row with distinctive novelty/status
 /// fields so a re-score that touches any non-perplexity column is detectable.
 fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow {
@@ -64297,6 +64523,80 @@ async fn update_trace_gate_decision_perplexity_touches_only_perplexity_columns()
     assert_eq!(after.peak_novelty_micros, before.peak_novelty_micros);
     assert_eq!(after.chunk_count, before.chunk_count);
     assert_eq!(after.chunks_capped, before.chunks_capped);
+}
+
+/// Unit test for the isolation invariant: `update_trace_gate_decision_credit_quality`
+/// sets ONLY the three shadow-mode credit-quality values — the base decision
+/// row (perplexity, novelty, tail-fraction, status, credit) is byte-identical
+/// before and after.
+#[tokio::test]
+async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    db.update_trace_gate_decision_credit_quality("tenant-a", decision_id, 730_000, 2_500_000, 1)
+        .await
+        .expect("update succeeds");
+
+    let after = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The three credit-quality values changed to exactly what we passed.
+    assert_eq!(after.credit_quality_micros, Some(730_000));
+    assert_eq!(after.credit_quality_anomaly_ratio_micros, Some(2_500_000));
+    assert_eq!(after.credit_quality_calibration_version, Some(1));
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(
+        after.row.gate_policy_version,
+        before_row.gate_policy_version
+    );
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.tail_fraction_micros,
+        before_row.tail_fraction_micros
+    );
+    assert_eq!(after.row.perplexity_passed, before_row.perplexity_passed);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(
+        after.row.nearest_neighbor_hash,
+        before_row.nearest_neighbor_hash
+    );
+    assert_eq!(after.row.novelty_passed, before_row.novelty_passed);
+    assert_eq!(
+        after.row.embedding_evidence_hash,
+        before_row.embedding_evidence_hash
+    );
+    assert_eq!(
+        after.row.attestation_chain_hash,
+        before_row.attestation_chain_hash
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
+    assert_eq!(after.row.vector_entry_id, before_row.vector_entry_id);
+    assert_eq!(
+        after.row.credit_withheld_reason,
+        before_row.credit_withheld_reason
+    );
+    assert_eq!(
+        after.row.peak_perplexity_micros,
+        before_row.peak_perplexity_micros
+    );
+    assert_eq!(
+        after.row.peak_novelty_micros,
+        before_row.peak_novelty_micros
+    );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
 }
 
 /// Regression test for the multi-decision-row isolation bug: a single
@@ -64492,6 +64792,144 @@ async fn rescore_perplexity_pass_updates_only_perplexity_leaves_novelty_untouche
         assert_eq!(after.chunk_count, original.chunk_count);
         assert_eq!(after.chunks_capped, original.chunks_capped);
     }
+}
+
+/// Task 6 payoff: `run_score_credit_quality_pass` backfills/recomputes `q`
+/// (and its two side values) for existing decision rows purely from their
+/// already-stored perplexity/peak-perplexity/novelty signals, via
+/// `list_gate_decisions_for_credit_scoring` -> `credit_quality` ->
+/// `update_trace_gate_decision_credit_quality` — no decrypt, no scorer, no
+/// vector index. Seeds several decision rows directly (bypassing the gate
+/// drive), including one whose novelty is below the V1 floor (0.5) so its
+/// signals collapse to `q == 0`, and asserts every row's credit-quality
+/// columns match `credit_quality(...)` for its stored inputs while every
+/// perplexity/novelty/status column is byte-identical to the pre-pass
+/// snapshot (isolation).
+#[tokio::test]
+async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouched() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    fn m(x: f64) -> i64 {
+        (x * 1_000_000.0).round() as i64
+    }
+
+    // Three rows with varied signals, one deliberately below the novelty
+    // floor (0.5) so `credit_quality` collapses it to q == 0.
+    let mut row_a = rescore_test_decision_row(Uuid::new_v4());
+    row_a.perplexity_micros = m(15.0);
+    row_a.peak_perplexity_micros = Some(m(18.0));
+    row_a.novelty_score_micros = m(0.85);
+
+    let mut row_b = rescore_test_decision_row(Uuid::new_v4());
+    row_b.perplexity_micros = m(20.0);
+    row_b.peak_perplexity_micros = Some(m(21.0));
+    row_b.novelty_score_micros = m(0.95);
+
+    let mut row_c = rescore_test_decision_row(Uuid::new_v4());
+    row_c.perplexity_micros = m(20.0);
+    row_c.peak_perplexity_micros = Some(m(21.0));
+    row_c.novelty_score_micros = m(0.49); // below floor -> q == 0
+
+    for row in [&row_a, &row_b, &row_c] {
+        db.seed_gate_decision("tenant-a", row.clone());
+    }
+
+    let snapshot = vec![row_a.clone(), row_b.clone(), row_c.clone()];
+
+    let summary = run_score_credit_quality_pass(state.clone(), None)
+        .await
+        .expect("credit-quality pass succeeds");
+    assert_eq!(summary.scored, 3, "all 3 must score: {summary:?}");
+    assert_eq!(summary.failed, 0, "no decision should fail: {summary:?}");
+
+    for original in &snapshot {
+        let expected = trace_commons_server::credit_quality::credit_quality(
+            original.perplexity_micros,
+            original.peak_perplexity_micros.unwrap_or(0),
+            original.novelty_score_micros,
+            &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+        );
+        let after = db
+            .gate_decision_with_credit_quality_by_id("tenant-a", original.decision_id)
+            .expect("decision row present");
+
+        assert_eq!(after.credit_quality_micros, Some(expected.q_micros));
+        assert_eq!(
+            after.credit_quality_anomaly_ratio_micros,
+            Some(expected.anomaly_ratio_micros)
+        );
+        assert_eq!(
+            after.credit_quality_calibration_version,
+            Some(trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version)
+        );
+
+        // Perplexity / novelty / status columns are byte-identical to the
+        // pre-pass snapshot: the pass writes ONLY the credit-quality side
+        // table, never the base decision row.
+        assert_eq!(after.row.decision_id, original.decision_id);
+        assert_eq!(after.row.submission_id, original.submission_id);
+        assert_eq!(after.row.gate_policy_version, original.gate_policy_version);
+        assert_eq!(after.row.gate_version_hash, original.gate_version_hash);
+        assert_eq!(after.row.perplexity_micros, original.perplexity_micros);
+        assert_eq!(
+            after.row.tail_fraction_micros,
+            original.tail_fraction_micros
+        );
+        assert_eq!(after.row.perplexity_passed, original.perplexity_passed);
+        assert_eq!(
+            after.row.novelty_score_micros,
+            original.novelty_score_micros
+        );
+        assert_eq!(
+            after.row.nearest_neighbor_hash,
+            original.nearest_neighbor_hash
+        );
+        assert_eq!(after.row.novelty_passed, original.novelty_passed);
+        assert_eq!(
+            after.row.embedding_evidence_hash,
+            original.embedding_evidence_hash
+        );
+        assert_eq!(
+            after.row.attestation_chain_hash,
+            original.attestation_chain_hash
+        );
+        assert_eq!(after.row.decided_at, original.decided_at);
+        assert_eq!(after.row.vector_entry_id, original.vector_entry_id);
+        assert_eq!(
+            after.row.credit_withheld_reason,
+            original.credit_withheld_reason
+        );
+        assert_eq!(
+            after.row.peak_perplexity_micros,
+            original.peak_perplexity_micros
+        );
+        assert_eq!(after.row.peak_novelty_micros, original.peak_novelty_micros);
+        assert_eq!(after.row.chunk_count, original.chunk_count);
+        assert_eq!(after.row.chunks_capped, original.chunks_capped);
+    }
+
+    // The explicitly below-floor row must persist q == 0 (not NULL): the
+    // side-table map has an entry, so `credit_quality_micros` is `Some(0)`.
+    let below_floor = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", row_c.decision_id)
+        .expect("row_c present");
+    assert_eq!(below_floor.credit_quality_micros, Some(0));
 }
 
 // -----------------------------------------------------------------------

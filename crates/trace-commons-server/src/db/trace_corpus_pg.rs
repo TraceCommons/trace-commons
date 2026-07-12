@@ -5546,6 +5546,39 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_credit_quality(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        q_micros: i64,
+        anomaly_ratio_micros: i64,
+        calibration_version: i32,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the three credit_quality columns on exactly this decision
+        // row. Perplexity, novelty, tail-fraction, vector-entry, gate status, and
+        // credit are left exactly as-is.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET credit_quality_micros = $3,
+                    credit_quality_anomaly_ratio_micros = $4,
+                    credit_quality_calibration_version = $5
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[
+                &tenant_id,
+                &decision_id,
+                &q_micros,
+                &anomaly_ratio_micros,
+                &calibration_version,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn bump_gate_evaluation_attempt(
         &self,
         tenant_id: &str,

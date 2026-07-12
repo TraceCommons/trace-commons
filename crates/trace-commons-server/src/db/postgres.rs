@@ -1153,6 +1153,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&39_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V39__trace_credit_quality.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&39_i32, &"trace_credit_quality"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -3673,6 +3693,42 @@ impl Database for PgBackend {
             .map(|row| crate::trace_corpus_storage::GateWorkItem {
                 tenant_id: row.get("tenant_id"),
                 submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
+
+    async fn list_gate_decisions_for_credit_scoring(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateCreditInput>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        let rows = client
+            .query(
+                "SELECT tenant_id, decision_id,
+                        COALESCE(perplexity_micros, 0)      AS perplexity_micros,
+                        COALESCE(peak_perplexity_micros, 0) AS peak_perplexity_micros,
+                        COALESCE(novelty_score_micros, 0)   AS novelty_score_micros
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateCreditInput {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                perplexity_micros: row.get("perplexity_micros"),
+                peak_perplexity_micros: row.get("peak_perplexity_micros"),
+                novelty_score_micros: row.get("novelty_score_micros"),
             })
             .collect())
     }

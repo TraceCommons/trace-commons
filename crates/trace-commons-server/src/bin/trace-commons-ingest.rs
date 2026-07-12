@@ -6567,6 +6567,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(rescore_perplexity_handler),
         )
         .route(
+            "/v1/admin/score-credit-quality",
+            post(score_credit_quality_handler),
+        )
+        .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
         )
@@ -45072,6 +45076,33 @@ async fn evaluate_and_record_gate(
     db.insert_trace_gate_decision_with_chunk_entries(tenant_id, row, chunk_entries)
         .await?;
 
+    // Shadow-mode credit-quality score (no settlement, no gating). Pure
+    // arithmetic on the signals just recorded; failure is non-fatal and
+    // hash-only logged so a scoring hiccup never blocks the gate decision
+    // itself.
+    let cq = trace_commons_server::credit_quality::credit_quality(
+        i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+    );
+    if let Err(error) = db
+        .update_trace_gate_decision_credit_quality(
+            tenant_id,
+            decision_id,
+            cq.q_micros,
+            cq.anomaly_ratio_micros,
+            trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version,
+        )
+        .await
+    {
+        tracing::warn!(
+            tenant_hash = %sha256_prefixed(tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "shadow credit-quality inline write failed (non-fatal)"
+        );
+    }
+
     Ok(GateOutcome::Scored {
         decision_id,
         perplexity_passed: decision.perplexity_passed,
@@ -45236,6 +45267,149 @@ async fn rescore_perplexity_handler(
         }
     });
     Ok(Json(RescorePerplexityAck {
+        accepted: true,
+        limit,
+    }))
+}
+
+/// Query params for the credit-quality batch admin route. `limit` bounds a
+/// run (useful for a `?limit=5` pilot smoke before a full pass); absent
+/// means the whole decision backlog.
+#[derive(Debug, Deserialize)]
+struct ScoreCreditQualityQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the credit-quality batch admin route. The
+/// work runs in a spawned background task; the route returns immediately.
+#[derive(Debug, Serialize)]
+struct ScoreCreditQualityAck {
+    accepted: bool,
+    limit: Option<i64>,
+}
+
+/// Running tally for one credit-quality batch pass.
+#[derive(Debug, Default)]
+struct ScoreCreditQualitySummary {
+    /// Decision rows whose credit-quality columns were (re)computed and
+    /// updated.
+    scored: u64,
+    /// Decision rows skipped because scoring/update failed (left as-is).
+    failed: u64,
+}
+
+/// Score ONE decision row's shadow credit-quality from its already-stored
+/// numeric signals and update only the credit_quality columns. Pure
+/// arithmetic — no decrypt, no scorer, no vector index.
+async fn score_credit_quality_one(
+    state: &AppState,
+    input: &trace_commons_server::trace_corpus_storage::GateCreditInput,
+) -> anyhow::Result<()> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("credit-quality scoring requires a configured DB mirror"))?;
+    let cq = trace_commons_server::credit_quality::credit_quality(
+        input.perplexity_micros,
+        input.peak_perplexity_micros,
+        input.novelty_score_micros,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+    );
+    db.update_trace_gate_decision_credit_quality(
+        &input.tenant_id,
+        input.decision_id,
+        cq.q_micros,
+        cq.anomaly_ratio_micros,
+        trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version,
+    )
+    .await?;
+    // Hash-only: identify the decision by hash, never the perplexity/novelty
+    // values.
+    tracing::info!(
+        tenant_hash = %sha256_prefixed(&input.tenant_id),
+        decision_hash = %sha256_prefixed(&input.decision_id.to_string()),
+        "shadow credit-quality scored one decision"
+    );
+    Ok(())
+}
+
+/// One credit-quality batch pass. Enumerates decision rows (cross-tenant,
+/// oldest-decided first, capped at `limit`) and scores each sequentially. A
+/// scoring/update failure on one decision is logged hash-only and skipped —
+/// the pass never aborts on one failure, and the skipped decision keeps its
+/// prior credit-quality value (idempotent: a re-trigger just recomputes the
+/// same deterministic values).
+async fn run_score_credit_quality_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+) -> anyhow::Result<ScoreCreditQualitySummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("credit-quality scoring requires a configured DB mirror"))?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let inputs = db
+        .list_gate_decisions_for_credit_scoring(effective_limit)
+        .await?;
+    let mut summary = ScoreCreditQualitySummary::default();
+    for input in &inputs {
+        match score_credit_quality_one(state.as_ref(), input).await {
+            Ok(()) => summary.scored += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&input.tenant_id),
+                    decision_hash = %sha256_prefixed(&input.decision_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "shadow credit-quality skipped one decision"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Admin route: trigger a batch backfill/recompute of shadow credit-quality
+/// scores for existing gate decisions.
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
+/// a background task and returns a hash-only ack immediately. An optional
+/// `?limit=N` bounds the run.
+async fn score_credit_quality_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ScoreCreditQualityQuery>,
+) -> ApiResult<Json<ScoreCreditQualityAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace credit-quality scoring requires a configured DB mirror",
+        ));
+    }
+    let limit = query.limit;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_score_credit_quality_pass(task_state, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    scored = summary.scored,
+                    failed = summary.failed,
+                    "Trace Commons credit-quality pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons credit-quality pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(ScoreCreditQualityAck {
         accepted: true,
         limit,
     }))

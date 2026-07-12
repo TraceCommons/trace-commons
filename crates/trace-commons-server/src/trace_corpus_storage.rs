@@ -1831,6 +1831,18 @@ pub struct GateWorkItem {
     pub submission_id: Uuid,
 }
 
+/// Numeric inputs for shadow credit-quality scoring of one decision row, read
+/// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
+/// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCreditInput {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub perplexity_micros: i64,
+    pub peak_perplexity_micros: i64,
+    pub novelty_score_micros: i64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2417,6 +2429,28 @@ pub trait TraceCorpusStore: Send + Sync {
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_perplexity called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the credit-quality columns for the decision row identified by
+    /// `(tenant_id, decision_id)`. Perplexity, novelty, tail-fraction, vector,
+    /// gate status, and credit are left untouched. Implementations MUST scope by
+    /// `tenant_id` (forced RLS). Defaults to a log-once warning + no-op so a
+    /// backend without a real impl cannot silently drop the write.
+    async fn update_trace_gate_decision_credit_quality(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _q_micros: i64,
+        _anomaly_ratio_micros: i64,
+        _calibration_version: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_credit_quality called on a backend without a real impl"
             );
         });
         Ok(())
