@@ -45072,6 +45072,33 @@ async fn evaluate_and_record_gate(
     db.insert_trace_gate_decision_with_chunk_entries(tenant_id, row, chunk_entries)
         .await?;
 
+    // Shadow-mode credit-quality score (no settlement, no gating). Pure
+    // arithmetic on the signals just recorded; failure is non-fatal and
+    // hash-only logged so a scoring hiccup never blocks the gate decision
+    // itself.
+    let cq = trace_commons_server::credit_quality::credit_quality(
+        i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+    );
+    if let Err(error) = db
+        .update_trace_gate_decision_credit_quality(
+            tenant_id,
+            decision_id,
+            cq.q_micros,
+            cq.anomaly_ratio_micros,
+            trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version,
+        )
+        .await
+    {
+        tracing::warn!(
+            tenant_hash = %sha256_prefixed(tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "shadow credit-quality inline write failed (non-fatal)"
+        );
+    }
+
     Ok(GateOutcome::Scored {
         decision_id,
         perplexity_passed: decision.perplexity_passed,

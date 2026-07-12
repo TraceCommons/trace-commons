@@ -64285,6 +64285,139 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
     );
 }
 
+/// Test-only gate service that reuses the deterministic in-memory builder for
+/// every hash/version field but overrides the perplexity/peak/novelty
+/// signals with fixed values, so a caller can assert an exact downstream
+/// `credit_quality` computation. Used by
+/// `evaluate_and_record_gate_writes_credit_quality_inline` (Task 5).
+struct FixedSignalGateService {
+    perplexity_micros: u64,
+    peak_perplexity_micros: u64,
+    novelty_score_micros: u64,
+}
+
+impl TraceGateService for FixedSignalGateService {
+    fn evaluate_trace(
+        &self,
+        tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        let in_memory =
+            InMemoryGateService::new("fixed_signal_for_tests", "sha256:fixed_signal_for_tests");
+        let mut decision =
+            in_memory.evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)?;
+        decision.perplexity_micros = self.perplexity_micros;
+        decision.peak_perplexity_micros = self.peak_perplexity_micros;
+        decision.novelty_score_micros = self.novelty_score_micros;
+        Ok(decision)
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "in_memory".into(),
+            gate_policy_version: "fixed_signal_for_tests".into(),
+            gate_version_hash: "sha256:fixed_signal_for_tests".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Task 5 payoff: `evaluate_and_record_gate` must compute and persist a
+/// shadow-mode credit-quality score inline, immediately after it writes the
+/// gate decision row — not only via the separate batch backfill. Drives the
+/// real `evaluate_and_record_gate` path (in-memory `Database` double + a
+/// gate service returning fixed perplexity/peak/novelty signals) and asserts
+/// the stored `credit_quality_micros`/`credit_quality_calibration_version`
+/// via `PerplexityDriverTestDb::gate_decision_with_credit_quality_by_id`
+/// (the canonical decision-row read-back does not carry credit-quality
+/// columns).
+#[tokio::test]
+async fn evaluate_and_record_gate_writes_credit_quality_inline() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    // Perplexity 15.0, peak 18.0, novelty 0.85 (all in micros) — chosen to
+    // land strictly between `CREDIT_QUALITY_CONSTANTS_V1`'s floors/ceilings
+    // on every axis, so `credit_quality` produces a known non-zero `q`.
+    fn m(x: f64) -> i64 {
+        (x * 1_000_000.0).round() as i64
+    }
+    let perplexity_micros = m(15.0);
+    let peak_perplexity_micros = m(18.0);
+    let novelty_micros = m(0.85);
+    Arc::make_mut(&mut state).gate_service = Arc::new(FixedSignalGateService {
+        perplexity_micros: perplexity_micros as u64,
+        peak_perplexity_micros: peak_perplexity_micros as u64,
+        novelty_score_micros: novelty_micros as u64,
+    });
+
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let submission_id = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission")
+        .submission_id;
+
+    let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds with fixed-signal gate service");
+    let GateOutcome::Scored { decision_id, .. } = outcome else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+
+    let expected = trace_commons_server::credit_quality::credit_quality(
+        perplexity_micros,
+        peak_perplexity_micros,
+        novelty_micros,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+    );
+
+    let after = db
+        .gate_decision_with_credit_quality_by_id(tenant_id, decision_id)
+        .expect("decision row present");
+    assert_eq!(after.credit_quality_micros, Some(expected.q_micros));
+    assert_eq!(
+        after.credit_quality_calibration_version,
+        Some(trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version)
+    );
+    assert_eq!(
+        after.credit_quality_anomaly_ratio_micros,
+        Some(expected.anomaly_ratio_micros)
+    );
+}
+
 /// Build a fully-populated gate-decision row with distinctive novelty/status
 /// fields so a re-score that touches any non-perplexity column is detectable.
 fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow {
