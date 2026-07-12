@@ -75328,6 +75328,33 @@ async fn pii_backstop_driver_tick_releases_held_submission() {
         Some(StorageTraceCorpusStatus::Accepted),
         "the held submission must be released to Accepted"
     );
+
+    // Read the re-stored envelope back to prove the redaction actually
+    // happened through the wiremock/`NearAiPrivacyFilterAdapter` span-decoding
+    // path, not just that status/summary read success.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope = read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "rescrubbed envelope must carry the backstop pipeline label: {}",
+        envelope.privacy.redaction_pipeline_version
+    );
+    let prose: String = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.redacted_content.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!prose.contains(marker), "flagged PII must be gone: {prose}");
+    assert!(
+        prose.contains("[REDACTED:private_email]"),
+        "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
 }
 
 // --- (b) tick fail path bumps the attempt counter and keeps the hold ----
