@@ -30,6 +30,10 @@ pub enum TraceCorpusStatus {
     Received,
     Accepted,
     Quarantined,
+    /// Held state pending the NEAR AI PII backstop verdict. Never
+    /// consumer/export/credit eligible and never reviewer-eligible; distinct
+    /// from `Quarantined`. Wire form: `awaiting_pii_backstop`.
+    AwaitingPiiBackstop,
     Rejected,
     Revoked,
     Expired,

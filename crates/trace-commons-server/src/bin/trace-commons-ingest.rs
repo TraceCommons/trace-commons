@@ -49256,6 +49256,9 @@ fn trace_corpus_status_from_storage(status: StorageTraceCorpusStatus) -> Option<
     match status {
         StorageTraceCorpusStatus::Accepted => Some(TraceCorpusStatus::Accepted),
         StorageTraceCorpusStatus::Quarantined => Some(TraceCorpusStatus::Quarantined),
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => {
+            Some(TraceCorpusStatus::AwaitingPiiBackstop)
+        }
         StorageTraceCorpusStatus::Rejected => Some(TraceCorpusStatus::Rejected),
         StorageTraceCorpusStatus::Revoked => Some(TraceCorpusStatus::Revoked),
         StorageTraceCorpusStatus::Expired => Some(TraceCorpusStatus::Expired),
@@ -49321,6 +49324,11 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
         ],
         TraceCorpusStatus::Quarantined => vec![
             "Quarantined for privacy review; credit is pending review.".to_string(),
+            format!("Attributed to tenant {}", record.tenant_storage_ref),
+        ],
+        TraceCorpusStatus::AwaitingPiiBackstop => vec![
+            "Held pending an automated privacy backstop verdict; not yet in the corpus."
+                .to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Revoked => vec!["Revoked and marked with a tombstone.".to_string()],
@@ -52695,6 +52703,7 @@ fn storage_corpus_status(status: TraceCorpusStatus) -> StorageTraceCorpusStatus 
     match status {
         TraceCorpusStatus::Accepted => StorageTraceCorpusStatus::Accepted,
         TraceCorpusStatus::Quarantined => StorageTraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop => StorageTraceCorpusStatus::AwaitingPiiBackstop,
         TraceCorpusStatus::Rejected => StorageTraceCorpusStatus::Rejected,
         TraceCorpusStatus::Revoked => StorageTraceCorpusStatus::Revoked,
         TraceCorpusStatus::Expired => StorageTraceCorpusStatus::Expired,
@@ -52709,9 +52718,12 @@ fn storage_derived_status(status: TraceCorpusStatus) -> StorageTraceDerivedStatu
             StorageTraceDerivedStatus::Expired
         }
         TraceCorpusStatus::Rejected => StorageTraceDerivedStatus::Invalidated,
-        TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined => {
-            StorageTraceDerivedStatus::Current
-        }
+        // Mirrors `Quarantined`: the derived entry stays Current and inherits
+        // the held corpus status. Consumer/vector paths re-gate on
+        // `corpus_status == Accepted`, so the hold is enforced there, not here.
+        TraceCorpusStatus::Accepted
+        | TraceCorpusStatus::Quarantined
+        | TraceCorpusStatus::AwaitingPiiBackstop => StorageTraceDerivedStatus::Current,
     }
 }
 
@@ -60874,6 +60886,11 @@ impl std::error::Error for TracePostgresRlsDiagnosticsUnavailable {}
 enum TraceCorpusStatus {
     Accepted,
     Quarantined,
+    // Held state: the trace is out of consumer/export/credit reach pending the
+    // NEAR AI PII backstop verdict. It is NOT reviewer-eligible (distinct from
+    // Quarantined) and NEVER satisfies a `== Accepted` consumer predicate. Set
+    // explicitly by ingest (Task 7) and cleared by the driver (Task 6).
+    AwaitingPiiBackstop,
     Rejected,
     Revoked,
     Expired,
@@ -60885,6 +60902,7 @@ impl TraceCorpusStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Quarantined => "quarantined",
+            Self::AwaitingPiiBackstop => "awaiting_pii_backstop",
             Self::Rejected => "rejected",
             Self::Revoked => "revoked",
             Self::Expired => "expired",
@@ -62496,8 +62514,10 @@ impl TraceRankerTrainingLabel {
     fn from_status(status: TraceCorpusStatus) -> Self {
         match status {
             TraceCorpusStatus::Accepted => Self::Accepted,
-            TraceCorpusStatus::Quarantined => Self::NeedsReview,
-            TraceCorpusStatus::Rejected
+            // Held state is never a ranking-positive label.
+            TraceCorpusStatus::Quarantined
+            | TraceCorpusStatus::AwaitingPiiBackstop
+            | TraceCorpusStatus::Rejected
             | TraceCorpusStatus::Revoked
             | TraceCorpusStatus::Expired
             | TraceCorpusStatus::Purged => Self::NeedsReview,
@@ -64487,7 +64507,12 @@ impl TraceCommonsTenantCreditResponse {
                     response.credit_points_estimated += record.credit_points_pending;
                     response.credit_points_final += record.credit_points_final.unwrap_or(0.0);
                 }
-                TraceCorpusStatus::Quarantined => response.quarantined += 1,
+                // Held pending the PII backstop: no credit is accrued (it is not
+                // Accepted). Reported alongside quarantined as a not-yet-accepted,
+                // non-terminal pending count on this contributor credit summary.
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    response.quarantined += 1
+                }
                 TraceCorpusStatus::Revoked => response.revoked += 1,
                 TraceCorpusStatus::Rejected => response.rejected += 1,
                 TraceCorpusStatus::Expired | TraceCorpusStatus::Purged => response.expired += 1,
@@ -66441,7 +66466,12 @@ impl TraceOperationalSubmissionSummary {
                 .or_insert(0) += 1;
             match record.status {
                 TraceCorpusStatus::Accepted => summary.accepted += 1,
-                TraceCorpusStatus::Quarantined => summary.quarantined += 1,
+                // Held pending the PII backstop: not Accepted. The precise count
+                // is preserved in `by_status["awaiting_pii_backstop"]`; folded
+                // into quarantined for the coarse not-yet-accepted tally.
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    summary.quarantined += 1
+                }
                 TraceCorpusStatus::Rejected => summary.rejected += 1,
                 TraceCorpusStatus::Revoked => summary.revoked += 1,
                 TraceCorpusStatus::Expired => summary.expired += 1,

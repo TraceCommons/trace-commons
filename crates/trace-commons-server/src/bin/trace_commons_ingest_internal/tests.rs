@@ -74610,3 +74610,17 @@ async fn revocation_enqueues_one_item_per_chunk_vector_entry() {
             .expect("planner rerun");
     assert_eq!(again, 0);
 }
+
+#[test]
+fn awaiting_pii_backstop_status_roundtrips_and_is_not_accepted() {
+    let s = TraceCorpusStatus::AwaitingPiiBackstop;
+    // Manual wire accessor mirrors the snake_case serde encoding.
+    assert_eq!(s.as_str(), "awaiting_pii_backstop");
+    let encoded = serde_json::to_string(&s).expect("encode status");
+    assert_eq!(encoded, "\"awaiting_pii_backstop\"");
+    let decoded: TraceCorpusStatus =
+        serde_json::from_str("\"awaiting_pii_backstop\"").expect("decode status");
+    assert_eq!(decoded, s);
+    // Held state must never be mistaken for the consumer-visible Accepted state.
+    assert_ne!(s, TraceCorpusStatus::Accepted);
+}
