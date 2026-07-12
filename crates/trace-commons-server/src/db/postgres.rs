@@ -92,6 +92,17 @@ pub struct PgBackend {
     /// V36). `None` keeps the gate driver's enumeration path fail-closed.
     /// NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
+    /// enumeration query (server-side NEAR AI PII backstop). Built only when
+    /// `pii_backstop_driver_url` is configured; its DB user is the
+    /// operator-provisioned `trace_pii_backstop_driver` role (NOLOGIN base,
+    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
+    /// V38). `None` keeps the backstop driver's enumeration path fail-closed.
+    /// NEVER aliased to `pool`. Mirrors `gate_driver_pool`. Query methods
+    /// against this pool land in a follow-up task; this field is wired but
+    /// unused until then.
+    #[allow(dead_code)]
+    pii_backstop_driver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -248,10 +259,37 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small PII-backstop driver pool only when a
+        // distinct PII-backstop driver connection string is configured. This
+        // pool runs as the narrow `trace_pii_backstop_driver` role and is
+        // never aliased to the runtime pool. Mirrors the gate-driver pool
+        // above exactly.
+        let pii_backstop_driver_pool = match config.pii_backstop_driver_url() {
+            Some(pii_backstop_driver_url) => {
+                let pii_backstop_driver_config = pii_backstop_driver_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!(
+                            "invalid pii-backstop-driver PostgreSQL URL: {e}"
+                        ))
+                    })?;
+                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
+                    pii_backstop_driver_config,
+                    tokio_postgres::NoTls,
+                );
+                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
+                    .max_size(2)
+                    .build()?;
+                Some(pii_backstop_driver_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
             gate_driver_pool,
+            pii_backstop_driver_pool,
         })
     }
 

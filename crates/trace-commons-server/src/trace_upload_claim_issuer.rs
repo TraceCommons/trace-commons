@@ -4145,6 +4145,7 @@ mod tests {
             ssl_mode: SslMode::Prefer,
             login_resolver_url: None,
             gate_driver_url: None,
+            pii_backstop_driver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
@@ -4463,6 +4464,7 @@ mod tests {
             ssl_mode: SslMode::Prefer,
             login_resolver_url: None,
             gate_driver_url: None,
+            pii_backstop_driver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,

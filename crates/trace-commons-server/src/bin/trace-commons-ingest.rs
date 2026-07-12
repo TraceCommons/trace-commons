@@ -721,6 +721,13 @@ const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS: &str =
     "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS";
 const TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS: &str =
     "TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_ENABLED: &str = "TRACE_COMMONS_PII_BACKSTOP_ENABLED";
+const TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE: &str = "TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE";
+const TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS: &str = "TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS";
+const TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -930,6 +937,10 @@ const TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE: i64 = 5;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS: i32 = 5;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS: i64 = 900_000;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
+const TRACE_PII_BACKSTOP_DEFAULT_INTERVAL_SECONDS: u64 = 45;
+const TRACE_PII_BACKSTOP_DEFAULT_BATCH_SIZE: i64 = 5;
+const TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS: i32 = 5;
+const TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
@@ -1157,6 +1168,14 @@ struct AppState {
     /// deployments and CI are unaffected until an operator opts in via
     /// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`.
     perplexity_score_driver: Option<PerplexityScoreDriverConfig>,
+    /// Server-side NEAR AI PII backstop driver loop config. `None` (the
+    /// default) means the driver is disabled; existing deployments and CI
+    /// are unaffected until an operator opts in via
+    /// `TRACE_COMMONS_PII_BACKSTOP_ENABLED`. The driver spawn/tick itself is
+    /// wired in a follow-up task; this field is populated ahead of that so
+    /// the config + reader-pool plumbing lands first.
+    #[allow(dead_code)]
+    pii_backstop_driver: Option<PiiBackstopDriverConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -1335,6 +1354,22 @@ struct PerplexityDriverTickSummary {
     skipped_duplicate: usize,
     cached: usize,
     failed: usize,
+}
+
+/// In-process PII-backstop driver loop config (server-side NEAR AI PII
+/// backstop). Like `PerplexityScoreDriverConfig`, it has no worker bearer
+/// token: it runs entirely in-process against `state.db_mirror`'s
+/// cross-tenant PII-backstop-driver pool and never goes through an HTTP
+/// handler. The driver spawn/tick itself lands in a follow-up task; this
+/// struct and its parser are wired here so config plumbing and the reader
+/// pool are ready ahead of that.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct PiiBackstopDriverConfig {
+    interval: StdDuration,
+    batch_size: i64,
+    max_attempts: i32,
+    backoff_base_seconds: i64,
 }
 
 #[derive(Clone)]
@@ -3086,6 +3121,7 @@ impl AppState {
             parse_trace_retention_maintenance_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
+        let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -3340,6 +3376,7 @@ impl AppState {
             retention_maintenance_scheduler,
             vector_index_scheduler,
             perplexity_score_driver,
+            pii_backstop_driver,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -5492,6 +5529,66 @@ fn parse_perplexity_score_driver_config_from_env()
             skip_duplicate_threshold_micros,
             max_attempts: max_attempts as i32,
         },
+        backoff_base_seconds,
+    }))
+}
+
+/// Server-side NEAR AI PII backstop driver. Like the perplexity-scoring
+/// driver, it has no bearer-token gate — it drives `state.db_mirror`'s
+/// cross-tenant PII-backstop-driver enumeration directly, so
+/// `TRACE_COMMONS_PII_BACKSTOP_ENABLED` alone turns it on. Off by default
+/// (`Ok(None)` when unset), so existing deployments and CI are unaffected
+/// until an operator explicitly opts in.
+///
+/// Fail-closed boot check: if `_ENABLED` is truthy but either
+/// `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` or
+/// `TRACE_NEAR_AI_PRIVACY_API_KEY` is unset/blank, this refuses at boot with
+/// a safe missing-control label rather than silently leaving the backstop
+/// disabled — secret values themselves are never included in the error.
+fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBackstopDriverConfig>> {
+    if !env_truthy(TRACE_COMMONS_PII_BACKSTOP_ENABLED) {
+        return Ok(None);
+    }
+    let driver_url = DatabaseConfig::pii_backstop_driver_url_from_env();
+    if driver_url.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PII_BACKSTOP_ENABLED}=true but TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL is not set"
+        );
+    }
+    let api_key = optional_trimmed_env("TRACE_NEAR_AI_PRIVACY_API_KEY")?;
+    if api_key.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PII_BACKSTOP_ENABLED}=true but TRACE_NEAR_AI_PRIVACY_API_KEY is not set"
+        );
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE,
+        TRACE_PII_BACKSTOP_DEFAULT_BATCH_SIZE,
+        1,
+        1_000,
+    )?;
+    let max_attempts = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS,
+        i64::from(TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS),
+        1,
+        1_000,
+    )?;
+    let backoff_base_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS,
+        0,
+        86_400,
+    )?;
+    Ok(Some(PiiBackstopDriverConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        batch_size,
+        max_attempts: max_attempts as i32,
         backoff_base_seconds,
     }))
 }

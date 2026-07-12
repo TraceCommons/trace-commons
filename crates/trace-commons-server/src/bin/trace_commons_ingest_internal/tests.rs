@@ -22,6 +22,8 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url:
+            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -4004,6 +4006,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -23396,6 +23399,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -74623,4 +74627,19 @@ fn awaiting_pii_backstop_status_roundtrips_and_is_not_accepted() {
     assert_eq!(decoded, s);
     // Held state must never be mistaken for the consumer-visible Accepted state.
     assert_ne!(s, TraceCorpusStatus::Accepted);
+}
+
+// Task 4: PII backstop driver config. `TRACE_COMMONS_PII_BACKSTOP_ENABLED` is
+// unset in the default test process env, so the parse fn must return `None`
+// regardless of any other PII-backstop var. Run with --test-threads=1 like
+// the other env-var-driven config tests in this suite: a parallel test that
+// happens to set `TRACE_COMMONS_PII_BACKSTOP_ENABLED` would otherwise race
+// this one.
+#[test]
+fn pii_backstop_config_off_when_disabled() {
+    assert!(
+        parse_pii_backstop_driver_config_from_env()
+            .unwrap()
+            .is_none()
+    );
 }
