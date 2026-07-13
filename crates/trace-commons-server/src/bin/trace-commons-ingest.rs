@@ -45356,7 +45356,7 @@ async fn evaluate_and_record_gate(
         i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
         i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
         i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
     );
     if let Err(error) = db
         .update_trace_gate_decision_credit_quality(
@@ -45364,7 +45364,7 @@ async fn evaluate_and_record_gate(
             decision_id,
             cq.q_micros,
             cq.anomaly_ratio_micros,
-            trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version,
+            trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version,
         )
         .await
     {
@@ -45646,14 +45646,14 @@ async fn score_credit_quality_one(
         input.perplexity_micros,
         input.peak_perplexity_micros,
         input.novelty_score_micros,
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
     );
     db.update_trace_gate_decision_credit_quality(
         &input.tenant_id,
         input.decision_id,
         cq.q_micros,
         cq.anomaly_ratio_micros,
-        trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version,
+        trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version,
     )
     .await?;
     // Hash-only: identify the decision by hash, never the perplexity/novelty

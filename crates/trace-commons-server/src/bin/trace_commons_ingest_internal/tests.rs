@@ -64504,7 +64504,7 @@ async fn evaluate_and_record_gate_writes_credit_quality_inline() {
         false,
     );
     // Perplexity 15.0, peak 18.0, novelty 0.85 (all in micros) — chosen to
-    // land strictly between `CREDIT_QUALITY_CONSTANTS_V1`'s floors/ceilings
+    // land strictly between `CREDIT_QUALITY_ACTIVE`'s floors/ceilings
     // on every axis, so `credit_quality` produces a known non-zero `q`.
     fn m(x: f64) -> i64 {
         (x * 1_000_000.0).round() as i64
@@ -64539,7 +64539,7 @@ async fn evaluate_and_record_gate_writes_credit_quality_inline() {
         perplexity_micros,
         peak_perplexity_micros,
         novelty_micros,
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
     );
 
     let after = db
@@ -64548,7 +64548,7 @@ async fn evaluate_and_record_gate_writes_credit_quality_inline() {
     assert_eq!(after.credit_quality_micros, Some(expected.q_micros));
     assert_eq!(
         after.credit_quality_calibration_version,
-        Some(trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version)
+        Some(trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version)
     );
     assert_eq!(
         after.credit_quality_anomaly_ratio_micros,
@@ -65557,7 +65557,7 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
     let mut row_c = rescore_test_decision_row(Uuid::new_v4());
     row_c.perplexity_micros = m(20.0);
     row_c.peak_perplexity_micros = Some(m(21.0));
-    row_c.novelty_score_micros = m(0.49); // below floor -> q == 0
+    row_c.novelty_score_micros = m(0.49); // novelty below floor -> graded (V2) nonzero q
 
     for row in [&row_a, &row_b, &row_c] {
         db.seed_gate_decision("tenant-a", row.clone());
@@ -65576,7 +65576,7 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
             original.perplexity_micros,
             original.peak_perplexity_micros.unwrap_or(0),
             original.novelty_score_micros,
-            &trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1,
+            &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
         );
         let after = db
             .gate_decision_with_credit_quality_by_id("tenant-a", original.decision_id)
@@ -65589,7 +65589,7 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
         );
         assert_eq!(
             after.credit_quality_calibration_version,
-            Some(trace_commons_server::credit_quality::CREDIT_QUALITY_CONSTANTS_V1.version)
+            Some(trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE.version)
         );
 
         // Perplexity / novelty / status columns are byte-identical to the
@@ -65637,12 +65637,26 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
         assert_eq!(after.row.chunks_capped, original.chunks_capped);
     }
 
-    // The explicitly below-floor row must persist q == 0 (not NULL): the
-    // side-table map has an entry, so `credit_quality_micros` is `Some(0)`.
+    // The novelty-below-floor row must persist a concrete score (not NULL): the
+    // side-table map has an entry. Under the active (V2) graded floor its novelty
+    // term no longer hard-zeroes, so `q` is a concrete nonzero value, computed
+    // here from the same active constants the backfill used.
     let below_floor = db
         .gate_decision_with_credit_quality_by_id("tenant-a", row_c.decision_id)
         .expect("row_c present");
-    assert_eq!(below_floor.credit_quality_micros, Some(0));
+    let expected_c = trace_commons_server::credit_quality::credit_quality(
+        row_c.perplexity_micros,
+        row_c
+            .peak_perplexity_micros
+            .unwrap_or(row_c.perplexity_micros),
+        row_c.novelty_score_micros,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
+    );
+    assert!(
+        expected_c.q_micros > 0,
+        "V2 lifts the novelty-below-floor row off zero"
+    );
+    assert_eq!(below_floor.credit_quality_micros, Some(expected_c.q_micros));
 }
 
 // -----------------------------------------------------------------------
