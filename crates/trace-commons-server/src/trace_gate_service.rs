@@ -107,6 +107,10 @@ pub struct GateDecision {
     /// deterministic/legacy services and failed gates. The host persists
     /// these as (submission_id, chunk_index)-tagged rows for revocation.
     pub chunk_vector_entries: Vec<GateChunkVectorEntry>,
+    /// 64-bit token simhash of the trace's decrypted text, for cross-trace
+    /// dedup clustering; computed inside the service so plaintext never
+    /// crosses the boundary (only the hash does), like `nearest_neighbor_hash`.
+    pub dedup_simhash: i64,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -272,6 +276,17 @@ fn build_deterministic_decision(
         )
         .as_bytes(),
     );
+    // Deterministic services (`InMemoryGateService`, `LegacyDeterministicGateService`)
+    // never see plaintext — only the AEAD ciphertext, which is nonce-randomized
+    // per encryption, so a real `dedup_simhash::trace_simhash` over "the text"
+    // is not available here. Fall back to an unused 8-byte window of the same
+    // input digest every other deterministic field is derived from: this keeps
+    // `dedup_simhash` stable for byte-identical `evaluate_trace` calls (the
+    // deterministic-service contract callers already rely on) without
+    // pretending to detect duplicate PLAINTEXT under independent encryptions.
+    // Real cross-trace duplicate detection requires `EnclaveGateService`,
+    // which has the decrypted plaintext in scope.
+    let dedup_simhash = u64_from_digest_prefix(&digest, 24) as i64;
     GateDecision {
         gate_policy_version: gate_policy_version.to_string(),
         gate_version_hash: gate_version_hash.to_string(),
@@ -293,6 +308,7 @@ fn build_deterministic_decision(
         chunk_count: 1,
         chunks_capped: false,
         chunk_vector_entries: Vec::new(),
+        dedup_simhash,
     }
 }
 
@@ -624,6 +640,27 @@ where
                     vector_entry_id: e.entry_id,
                 })
                 .collect(),
+            // Computed from the AEAD-decrypted plaintext (in scope above as
+            // `plaintext`) so the cross-trace dedup signal is derived inside
+            // the same trust boundary as every other decrypted-content field
+            // here — only the hash crosses back to the caller.
+            //
+            // Must be over the CANONICAL RENDERED EVENT TEXT
+            // (metadata-free), not the raw envelope JSON: the envelope
+            // carries per-submission-unique fields (submission_id, trace_id,
+            // created_at, per-event event_id/timestamp), so hashing the raw
+            // JSON means byte-identical-content resubmissions never collide.
+            // This mirrors the same rendering the chunker uses to build the
+            // text the scorer/embedder actually consume
+            // (`chunk_envelope_plaintext` / `chunk_plaintext`), so the
+            // simhash is over the same metadata-free text.
+            dedup_simhash: {
+                let dedup_canonical_text =
+                    trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
+                        .map(|events| events.join("\n"))
+                        .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
+                crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
+            },
         })
     }
 

@@ -438,6 +438,14 @@ const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
+// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex` instance
+// from the novelty index above, so dedup lookups never pollute novelty's
+// nearest-neighbor results. Same dim/hnsw/ef params as the novelty index
+// (`TRACE_COMMONS_VECTOR_INDEX_*`); only the root path is independently
+// configurable. Read only under the `local-gpu-models`/`near-ai-scorer`
+// features (usearch is not compiled in otherwise).
+#[allow(dead_code)]
+const TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -1211,6 +1219,64 @@ struct AppState {
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
     account_near_config: Option<Arc<NearConfig>>,
+    /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
+    /// instance from the novelty index — sharing the novelty index would
+    /// pollute its nearest-neighbor results and silently change novelty
+    /// scoring, so dedup gets its own disk-backed root
+    /// (`TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT`). `None` when built without
+    /// `local-gpu-models`/`near-ai-scorer` (usearch is not compiled in) or
+    /// when construction fails at startup — dedup is best-effort shadow
+    /// scoring, so a construction failure degrades to simhash-only rather
+    /// than failing the whole server closed.
+    // Not yet read outside tests: Task 6 (inline-at-gate dedup assignment)
+    // wires `dedup_index_query`/`dedup_index_insert` into
+    // `evaluate_and_record_gate`. `#[allow(dead_code)]` mirrors this file's
+    // existing convention for fields/consts staged ahead of their consumer
+    // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index:
+        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
+    /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
+    /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
+    /// doc comment), because usearch keys are `u64` and the shared
+    /// novelty-index code path never needed to resolve a hit back to a real
+    /// database row. Cross-trace dedup DOES need the real `decision_id` back
+    /// (Task 6 matches it against `DedupSignalRow::decision_id`), so this
+    /// in-process map from the usearch key to the original full `Uuid` closes
+    /// that gap.
+    ///
+    /// The key is a unique, monotonic per-process counter
+    /// (`dedup_vector_index_counter`), NOT `uuid_to_key(decision_id)` (the high
+    /// 8 bytes of the UUID). Keying by the truncated UUID would collide two
+    /// distinct decision_ids sharing that 8-byte prefix, silently overwriting
+    /// the map entry and letting a later `nearest()` return a FABRICATED wrong
+    /// decision_id. A dedicated counter makes key -> uuid exact and
+    /// collision-free.
+    ///
+    /// PROCESS-LOCAL: this map is not persisted. The on-disk usearch index
+    /// survives a restart, but the map does not, so after a restart a query
+    /// misses any vector inserted before the restart (its key is unknown and
+    /// is SKIPPED — never fabricated) until that decision is re-inserted. Only
+    /// the embedding-similarity dedup signal is affected; the simhash signal is
+    /// DB-persisted and unaffected (and the Task 7 batch recluster is
+    /// simhash-only). The map also grows unbounded for the process lifetime —
+    /// there is no eviction paired to the index's LRU. Acceptable at pilot
+    /// scale; follow-up options are evict-with-LRU or persist/rebuild-on-boot.
+    ///
+    /// Guarded by a `std::sync::Mutex`, not `tokio::sync`, since callers never
+    /// hold it across an `.await`.
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index_id_map: Arc<std::sync::Mutex<std::collections::HashMap<u64, Uuid>>>,
+    /// Monotonic per-process key allocator for `dedup_vector_index_id_map`.
+    /// Starts at 1; every `dedup_index_insert` claims a fresh key via
+    /// `fetch_add(1)`. See `dedup_vector_index_id_map` for why a counter is
+    /// used instead of `uuid_to_key(decision_id)`.
+    #[allow(dead_code)]
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    dedup_vector_index_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only override for the NEAR access-key binding check (Slice 3a Task 6).
     /// When `Some`, the enroll-finish handler consults this stub instead of the
     /// live `view_access_key_list` JSON-RPC call, so the binding check is
@@ -3369,6 +3435,14 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_near_config,
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index: build_dedup_vector_index_from_env(),
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index_id_map: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+            dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(test)]
             near_access_key_checker_override: None,
         })
@@ -5030,6 +5104,203 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
     )))
 }
 
+/// Build the cross-trace dedup vector index (shadow-only). A SEPARATE
+/// `UsearchVectorIndex` instance from the novelty index built above — the
+/// two must never share a root, or a dedup lookup would return novelty's
+/// neighbors (and vice versa), silently changing novelty scoring.
+///
+/// Uses the same dim/hnsw/ef/max_open/flush_every knobs as the novelty index
+/// (`TRACE_COMMONS_VECTOR_INDEX_*`) so the two indexes stay dimensionally
+/// compatible with the shared embedder, but reads its OWN root from
+/// `TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT`, defaulting to a sibling
+/// directory of the novelty root (`<novelty_root>/../dedup-index`).
+///
+/// Fail-open by design: dedup is shadow-only (no settlement, no gating), so
+/// a construction failure here must not take down the server. On error this
+/// logs a hash-only warning and returns `None`; `dedup_index_query`/
+/// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
+/// signal keeps working.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+fn build_dedup_vector_index_from_env()
+-> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+
+    let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
+    let dedup_root = std::env::var(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| format!("{novelty_root}/../dedup-index"));
+
+    let result = (|| -> anyhow::Result<UsearchVectorIndex> {
+        let dim = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_DIM,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
+        )?;
+        let max_open = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
+        )?;
+        let flush_every = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
+        )?;
+        let hnsw_m = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
+        )?;
+        let ef_construction = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
+        )?;
+        let ef_search = parse_usize_env(
+            TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
+            TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
+        )?;
+        UsearchVectorIndex::try_new(
+            &dedup_root,
+            dim,
+            hnsw_m,
+            ef_construction,
+            ef_search,
+            max_open,
+            flush_every,
+        )
+        .with_context(|| format!("failed to initialize dedup UsearchVectorIndex (dim={dim})"))
+    })();
+
+    match result {
+        Ok(index) => Some(Arc::new(index)),
+        Err(error) => {
+            tracing::warn!(
+                error_class = "DedupVectorIndexInitFailed",
+                error_hash = %safe_runtime_error_hash(&error),
+                "dedup vector index init failed; falling back to simhash-only dedup"
+            );
+            None
+        }
+    }
+}
+
+/// Cross-trace dedup helpers (shadow-only). Both are fail-open: `None`
+/// index -> no-op/empty, and a live index still never returns an `Err` to
+/// the caller — any usearch failure is logged hash-only and treated as "no
+/// signal" so the simhash-only dedup path is unaffected.
+///
+/// Not yet called outside tests: Task 6 wires these into
+/// `evaluate_and_record_gate`.
+#[allow(dead_code)]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+impl AppState {
+    /// Query the dedup vector index for the `k` nearest neighbors of
+    /// `embedding`. Returns `(decision_id, cosine_distance_micros)` pairs,
+    /// nearest first (matching `UsearchVectorIndex::nearest`'s ordering).
+    /// `cosine_distance_micros = round((1.0 - cosine_similarity) * 1e6)`,
+    /// consistent with `dedup_assign::ClusterCandidate::embed_cosine_micros`
+    /// and `DEDUP_CONSTANTS_V1.tau_e_micros`.
+    ///
+    /// Empty when the index is `None` (not configured / failed to init at
+    /// startup) — the simhash signal still works without it. Each neighbor's
+    /// usearch key (the high 8 bytes of the returned `Uuid`, which `insert`
+    /// set to a unique counter) is resolved to the real decision_id via
+    /// `dedup_vector_index_id_map`. A neighbor whose key has no map entry
+    /// (process-restart gap; see that field's doc comment) is SKIPPED rather
+    /// than fabricating an id — there are no silent wrong answers.
+    fn dedup_index_query(&self, embedding: &[f32], k: usize) -> Vec<(Uuid, i64)> {
+        let Some(index) = self.dedup_vector_index.as_ref() else {
+            return Vec::new();
+        };
+        // All dedup traffic shares one logical tenant namespace so matching
+        // is cross-tenant by construction (dedup dedups across tenants,
+        // unlike novelty which is per-tenant).
+        let neighbors = match trace_commons_gate_enclave::vector_index::VectorIndex::nearest(
+            index.as_ref(),
+            DEDUP_VECTOR_INDEX_NAMESPACE,
+            embedding,
+            k,
+        ) {
+            Ok(n) => n,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "DedupVectorIndexQueryFailed",
+                    error_hash = %safe_runtime_error_hash(&error),
+                    "dedup vector index query failed (non-fatal)"
+                );
+                return Vec::new();
+            }
+        };
+        let id_map = self
+            .dedup_vector_index_id_map
+            .lock()
+            .expect("dedup_vector_index_id_map mutex poisoned");
+        let mut out = Vec::with_capacity(neighbors.len());
+        for n in &neighbors {
+            let key_bytes: [u8; 8] = match n.entry_id.as_bytes()[0..8].try_into() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let key = u64::from_be_bytes(key_bytes);
+            let Some(&decision_id) = id_map.get(&key) else {
+                continue;
+            };
+            let distance_micros = ((1.0 - n.similarity) * 1_000_000.0).round() as i64;
+            out.push((decision_id, distance_micros));
+        }
+        out
+    }
+
+    /// Insert `embedding` under `id` into the dedup vector index. No-op when
+    /// the index is `None`. Non-fatal on failure: logs hash-only and
+    /// returns without propagating the error, matching the fail-open
+    /// contract the rest of the dedup shadow-scoring path relies on.
+    ///
+    /// The usearch entry is keyed by a fresh unique monotonic counter
+    /// (`dedup_vector_index_counter`), NOT by `uuid_to_key(id)`. Keying by the
+    /// truncated UUID would collide two distinct decision_ids sharing the same
+    /// 8-byte prefix, silently clobbering the reverse-map entry and letting a
+    /// later query return a fabricated wrong decision_id. `VectorIndex::insert`
+    /// takes a `Uuid` and internally keys usearch via `uuid_to_key` (the high 8
+    /// bytes, big-endian), so we synthesize a `Uuid` whose high 8 bytes ARE the
+    /// counter — `Uuid::from_u128((counter as u128) << 64)` — making the
+    /// usearch key exactly `counter`. We record `counter -> id` so the query
+    /// side resolves the real decision_id back.
+    fn dedup_index_insert(&self, id: Uuid, embedding: &[f32]) {
+        let Some(index) = self.dedup_vector_index.as_ref() else {
+            return;
+        };
+        let key = self
+            .dedup_vector_index_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Synthesize a Uuid whose high 8 bytes (what `uuid_to_key` reads) equal
+        // `key`, so the usearch entry is keyed by the unique counter.
+        let key_uuid = Uuid::from_u128((key as u128) << 64);
+        if let Err(error) = trace_commons_gate_enclave::vector_index::VectorIndex::insert(
+            index.as_ref(),
+            key_uuid,
+            DEDUP_VECTOR_INDEX_NAMESPACE,
+            embedding,
+        ) {
+            tracing::warn!(
+                error_class = "DedupVectorIndexInsertFailed",
+                error_hash = %safe_runtime_error_hash(&error),
+                "dedup vector index insert failed (non-fatal)"
+            );
+            return;
+        }
+        self.dedup_vector_index_id_map
+            .lock()
+            .expect("dedup_vector_index_id_map mutex poisoned")
+            .insert(key, id);
+    }
+}
+
+/// Fixed `VectorIndex` tenant-namespace key for the dedup index. Dedup is
+/// intentionally cross-tenant (it dedups traces across tenants), unlike the
+/// per-tenant novelty index, so every insert/query in the dedup index goes
+/// through this single shared namespace rather than the caller's real
+/// tenant id.
+#[allow(dead_code)]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+const DEDUP_VECTOR_INDEX_NAMESPACE: &str = "trace_commons_cross_trace_dedup_v1";
+
 /// Parse a required `u64` env var. Returns an error if the var is unset,
 /// empty, or doesn't parse. Used for the three gate floors that the
 /// orchestrator config refuses to default.
@@ -6570,6 +6841,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/score-credit-quality",
             post(score_credit_quality_handler),
         )
+        .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
@@ -45103,6 +45375,66 @@ async fn evaluate_and_record_gate(
         );
     }
 
+    // Shadow-mode cross-trace dedup (simhash-only in v1; embedding side deferred).
+    // Best-effort: a failure logs hash-only and never blocks the gate decision.
+    let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
+    let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
+    let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
+    // simhash — not one candidate per member decision. `list_dedup_signals`
+    // returns rows in `decided_at ASC` order, so the first-seen simhash per
+    // `cluster_id` here is the earliest-decided member, i.e. the
+    // representative. This matches the batch route
+    // (`run_recluster_dedup_pass`), which also assigns against one
+    // representative-keyed candidate per cluster; without this, inline and
+    // batch clustering could disagree on membership.
+    let mut reps: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    for s in &signals {
+        if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
+            reps.entry(cid).or_insert(sh);
+            *sizes.entry(cid).or_insert(0) += 1;
+        }
+    }
+    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+        .iter()
+        .map(
+            |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+                cluster_id: *cluster_id,
+                size: *sizes.get(cluster_id).unwrap_or(&0),
+                simhash: *simhash as u64,
+                embed_cosine_micros: None,
+            },
+        )
+        .collect();
+    let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
+        dedup_simhash as u64,
+        &candidates,
+        &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+    ) {
+        trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
+        trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
+    };
+    let new_size =
+        i32::try_from(sizes.get(&cluster_id).copied().unwrap_or(0) + 1).unwrap_or(i32::MAX);
+    // Inline only sets THIS row's size snapshot; existing members' sizes are
+    // refreshed by the Task 7 batch route.
+    if let Err(error) = db
+        .update_trace_gate_decision_dedup(
+            tenant_id,
+            decision_id,
+            dedup_simhash,
+            cluster_id,
+            new_size,
+        )
+        .await
+    {
+        tracing::warn!(
+            tenant_hash = %sha256_prefixed(tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "shadow dedup inline write failed (non-fatal)"
+        );
+    }
+
     Ok(GateOutcome::Scored {
         decision_id,
         perplexity_passed: decision.perplexity_passed,
@@ -45410,6 +45742,184 @@ async fn score_credit_quality_handler(
         }
     });
     Ok(Json(ScoreCreditQualityAck {
+        accepted: true,
+        limit,
+    }))
+}
+
+/// Query params for the dedup recluster batch admin route. `limit` bounds a
+/// run (useful for a `?limit=5` pilot smoke before a full pass); absent means
+/// the whole decision backlog.
+#[derive(Debug, Deserialize)]
+struct ReclusterDedupQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the dedup recluster batch admin route. The
+/// work runs in a spawned background task; the route returns immediately.
+#[derive(Debug, Serialize)]
+struct ReclusterDedupAck {
+    accepted: bool,
+    limit: Option<i64>,
+}
+
+/// Running tally for one dedup recluster batch pass.
+#[derive(Debug, Default)]
+struct ReclusterDedupSummary {
+    /// Decision rows whose dedup columns were recomputed and updated.
+    reclustered: u64,
+    /// Decision rows skipped because the write failed (left as-is).
+    failed: u64,
+}
+
+/// One full dedup recluster batch pass. SIMHASH-ONLY in v1 (embedding-side
+/// recluster is a follow-up, consistent with the inline gate path in
+/// `evaluate_and_record_gate`).
+///
+/// Enumerates dedup signal rows cross-tenant (`decided_at ASC`, per
+/// `list_dedup_signals`), then recomputes cluster assignments over that whole
+/// snapshot in a SINGLE deterministic sweep: walking rows in order, each row
+/// with a recorded simhash is assigned against the clusters formed so far
+/// (via `assign_cluster`, simhash-only candidates — `embed_cosine_micros:
+/// None`), joining an existing cluster or minting a new one. Rows without a
+/// recorded simhash cannot be clustered and are left untouched (not counted,
+/// not written).
+///
+/// Final cluster sizes are computed AFTER the full sweep completes, so every
+/// member of a cluster is written with the same total membership count — not
+/// its position-in-sweep size. A write failure on one decision is logged
+/// hash-only and skipped; the pass never aborts on one failure.
+async fn run_recluster_dedup_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+) -> anyhow::Result<ReclusterDedupSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("dedup recluster requires a configured DB mirror"))?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let rows = db.list_dedup_signals(effective_limit).await?;
+
+    // Pass 1: single deterministic sweep building cluster assignments over
+    // the snapshot. `reps` holds each cluster's representative simhash (the
+    // simhash of the row that created it); `counts` holds each cluster's
+    // running (and, after the loop, final) membership.
+    let mut reps: std::collections::HashMap<uuid::Uuid, u64> = std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    let mut assigned: Vec<(
+        &trace_commons_server::trace_corpus_storage::DedupSignalRow,
+        i64,
+        uuid::Uuid,
+    )> = Vec::new();
+
+    for row in &rows {
+        let Some(simhash_i64) = row.dedup_simhash else {
+            // No simhash recorded yet: cannot cluster this row. Skip it —
+            // leave it as-is, do not write it.
+            continue;
+        };
+        let simhash_u64 = simhash_i64 as u64;
+        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+            .iter()
+            .map(
+                |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+                    cluster_id: *cluster_id,
+                    size: *counts.get(cluster_id).unwrap_or(&0),
+                    simhash: *simhash,
+                    embed_cosine_micros: None,
+                },
+            )
+            .collect();
+        let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
+            simhash_u64,
+            &candidates,
+            &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+        ) {
+            trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
+            trace_commons_server::dedup_assign::ClusterAssignment::New => {
+                let id = uuid::Uuid::new_v4();
+                reps.insert(id, simhash_u64);
+                id
+            }
+        };
+        *counts.entry(cluster_id).or_insert(0) += 1;
+        assigned.push((row, simhash_i64, cluster_id));
+    }
+
+    // Pass 2: write every assigned row with its cluster's FINAL total
+    // membership count (computed after the whole sweep above).
+    let mut summary = ReclusterDedupSummary::default();
+    for (row, simhash_i64, cluster_id) in assigned {
+        let final_size =
+            i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
+        match db
+            .update_trace_gate_decision_dedup(
+                &row.tenant_id,
+                row.decision_id,
+                simhash_i64,
+                cluster_id,
+                final_size,
+            )
+            .await
+        {
+            Ok(()) => summary.reclustered += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&row.tenant_id),
+                    decision_hash = %sha256_prefixed(&row.decision_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "shadow dedup recluster skipped one decision"
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Admin route: trigger a batch backfill/recompute of cross-trace dedup
+/// cluster assignments and size snapshots over the whole corpus.
+/// SIMHASH-ONLY in v1 (embedding-side recluster is a follow-up).
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
+/// a background task and returns a hash-only ack immediately. An optional
+/// `?limit=N` bounds the run.
+async fn recluster_dedup_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReclusterDedupQuery>,
+) -> ApiResult<Json<ReclusterDedupAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dedup recluster requires a configured DB mirror",
+        ));
+    }
+    let limit = query.limit;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_recluster_dedup_pass(task_state, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    reclustered = summary.reclustered,
+                    failed = summary.failed,
+                    "Trace Commons dedup recluster pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons dedup recluster pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(ReclusterDedupAck {
         accepted: true,
         limit,
     }))
@@ -45803,6 +46313,12 @@ async fn gate_evaluate_worker_handler(
             chunk_count: 1,
             chunks_capped: false,
             chunk_vector_entries: Vec::new(),
+            // This is a synthetic re-hydration of the already-persisted
+            // decision for the credit-emission call below (no ciphertext or
+            // plaintext in scope here) — dedup clustering already ran inline
+            // in `evaluate_and_record_gate` against the real decision, so
+            // there is nothing meaningful to compute for this throwaway copy.
+            dedup_simhash: 0,
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),

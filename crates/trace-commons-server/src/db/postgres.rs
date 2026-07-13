@@ -1173,6 +1173,24 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&40_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!("../../../../migrations/V40__trace_dedup.sql"))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&40_i32, &"trace_dedup"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -3729,6 +3747,38 @@ impl Database for PgBackend {
                 perplexity_micros: row.get("perplexity_micros"),
                 peak_perplexity_micros: row.get("peak_perplexity_micros"),
                 novelty_score_micros: row.get("novelty_score_micros"),
+            })
+            .collect())
+    }
+
+    async fn list_dedup_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupSignalRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        let rows = client
+            .query(
+                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::DedupSignalRow {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                dedup_cluster_id: row.get("dedup_cluster_id"),
+                dedup_simhash: row.get("dedup_simhash"),
             })
             .collect())
     }

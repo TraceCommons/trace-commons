@@ -7,6 +7,8 @@ pub mod audit_chain;
 pub mod config;
 pub mod credit_quality;
 pub mod db;
+pub mod dedup_assign;
+pub mod dedup_simhash;
 pub mod error;
 pub mod instance_enroll_guard;
 pub mod near_credit;

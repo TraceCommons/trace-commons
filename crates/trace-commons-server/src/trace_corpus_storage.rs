@@ -1843,6 +1843,18 @@ pub struct GateCreditInput {
     pub novelty_score_micros: i64,
 }
 
+/// Cross-trace dedup cluster signal for one decision row (migration V40),
+/// read cross-tenant through the narrow `trace_gate_driver` pool (no tenant
+/// GUC). `dedup_simhash` / `dedup_cluster_id` are `None` until a dedup pass
+/// has assigned this decision to a cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupSignalRow {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub dedup_cluster_id: Option<Uuid>,
+    pub dedup_simhash: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2451,6 +2463,29 @@ pub trait TraceCorpusStore: Send + Sync {
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_credit_quality called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the dedup columns (migration V40) for the decision row
+    /// identified by `(tenant_id, decision_id)`. Perplexity, novelty,
+    /// tail-fraction, vector, gate status, and credit are left untouched.
+    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
+    /// log-once warning + no-op so a backend without a real impl cannot
+    /// silently drop the write.
+    async fn update_trace_gate_decision_dedup(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _dedup_simhash: i64,
+        _dedup_cluster_id: Uuid,
+        _dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_dedup called on a backend without a real impl"
             );
         });
         Ok(())

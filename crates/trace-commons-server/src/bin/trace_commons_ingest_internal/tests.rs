@@ -4033,6 +4033,14 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_id_map: Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         near_access_key_checker_override: None,
     })
 }
@@ -23425,6 +23433,14 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index: None,
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_id_map: Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
+        #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+        dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         near_access_key_checker_override: None,
     });
 
@@ -63178,6 +63194,17 @@ struct DecisionRowWithCreditQuality {
     credit_quality_calibration_version: Option<i32>,
 }
 
+/// Test-only combined view of a `trace_gate_decisions` row plus its
+/// cross-trace dedup columns (migration V40), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_dedup_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithDedup {
+    row: StorageTraceGateDecisionRow,
+    dedup_simhash: Option<i64>,
+    dedup_cluster_id: Option<Uuid>,
+    dedup_cluster_size: Option<i32>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -63205,6 +63232,13 @@ struct PerplexityDriverTestDb {
     /// after the credit-quality write.
     credit_quality_scores:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, i64, i32)>>,
+    /// Cross-trace dedup cluster assignments written by
+    /// `update_trace_gate_decision_dedup`, keyed by `(tenant_id,
+    /// decision_id)`. Kept as a side table (like `credit_quality_scores`)
+    /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
+    /// isolation test can assert the base row is byte-identical before and
+    /// after the dedup write.
+    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63217,6 +63251,7 @@ impl PerplexityDriverTestDb {
             derived_records: std::sync::RwLock::new(Vec::new()),
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -63323,6 +63358,30 @@ impl PerplexityDriverTestDb {
             credit_quality_micros: credit.map(|(q, _, _)| q),
             credit_quality_anomaly_ratio_micros: credit.map(|(_, r, _)| r),
             credit_quality_calibration_version: credit.map(|(_, _, v)| v),
+        })
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any cross-trace dedup assignment recorded
+    /// for it — used by the dedup isolation test to assert the base row is
+    /// byte-identical before and after the dedup write.
+    fn gate_decision_with_dedup_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithDedup> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let dedup = self
+            .dedup
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithDedup {
+            row,
+            dedup_simhash: dedup.map(|(h, _, _)| h),
+            dedup_cluster_id: dedup.map(|(_, c, _)| c),
+            dedup_cluster_size: dedup.map(|(_, _, s)| s),
         })
     }
 
@@ -64060,6 +64119,25 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         );
         Ok(())
     }
+    /// In-memory analogue of the Postgres `update_trace_gate_decision_dedup`
+    /// impl: record the three dedup values in a side table keyed by
+    /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
+    /// without touching the stored `StorageTraceGateDecisionRow` at all — so
+    /// isolation is structural, not just asserted.
+    async fn update_trace_gate_decision_dedup(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_simhash: i64,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        self.dedup.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (dedup_simhash, dedup_cluster_id, dedup_cluster_size),
+        );
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64184,6 +64262,37 @@ impl Database for PerplexityDriverTestDb {
                     novelty_score_micros: row.novelty_score_micros,
                 },
             )
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_dedup_signals` enumeration:
+    /// one `DedupSignalRow` per decision row (any tenant, insertion order,
+    /// capped at `limit`), with `dedup_cluster_id`/`dedup_simhash` populated
+    /// from the `dedup` side table when a prior `update_trace_gate_decision_dedup`
+    /// call recorded one — `None` otherwise, mirroring rows that have not been
+    /// through a dedup pass yet.
+    async fn list_dedup_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::DedupSignalRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let dedup = self.dedup.read().unwrap();
+        Ok(self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .map(|(tenant_id, row)| {
+                let seen = dedup.get(&(tenant_id.clone(), row.decision_id));
+                trace_commons_server::trace_corpus_storage::DedupSignalRow {
+                    tenant_id: tenant_id.clone(),
+                    decision_id: row.decision_id,
+                    dedup_cluster_id: seen.map(|(_, c, _)| *c),
+                    dedup_simhash: seen.map(|(h, _, _)| *h),
+                }
+            })
             .collect())
     }
 }
@@ -64597,6 +64706,610 @@ async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns()
     );
     assert_eq!(after.row.chunk_count, before_row.chunk_count);
     assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+/// Unit test for the isolation invariant: `update_trace_gate_decision_dedup`
+/// sets ONLY the three cross-trace dedup values (migration V40) — the base
+/// decision row (perplexity, novelty, tail-fraction, status, credit) is
+/// byte-identical before and after.
+#[tokio::test]
+async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    let cluster = Uuid::from_u128(7);
+    db.update_trace_gate_decision_dedup("tenant-a", decision_id, 42i64, cluster, 3)
+        .await
+        .expect("dedup update succeeds");
+
+    let after = db
+        .gate_decision_with_dedup_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The three dedup values changed to exactly what we passed.
+    assert_eq!(after.dedup_simhash, Some(42));
+    assert_eq!(after.dedup_cluster_id, Some(cluster));
+    assert_eq!(after.dedup_cluster_size, Some(3));
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(
+        after.row.gate_policy_version,
+        before_row.gate_policy_version
+    );
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.tail_fraction_micros,
+        before_row.tail_fraction_micros
+    );
+    assert_eq!(after.row.perplexity_passed, before_row.perplexity_passed);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(
+        after.row.nearest_neighbor_hash,
+        before_row.nearest_neighbor_hash
+    );
+    assert_eq!(after.row.novelty_passed, before_row.novelty_passed);
+    assert_eq!(
+        after.row.embedding_evidence_hash,
+        before_row.embedding_evidence_hash
+    );
+    assert_eq!(
+        after.row.attestation_chain_hash,
+        before_row.attestation_chain_hash
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
+    assert_eq!(after.row.vector_entry_id, before_row.vector_entry_id);
+    assert_eq!(
+        after.row.credit_withheld_reason,
+        before_row.credit_withheld_reason
+    );
+    assert_eq!(
+        after.row.peak_perplexity_micros,
+        before_row.peak_perplexity_micros
+    );
+    assert_eq!(
+        after.row.peak_novelty_micros,
+        before_row.peak_novelty_micros
+    );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+// -----------------------------------------------------------------------
+// Task 6: inline cross-trace dedup (simhash-only) tests
+// -----------------------------------------------------------------------
+
+/// Same fixture as `fixture_gate_worker_artifact_store` but also returns a
+/// `KmsKeyWrapper` decryptor built from the SAME underlying key material and
+/// key-ref label as the artifact store's KEK. `LocalMasterKeyWrapper`/
+/// `SecretsCrypto` derive their AES key from the master-key string plus a
+/// per-encryption salt carried inline in the wrapped output (see
+/// `SecretsCrypto::decrypt`), so a second, independently-constructed wrapper
+/// over the same key string can unwrap DEKs the store's own (moved-in) KEK
+/// wrapped — letting a caller build a real `EnclaveGateService` that decrypts
+/// the exact envelopes this store writes. The Task 6 dedup test needs this:
+/// it asserts on the ACTUAL decrypted plaintext's simhash, not a synthetic
+/// stand-in, so it must exercise the real `EnclaveGateService::evaluate_trace`
+/// decrypt path (Part A wires `dedup_simhash` from `plaintext` there).
+fn fixture_gate_worker_artifact_store_with_decryptor(
+    artifact_root: &Path,
+) -> (ConfiguredTraceArtifactStore, Arc<dyn KmsKeyWrapper>, String) {
+    let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
+    let kek_crypto =
+        SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture kek crypto");
+    let kek = LocalMasterKeyWrapper::new(kek_crypto, "trace-commons-gate-worker-test-v1");
+    let provider_config = TraceArtifactProviderConfig::service_owned_remote(object_store.clone())
+        .expect("provider config");
+    let provider = FileRemoteTraceArtifactProvider::new(artifact_root.to_path_buf());
+    let store = Arc::new(ServiceOwnedTraceArtifactStore::new(
+        provider_config,
+        crypto,
+        kek,
+        provider,
+    ));
+    let configured = ConfiguredTraceArtifactStore::new(object_store.clone(), store);
+    let decryptor_crypto = SecretsCrypto::new(SecretString::from(key)).expect("decryptor crypto");
+    let decryptor: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
+        decryptor_crypto,
+        "trace-commons-gate-worker-test-v1",
+    ));
+    (configured, decryptor, object_store)
+}
+
+/// Like `seed_perplexity_driver_test_db` but takes one plaintext-JSON payload
+/// per submission (instead of a fixed `{"safe": true}` for every one), so a
+/// test can control which submissions carry byte-identical vs distinct
+/// canonical text. Returns the submission ids in the same order as `texts`.
+fn seed_perplexity_driver_test_db_with_texts(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    texts: &[&str],
+) -> (Arc<PerplexityDriverTestDb>, Vec<Uuid>) {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let mut submission_ids = Vec::with_capacity(texts.len());
+    for text in texts {
+        let submission_id = Uuid::new_v4();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({"text": text})).expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        // See `seed_perplexity_driver_test_db`: `created_at` must be
+        // `receipt.encrypted_at` so the reconstructed receipt round-trips.
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+        submission_ids.push(submission_id);
+    }
+    (db, submission_ids)
+}
+
+/// Task 6 payoff: `evaluate_and_record_gate` clusters duplicate traces by
+/// their gate-service-computed simhash. Drives THREE real
+/// `evaluate_and_record_gate` calls (real v2 KEK-wrapped envelopes, real
+/// `EnclaveGateService` decrypt path) — two submissions carry byte-identical
+/// canonical text, one carries unrelated text — and asserts, via
+/// `gate_decision_with_dedup_by_id`, that the two duplicates land in the same
+/// `dedup_cluster_id` with `dedup_cluster_size == 2` while the distinct trace
+/// gets its own singleton cluster (`dedup_cluster_size == 1`).
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let duplicate_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
+    let distinct_text = "an entirely unrelated trace about deploying kubernetes clusters";
+
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_texts(
+        &artifact_store,
+        tenant_id,
+        &[duplicate_text, duplicate_text, distinct_text],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let mut decision_ids = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, *submission_id)
+            .await
+            .expect("evaluate_and_record_gate succeeds");
+        let GateOutcome::Scored { decision_id, .. } = outcome else {
+            panic!("expected GateOutcome::Scored, got {outcome:?}");
+        };
+        decision_ids.push(decision_id);
+    }
+
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[0])
+        .expect("first decision row present");
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[1])
+        .expect("second decision row present");
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[2])
+        .expect("third decision row present");
+
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        first.dedup_cluster_id, second.dedup_cluster_id,
+        "byte-identical canonical text must land in the same dedup cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "second duplicate observes cluster size 2 (itself + the first)"
+    );
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "unrelated canonical text must land in a distinct dedup cluster"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the distinct trace is a singleton cluster"
+    );
+}
+
+/// Like `seed_perplexity_driver_test_db_with_texts` but each entry is a full
+/// `TraceContributionEnvelope`-shaped JSON payload (an `events` array of
+/// `{event_type, tool_name, redacted_content}` plus per-submission-unique
+/// envelope metadata: `submission_id`, `trace_id`, `created_at`, and a
+/// per-event `event_id`/`timestamp`). This is the shape
+/// `parse_envelope_rendered_events` (chunker.rs:74) actually parses, and the
+/// shape `EnclaveGateService::evaluate_trace` decrypts in production — unlike
+/// `seed_perplexity_driver_test_db_with_texts`'s bare `{"text": ...}` stand-in,
+/// which never exercises the metadata-carrying envelope fields at all.
+fn seed_perplexity_driver_test_db_with_envelopes(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    // One entry per submission: the events (event_type, tool_name, content)
+    // that make up that submission's canonical rendered text.
+    events_per_submission: &[&[(&str, Option<&str>, &str)]],
+) -> (Arc<PerplexityDriverTestDb>, Vec<Uuid>) {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let mut submission_ids = Vec::with_capacity(events_per_submission.len());
+    for events in events_per_submission {
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let created_at = chrono::Utc::now() + chrono::Duration::milliseconds(rand_offset_ms());
+        let events_json: Vec<serde_json::Value> = events
+            .iter()
+            .map(|(event_type, tool_name, content)| {
+                serde_json::json!({
+                    "event_id": Uuid::new_v4().to_string(),
+                    "event_type": event_type,
+                    "tool_name": tool_name,
+                    "redacted_content": content,
+                    "timestamp": (chrono::Utc::now() + chrono::Duration::milliseconds(rand_offset_ms())).to_rfc3339(),
+                })
+            })
+            .collect();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "submission_id": submission_id.to_string(),
+            "trace_id": trace_id.to_string(),
+            "created_at": created_at.to_rfc3339(),
+            "events": events_json,
+        }))
+        .expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+        submission_ids.push(submission_id);
+    }
+    (db, submission_ids)
+}
+
+/// Small helper so successive `chrono::Utc::now()` calls in
+/// `seed_perplexity_driver_test_db_with_envelopes` don't collide when the
+/// clock resolution is coarse; not cryptographic, just a decorrelation nudge.
+fn rand_offset_ms() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static COUNTER: AtomicI64 = AtomicI64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// C1 regression: the dedup simhash must be computed over the CANONICAL
+/// RENDERED EVENT TEXT (metadata-free), not the raw envelope JSON. Two
+/// submissions with byte-identical events but different
+/// `submission_id`/`trace_id`/`created_at`/per-event `event_id`/`timestamp`
+/// must still cluster together. Before the fix, `evaluate_trace` hashed
+/// `String::from_utf8_lossy(&plaintext)` (the full envelope JSON including
+/// the unique metadata fields), so this test fails: the two "duplicate"
+/// submissions get different simhashes and land in different clusters.
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_duplicates_despite_distinct_envelope_metadata() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    // Same canonical events (content, event_type, tool_name) for the first
+    // two submissions; the third has unrelated content. Envelope-level
+    // metadata (submission_id, trace_id, created_at, event_id, timestamp) is
+    // regenerated fresh per submission by the seeding helper, so the two
+    // "duplicates" are byte-identical only in their rendered event text.
+    let shared_events: &[(&str, Option<&str>, &str)] = &[
+        ("user_message", None, "please refactor the auth module"),
+        (
+            "tool_call",
+            Some("Bash"),
+            "cargo test -p trace-commons-server",
+        ),
+        (
+            "assistant_message",
+            None,
+            "refactored auth module and tests pass",
+        ),
+    ];
+    let distinct_events: &[(&str, Option<&str>, &str)] = &[(
+        "user_message",
+        None,
+        "an entirely unrelated trace about deploying kubernetes clusters",
+    )];
+
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_envelopes(
+        &artifact_store,
+        tenant_id,
+        &[shared_events, shared_events, distinct_events],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let mut decision_ids = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, *submission_id)
+            .await
+            .expect("evaluate_and_record_gate succeeds");
+        let GateOutcome::Scored { decision_id, .. } = outcome else {
+            panic!("expected GateOutcome::Scored, got {outcome:?}");
+        };
+        decision_ids.push(decision_id);
+    }
+
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[0])
+        .expect("first decision row present");
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[1])
+        .expect("second decision row present");
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, decision_ids[2])
+        .expect("third decision row present");
+
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        first.dedup_cluster_id, second.dedup_cluster_id,
+        "same canonical event text with different envelope metadata must still cluster together"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "second duplicate observes cluster size 2 (itself + the first)"
+    );
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "unrelated canonical text must land in a distinct dedup cluster"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the distinct trace is a singleton cluster"
+    );
+}
+
+/// Task 7 payoff: `run_recluster_dedup_pass` recomputes cluster assignments
+/// over the whole corpus snapshot in a single deterministic sweep. Seeds
+/// three decisions with `dedup_simhash` already set directly (no gate
+/// evaluation): two carry the SAME simhash across two DIFFERENT tenants
+/// (proving clustering is cross-tenant), one carries a distinct simhash.
+/// After the pass, the two same-simhash rows must share a `dedup_cluster_id`
+/// with `dedup_cluster_size == 2`; the distinct row must be a singleton
+/// (`dedup_cluster_size == 1`). Also asserts the perplexity/novelty/
+/// credit_quality columns are byte-identical before and after — the pass
+/// writes ONLY the dedup side table.
+#[tokio::test]
+async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_untouched() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    let distinct_simhash: i64 = 0x0f0f_0f0f_0f0f_0f0f;
+
+    let row_a = rescore_test_decision_row(Uuid::new_v4());
+    let row_b = rescore_test_decision_row(Uuid::new_v4());
+    let row_c = rescore_test_decision_row(Uuid::new_v4());
+
+    db.seed_gate_decision("tenant-a", row_a.clone());
+    db.seed_gate_decision("tenant-b", row_b.clone());
+    db.seed_gate_decision("tenant-a", row_c.clone());
+
+    // Seed initial dedup_simhash values directly (as if a prior inline gate
+    // pass had recorded them), with placeholder cluster assignments the
+    // recluster pass is expected to overwrite entirely.
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        row_a.decision_id,
+        shared_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_a dedup");
+    db.update_trace_gate_decision_dedup(
+        "tenant-b",
+        row_b.decision_id,
+        shared_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_b dedup");
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        row_c.decision_id,
+        distinct_simhash,
+        Uuid::new_v4(),
+        1,
+    )
+    .await
+    .expect("seed row_c dedup");
+
+    let snapshot = [
+        ("tenant-a", row_a.clone()),
+        ("tenant-b", row_b.clone()),
+        ("tenant-a", row_c.clone()),
+    ];
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(
+        summary.reclustered, 3,
+        "all 3 rows must be reclustered: {summary:?}"
+    );
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_a = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_a.decision_id)
+        .expect("row_a present");
+    let after_b = db
+        .gate_decision_with_dedup_by_id("tenant-b", row_b.decision_id)
+        .expect("row_b present");
+    let after_c = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_c.decision_id)
+        .expect("row_c present");
+
+    assert!(
+        after_a.dedup_cluster_id.is_some(),
+        "row_a must be assigned a cluster"
+    );
+    assert_eq!(
+        after_a.dedup_cluster_id, after_b.dedup_cluster_id,
+        "same simhash across two different tenants must land in the same cluster"
+    );
+    assert_eq!(
+        after_a.dedup_cluster_size,
+        Some(2),
+        "shared-simhash cluster has 2 members"
+    );
+    assert_eq!(
+        after_b.dedup_cluster_size,
+        Some(2),
+        "shared-simhash cluster has 2 members"
+    );
+    assert_ne!(
+        after_c.dedup_cluster_id, after_a.dedup_cluster_id,
+        "distinct simhash must land in a different cluster"
+    );
+    assert_eq!(
+        after_c.dedup_cluster_size,
+        Some(1),
+        "distinct simhash is a singleton cluster"
+    );
+
+    // Isolation: perplexity/novelty/credit_quality columns are byte-identical
+    // before and after — the recluster pass writes ONLY the dedup side table.
+    for (tenant_id, original) in &snapshot {
+        let after = db
+            .gate_decision_with_dedup_by_id(tenant_id, original.decision_id)
+            .expect("row present");
+        assert_eq!(after.row.decision_id, original.decision_id);
+        assert_eq!(after.row.submission_id, original.submission_id);
+        assert_eq!(after.row.perplexity_micros, original.perplexity_micros);
+        assert_eq!(
+            after.row.peak_perplexity_micros,
+            original.peak_perplexity_micros
+        );
+        assert_eq!(after.row.perplexity_passed, original.perplexity_passed);
+        assert_eq!(
+            after.row.novelty_score_micros,
+            original.novelty_score_micros
+        );
+        assert_eq!(after.row.novelty_passed, original.novelty_passed);
+    }
+    let credit_after = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", row_a.decision_id)
+        .expect("row_a present");
+    assert_eq!(
+        credit_after.credit_quality_micros, None,
+        "recluster pass must never touch the credit-quality side table"
+    );
 }
 
 /// Regression test for the multi-decision-row isolation bug: a single
@@ -65645,6 +66358,110 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
             || chain.contains("LocalPerplexityScorerLoadFailed"),
         "expected LocalPerplexityScorer* error class, got: {chain}"
     );
+}
+
+// ----- Cross-trace dedup: separate dedup vector index (Task 5) -------------
+//
+// Feature-gated because `UsearchVectorIndex` (and `AppState::dedup_vector_index`)
+// only compile under `local-gpu-models`/`near-ai-scorer`.
+
+/// `dedup_index_query`/`dedup_index_insert` must resolve a query against a
+/// live dedup index to the correct original `decision_id`, and the cosine
+/// distance for a near-identical vector must land under
+/// `DEDUP_CONSTANTS_V1.tau_e_micros`.
+///
+/// Regression guard for the counter-key fix: the two inserted decision_ids
+/// deliberately SHARE the same high 8 bytes (they differ only in the low 8).
+/// Under the old scheme (keying usearch by `uuid_to_key(id)` = the high 8
+/// bytes) they collided — the second insert would overwrite the first's
+/// reverse-map entry and the query could return a fabricated wrong
+/// decision_id. With the unique monotonic counter key the two entries are
+/// distinct and the query resolves the true near id.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_index_query_finds_near_vector() {
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+
+    fn norm(mut v: Vec<f32>) -> Vec<f32> {
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n > 0.0 {
+            for x in v.iter_mut() {
+                *x /= n;
+            }
+        }
+        v
+    }
+
+    let index_temp = tempfile::tempdir().expect("index temp dir");
+    let dim = 8;
+    let idx = UsearchVectorIndex::try_new(index_temp.path(), dim, 16, 200, 50, 2, 32)
+        .expect("dedup index ctor");
+
+    let state_temp = tempfile::tempdir().expect("state temp dir");
+    let mut state = test_state(state_temp.path().to_path_buf());
+    {
+        // `test_state` just built this Arc, so we are the sole owner — safe
+        // to mutate the dedup index field in before inserting/querying.
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner of freshly built state");
+        state_mut.dedup_vector_index = Some(Arc::new(idx));
+    }
+
+    // Same high 8 bytes, different low 8 bytes: these two would collide under
+    // the old `uuid_to_key`-based keying. The counter key keeps them distinct.
+    let id_near = Uuid::from_u128(0xAABB_CCDD_EEFF_0011_0000_0000_0000_0001);
+    let id_far = Uuid::from_u128(0xAABB_CCDD_EEFF_0011_0000_0000_0000_0002);
+    assert_eq!(
+        id_near.as_bytes()[0..8],
+        id_far.as_bytes()[0..8],
+        "test setup: ids must share the high 8 bytes to exercise the collision fix"
+    );
+    // vec_near is a small perturbation of the probe; vec_far is orthogonal.
+    let vec_near = norm(vec![1.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let vec_far = norm(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+
+    state.dedup_index_insert(id_near, &vec_near);
+    state.dedup_index_insert(id_far, &vec_far);
+
+    let probe = norm(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let results = state.dedup_index_query(&probe, 5);
+
+    assert!(
+        !results.is_empty(),
+        "expected at least one neighbor from the dedup index, got none"
+    );
+    let (top_id, top_distance_micros) = results[0];
+    assert_eq!(
+        top_id, id_near,
+        "nearest neighbor must resolve back to the real inserted decision_id (not the colliding id_far)"
+    );
+    // Both distinct ids must be resolvable — proves neither reverse-map entry
+    // was clobbered by the shared-prefix collision.
+    assert!(
+        results.iter().any(|(id, _)| *id == id_far),
+        "the orthogonal id_far must also be resolvable, proving no reverse-map collision"
+    );
+    assert!(
+        top_distance_micros < trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1.tau_e_micros,
+        "expected cosine-distance micros under tau_e_micros ({}), got {top_distance_micros}",
+        trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1.tau_e_micros
+    );
+}
+
+/// `dedup_index_query`/`dedup_index_insert` must fail open (no panic, no
+/// error) when the dedup index was never configured — the simhash-only
+/// dedup signal must keep working even when usearch init failed or the
+/// feature-gated index was never built.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_index_helpers_no_op_when_index_absent() {
+    let state_temp = tempfile::tempdir().expect("state temp dir");
+    let state = test_state(state_temp.path().to_path_buf());
+    assert!(state.dedup_vector_index.is_none());
+
+    // insert must not panic even though there's nothing to insert into.
+    state.dedup_index_insert(Uuid::new_v4(), &[1.0, 0.0, 0.0, 0.0]);
+    let results = state.dedup_index_query(&[1.0, 0.0, 0.0, 0.0], 5);
+    assert!(results.is_empty());
 }
 
 // -----------------------------------------------------------------------------
