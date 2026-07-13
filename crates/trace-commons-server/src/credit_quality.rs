@@ -14,6 +14,12 @@ pub struct CreditQualityConstants {
     pub ppl_ceil_micros: i64,
     pub nov_floor_micros: i64,
     pub nov_ceil_micros: i64,
+    /// Graded-floor multiplier for the perplexity term, * 1e6. A below-floor
+    /// perplexity yields this fraction of the term instead of 0. `0` reproduces
+    /// the pre-V2 hard-zero behavior exactly.
+    pub ppl_floor_mult_micros: i64,
+    /// Graded-floor multiplier for the novelty term, * 1e6. See above.
+    pub nov_floor_mult_micros: i64,
     pub anomaly_soft_ratio_micros: i64,
     pub anomaly_hard_ratio_micros: i64,
     pub version: i32,
@@ -24,10 +30,32 @@ pub const CREDIT_QUALITY_CONSTANTS_V1: CreditQualityConstants = CreditQualityCon
     ppl_ceil_micros: 38_500_000,
     nov_floor_micros: 500_000,
     nov_ceil_micros: 1_000_000,
+    // V1 hard-zeroes below floor: floor_mult == 0 makes the affine wrapper the
+    // identity, so V1 scores are byte-identical to the pre-V2 formula.
+    ppl_floor_mult_micros: 0,
+    nov_floor_mult_micros: 0,
     anomaly_soft_ratio_micros: 3_000_000, // r <= 3.0 -> no penalty
     anomaly_hard_ratio_micros: 10_000_000, // r >= 10.0 -> withhold
     version: 1,
 };
+
+/// V2 softens the perplexity and novelty terms from hard-zeroing floors to
+/// graded (affine) floors: substantive-but-unremarkable work earns a nonzero
+/// quality signal instead of 0. Safe now that cross-trace dedup (`dup_pen`,
+/// PR #169) carries the anti-duplication load the novelty term used to bear.
+/// Floors/ceilings/anomaly thresholds are unchanged from V1; the floor-mults are
+/// calibration starting points to tune on the pilot backfill. The anomaly term
+/// remains a hard fraud gate.
+pub const CREDIT_QUALITY_CONSTANTS_V2: CreditQualityConstants = CreditQualityConstants {
+    ppl_floor_mult_micros: 250_000, // 0.25
+    nov_floor_mult_micros: 300_000, // 0.30
+    version: 2,
+    ..CREDIT_QUALITY_CONSTANTS_V1
+};
+
+/// The active calibration used by the production inline score and the batch
+/// re-score route. Bumping the active version touches this one line.
+pub const CREDIT_QUALITY_ACTIVE: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V2;
 
 /// Result of scoring one decision row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +81,30 @@ fn saturating_term(value_micros: i64, floor_micros: i64, ceil_micros: i64) -> f6
     ((1.0 + x).ln() / (1.0 + span).ln()).clamp(0.0, 1.0)
 }
 
+/// Apply a graded (affine) floor to a `[0,1]` saturating-term value:
+/// `floor_mult + (1 - floor_mult) * sat`. `floor_mult == 0` is the identity
+/// (hard-zero, V1 behavior); a below-floor signal yields `floor_mult` instead of
+/// 0 while a ceiling-saturated signal still yields 1.0. Monotonicity and
+/// concavity of `sat` are preserved.
+fn graded_floor(sat: f64, floor_mult_micros: i64) -> f64 {
+    let floor_mult = (floor_mult_micros as f64 / 1_000_000.0).clamp(0.0, 1.0);
+    floor_mult + (1.0 - floor_mult) * sat
+}
+
 pub fn credit_quality(
     ppl_rep_micros: i64,
     ppl_peak_micros: i64,
     nov_rep_micros: i64,
     k: &CreditQualityConstants,
 ) -> CreditQualityScore {
-    let f = saturating_term(ppl_rep_micros, k.ppl_floor_micros, k.ppl_ceil_micros);
-    let g = saturating_term(nov_rep_micros, k.nov_floor_micros, k.nov_ceil_micros);
+    let f = graded_floor(
+        saturating_term(ppl_rep_micros, k.ppl_floor_micros, k.ppl_ceil_micros),
+        k.ppl_floor_mult_micros,
+    );
+    let g = graded_floor(
+        saturating_term(nov_rep_micros, k.nov_floor_micros, k.nov_ceil_micros),
+        k.nov_floor_mult_micros,
+    );
 
     // Spikiness ratio r = peak / rep (real units); rep <= 0 -> ratio 1.0 (no signal).
     let (ratio, anomaly_ratio_micros) = if ppl_rep_micros <= 0 {
@@ -201,6 +245,97 @@ mod tests {
             genuine > parasite,
             "genuine {genuine} !> parasite {parasite}"
         );
+    }
+
+    // ---- V2 (graded affine floor) ----
+    const K2: CreditQualityConstants = CREDIT_QUALITY_CONSTANTS_V2;
+
+    #[test]
+    fn v1_floor_mults_are_zero_so_v2_formula_reproduces_v1() {
+        // With floor_mult == 0 the affine wrapper is the identity, so V1
+        // scores must be byte-identical to the pre-V2 hard-zero behavior.
+        assert_eq!(K.ppl_floor_mult_micros, 0);
+        assert_eq!(K.nov_floor_mult_micros, 0);
+        // below-floor still zeroes under V1
+        assert_eq!(credit_quality(m(5.9), m(6.0), m(0.9), &K).q_micros, 0);
+        assert_eq!(credit_quality(m(20.0), m(21.0), m(0.49), &K).q_micros, 0);
+    }
+
+    #[test]
+    fn v2_graded_floor_lifts_below_floor_off_zero() {
+        // A non-anomalous trace below BOTH floors scores the product of the two
+        // floor multipliers, not zero: 0.25 * 0.30 = 0.075 -> 75_000 micros.
+        let s = credit_quality(m(5.0), m(5.0), m(0.4), &K2);
+        assert_eq!(
+            s.q_micros, 75_000,
+            "expected floor product, got {}",
+            s.q_micros
+        );
+        assert!(!s.anomaly_withheld);
+    }
+
+    #[test]
+    fn v2_saturates_to_one_at_ceilings() {
+        // both signals at/above ceiling, low spikiness -> still exactly 1.0
+        let s = credit_quality(
+            K2.ppl_ceil_micros,
+            K2.ppl_ceil_micros,
+            K2.nov_ceil_micros,
+            &K2,
+        );
+        assert_eq!(s.q_micros, 1_000_000);
+    }
+
+    #[test]
+    fn v2_anomaly_still_hard_zeroes() {
+        // Even with softened floors, the hard spikiness ratio zeroes q and flags.
+        let hard_r = (K2.anomaly_hard_ratio_micros as f64 / 1_000_000.0) + 1.0;
+        let s = credit_quality(m(7.0), m(7.0 * hard_r), m(0.9), &K2);
+        assert_eq!(s.q_micros, 0);
+        assert!(s.anomaly_withheld);
+    }
+
+    #[test]
+    fn v2_monotonic_and_concave_in_perplexity() {
+        let q = |p: f64| credit_quality(m(p), m(p), m(0.9), &K2).q_micros;
+        assert!(q(12.0) >= q(8.0), "monotonic");
+        let d1 = q(10.0) - q(8.0);
+        let d2 = q(12.0) - q(10.0);
+        assert!(d2 <= d1, "expected concavity: d1={d1} d2={d2}");
+    }
+
+    #[test]
+    fn v2_genuine_beats_every_gamed_variant() {
+        // The anti-gaming sanity check must still hold under the softened floors.
+        let genuine = credit_quality(m(15.0), m(18.0), m(0.85), &K2).q_micros;
+        let pump = credit_quality(m(1642.0), m(1642.0), m(0.51), &K2).q_micros;
+        let shim = credit_quality(m(6.2), m(6.4), m(0.99), &K2).q_micros;
+        let parasite = credit_quality(m(6.5), m(120.0), m(0.85), &K2).q_micros;
+        assert!(genuine > pump, "genuine {genuine} !> pump {pump}");
+        assert!(genuine > shim, "genuine {genuine} !> shim {shim}");
+        assert!(
+            genuine > parasite,
+            "genuine {genuine} !> parasite {parasite}"
+        );
+    }
+
+    #[test]
+    fn v2_property_monotonic_and_bounded() {
+        let novs = [m(0.2), m(0.6), m(1.0)];
+        for &nov in &novs {
+            let mut prev = -1i64;
+            let mut p = 0.0_f64;
+            while p <= 60.0 {
+                let q = credit_quality(m(p), m(p), nov, &K2).q_micros;
+                assert!((0..=1_000_000).contains(&q), "q out of range: {q}");
+                assert!(
+                    q >= prev,
+                    "not monotonic at p={p} nov={nov}: {prev} then {q}"
+                );
+                prev = q;
+                p += 0.5;
+            }
+        }
     }
 
     // Property-based layer (loop-sampled, no new dependency).
