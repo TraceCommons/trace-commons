@@ -5,6 +5,7 @@ pub mod account_passkey;
 pub mod account_session;
 pub mod audit_chain;
 pub mod config;
+pub mod contributor_cap;
 pub mod credit_quality;
 pub mod db;
 pub mod dedup_assign;
