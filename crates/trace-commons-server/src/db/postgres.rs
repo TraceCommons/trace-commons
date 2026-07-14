@@ -3802,6 +3802,45 @@ impl Database for PgBackend {
             })
             .collect())
     }
+
+    async fn list_contributor_cap_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::ContributorCapSignalRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions and
+        // submissions. Ordered by (auth_principal_ref, decided_at) so the recompute
+        // pass groups per contributor and forward-accumulates in time order.
+        let rows = client
+            .query(
+                "SELECT d.tenant_id, d.decision_id, s.auth_principal_ref,
+                        d.decided_at, d.credit_quality_micros, d.dedup_cluster_size
+                 FROM trace_gate_decisions d
+                 JOIN trace_submissions s
+                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                 ORDER BY s.auth_principal_ref ASC, d.decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::ContributorCapSignalRow {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                auth_principal_ref: row.get("auth_principal_ref"),
+                decided_at: row.get("decided_at"),
+                credit_quality_micros: row.get("credit_quality_micros"),
+                dedup_cluster_size: row.get("dedup_cluster_size"),
+            })
+            .collect())
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

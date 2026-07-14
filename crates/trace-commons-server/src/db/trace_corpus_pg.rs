@@ -5612,6 +5612,41 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_contributor_cap(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        factor_micros: i32,
+        cumulative_raw_micros: i64,
+        epoch: i64,
+        version: i32,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the four contributor-cap columns on exactly this decision
+        // row. Perplexity, novelty, dedup, gate status, and credit are untouched.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET contributor_factor_micros = $3,
+                    contributor_cumulative_raw_micros = $4,
+                    contributor_cap_epoch = $5,
+                    contributor_cap_version = $6
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[
+                &tenant_id,
+                &decision_id,
+                &factor_micros,
+                &cumulative_raw_micros,
+                &epoch,
+                &version,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn bump_gate_evaluation_attempt(
         &self,
         tenant_id: &str,
