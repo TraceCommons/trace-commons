@@ -6843,6 +6843,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route(
+            "/v1/admin/recompute-contributor-caps",
+            post(recompute_contributor_caps_handler),
+        )
+        .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
         )
@@ -45920,6 +45924,141 @@ async fn recluster_dedup_handler(
         }
     });
     Ok(Json(ReclusterDedupAck {
+        accepted: true,
+        limit,
+    }))
+}
+
+/// Query params for the per-contributor cap recompute batch admin route.
+/// `limit` bounds a run (useful for a `?limit=5` pilot smoke before a full
+/// pass); absent means the whole decision backlog.
+#[derive(Debug, Deserialize)]
+struct RecomputeContributorCapsQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the contributor-cap recompute batch admin
+/// route. The work runs in a spawned background task; the route returns
+/// immediately.
+#[derive(Debug, Serialize)]
+struct RecomputeContributorCapsAck {
+    accepted: bool,
+    limit: Option<i64>,
+}
+
+/// Running tally for one contributor-cap recompute batch pass.
+#[derive(Debug, Default)]
+struct RecomputeContributorCapsSummary {
+    updated: u64,
+    failed: u64,
+}
+
+/// One full per-contributor cap recompute pass. A single forward sweep over the
+/// gate-driver enumeration (already ordered by `auth_principal_ref, decided_at`)
+/// accumulates in-epoch `R` per `(auth_principal_ref, epoch_index)`, resetting at
+/// each contributor or epoch boundary, and writes each decision's marginal
+/// factor + cumulative snapshot. Each factor depends only on prior in-epoch
+/// decisions, so one pass is correct (no dedup-style second pass).
+async fn run_recompute_contributor_caps_pass(
+    state: Arc<AppState>,
+    limit: Option<i64>,
+) -> anyhow::Result<RecomputeContributorCapsSummary> {
+    use trace_commons_server::contributor_cap as cap;
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("contributor-cap recompute requires a configured DB mirror")
+    })?;
+    let effective_limit = limit.unwrap_or(i64::MAX).max(0);
+    let rows = db.list_contributor_cap_signals(effective_limit).await?;
+    let k = &cap::CONTRIBUTOR_CAP_CONSTANTS_V1;
+
+    let mut summary = RecomputeContributorCapsSummary::default();
+    // Group key = (auth_principal_ref, epoch_index); reset R when it changes.
+    let mut cur_key: Option<(String, i64)> = None;
+    let mut r_before: i64 = 0;
+    for row in &rows {
+        let epoch = cap::epoch_index(row.decided_at.timestamp(), k.epoch_days);
+        let key = (row.auth_principal_ref.clone(), epoch);
+        if cur_key.as_ref() != Some(&key) {
+            cur_key = Some(key);
+            r_before = 0;
+        }
+        let r = cap::increment_micros(row.credit_quality_micros, row.dedup_cluster_size);
+        let factor = cap::contributor_factor_micros(r_before, r, k);
+        let cumulative = r_before.saturating_add(r);
+        let factor_i32 = i32::try_from(factor).unwrap_or(i32::MAX);
+        match db
+            .update_trace_gate_decision_contributor_cap(
+                &row.tenant_id,
+                row.decision_id,
+                factor_i32,
+                cumulative,
+                epoch,
+                k.version,
+            )
+            .await
+        {
+            Ok(()) => {
+                summary.updated += 1;
+                r_before = cumulative;
+            }
+            Err(error) => {
+                summary.failed += 1;
+                // Do NOT advance r_before on a failed write: the snapshot for
+                // this decision was not persisted, so later decisions in the
+                // group must accumulate as if this one is retried next pass.
+                tracing::warn!(
+                    tenant_hash = %sha256_prefixed(&row.tenant_id),
+                    decision_hash = %sha256_prefixed(&row.decision_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "shadow contributor-cap recompute skipped one decision"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Admin route: trigger a batch backfill/recompute of per-contributor cap
+/// factors and cumulative-total snapshots over the whole corpus.
+///
+/// Auth: reuses the admin bearer credential (`require_admin`), matching the
+/// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
+/// a background task and returns a hash-only ack immediately. An optional
+/// `?limit=N` bounds the run.
+async fn recompute_contributor_caps_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RecomputeContributorCapsQuery>,
+) -> ApiResult<Json<RecomputeContributorCapsAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "contributor-cap recompute requires a configured DB mirror",
+        ));
+    }
+    let limit = query.limit;
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_recompute_contributor_caps_pass(task_state, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    updated = summary.updated,
+                    failed = summary.failed,
+                    "Trace Commons contributor-cap recompute pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons contributor-cap recompute pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(RecomputeContributorCapsAck {
         accepted: true,
         limit,
     }))
