@@ -64459,9 +64459,14 @@ impl Database for PerplexityDriverTestDb {
                     )
                 })
                 .collect();
+        // Mirror the pg enumeration's ordering, including the decision_id
+        // tiebreaker, so tied decided_at values sort deterministically.
         rows.sort_by(|a, b| {
-            (a.auth_principal_ref.as_str(), a.decided_at)
-                .cmp(&(b.auth_principal_ref.as_str(), b.decided_at))
+            (a.auth_principal_ref.as_str(), a.decided_at, a.decision_id).cmp(&(
+                b.auth_principal_ref.as_str(),
+                b.decided_at,
+                b.decision_id,
+            ))
         });
         rows.truncate(limit);
         Ok(rows)

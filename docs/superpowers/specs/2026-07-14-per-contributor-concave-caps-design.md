@@ -53,8 +53,13 @@ contributor_factor · reputation`). Kept out of #3 so each slice is one concept;
 ## The concave cap
 
 A contributor's cumulative "raw" credit **within the current epoch** is
-`R = Σ(q · dup_pen)` over their accepted decisions in that epoch. Effective
-credit is a saturating concave function of `R`:
+`R = Σ(q · dup_pen)` over their scored decisions in that epoch. Consistent with
+the #1 credit-quality and #2 dedup enumerations, this is **not** filtered by
+submission acceptance status — every scored decision contributes. A
+gate-rejected trace has low `q` (it fails the perplexity/novelty floors), so it
+adds little to `R`, and its own `contributor_factor` is moot since a rejected
+trace earns no base credit to multiply. Effective credit is a saturating concave
+function of `R`:
 
 ```
 effective(R) = K · (1 − exp(−R / K))

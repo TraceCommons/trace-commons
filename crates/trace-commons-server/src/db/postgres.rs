@@ -3823,7 +3823,11 @@ impl Database for PgBackend {
                  FROM trace_gate_decisions d
                  JOIN trace_submissions s
                    ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
-                 ORDER BY s.auth_principal_ref ASC, d.decided_at ASC
+                 -- decision_id is the final, unique tiebreaker so decisions
+                 -- with an identical decided_at within a contributor sort
+                 -- deterministically; the forward pass then assigns each row a
+                 -- stable factor/cumulative across idempotent re-runs.
+                 ORDER BY s.auth_principal_ref ASC, d.decided_at ASC, d.decision_id ASC
                  LIMIT $1",
                 &[&limit],
             )
