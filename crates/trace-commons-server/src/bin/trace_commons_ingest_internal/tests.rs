@@ -63205,6 +63205,18 @@ struct DecisionRowWithDedup {
     dedup_cluster_size: Option<i32>,
 }
 
+/// Test-only combined view of a `trace_gate_decisions` row plus its
+/// per-contributor cap columns (migration V41), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_contributor_cap_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithContributorCap {
+    row: StorageTraceGateDecisionRow,
+    contributor_factor_micros: Option<i32>,
+    contributor_cumulative_raw_micros: Option<i64>,
+    contributor_cap_epoch: Option<i64>,
+    contributor_cap_version: Option<i32>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -63239,6 +63251,15 @@ struct PerplexityDriverTestDb {
     /// isolation test can assert the base row is byte-identical before and
     /// after the dedup write.
     dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
+    /// Per-contributor cap snapshots written by
+    /// `update_trace_gate_decision_contributor_cap`, keyed by `(tenant_id,
+    /// decision_id)`. Kept as a side table (like `dedup`) rather than fields
+    /// on `StorageTraceGateDecisionRow` itself, so the isolation test can
+    /// assert the base row is byte-identical before and after the
+    /// contributor-cap write. Tuple is `(factor_micros, cumulative_raw_micros,
+    /// epoch, version)`.
+    contributor_cap:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, i64, i64, i32)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63252,6 +63273,7 @@ impl PerplexityDriverTestDb {
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
             dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
+            contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -63383,6 +63405,80 @@ impl PerplexityDriverTestDb {
             dedup_cluster_id: dedup.map(|(_, c, _)| c),
             dedup_cluster_size: dedup.map(|(_, _, s)| s),
         })
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any per-contributor cap snapshot recorded
+    /// for it — used by the contributor-cap isolation test to assert the base
+    /// row is byte-identical before and after the contributor-cap write.
+    fn gate_decision_with_contributor_cap_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithContributorCap> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let cap = self
+            .contributor_cap
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithContributorCap {
+            row,
+            contributor_factor_micros: cap.map(|(f, _, _, _)| f),
+            contributor_cumulative_raw_micros: cap.map(|(_, c, _, _)| c),
+            contributor_cap_epoch: cap.map(|(_, _, e, _)| e),
+            contributor_cap_version: cap.map(|(_, _, _, v)| v),
+        })
+    }
+
+    /// Seed a `trace_submissions` row carrying `auth_principal_ref`, keyed by
+    /// `(tenant_id, submission_id)`, WITHOUT registering it in the ungated
+    /// backlog. Used alongside `seed_gate_decision` by the contributor-cap
+    /// tests, which need `list_contributor_cap_signals`'s join to resolve an
+    /// identity for each already-decided submission.
+    fn seed_submission_with_principal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        auth_principal_ref: &str,
+    ) {
+        let now = Utc::now();
+        self.submissions.write().unwrap().insert(
+            (tenant_id.to_string(), submission_id),
+            StorageTraceSubmissionRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                status: StorageTraceCorpusStatus::Accepted,
+                auth_principal_ref: auth_principal_ref.to_string(),
+                contributor_pseudonym: Some("contributor-cap-test-pseudonym".to_string()),
+                submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+                schema_version: "trace_contribution.v1".to_string(),
+                consent_policy_version: "trace-consent-v1".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["evaluation".to_string()],
+                retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+                privacy_risk: "low".to_string(),
+                redaction_pipeline_version: "test-redactor-v1".to_string(),
+                redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+                redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+                canonical_summary_hash: None,
+                submission_score: None,
+                credit_points_pending: None,
+                credit_points_final: None,
+                received_at: now,
+                updated_at: now,
+                reviewed_at: None,
+                review_assigned_to_principal_ref: None,
+                review_assigned_at: None,
+                review_lease_expires_at: None,
+                review_due_at: None,
+                revoked_at: None,
+                expires_at: None,
+                purged_at: None,
+            },
+        );
     }
 
     /// Current recorded attempt count for `(tenant_id, submission_id)`, as
@@ -64138,6 +64234,27 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         );
         Ok(())
     }
+    /// In-memory analogue of the Postgres
+    /// `update_trace_gate_decision_contributor_cap` impl: record the four
+    /// contributor-cap values in a side table keyed by `(tenant_id,
+    /// decision_id)`, exactly like the real backend's UPDATE, without
+    /// touching the stored `StorageTraceGateDecisionRow` at all — so
+    /// isolation is structural, not just asserted.
+    async fn update_trace_gate_decision_contributor_cap(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        factor_micros: i32,
+        cumulative_raw_micros: i64,
+        epoch: i64,
+        version: i32,
+    ) -> Result<(), DatabaseError> {
+        self.contributor_cap.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (factor_micros, cumulative_raw_micros, epoch, version),
+        );
+        Ok(())
+    }
     /// Overrides the default "not implemented for this backend" error so
     /// CI-running (non-PG) tests can exercise `score_one_submission`'s
     /// failed-scorer cost-control branch: increments and records the
@@ -64294,6 +64411,65 @@ impl Database for PerplexityDriverTestDb {
                 }
             })
             .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_contributor_cap_signals`
+    /// enumeration: joins each decision row to its seeded submission's
+    /// `auth_principal_ref` (decisions with no matching seeded submission are
+    /// dropped — the real backend's `JOIN` has no unmatched-row behavior
+    /// either), pulls `credit_quality_micros` / `dedup_cluster_size` from
+    /// their respective side tables, and orders the result by
+    /// `(auth_principal_ref, decided_at)` before applying `limit` — matching
+    /// the real backend's `ORDER BY ... LIMIT`.
+    async fn list_contributor_cap_signals(
+        &self,
+        limit: i64,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::ContributorCapSignalRow>,
+        DatabaseError,
+    > {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let credit = self.credit_quality_scores.read().unwrap();
+        let dedup = self.dedup.read().unwrap();
+        let submissions = self.submissions.read().unwrap();
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::ContributorCapSignalRow> =
+            self.gate_decisions
+                .read()
+                .unwrap()
+                .iter()
+                .filter_map(|(tenant_id, row)| {
+                    let auth_principal_ref = submissions
+                        .get(&(tenant_id.clone(), row.submission_id))
+                        .map(|s| s.auth_principal_ref.clone())?;
+                    let credit_quality_micros = credit
+                        .get(&(tenant_id.clone(), row.decision_id))
+                        .map(|(q, _, _)| *q);
+                    let dedup_cluster_size = dedup
+                        .get(&(tenant_id.clone(), row.decision_id))
+                        .map(|(_, _, s)| *s);
+                    Some(
+                        trace_commons_server::trace_corpus_storage::ContributorCapSignalRow {
+                            tenant_id: tenant_id.clone(),
+                            decision_id: row.decision_id,
+                            auth_principal_ref,
+                            decided_at: row.decided_at,
+                            credit_quality_micros,
+                            dedup_cluster_size,
+                        },
+                    )
+                })
+                .collect();
+        // Mirror the pg enumeration's ordering, including the decision_id
+        // tiebreaker, so tied decided_at values sort deterministically.
+        rows.sort_by(|a, b| {
+            (a.auth_principal_ref.as_str(), a.decided_at, a.decision_id).cmp(&(
+                b.auth_principal_ref.as_str(),
+                b.decided_at,
+                b.decision_id,
+            ))
+        });
+        rows.truncate(limit);
+        Ok(rows)
     }
 }
 
@@ -65309,6 +65485,375 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
     assert_eq!(
         credit_after.credit_quality_micros, None,
         "recluster pass must never touch the credit-quality side table"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Task 4 (contributor-cap slice): `run_recompute_contributor_caps_pass` tests
+// -----------------------------------------------------------------------
+
+/// Cross-tenant: the SAME `auth_principal_ref` submitting through two
+/// DIFFERENT tenants in the SAME epoch shares ONE per-epoch running total.
+/// Decision 2 accumulates on top of decision 1's `r`, so its marginal factor
+/// must be strictly smaller than decision 1's, and its cumulative snapshot
+/// must equal `r1 + r2`.
+#[tokio::test]
+async fn recompute_contributor_caps_shares_running_total_across_tenants() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let shared_principal = "shared-contributor-cross-tenant";
+    let now = Utc::now();
+
+    let mut row_1 = rescore_test_decision_row(Uuid::new_v4());
+    row_1.decided_at = now;
+    let mut row_2 = rescore_test_decision_row(Uuid::new_v4());
+    row_2.decided_at = now + chrono::Duration::seconds(60);
+
+    db.seed_submission_with_principal("tenant-a", row_1.submission_id, shared_principal);
+    db.seed_submission_with_principal("tenant-b", row_2.submission_id, shared_principal);
+    db.seed_gate_decision("tenant-a", row_1.clone());
+    db.seed_gate_decision("tenant-b", row_2.clone());
+
+    // Sizable raw increment (q = 0.8, no dedup penalty) for both decisions,
+    // pushing the running total well into the concave region so the second
+    // decision's marginal factor is visibly smaller than the first's.
+    db.update_trace_gate_decision_credit_quality("tenant-a", row_1.decision_id, 800_000, 0, 1)
+        .await
+        .expect("seed row_1 credit quality");
+    db.update_trace_gate_decision_credit_quality("tenant-b", row_2.decision_id, 800_000, 0, 1)
+        .await
+        .expect("seed row_2 credit quality");
+
+    let summary = run_recompute_contributor_caps_pass(state.clone(), None)
+        .await
+        .expect("recompute pass succeeds");
+    assert_eq!(summary.updated, 2, "both rows must be updated: {summary:?}");
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_1 = db
+        .gate_decision_with_contributor_cap_by_id("tenant-a", row_1.decision_id)
+        .expect("row_1 present");
+    let after_2 = db
+        .gate_decision_with_contributor_cap_by_id("tenant-b", row_2.decision_id)
+        .expect("row_2 present");
+
+    let factor_1 = after_1
+        .contributor_factor_micros
+        .expect("row_1 factor written");
+    let factor_2 = after_2
+        .contributor_factor_micros
+        .expect("row_2 factor written");
+    assert!(
+        factor_2 < factor_1,
+        "second decision for the SAME principal across tenants must have a \
+         strictly smaller marginal factor: factor_1={factor_1} factor_2={factor_2}"
+    );
+
+    let cumulative_1 = after_1
+        .contributor_cumulative_raw_micros
+        .expect("row_1 cumulative written");
+    let cumulative_2 = after_2
+        .contributor_cumulative_raw_micros
+        .expect("row_2 cumulative written");
+    assert_eq!(cumulative_1, 800_000, "row_1 cumulative == r1 (R_before=0)");
+    assert_eq!(
+        cumulative_2, 1_600_000,
+        "row_2 cumulative == r1 + r2, shared running total across tenants"
+    );
+}
+
+/// Epoch reset: two decisions for ONE principal in DIFFERENT 7-day epochs
+/// each start from `R_before = 0`, so both get a marginal factor near 1.0
+/// (~1_000_000 micros) regardless of order.
+#[tokio::test]
+async fn recompute_contributor_caps_resets_each_epoch() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let principal = "epoch-reset-contributor";
+    // Epoch-align to unix epoch 0 so the 8-day gap unambiguously crosses a
+    // 7-day epoch boundary regardless of "now"'s phase within its epoch.
+    let epoch0_anchor = DateTime::<Utc>::from_timestamp(0, 0).expect("valid timestamp");
+
+    let mut row_1 = rescore_test_decision_row(Uuid::new_v4());
+    row_1.decided_at = epoch0_anchor + chrono::Duration::hours(1);
+    let mut row_2 = rescore_test_decision_row(Uuid::new_v4());
+    row_2.decided_at = epoch0_anchor + chrono::Duration::days(8);
+
+    db.seed_submission_with_principal("tenant-a", row_1.submission_id, principal);
+    db.seed_submission_with_principal("tenant-a", row_2.submission_id, principal);
+    db.seed_gate_decision("tenant-a", row_1.clone());
+    db.seed_gate_decision("tenant-a", row_2.clone());
+
+    // Modest raw increment: r = 0.1 for both, well within the near-linear
+    // region so a fresh-epoch factor should read close to 1.0.
+    db.update_trace_gate_decision_credit_quality("tenant-a", row_1.decision_id, 100_000, 0, 1)
+        .await
+        .expect("seed row_1 credit quality");
+    db.update_trace_gate_decision_credit_quality("tenant-a", row_2.decision_id, 100_000, 0, 1)
+        .await
+        .expect("seed row_2 credit quality");
+
+    let summary = run_recompute_contributor_caps_pass(state.clone(), None)
+        .await
+        .expect("recompute pass succeeds");
+    assert_eq!(summary.updated, 2, "both rows must be updated: {summary:?}");
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_1 = db
+        .gate_decision_with_contributor_cap_by_id("tenant-a", row_1.decision_id)
+        .expect("row_1 present");
+    let after_2 = db
+        .gate_decision_with_contributor_cap_by_id("tenant-a", row_2.decision_id)
+        .expect("row_2 present");
+
+    assert_ne!(
+        after_1.contributor_cap_epoch, after_2.contributor_cap_epoch,
+        "an 8-day gap must cross a 7-day epoch boundary"
+    );
+    let factor_1 = after_1
+        .contributor_factor_micros
+        .expect("row_1 factor written");
+    let factor_2 = after_2
+        .contributor_factor_micros
+        .expect("row_2 factor written");
+    assert!(
+        factor_1 > 990_000,
+        "row_1 is first-in-epoch, expected near-1.0, got {factor_1}"
+    );
+    assert!(
+        factor_2 > 990_000,
+        "row_2 resets into a fresh epoch, expected near-1.0, got {factor_2}"
+    );
+}
+
+/// Column isolation: capture a decision's `credit_quality_micros`,
+/// `dedup_cluster_size`, and gate-status fields before running the pass;
+/// assert those are byte-identical after and only the `contributor_*`
+/// columns changed.
+#[tokio::test]
+async fn recompute_contributor_caps_touches_only_contributor_columns() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let row = rescore_test_decision_row(Uuid::new_v4());
+    db.seed_submission_with_principal(
+        "tenant-a",
+        row.submission_id,
+        "column-isolation-contributor",
+    );
+    db.seed_gate_decision("tenant-a", row.clone());
+    db.update_trace_gate_decision_credit_quality("tenant-a", row.decision_id, 500_000, 12_345, 3)
+        .await
+        .expect("seed credit quality");
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        row.decision_id,
+        0x1111_2222_3333_4444,
+        Uuid::new_v4(),
+        2,
+    )
+    .await
+    .expect("seed dedup");
+
+    let before = db
+        .gate_decision_with_contributor_cap_by_id("tenant-a", row.decision_id)
+        .expect("row present before pass");
+    assert_eq!(
+        before.contributor_factor_micros, None,
+        "contributor-cap columns are unset before the pass runs"
+    );
+
+    let summary = run_recompute_contributor_caps_pass(state.clone(), None)
+        .await
+        .expect("recompute pass succeeds");
+    assert_eq!(summary.updated, 1, "one row must be updated: {summary:?}");
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after = db
+        .gate_decision_with_contributor_cap_by_id("tenant-a", row.decision_id)
+        .expect("row present after pass");
+
+    // Only the contributor_* columns changed.
+    assert!(
+        after.contributor_factor_micros.is_some(),
+        "contributor_factor_micros must be written"
+    );
+    assert!(
+        after.contributor_cumulative_raw_micros.is_some(),
+        "contributor_cumulative_raw_micros must be written"
+    );
+    assert!(
+        after.contributor_cap_epoch.is_some(),
+        "contributor_cap_epoch must be written"
+    );
+    assert_eq!(
+        after.contributor_cap_version,
+        Some(trace_commons_server::contributor_cap::CONTRIBUTOR_CAP_CONSTANTS_V1.version),
+        "contributor_cap_version stamps the current constants version"
+    );
+
+    // Everything else is byte-identical.
+    assert_eq!(
+        after.row, before.row,
+        "the base decision row must be untouched"
+    );
+    let credit_after = db
+        .gate_decision_with_credit_quality_by_id("tenant-a", row.decision_id)
+        .expect("credit-quality side table present");
+    assert_eq!(
+        credit_after.credit_quality_micros,
+        Some(500_000),
+        "credit-quality side table must be untouched by the contributor-cap pass"
+    );
+    assert_eq!(
+        credit_after.credit_quality_anomaly_ratio_micros,
+        Some(12_345)
+    );
+    assert_eq!(credit_after.credit_quality_calibration_version, Some(3));
+    let dedup_after = db
+        .gate_decision_with_dedup_by_id("tenant-a", row.decision_id)
+        .expect("dedup side table present");
+    assert_eq!(
+        dedup_after.dedup_cluster_size,
+        Some(2),
+        "dedup side table must be untouched by the contributor-cap pass"
+    );
+}
+
+/// Anti-farm end to end: a single principal floods many low-quality
+/// decisions inside one epoch. The pass must keep the epoch's total
+/// effective credit (`sum(r * factor) / 1e6`) bounded by K, and the last
+/// decision's marginal factor must be much smaller than the first's —
+/// the concave cap saturating exactly as `contributor_cap`'s own unit tests
+/// prove for the underlying math, now exercised end to end through the pass.
+#[tokio::test]
+async fn recompute_contributor_caps_bounds_epoch_total_by_k() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let principal = "anti-farm-contributor";
+    let now = Utc::now();
+    let epoch = trace_commons_server::contributor_cap::epoch_index(
+        now.timestamp(),
+        trace_commons_server::contributor_cap::CONTRIBUTOR_CAP_CONSTANTS_V1.epoch_days,
+    );
+
+    // Flood 200 decisions of r = 0.2 each (R_final = 40, comfortably past
+    // K = 25), all within the same epoch, strictly increasing decided_at so
+    // enumeration order is deterministic.
+    const N: i64 = 200;
+    const R_MICROS: i64 = 200_000; // 0.2
+    let mut decision_ids = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let mut row = rescore_test_decision_row(Uuid::new_v4());
+        row.decided_at = now + chrono::Duration::seconds(i);
+        db.seed_submission_with_principal("tenant-a", row.submission_id, principal);
+        db.seed_gate_decision("tenant-a", row.clone());
+        db.update_trace_gate_decision_credit_quality("tenant-a", row.decision_id, R_MICROS, 0, 1)
+            .await
+            .expect("seed credit quality");
+        decision_ids.push(row.decision_id);
+    }
+
+    let summary = run_recompute_contributor_caps_pass(state.clone(), None)
+        .await
+        .expect("recompute pass succeeds");
+    assert_eq!(
+        summary.updated, N as u64,
+        "every flooded row must be updated: {summary:?}"
+    );
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let k = trace_commons_server::contributor_cap::CONTRIBUTOR_CAP_CONSTANTS_V1.k_micros as f64
+        / 1_000_000.0;
+    let mut total_effective = 0.0f64;
+    let mut factors = Vec::with_capacity(decision_ids.len());
+    for decision_id in &decision_ids {
+        let after = db
+            .gate_decision_with_contributor_cap_by_id("tenant-a", *decision_id)
+            .expect("row present");
+        assert_eq!(
+            after.contributor_cap_epoch,
+            Some(epoch),
+            "every flooded row must land in the same epoch bucket"
+        );
+        let factor = after.contributor_factor_micros.expect("factor written") as f64 / 1_000_000.0;
+        total_effective += (R_MICROS as f64 / 1_000_000.0) * factor;
+        factors.push(factor);
+    }
+
+    assert!(
+        total_effective <= k + 1e-6,
+        "epoch total effective credit {total_effective} must be <= K {k}"
+    );
+    let first_factor = factors[0];
+    let last_factor = factors[factors.len() - 1];
+    assert!(
+        last_factor < first_factor * 0.3,
+        "last decision's factor must be much smaller than the first's: \
+         first={first_factor} last={last_factor}"
     );
 }
 

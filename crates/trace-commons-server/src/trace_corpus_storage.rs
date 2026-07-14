@@ -1855,6 +1855,20 @@ pub struct DedupSignalRow {
     pub dedup_simhash: Option<i64>,
 }
 
+/// One row for the per-contributor cap recompute pass. Cross-tenant by
+/// construction (enumerated on the gate-driver pool), joining each decision to
+/// its submission for the contributor identity (`auth_principal_ref`). The pass
+/// derives `r = q * dup_pen` and the epoch bucket from these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributorCapSignalRow {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub auth_principal_ref: String,
+    pub decided_at: DateTime<Utc>,
+    pub credit_quality_micros: Option<i64>,
+    pub dedup_cluster_size: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2486,6 +2500,30 @@ pub trait TraceCorpusStore: Send + Sync {
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_dedup called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the four contributor-cap columns (migration V41) for the
+    /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
+    /// novelty, dedup, gate status, and credit are left untouched.
+    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
+    /// log-once warning + no-op so a backend without a real impl cannot
+    /// silently drop the write.
+    async fn update_trace_gate_decision_contributor_cap(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _factor_micros: i32,
+        _cumulative_raw_micros: i64,
+        _epoch: i64,
+        _version: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_contributor_cap called on a backend without a real impl"
             );
         });
         Ok(())
