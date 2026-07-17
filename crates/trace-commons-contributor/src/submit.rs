@@ -46,6 +46,39 @@ pub struct SubmitOptions {
     pub pii_filter: Option<String>,
 }
 
+/// One entry in a `submit --manifest` file: an envelope id that reached the
+/// server, for handing to an external collector (e.g. devfolio).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManifestEntry {
+    pub submission_id: Uuid,
+    pub status: String,
+}
+
+/// Envelope ids that reached the server, for handing to an external
+/// collector (e.g. devfolio). Includes freshly submitted and
+/// already-submitted traces; skips refused/failed/skipped outcomes.
+pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
+    outcomes
+        .iter()
+        .filter_map(|o| match o {
+            SubmitOutcome::Submitted {
+                submission_id,
+                status,
+            } => Some(ManifestEntry {
+                submission_id: *submission_id,
+                status: status.clone(),
+            }),
+            SubmitOutcome::AlreadySubmitted { submission_id } => Some(ManifestEntry {
+                submission_id: *submission_id,
+                status: "already-submitted".to_string(),
+            }),
+            SubmitOutcome::SkippedParseFailure { .. }
+            | SubmitOutcome::Refused { .. }
+            | SubmitOutcome::Failed { .. } => None,
+        })
+        .collect()
+}
+
 /// Redact-and-upload every selected session. Sessions are independent: one
 /// session's failure never aborts the batch. The one exception is the
 /// once-per-batch privacy-filter canary self-test, which is a fail-closed
@@ -1187,4 +1220,70 @@ mod tests {
         assert!(store.load_receipts().unwrap().is_empty());
     }
 
+    #[test]
+    fn build_manifest_includes_only_delivered_ids() {
+        let u1 = Uuid::new_v4();
+        let u2 = Uuid::new_v4();
+        let outcomes = vec![
+            SubmitOutcome::Submitted {
+                submission_id: u1,
+                status: "submitted".to_string(),
+            },
+            SubmitOutcome::AlreadySubmitted { submission_id: u2 },
+            SubmitOutcome::Refused {
+                reason_label: "secret-leak-detected".to_string(),
+            },
+            SubmitOutcome::Failed {
+                reason_label: "claim-mint-failed".to_string(),
+            },
+            SubmitOutcome::SkippedParseFailure {
+                reason_label: "parse-failed".to_string(),
+            },
+        ];
+
+        let manifest = build_manifest(&outcomes);
+
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0].submission_id, u1);
+        assert_eq!(manifest[0].status, "submitted");
+        assert_eq!(manifest[1].submission_id, u2);
+        assert_eq!(manifest[1].status, "already-submitted");
+    }
+
+    #[tokio::test]
+    async fn submit_sessions_outcomes_round_trip_through_manifest_file() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+
+        let entries = build_manifest(&outcomes);
+        let manifest_path = tempfile::NamedTempFile::new().unwrap();
+        let json = serde_json::to_string_pretty(&entries).unwrap();
+        std::fs::write(manifest_path.path(), json).unwrap();
+
+        let read_back = std::fs::read_to_string(manifest_path.path()).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&read_back).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let SubmitOutcome::Submitted { submission_id, .. } = &outcomes[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            parsed[0]["submission_id"],
+            serde_json::Value::String(submission_id.to_string())
+        );
+        assert_eq!(parsed[0]["status"], "accepted");
+    }
 }

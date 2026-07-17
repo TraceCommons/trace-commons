@@ -346,6 +346,7 @@ pub struct SubmitSelection<'a> {
     pub yes: bool,
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
+    pub manifest: Option<&'a Path>,
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
@@ -408,6 +409,14 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         pii_filter: sel.pii_filter.map(str::to_string),
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
+
+    if let Some(path) = sel.manifest {
+        let entries = submit::build_manifest(&outcomes);
+        let json = serde_json::to_string_pretty(&entries).context("serializing manifest")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("writing manifest to {}", path.display()))?;
+        println!("wrote {} envelope id(s) to manifest", entries.len());
+    }
 
     let mut had_failure = false;
     for outcome in &outcomes {

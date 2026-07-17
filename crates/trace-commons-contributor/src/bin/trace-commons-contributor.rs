@@ -57,6 +57,9 @@ enum Command {
         /// PII filter backend: near-ai (requires TRACE_NEAR_AI_PRIVACY_API_KEY)
         #[arg(long)]
         pii_filter: Option<String>,
+        /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
+        #[arg(long)]
+        manifest: Option<PathBuf>,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -111,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
             yes,
             dry_run,
             pii_filter,
+            manifest,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -120,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 yes,
                 dry_run,
                 pii_filter: pii_filter.as_deref(),
+                manifest: manifest.as_deref(),
             };
             commands::submit(&store, &sel).await
         }
