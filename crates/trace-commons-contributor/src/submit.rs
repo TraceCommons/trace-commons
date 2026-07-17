@@ -634,6 +634,40 @@ mod tests {
         assert_eq!(received.lock().unwrap().len(), 1);
     }
 
+    /// End-to-end: `--devfolio-submission` (surfaced here as
+    /// `SubmitOptions::devfolio_submission_id`) must ride the real
+    /// `submit_sessions` path onto the delivered envelope's
+    /// `feature_flags["devfolio_submission_id"]`, not just the isolated
+    /// envelope-builder unit tests in `envelope.rs`.
+    #[tokio::test]
+    async fn submit_sessions_stamps_devfolio_submission_id_onto_delivered_envelope() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            devfolio_submission_id: Some("devfolio-sub-e2e".to_string()),
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 1);
+        let sent = &received_guard[0];
+        assert_eq!(
+            sent["ironclaw"]["feature_flags"]["devfolio_submission_id"],
+            "devfolio-sub-e2e"
+        );
+    }
+
     /// The residual-secret guard is a re-scan of the finished envelope with
     /// the secret detector. A survivor (a detect-then-redact bug, or a
     /// non-string payload value the string-leaf pass never visited) leaves a

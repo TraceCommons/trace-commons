@@ -42,7 +42,7 @@ enum Command {
         /// Only sessions started within this duration (e.g. 2d, 12h)
         #[arg(long)]
         since: Option<String>,
-        /// Only sessions whose project directory matches this path
+        /// Only sessions whose working directory is at or under this path
         #[arg(long)]
         project: Option<PathBuf>,
         /// Restrict to one source: claude-code | codex

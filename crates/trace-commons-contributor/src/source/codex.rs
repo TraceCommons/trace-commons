@@ -91,14 +91,51 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .modified()
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
+        let cwd = peek_cwd(&path);
         sessions.push(SessionRef {
             source: SOURCE_CODEX,
             path,
             project: None,
+            cwd,
             started_at,
             size_bytes: metadata.len(),
         });
     }
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// reads lines one at a time, parsing each as JSON, and stops at the first
+/// `session_meta` record carrying a `payload.cwd` field -- no full parse of
+/// the file. Mirrors the exact field path `load_session` uses
+/// (`payload.and_then(|p| p.get("cwd"))`) so discovery and load never
+/// disagree on the value. Returns `None` if the file cannot be read/parsed
+/// or no record carries `cwd`.
+fn peek_cwd(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+            continue;
+        }
+        if let Some(c) = record
+            .get("payload")
+            .and_then(|p| p.get("cwd"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {

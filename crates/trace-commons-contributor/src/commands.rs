@@ -227,15 +227,7 @@ fn discover_filtered(
     refs.retain(|r| {
         let project_ok = match project_filter {
             None => true,
-            Some(p) => {
-                // Prefer the true decoded working directory read from the
-                // session file (hyphen-safe); only pay the load cost when a
-                // project filter is actually set.
-                let cwd = source_for(r.source)
-                    .and_then(|s| s.load(r).ok())
-                    .and_then(|t| t.cwd);
-                cwd_matches_project(cwd.as_deref(), r.project.as_deref(), &r.path, p)
-            }
+            Some(p) => cwd_matches_project(r.cwd.as_deref(), r.project.as_deref(), &r.path, p),
         };
         let since_ok = match since {
             None => true,

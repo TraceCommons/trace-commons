@@ -276,7 +276,9 @@ pub fn build_raw_contribution(
             .unwrap_or_else(|| "unknown".to_string()),
     );
     if let Some(id) = cfg.devfolio_submission_id.as_deref() {
-        feature_flags.insert("devfolio_submission_id".to_string(), id.to_string());
+        if !id.trim().is_empty() {
+            feature_flags.insert("devfolio_submission_id".to_string(), id.to_string());
+        }
     }
 
     let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
@@ -691,6 +693,17 @@ mod tests {
     #[test]
     fn devfolio_submission_id_absent_when_unset() {
         let cfg = test_config(); // devfolio_submission_id defaults to None
+        let raw = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
+        assert!(!raw
+            .ironclaw
+            .feature_flags
+            .contains_key("devfolio_submission_id"));
+    }
+
+    #[test]
+    fn devfolio_submission_id_empty_is_omitted() {
+        let mut cfg = test_config();
+        cfg.devfolio_submission_id = Some("   ".to_string());
         let raw = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
         assert!(!raw
             .ironclaw

@@ -37,7 +37,9 @@ pub struct ContributorConfig {
     pub allowed_hosts: Option<String>,
     /// Self-asserted devfolio submission id, stamped onto every uploaded
     /// envelope's `feature_flags`. Attribution only; never an authorization
-    /// input. Set once here or overridden per-run by `--devfolio-submission`.
+    /// input. Read from the config file if present here; overridden per-run
+    /// by `--devfolio-submission`. There is no CLI writer for this field --
+    /// `login` always leaves it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devfolio_submission_id: Option<String>,
 }

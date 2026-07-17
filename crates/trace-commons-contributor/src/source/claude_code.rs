@@ -96,10 +96,12 @@ impl TraceSource for ClaudeCodeSource {
                     .modified()
                     .ok()
                     .map(chrono::DateTime::<chrono::Utc>::from);
+                let cwd = peek_cwd(&path);
                 sessions.push(SessionRef {
                     source: SOURCE_CLAUDE_CODE,
                     path,
                     project: discovery_project.clone(),
+                    cwd,
                     started_at,
                     size_bytes: metadata.len(),
                 });
@@ -117,6 +119,33 @@ impl TraceSource for ClaudeCodeSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// reads lines one at a time, parsing each as JSON, and stops at the first
+/// record carrying a `cwd` field -- no full parse of the file. Mirrors the
+/// exact field access `load_session` uses (`record.get("cwd").and_then(|v|
+/// v.as_str())`) so discovery and load never disagree on the value. Returns
+/// `None` if the file cannot be read/parsed or no record carries `cwd`.
+fn peek_cwd(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(c) = record.get("cwd").and_then(|v| v.as_str()) {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
@@ -383,6 +412,34 @@ mod tests {
         // heuristic takes the segment after the final '-' as a best-effort
         // project basename, ahead of `load()` reading the true cwd.
         assert_eq!(found[0].project, Some("myproj".to_string()));
+        // Discovery now peeks the true cwd cheaply too, matching `load()`.
+        assert_eq!(
+            found[0].cwd.as_deref(),
+            Some("/Users/testuser/code/myproj")
+        );
+    }
+
+    #[test]
+    fn peek_cwd_reads_first_hit_and_round_trips_hyphenated_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n{\"type\":\"assistant\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            peek_cwd(&path),
+            Some("/Users/dev/code/my-hack".to_string())
+        );
+    }
+
+    #[test]
+    fn peek_cwd_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+        assert_eq!(peek_cwd(&path), None);
     }
 
     #[test]
