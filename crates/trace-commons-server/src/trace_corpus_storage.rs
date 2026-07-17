@@ -1870,6 +1870,22 @@ pub struct ContributorCapSignalRow {
     pub dedup_cluster_size: Option<i32>,
 }
 
+/// One row of the latest gate-decision score for a single submission, read
+/// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
+/// Used by the devfolio score read-back surface, which looks up scores by
+/// `submission_id` across every contributor's per-user tenant. When a
+/// submission has more than one decision row, the row with the latest
+/// `decided_at` wins. `credit_quality_micros` is `None` until the shadow-mode
+/// credit-quality pass has scored the decision (migration V39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceScoreBySubmissionRow {
+    pub submission_id: Uuid,
+    pub credit_quality_micros: Option<i64>,
+    pub perplexity_micros: i64,
+    pub novelty_score_micros: i64,
+    pub gate_passed: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,

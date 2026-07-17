@@ -64512,6 +64512,55 @@ impl Database for PerplexityDriverTestDb {
         rows.truncate(limit);
         Ok(rows)
     }
+
+    /// In-memory analogue of the Postgres `list_scores_by_submission_ids`
+    /// read: filters stored gate-decision rows to the requested ids
+    /// (ignoring tenant — the real method is cross-tenant by construction),
+    /// keeps the LATEST row per submission by `decided_at`, and projects the
+    /// score fields. `credit_quality_micros` comes from the
+    /// `credit_quality_scores` side table, mirroring
+    /// `gate_decision_with_credit_quality_by_id`.
+    async fn list_scores_by_submission_ids(
+        &self,
+        submission_ids: &[Uuid],
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow>,
+        DatabaseError,
+    > {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let mut latest: std::collections::HashMap<Uuid, (String, &StorageTraceGateDecisionRow)> =
+            std::collections::HashMap::new();
+        for (tenant_id, row) in decisions.iter() {
+            if !submission_ids.contains(&row.submission_id) {
+                continue;
+            }
+            match latest.get(&row.submission_id) {
+                Some((_, existing)) if existing.decided_at >= row.decided_at => {}
+                _ => {
+                    latest.insert(row.submission_id, (tenant_id.clone(), row));
+                }
+            }
+        }
+        Ok(latest
+            .into_values()
+            .map(|(tenant_id, row)| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id, row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                }
+            })
+            .collect())
+    }
 }
 
 /// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
@@ -65895,6 +65944,80 @@ async fn recompute_contributor_caps_bounds_epoch_total_by_k() {
         last_factor < first_factor * 0.3,
         "last decision's factor must be much smaller than the first's: \
          first={first_factor} last={last_factor}"
+    );
+}
+
+/// Store-level test for the devfolio score read-back surface:
+/// `list_scores_by_submission_ids` must return the LATEST decision per
+/// submission, cross-tenant, dropping unknown ids and leaving
+/// `credit_quality_micros` `None` when the shadow-mode credit-quality pass
+/// has not scored the decision yet.
+#[tokio::test]
+async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cross_tenant() {
+    let db = PerplexityDriverTestDb::new();
+
+    // id1, tenant-a: fully scored (gate passed, q present).
+    let id1 = Uuid::new_v4();
+    let mut row1 = rescore_test_decision_row(id1);
+    row1.perplexity_passed = true;
+    row1.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.update_trace_gate_decision_credit_quality("tenant-a", row1.decision_id, 700_000, 0, 1)
+        .await
+        .expect("seed row1 credit quality");
+
+    // id2, tenant-b (DIFFERENT tenant): gated but the credit-quality pass has
+    // not run yet, so q stays NULL. One gate failed.
+    let id2 = Uuid::new_v4();
+    let mut row2 = rescore_test_decision_row(id2);
+    row2.perplexity_passed = false;
+    row2.novelty_passed = true;
+    db.seed_gate_decision("tenant-b", row2.clone());
+
+    // id3, tenant-a: TWO decisions at different decided_at — the latest must
+    // win.
+    let id3 = Uuid::new_v4();
+    let mut row3_old = rescore_test_decision_row(id3);
+    row3_old.decided_at = Utc::now() - chrono::Duration::seconds(120);
+    row3_old.perplexity_micros = 111;
+    let mut row3_new = rescore_test_decision_row(id3);
+    row3_new.decided_at = Utc::now();
+    row3_new.perplexity_micros = 999;
+    db.seed_gate_decision("tenant-a", row3_old);
+    db.seed_gate_decision("tenant-a", row3_new);
+
+    let unknown_id = Uuid::new_v4();
+
+    let rows = db
+        .list_scores_by_submission_ids(&[id1, id2, id3, unknown_id])
+        .await
+        .expect("cross-tenant read succeeds");
+    assert_eq!(
+        rows.len(),
+        3,
+        "unknown id must be absent, not an error: {rows:?}"
+    );
+
+    let by_id: std::collections::HashMap<Uuid, _> =
+        rows.into_iter().map(|r| (r.submission_id, r)).collect();
+
+    let r1 = by_id.get(&id1).expect("id1 present");
+    assert_eq!(r1.credit_quality_micros, Some(700_000));
+    assert!(r1.gate_passed, "both sub-gates passed for id1");
+
+    let r2 = by_id.get(&id2).expect("id2 present (different tenant)");
+    assert_eq!(r2.credit_quality_micros, None, "q not yet scored for id2");
+    assert!(!r2.gate_passed, "perplexity sub-gate failed for id2");
+
+    let r3 = by_id.get(&id3).expect("id3 present");
+    assert_eq!(
+        r3.perplexity_micros, 999,
+        "the LATEST decision row must win, not the first-seeded one"
+    );
+
+    assert!(
+        !by_id.contains_key(&unknown_id),
+        "unknown id must not appear in the result"
     );
 }
 
