@@ -3912,6 +3912,12 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         "revocation-worker-token-a",
         TokenRole::RevocationWorker,
     );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "competition-read-worker-token-a",
+        TokenRole::CompetitionReadWorker,
+    );
     insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
     insert_token(
         &mut tokens,
@@ -4271,6 +4277,16 @@ fn token_role_parses_worker_roles() {
             TokenRole::RevocationWorker,
             "revocation_worker",
         ),
+        (
+            "competition_read_worker",
+            TokenRole::CompetitionReadWorker,
+            "competition_read_worker",
+        ),
+        (
+            "competition-read-worker",
+            TokenRole::CompetitionReadWorker,
+            "competition_read_worker",
+        ),
     ];
 
     for (raw, expected, storage_name) in cases {
@@ -4279,6 +4295,31 @@ fn token_role_parses_worker_roles() {
         assert_eq!(parsed.storage_name(), storage_name);
     }
     assert!(TokenRole::parse("trainer").is_err());
+}
+
+#[test]
+fn require_competition_operator_admits_admin_and_competition_worker_denies_others() {
+    let build_auth = |role: TokenRole| TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role,
+        principal_ref: principal_storage_ref("competition-read-worker-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    let reviewer_err = require_competition_operator(&build_auth(TokenRole::Reviewer))
+        .expect_err("reviewer token must be rejected");
+    assert_eq!(reviewer_err.0, StatusCode::FORBIDDEN);
+
+    require_competition_operator(&build_auth(TokenRole::CompetitionReadWorker))
+        .expect("competition read worker token is admitted");
+
+    require_competition_operator(&build_auth(TokenRole::Admin)).expect("admin token is admitted");
 }
 
 #[test]

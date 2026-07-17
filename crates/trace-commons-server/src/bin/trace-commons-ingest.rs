@@ -2626,6 +2626,7 @@ enum TokenRole {
     UtilityWorker,
     ProcessEvalWorker,
     RevocationWorker,
+    CompetitionReadWorker,
 }
 
 impl TokenRole {
@@ -2644,6 +2645,9 @@ impl TokenRole {
             | "process_evaluation_worker"
             | "process-evaluation-worker" => Ok(Self::ProcessEvalWorker),
             "revocation_worker" | "revocation-worker" => Ok(Self::RevocationWorker),
+            "competition_read_worker" | "competition-read-worker" => {
+                Ok(Self::CompetitionReadWorker)
+            }
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -2676,6 +2680,7 @@ impl TokenRole {
             Self::UtilityWorker => "utility_worker",
             Self::ProcessEvalWorker => "process_eval_worker",
             Self::RevocationWorker => "revocation_worker",
+            Self::CompetitionReadWorker => "competition_read_worker",
         }
     }
 }
@@ -47792,6 +47797,7 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::UtilityWorker => StorageTraceTenantAccessGrantRole::UtilityWorker,
         TokenRole::ProcessEvalWorker => StorageTraceTenantAccessGrantRole::ProcessEvalWorker,
         TokenRole::RevocationWorker => StorageTraceTenantAccessGrantRole::RevocationWorker,
+        TokenRole::CompetitionReadWorker => StorageTraceTenantAccessGrantRole::CompetitionReadWorker,
     }
 }
 
@@ -48839,6 +48845,18 @@ fn require_process_evaluation_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "admin or process evaluation worker token required",
+        ))
+    }
+}
+
+#[allow(dead_code)]
+fn require_competition_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::CompetitionReadWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or competition read worker token required",
         ))
     }
 }
