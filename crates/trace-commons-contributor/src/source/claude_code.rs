@@ -122,17 +122,21 @@ impl TraceSource for ClaudeCodeSource {
 }
 
 /// Cheap discovery-time peek at a session file's true working directory:
-/// reads lines one at a time, parsing each as JSON, and stops at the first
-/// record carrying a `cwd` field -- no full parse of the file. Mirrors the
-/// exact field access `load_session` uses (`record.get("cwd").and_then(|v|
-/// v.as_str())`) so discovery and load never disagree on the value. Returns
-/// `None` if the file cannot be read/parsed or no record carries `cwd`.
+/// parses each line as JSON in turn and stops at the first record carrying
+/// a `cwd` field, skipping the full parse of the file's events. Reads the
+/// file the same way `load_session` does (`std::fs::read` then
+/// `String::from_utf8_lossy`), so an invalid-UTF-8 line elsewhere in the
+/// file does not abort the scan before it reaches a later cwd-bearing line.
+/// `load_session` never errors on bad UTF-8 either, so peek and load must
+/// tolerate it identically, or `--project` filtering can silently disagree
+/// with what `submit_sessions` actually delivers. Mirrors the exact field
+/// access `load_session` uses (`record.get("cwd").and_then(|v|
+/// v.as_str())`). Returns `None` if the file cannot be read or no record
+/// carries `cwd`.
 fn peek_cwd(path: &Path) -> Option<String> {
-    use std::io::{BufRead, BufReader};
-    let file = std::fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -440,6 +444,29 @@ mod tests {
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
         assert_eq!(peek_cwd(&path), None);
+    }
+
+    #[test]
+    fn peek_cwd_tolerates_invalid_utf8_before_the_cwd_line() {
+        // A malformed-UTF-8 line ahead of the cwd-bearing line must not abort
+        // the scan: `load_session` reads via `String::from_utf8_lossy` and
+        // keeps going past bad bytes, so `peek_cwd` must match exactly or
+        // `--project` filtering can silently disagree with what
+        // `submit_sessions` actually delivers.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"bad\":\"");
+        bytes.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 sequence
+        bytes.extend_from_slice(b"not json}\n");
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n",
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            peek_cwd(&path),
+            Some("/Users/dev/code/my-hack".to_string())
+        );
     }
 
     #[test]

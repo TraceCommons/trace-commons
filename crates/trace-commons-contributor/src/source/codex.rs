@@ -104,18 +104,21 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
 }
 
 /// Cheap discovery-time peek at a session file's true working directory:
-/// reads lines one at a time, parsing each as JSON, and stops at the first
-/// `session_meta` record carrying a `payload.cwd` field -- no full parse of
-/// the file. Mirrors the exact field path `load_session` uses
-/// (`payload.and_then(|p| p.get("cwd"))`) so discovery and load never
-/// disagree on the value. Returns `None` if the file cannot be read/parsed
-/// or no record carries `cwd`.
+/// parses each line as JSON in turn and stops at the first `session_meta`
+/// record carrying a `payload.cwd` field, skipping the full parse of the
+/// file's events. Reads the file the same way `load_session` does
+/// (`std::fs::read` then `String::from_utf8_lossy`), so an invalid-UTF-8
+/// line elsewhere in the file does not abort the scan before it reaches a
+/// later cwd-bearing line. `load_session` never errors on bad UTF-8 either,
+/// so peek and load must tolerate it identically, or `--project` filtering
+/// can silently disagree with what `submit_sessions` actually delivers.
+/// Mirrors the exact field path `load_session` uses
+/// (`payload.and_then(|p| p.get("cwd"))`). Returns `None` if the file
+/// cannot be read or no record carries `cwd`.
 fn peek_cwd(path: &Path) -> Option<String> {
-    use std::io::{BufRead, BufReader};
-    let file = std::fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
