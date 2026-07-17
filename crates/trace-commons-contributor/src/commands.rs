@@ -181,11 +181,32 @@ pub fn mint_grant_cmd(
     Ok(())
 }
 
+/// Pure predicate for the `--project` filter. Prefers the session's true
+/// decoded working directory (`cwd`) for a hyphen-safe, component-wise
+/// path-prefix match; falls back to the legacy basename-or-path heuristic
+/// only when the true cwd is unavailable.
+fn cwd_matches_project(
+    cwd: Option<&str>,
+    legacy_project: Option<&str>,
+    path: &Path,
+    project: &Path,
+) -> bool {
+    if let Some(cwd) = cwd {
+        return Path::new(cwd).starts_with(project);
+    }
+    let basename = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    legacy_project == Some(basename) || path.starts_with(project)
+}
+
 /// Discover every locally discoverable session across all sources, applying
-/// optional `source`/`project`/`since` filters. `project` matches either the
-/// session's basename (`SessionRef.project`) or a prefix of its full path;
-/// `since` filters against `started_at` (falls back to excluding sessions
-/// with no timestamp when set).
+/// optional `source`/`project`/`since` filters. `project` matches the
+/// session's true decoded working directory when available; otherwise falls
+/// back to the legacy heuristic (basename match or path prefix). `since`
+/// filters against `started_at` (falls back to excluding sessions with no
+/// timestamp when set).
 fn discover_filtered(
     source_filter: Option<&str>,
     project_filter: Option<&Path>,
@@ -206,10 +227,13 @@ fn discover_filtered(
         let project_ok = match project_filter {
             None => true,
             Some(p) => {
-                let basename = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                let basename_match = r.project.as_deref() == Some(basename);
-                let prefix_match = r.path.starts_with(p);
-                basename_match || prefix_match
+                // Prefer the true decoded working directory read from the
+                // session file (hyphen-safe); only pay the load cost when a
+                // project filter is actually set.
+                let cwd = source_for(r.source)
+                    .and_then(|s| s.load(r).ok())
+                    .and_then(|t| t.cwd);
+                cwd_matches_project(cwd.as_deref(), r.project.as_deref(), &r.path, p)
             }
         };
         let since_ok = match since {
@@ -582,5 +606,66 @@ mod tests {
         assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod project_filter_tests {
+    use super::cwd_matches_project;
+    use std::path::Path;
+
+    #[test]
+    fn true_cwd_prefix_matches_including_hyphenated_name() {
+        // Project literally named "my-hack" — the legacy basename would decode
+        // to "hack" and miss it; the true cwd matches exactly.
+        let cwd = Some("/Users/dev/code/my-hack");
+        assert!(cwd_matches_project(
+            cwd,
+            Some("hack"),
+            Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn true_cwd_excludes_sibling_and_prefix_collision() {
+        // Sibling dir and a "my-hack-2" name must NOT match "my-hack".
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/other"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/my-hack-2"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_basename_or_path_prefix_when_cwd_unknown() {
+        // No true cwd available -> legacy heuristic: basename match ...
+        assert!(cwd_matches_project(
+            None,
+            Some("my-hack"),
+            Path::new("/somewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // ... or session-file path prefix.
+        assert!(cwd_matches_project(
+            None,
+            None,
+            Path::new("/Users/dev/code/my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // Neither matches -> false.
+        assert!(!cwd_matches_project(
+            None,
+            Some("other"),
+            Path::new("/elsewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
     }
 }
