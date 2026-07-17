@@ -577,6 +577,7 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
+            devfolio_submission_id: None,
         }
     }
 

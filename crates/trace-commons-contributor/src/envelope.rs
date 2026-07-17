@@ -275,6 +275,9 @@ pub fn build_raw_contribution(
             .map(|cwd| session_hash(cwd.as_bytes()))
             .unwrap_or_else(|| "unknown".to_string()),
     );
+    if let Some(id) = cfg.devfolio_submission_id.as_deref() {
+        feature_flags.insert("devfolio_submission_id".to_string(), id.to_string());
+    }
 
     let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
 
@@ -451,6 +454,7 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            devfolio_submission_id: None,
         }
     }
 
@@ -671,6 +675,27 @@ mod tests {
                 .unwrap();
         let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         assert!(envelope_size_ok(&envelope).is_err());
+    }
+
+    #[test]
+    fn devfolio_submission_id_written_to_feature_flags_when_set() {
+        let mut cfg = test_config();
+        cfg.devfolio_submission_id = Some("devfolio-sub-123".to_string());
+        let raw = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
+        assert_eq!(
+            raw.ironclaw.feature_flags.get("devfolio_submission_id"),
+            Some(&"devfolio-sub-123".to_string())
+        );
+    }
+
+    #[test]
+    fn devfolio_submission_id_absent_when_unset() {
+        let cfg = test_config(); // devfolio_submission_id defaults to None
+        let raw = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
+        assert!(!raw
+            .ironclaw
+            .feature_flags
+            .contains_key("devfolio_submission_id"));
     }
 
     #[test]

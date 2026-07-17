@@ -75,6 +75,7 @@ pub async fn login(
         consent_scopes: consent_scopes.clone(),
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
+        devfolio_submission_id: None,
     };
     store
         .save_config(&cfg)
