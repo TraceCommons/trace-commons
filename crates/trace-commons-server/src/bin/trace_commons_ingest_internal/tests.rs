@@ -64516,9 +64516,12 @@ impl Database for PerplexityDriverTestDb {
     /// In-memory analogue of the Postgres `list_scores_by_submission_ids`
     /// read: filters stored gate-decision rows to the requested ids
     /// (ignoring tenant — the real method is cross-tenant by construction),
-    /// keeps the LATEST row per submission by `decided_at`, and projects the
-    /// score fields. `credit_quality_micros` comes from the
-    /// `credit_quality_scores` side table, mirroring
+    /// keeps the LATEST row per submission by `(decided_at, decision_id)`,
+    /// and projects the score fields. The `decision_id` tiebreaker mirrors
+    /// the Postgres impl's `ORDER BY submission_id, decided_at DESC,
+    /// decision_id DESC` so ties on `decided_at` resolve identically between
+    /// the double and the real backend. `credit_quality_micros` comes from
+    /// the `credit_quality_scores` side table, mirroring
     /// `gate_decision_with_credit_quality_by_id`.
     async fn list_scores_by_submission_ids(
         &self,
@@ -64538,8 +64541,10 @@ impl Database for PerplexityDriverTestDb {
             if !submission_ids.contains(&row.submission_id) {
                 continue;
             }
+            let candidate_key = (row.decided_at, row.decision_id);
             match latest.get(&row.submission_id) {
-                Some((_, existing)) if existing.decided_at >= row.decided_at => {}
+                Some((_, existing))
+                    if (existing.decided_at, existing.decision_id) >= candidate_key => {}
                 _ => {
                     latest.insert(row.submission_id, (tenant_id.clone(), row));
                 }
@@ -65986,15 +65991,44 @@ async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cr
     db.seed_gate_decision("tenant-a", row3_old);
     db.seed_gate_decision("tenant-a", row3_new);
 
+    // id4, tenant-a: TWO decisions with the SAME decided_at but different
+    // decision_id — the tiebreaker (highest decision_id wins) must be
+    // deterministic, matching the Postgres impl's
+    // `ORDER BY submission_id, decided_at DESC, decision_id DESC`.
+    let id4 = Uuid::new_v4();
+    let tie_decided_at = Utc::now();
+    let mut row4_low_id = rescore_test_decision_row(id4);
+    row4_low_id.decision_id = Uuid::from_u128(1);
+    row4_low_id.decided_at = tie_decided_at;
+    row4_low_id.perplexity_micros = 111;
+    let mut row4_high_id = rescore_test_decision_row(id4);
+    row4_high_id.decision_id = Uuid::from_u128(2);
+    row4_high_id.decided_at = tie_decided_at;
+    row4_high_id.perplexity_micros = 222;
+    // Seed the LOWER decision_id FIRST: a naive "first-seen wins on ties"
+    // implementation (comparing decided_at alone with `>=`) would keep
+    // row4_low_id and fail this assertion. Only an explicit
+    // (decided_at, decision_id) comparison correctly picks row4_high_id
+    // regardless of insertion order.
+    db.seed_gate_decision("tenant-a", row4_low_id);
+    db.seed_gate_decision("tenant-a", row4_high_id);
+
     let unknown_id = Uuid::new_v4();
 
+    // Empty input short-circuits to Ok(vec![]) without touching storage.
+    let empty = db
+        .list_scores_by_submission_ids(&[])
+        .await
+        .expect("empty input succeeds");
+    assert_eq!(empty, Vec::new(), "empty submission_ids returns Ok(vec![])");
+
     let rows = db
-        .list_scores_by_submission_ids(&[id1, id2, id3, unknown_id])
+        .list_scores_by_submission_ids(&[id1, id2, id3, id4, unknown_id])
         .await
         .expect("cross-tenant read succeeds");
     assert_eq!(
         rows.len(),
-        3,
+        4,
         "unknown id must be absent, not an error: {rows:?}"
     );
 
@@ -66013,6 +66047,12 @@ async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cr
     assert_eq!(
         r3.perplexity_micros, 999,
         "the LATEST decision row must win, not the first-seeded one"
+    );
+
+    let r4 = by_id.get(&id4).expect("id4 present");
+    assert_eq!(
+        r4.perplexity_micros, 222,
+        "tied decided_at must break deterministically on the HIGHEST decision_id"
     );
 
     assert!(

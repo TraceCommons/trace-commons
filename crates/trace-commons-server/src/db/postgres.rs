@@ -3871,7 +3871,11 @@ impl Database for PgBackend {
                     novelty_passed
                  FROM trace_gate_decisions
                  WHERE submission_id = ANY($1)
-                 ORDER BY submission_id, decided_at DESC",
+                 -- decision_id is the final, unique tiebreaker (mirrors
+                 -- list_contributor_cap_signals) so decisions that share a
+                 -- decided_at sort deterministically instead of Postgres
+                 -- picking an arbitrary row among ties on repeated reads.
+                 ORDER BY submission_id, decided_at DESC, decision_id DESC",
                 &[&submission_ids],
             )
             .await
