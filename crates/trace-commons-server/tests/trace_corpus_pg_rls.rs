@@ -1485,6 +1485,10 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
             .expect("read NEAR account outbox central RLS policy migration"),
     );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
+            .expect("read PII backstop central RLS policy migration"),
+    );
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));
