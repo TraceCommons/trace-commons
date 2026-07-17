@@ -75,7 +75,6 @@ pub async fn login(
         consent_scopes: consent_scopes.clone(),
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
-        devfolio_submission_id: None,
     };
     store
         .save_config(&cfg)
@@ -347,7 +346,6 @@ pub struct SubmitSelection<'a> {
     pub yes: bool,
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
-    pub devfolio_submission: Option<&'a str>,
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
@@ -408,7 +406,6 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
-        devfolio_submission_id: sel.devfolio_submission.map(str::to_string),
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 

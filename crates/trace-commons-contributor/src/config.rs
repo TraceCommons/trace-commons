@@ -35,13 +35,6 @@ pub struct ContributorConfig {
     pub consent_scopes: Vec<String>,
     pub pii_filter: Option<String>,
     pub allowed_hosts: Option<String>,
-    /// Self-asserted devfolio submission id, stamped onto every uploaded
-    /// envelope's `feature_flags`. Attribution only; never an authorization
-    /// input. Read from the config file if present here; overridden per-run
-    /// by `--devfolio-submission`. There is no CLI writer for this field --
-    /// `login` always leaves it `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devfolio_submission_id: Option<String>,
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -330,7 +323,6 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
-            devfolio_submission_id: None,
         }
     }
 

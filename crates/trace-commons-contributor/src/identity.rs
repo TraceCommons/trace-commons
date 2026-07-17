@@ -322,7 +322,6 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
-            devfolio_submission_id: None,
         };
         let signed = build_signed_claim_request(&cfg, &device, chrono::Utc::now()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&signed.body).unwrap();
