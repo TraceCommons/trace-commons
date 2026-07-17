@@ -44,6 +44,7 @@ pub enum SubmitOutcome {
 pub struct SubmitOptions {
     pub dry_run: bool,
     pub pii_filter: Option<String>,
+    pub devfolio_submission_id: Option<String>,
 }
 
 /// Redact-and-upload every selected session. Sessions are independent: one
@@ -309,6 +310,9 @@ fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> Contributo
     let mut c = cfg.clone();
     if opts.pii_filter.is_some() {
         c.pii_filter = opts.pii_filter.clone();
+    }
+    if opts.devfolio_submission_id.is_some() {
+        c.devfolio_submission_id = opts.devfolio_submission_id.clone();
     }
     c
 }
@@ -593,6 +597,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -700,6 +705,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -762,6 +768,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -789,6 +796,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
+            devfolio_submission_id: None,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -830,6 +838,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -882,6 +891,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -909,6 +919,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -936,6 +947,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1037,6 +1049,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1173,6 +1186,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            devfolio_submission_id: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1186,5 +1200,27 @@ mod tests {
         }
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effective_config_applies_devfolio_submission_override() {
+        let mut cfg = cfg_for("https://issuer.example", "https://ingest.example", "device-1");
+        cfg.devfolio_submission_id = Some("from-config".to_string());
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            devfolio_submission_id: Some("from-flag".to_string()),
+        };
+        let eff = effective_config(&cfg, &opts);
+        assert_eq!(eff.devfolio_submission_id.as_deref(), Some("from-flag"));
+
+        // When the flag is absent, the config value survives.
+        let opts_none = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            devfolio_submission_id: None,
+        };
+        let eff2 = effective_config(&cfg, &opts_none);
+        assert_eq!(eff2.devfolio_submission_id.as_deref(), Some("from-config"));
     }
 }

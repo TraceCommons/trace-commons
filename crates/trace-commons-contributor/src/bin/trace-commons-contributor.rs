@@ -57,6 +57,10 @@ enum Command {
         /// PII filter backend: near-ai (requires TRACE_NEAR_AI_PRIVACY_API_KEY)
         #[arg(long)]
         pii_filter: Option<String>,
+        /// Devfolio submission id to stamp on every uploaded envelope
+        /// (self-asserted attribution; overrides the config value)
+        #[arg(long = "devfolio-submission")]
+        devfolio_submission: Option<String>,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -111,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
             yes,
             dry_run,
             pii_filter,
+            devfolio_submission,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -120,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
                 yes,
                 dry_run,
                 pii_filter: pii_filter.as_deref(),
+                devfolio_submission: devfolio_submission.as_deref(),
             };
             commands::submit(&store, &sel).await
         }
