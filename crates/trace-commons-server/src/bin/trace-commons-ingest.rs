@@ -47797,7 +47797,9 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::UtilityWorker => StorageTraceTenantAccessGrantRole::UtilityWorker,
         TokenRole::ProcessEvalWorker => StorageTraceTenantAccessGrantRole::ProcessEvalWorker,
         TokenRole::RevocationWorker => StorageTraceTenantAccessGrantRole::RevocationWorker,
-        TokenRole::CompetitionReadWorker => StorageTraceTenantAccessGrantRole::CompetitionReadWorker,
+        TokenRole::CompetitionReadWorker => {
+            StorageTraceTenantAccessGrantRole::CompetitionReadWorker
+        }
     }
 }
 

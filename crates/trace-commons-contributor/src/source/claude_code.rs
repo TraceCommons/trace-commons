@@ -417,10 +417,7 @@ mod tests {
         // project basename, ahead of `load()` reading the true cwd.
         assert_eq!(found[0].project, Some("myproj".to_string()));
         // Discovery now peeks the true cwd cheaply too, matching `load()`.
-        assert_eq!(
-            found[0].cwd.as_deref(),
-            Some("/Users/testuser/code/myproj")
-        );
+        assert_eq!(found[0].cwd.as_deref(), Some("/Users/testuser/code/myproj"));
     }
 
     #[test]
@@ -432,10 +429,7 @@ mod tests {
             "{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n{\"type\":\"assistant\"}\n",
         )
         .unwrap();
-        assert_eq!(
-            peek_cwd(&path),
-            Some("/Users/dev/code/my-hack".to_string())
-        );
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
     }
 
     #[test]
@@ -459,14 +453,9 @@ mod tests {
         bytes.extend_from_slice(b"{\"type\":\"user\",\"bad\":\"");
         bytes.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 sequence
         bytes.extend_from_slice(b"not json}\n");
-        bytes.extend_from_slice(
-            b"{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n",
-        );
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n");
         std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(
-            peek_cwd(&path),
-            Some("/Users/dev/code/my-hack".to_string())
-        );
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
     }
 
     #[test]
