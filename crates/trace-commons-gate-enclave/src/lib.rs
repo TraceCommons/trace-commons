@@ -27,6 +27,7 @@ pub mod vector_index_usearch;
 pub use embedder::{Embedder, MockEmbedder};
 pub use orchestrator::{
     EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, OrchestrationDecision,
+    PerplexityOnlyOutcome,
 };
 pub use perplexity::{
     MockPerplexityScorer, MockTokenRarityScorer, PerplexityResult, PerplexityScorer,

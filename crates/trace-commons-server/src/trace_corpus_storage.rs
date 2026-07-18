@@ -1835,6 +1835,44 @@ pub struct GateWorkItem {
     pub submission_id: Uuid,
 }
 
+/// Numeric inputs for shadow credit-quality scoring of one decision row, read
+/// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
+/// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCreditInput {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub perplexity_micros: i64,
+    pub peak_perplexity_micros: i64,
+    pub novelty_score_micros: i64,
+}
+
+/// Cross-trace dedup cluster signal for one decision row (migration V40),
+/// read cross-tenant through the narrow `trace_gate_driver` pool (no tenant
+/// GUC). `dedup_simhash` / `dedup_cluster_id` are `None` until a dedup pass
+/// has assigned this decision to a cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupSignalRow {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub dedup_cluster_id: Option<Uuid>,
+    pub dedup_simhash: Option<i64>,
+}
+
+/// One row for the per-contributor cap recompute pass. Cross-tenant by
+/// construction (enumerated on the gate-driver pool), joining each decision to
+/// its submission for the contributor identity (`auth_principal_ref`). The pass
+/// derives `r = q * dup_pen` and the epoch bucket from these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributorCapSignalRow {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub auth_principal_ref: String,
+    pub decided_at: DateTime<Utc>,
+    pub credit_quality_micros: Option<i64>,
+    pub dedup_cluster_size: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2408,6 +2446,104 @@ pub trait TraceCorpusStore: Send + Sync {
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_credit_withheld_reason called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Re-score maintenance: update ONLY the perplexity columns
+    /// (`perplexity_micros`, `peak_perplexity_micros`, `perplexity_passed`) on
+    /// the `trace_gate_decisions` row for `(tenant_id, submission_id)`. Novelty,
+    /// tail-fraction, vector-entry, gate status, credit, and every other column
+    /// are left untouched. Implementations MUST scope the update by `tenant_id`
+    /// (the V23 table has forced RLS bound to `trace_current_tenant_id()`).
+    ///
+    /// Defaults to a log-once warning + no-op; only the production Postgres
+    /// backend has a real implementation. The default deliberately does not
+    /// panic but does warn (label-only, no tenant/submission identifiers) so a
+    /// future non-Postgres backend that exercises the re-score path cannot
+    /// silently drop the update.
+    async fn update_trace_gate_decision_perplexity(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _perplexity_micros: i64,
+        _peak_perplexity_micros: Option<i64>,
+        _perplexity_passed: bool,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_perplexity called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the credit-quality columns for the decision row identified by
+    /// `(tenant_id, decision_id)`. Perplexity, novelty, tail-fraction, vector,
+    /// gate status, and credit are left untouched. Implementations MUST scope by
+    /// `tenant_id` (forced RLS). Defaults to a log-once warning + no-op so a
+    /// backend without a real impl cannot silently drop the write.
+    async fn update_trace_gate_decision_credit_quality(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _q_micros: i64,
+        _anomaly_ratio_micros: i64,
+        _calibration_version: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_credit_quality called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the dedup columns (migration V40) for the decision row
+    /// identified by `(tenant_id, decision_id)`. Perplexity, novelty,
+    /// tail-fraction, vector, gate status, and credit are left untouched.
+    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
+    /// log-once warning + no-op so a backend without a real impl cannot
+    /// silently drop the write.
+    async fn update_trace_gate_decision_dedup(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _dedup_simhash: i64,
+        _dedup_cluster_id: Uuid,
+        _dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_dedup called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the four contributor-cap columns (migration V41) for the
+    /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
+    /// novelty, dedup, gate status, and credit are left untouched.
+    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
+    /// log-once warning + no-op so a backend without a real impl cannot
+    /// silently drop the write.
+    async fn update_trace_gate_decision_contributor_cap(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _factor_micros: i32,
+        _cumulative_raw_micros: i64,
+        _epoch: i64,
+        _version: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_contributor_cap called on a backend without a real impl"
             );
         });
         Ok(())

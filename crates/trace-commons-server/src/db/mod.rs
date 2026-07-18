@@ -972,6 +972,64 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "pii-backstop-driver pool not configured".to_string(),
         ))
     }
+
+    /// Enumerate submissions that ALREADY have a `trace_gate_decisions` row,
+    /// cross-tenant, ordered oldest-received first, capped at `limit`. This is
+    /// the sibling of [`Self::list_submissions_needing_gate_decision`] used by
+    /// the perplexity re-score maintenance task: it targets the historical
+    /// decisions that need their perplexity recomputed. Like the enumeration it
+    /// mirrors, it reads through the gate-driver reader pool with NO tenant GUC
+    /// set — the `trace_gate_driver` role's permissive cross-tenant SELECT
+    /// policies authorize the read.
+    ///
+    /// The default returns an empty list, which is correct for any [`Database`]
+    /// impl that never wires a gate-driver pool (e.g. test doubles).
+    /// [`postgres::PgBackend`] overrides this with the real query.
+    async fn list_submissions_with_gate_decision(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Enumerate decision rows for shadow credit-quality scoring, cross-tenant,
+    /// oldest-decided first, capped at `limit`. Reads through the gate-driver
+    /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive
+    /// cross-tenant SELECT policies authorize it). Default: empty (test doubles
+    /// / backends without a gate-driver pool).
+    async fn list_gate_decisions_for_credit_scoring(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateCreditInput>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Enumerate dedup signal rows (migration V40), cross-tenant, oldest-decided
+    /// first, capped at `limit`. Reads through the gate-driver reader pool with
+    /// NO tenant GUC (the trace_gate_driver role's permissive cross-tenant
+    /// SELECT policies authorize it). Default: empty (test doubles / backends
+    /// without a gate-driver pool).
+    async fn list_dedup_signals(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupSignalRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Enumerate per-contributor cap signal rows (migration V41), cross-tenant,
+    /// joining each decision to its submission for the contributor identity
+    /// (`auth_principal_ref`), ordered `(auth_principal_ref, decided_at ASC)`
+    /// so the recompute pass can group per contributor and forward-accumulate
+    /// in time order. Reads through the gate-driver reader pool with NO tenant
+    /// GUC (the trace_gate_driver role's permissive cross-tenant SELECT
+    /// policies authorize it). Default: empty (test doubles / backends
+    /// without a gate-driver pool).
+    async fn list_contributor_cap_signals(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::ContributorCapSignalRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

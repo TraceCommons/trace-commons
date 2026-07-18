@@ -1191,6 +1191,64 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&39_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V39__trace_credit_quality.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&39_i32, &"trace_credit_quality"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&40_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!("../../../../migrations/V40__trace_dedup.sql"))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&40_i32, &"trace_dedup"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&41_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V41__trace_contributor_cap.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&41_i32, &"trace_contributor_cap"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -3726,6 +3784,158 @@ impl Database for PgBackend {
             .map(|row| crate::trace_corpus_storage::GateWorkItem {
                 tenant_id: row.get("tenant_id"),
                 submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
+
+    async fn list_submissions_with_gate_decision(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant context is set on this connection: the trace_gate_driver
+        // role's permissive cross-tenant SELECT policies (migration V36) are
+        // what authorize this read across every tenant's decisions.
+        //
+        // DISTINCT + `received_at` in the projection mirrors the sibling
+        // `list_submissions_needing_gate_decision` query: `received_at` is a
+        // legal DISTINCT + ORDER BY target and a per-submission constant, so it
+        // does not change dedup cardinality and is dropped when mapping to
+        // GateWorkItem. A submission with a decision necessarily has a decision
+        // row, so the INNER JOIN never fans out beyond the one decision.
+        let rows = client
+            .query(
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                 FROM trace_submissions s
+                 JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 ORDER BY s.received_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateWorkItem {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
+
+    async fn list_gate_decisions_for_credit_scoring(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateCreditInput>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        let rows = client
+            .query(
+                "SELECT tenant_id, decision_id,
+                        COALESCE(perplexity_micros, 0)      AS perplexity_micros,
+                        COALESCE(peak_perplexity_micros, 0) AS peak_perplexity_micros,
+                        COALESCE(novelty_score_micros, 0)   AS novelty_score_micros
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateCreditInput {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                perplexity_micros: row.get("perplexity_micros"),
+                peak_perplexity_micros: row.get("peak_perplexity_micros"),
+                novelty_score_micros: row.get("novelty_score_micros"),
+            })
+            .collect())
+    }
+
+    async fn list_dedup_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupSignalRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        let rows = client
+            .query(
+                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::DedupSignalRow {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                dedup_cluster_id: row.get("dedup_cluster_id"),
+                dedup_simhash: row.get("dedup_simhash"),
+            })
+            .collect())
+    }
+
+    async fn list_contributor_cap_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::ContributorCapSignalRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions and
+        // submissions. Ordered by (auth_principal_ref, decided_at) so the recompute
+        // pass groups per contributor and forward-accumulates in time order.
+        let rows = client
+            .query(
+                "SELECT d.tenant_id, d.decision_id, s.auth_principal_ref,
+                        d.decided_at, d.credit_quality_micros, d.dedup_cluster_size
+                 FROM trace_gate_decisions d
+                 JOIN trace_submissions s
+                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                 -- decision_id is the final, unique tiebreaker so decisions
+                 -- with an identical decided_at within a contributor sort
+                 -- deterministically; the forward pass then assigns each row a
+                 -- stable factor/cumulative across idempotent re-runs.
+                 ORDER BY s.auth_principal_ref ASC, d.decided_at ASC, d.decision_id ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::ContributorCapSignalRow {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                auth_principal_ref: row.get("auth_principal_ref"),
+                decided_at: row.get("decided_at"),
+                credit_quality_micros: row.get("credit_quality_micros"),
+                dedup_cluster_size: row.get("dedup_cluster_size"),
             })
             .collect())
     }

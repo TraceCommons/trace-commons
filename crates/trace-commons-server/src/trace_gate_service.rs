@@ -107,6 +107,10 @@ pub struct GateDecision {
     /// deterministic/legacy services and failed gates. The host persists
     /// these as (submission_id, chunk_index)-tagged rows for revocation.
     pub chunk_vector_entries: Vec<GateChunkVectorEntry>,
+    /// 64-bit token simhash of the trace's decrypted text, for cross-trace
+    /// dedup clustering; computed inside the service so plaintext never
+    /// crosses the boundary (only the hash does), like `nearest_neighbor_hash`.
+    pub dedup_simhash: i64,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -116,6 +120,22 @@ pub struct GateServiceStatus {
     pub gate_policy_version: String,
     pub gate_version_hash: String,
     pub attestation_verifier_configured: bool,
+}
+
+/// Perplexity-only outcome returned by
+/// [`TraceGateService::evaluate_trace_perplexity_only`]. Carries only the
+/// perplexity-derived fields the re-score maintenance path updates; there is
+/// deliberately no novelty, embedding, or vector-entry state because the
+/// perplexity-only path never touches the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerplexityOnlyGateOutcome {
+    /// Representative (token-weighted) perplexity in micros.
+    pub perplexity_micros: u64,
+    /// Peak (most-surprising chunk) perplexity in micros.
+    pub peak_perplexity_micros: u64,
+    /// Whether the perplexity cleared the configured floor(s) — the same
+    /// predicate a full evaluation applies.
+    pub perplexity_passed: bool,
 }
 
 /// Pluggable gate-evaluation service.
@@ -136,6 +156,28 @@ pub trait TraceGateService: Send + Sync {
         wrapped_dek: &WrappedDek,
         object_kind: TraceArtifactKind,
     ) -> anyhow::Result<GateDecision>;
+
+    /// Recompute ONLY the perplexity of a wrapped trace, running the exact same
+    /// canonical-representation + chunking + scoring path as
+    /// [`Self::evaluate_trace`] but performing NO embedding, NO nearest-neighbor
+    /// query, and NO vector-index insertion. Used by the perplexity re-score
+    /// maintenance task so re-scored values are byte-comparable to production
+    /// perplexity without mutating the novelty/vector index.
+    ///
+    /// The default implementation refuses — only backends that carry a real
+    /// perplexity scorer (`EnclaveGateService`) and the deterministic
+    /// in-memory service override it. A backend that cannot isolate perplexity
+    /// from its novelty/vector side effects MUST leave this defaulted so the
+    /// re-score task fails closed rather than corrupting the index.
+    fn evaluate_trace_perplexity_only(
+        &self,
+        _tenant_ctx: &TenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
+        anyhow::bail!("PerplexityOnlyRescoreUnsupported")
+    }
 
     /// Mark a previously-indexed vector entry as invalidated inside the gate
     /// service (e.g., to drop it from the enclave's in-memory nearest-neighbor
@@ -234,6 +276,17 @@ fn build_deterministic_decision(
         )
         .as_bytes(),
     );
+    // Deterministic services (`InMemoryGateService`, `LegacyDeterministicGateService`)
+    // never see plaintext — only the AEAD ciphertext, which is nonce-randomized
+    // per encryption, so a real `dedup_simhash::trace_simhash` over "the text"
+    // is not available here. Fall back to an unused 8-byte window of the same
+    // input digest every other deterministic field is derived from: this keeps
+    // `dedup_simhash` stable for byte-identical `evaluate_trace` calls (the
+    // deterministic-service contract callers already rely on) without
+    // pretending to detect duplicate PLAINTEXT under independent encryptions.
+    // Real cross-trace duplicate detection requires `EnclaveGateService`,
+    // which has the decrypted plaintext in scope.
+    let dedup_simhash = u64_from_digest_prefix(&digest, 24) as i64;
     GateDecision {
         gate_policy_version: gate_policy_version.to_string(),
         gate_version_hash: gate_version_hash.to_string(),
@@ -255,6 +308,7 @@ fn build_deterministic_decision(
         chunk_count: 1,
         chunks_capped: false,
         chunk_vector_entries: Vec::new(),
+        dedup_simhash,
     }
 }
 
@@ -300,6 +354,31 @@ impl TraceGateService for InMemoryGateService {
             &self.gate_policy_version,
             &self.gate_version_hash,
         ))
+    }
+
+    fn evaluate_trace_perplexity_only(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
+        // Derive the perplexity fields from the same deterministic decision the
+        // full path would produce, so re-scored values stay consistent with a
+        // full evaluation. No novelty/vector state is read or written.
+        let decision = build_deterministic_decision(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+            &self.gate_policy_version,
+            &self.gate_version_hash,
+        );
+        Ok(PerplexityOnlyGateOutcome {
+            perplexity_micros: decision.perplexity_micros,
+            peak_perplexity_micros: decision.peak_perplexity_micros,
+            perplexity_passed: decision.perplexity_passed,
+        })
     }
 
     fn invalidate_vector_entry(
@@ -561,6 +640,55 @@ where
                     vector_entry_id: e.entry_id,
                 })
                 .collect(),
+            // Computed from the AEAD-decrypted plaintext (in scope above as
+            // `plaintext`) so the cross-trace dedup signal is derived inside
+            // the same trust boundary as every other decrypted-content field
+            // here — only the hash crosses back to the caller.
+            //
+            // Must be over the CANONICAL RENDERED EVENT TEXT
+            // (metadata-free), not the raw envelope JSON: the envelope
+            // carries per-submission-unique fields (submission_id, trace_id,
+            // created_at, per-event event_id/timestamp), so hashing the raw
+            // JSON means byte-identical-content resubmissions never collide.
+            // This mirrors the same rendering the chunker uses to build the
+            // text the scorer/embedder actually consume
+            // (`chunk_envelope_plaintext` / `chunk_plaintext`), so the
+            // simhash is over the same metadata-free text.
+            dedup_simhash: {
+                let dedup_canonical_text =
+                    trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
+                        .map(|events| events.join("\n"))
+                        .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
+                crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
+            },
+        })
+    }
+
+    fn evaluate_trace_perplexity_only(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
+        // Identical decrypt path to `evaluate_trace` — same DEK unwrap under the
+        // canonical KEK context and the same AEAD decrypt — so the plaintext fed
+        // to the scorer is byte-identical to a full evaluation.
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
+            artifact_kind: object_kind.clone(),
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+
+        // Perplexity-only: chunk + score + aggregate with the SAME orchestrator
+        // config, but no embedding, no nearest-neighbor query, no index insert.
+        let outcome = self.orchestrator.evaluate_perplexity_only(&plaintext)?;
+        Ok(PerplexityOnlyGateOutcome {
+            perplexity_micros: outcome.perplexity_micros,
+            peak_perplexity_micros: outcome.peak_perplexity_micros,
+            perplexity_passed: outcome.perplexity_passed,
         })
     }
 
