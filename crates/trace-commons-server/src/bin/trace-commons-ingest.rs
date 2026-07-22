@@ -6852,6 +6852,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(recompute_contributor_caps_handler),
         )
         .route(
+            "/v1/admin/scores-by-submission",
+            post(scores_by_submission_handler),
+        )
+        .route(
             "/v1/admin/credit-settlements",
             get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
         )
@@ -46069,6 +46073,74 @@ async fn recompute_contributor_caps_handler(
     }))
 }
 
+/// Devfolio score read-back request: the envelope ids a competition operator
+/// collected from participants' upload manifests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScoresBySubmissionRequest {
+    submission_ids: Vec<Uuid>,
+}
+
+/// Score bundle reported per envelope id. `credit_quality_micros` is the
+/// headline graded credit quality `q`; it is `None` when the submission has a
+/// gate decision but the shadow-mode credit-quality pass has not scored it
+/// yet. Ids with no gate decision at all are omitted from the response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubmissionScoreBundle {
+    submission_id: Uuid,
+    credit_quality_micros: Option<i64>,
+    perplexity_micros: i64,
+    novelty_score_micros: i64,
+    gate_passed: bool,
+}
+
+/// Maximum envelope ids per score read-back request, mirroring the
+/// submission-status batch cap.
+const SCORES_BY_SUBMISSION_MAX_IDS: usize = 500;
+
+async fn scores_by_submission_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ScoresBySubmissionRequest>,
+) -> ApiResult<Json<Vec<SubmissionScoreBundle>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_competition_operator(&tenant)?;
+    if body.submission_ids.len() > SCORES_BY_SUBMISSION_MAX_IDS {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "score read-back requests are limited to 500 ids",
+        ));
+    }
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score read-back requires a configured DB mirror",
+        ));
+    };
+    let rows = db
+        .list_scores_by_submission_ids(&body.submission_ids)
+        .await
+        .map_err(internal_error)?;
+    let scores = rows
+        .into_iter()
+        .map(|row| SubmissionScoreBundle {
+            submission_id: row.submission_id,
+            credit_quality_micros: row.credit_quality_micros,
+            perplexity_micros: row.perplexity_micros,
+            novelty_score_micros: row.novelty_score_micros,
+            gate_passed: row.gate_passed,
+        })
+        .collect::<Vec<_>>();
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "scores_by_submission",
+        scores.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(scores))
+}
+
 /// Per-submission cost-control knobs for the in-process perplexity-scoring
 /// driver's `score_one_submission` wrapper (Task 4).
 #[derive(Debug, Clone, Copy)]
@@ -48851,7 +48923,6 @@ fn require_process_evaluation_operator(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
-#[allow(dead_code)]
 fn require_competition_operator(auth: &TenantAuth) -> ApiResult<()> {
     if auth.role.can_admin() || auth.role == TokenRole::CompetitionReadWorker {
         Ok(())

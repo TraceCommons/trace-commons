@@ -1,7 +1,7 @@
 # Devfolio project-scoped uploads + score read-back — design
 
 Date: 2026-07-17 (revised after the neutral-schema pivot)
-Status: Approved; contributor side implemented, read-back in progress
+Status: Approved; implemented (contributor scope + manifest + score read-back)
 
 ## Problem
 
@@ -57,7 +57,7 @@ corpus. The interactive picker remains the final control.
 excluded). The participant hands that file's ids to devfolio. Logging is
 count-only. No trace-schema change.
 
-### Part 3 — Score read-back by envelope id — IN PROGRESS
+### Part 3 — Score read-back by envelope id — DONE
 
 A new server-side worker route lets devfolio pull scores for a set of
 `submission_id`s.
@@ -85,7 +85,8 @@ A new server-side worker route lets devfolio pull scores for a set of
 - **Store method.** `list_scores_by_submission_ids(&[Uuid])` on the gate-driver
   path (beside `list_gate_decisions_for_credit_scoring`), `WHERE submission_id =
   ANY($1)`, returning the **latest** decision per submission
-  (`DISTINCT ON (submission_id) ... ORDER BY submission_id, decided_at DESC`).
+  (`DISTINCT ON (submission_id) ... ORDER BY submission_id, decided_at DESC,
+  decision_id DESC` (the `decision_id` tiebreaker keeps ties deterministic)).
 - **Score bundle returned per id:** `credit_quality_micros` (the graded
   credit-quality `q`, headline) — nullable, since it is populated only after the
   shadow-mode `score-credit-quality` pass runs — plus `perplexity_micros`,
