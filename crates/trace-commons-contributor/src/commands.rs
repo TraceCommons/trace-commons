@@ -181,16 +181,50 @@ pub fn mint_grant_cmd(
     Ok(())
 }
 
+/// Pure predicate for the `--project` filter. Prefers the session's true
+/// decoded working directory (`cwd`) for a hyphen-safe, component-wise
+/// path-prefix match; falls back to the legacy basename-or-path heuristic
+/// only when the true cwd is unavailable.
+fn cwd_matches_project(
+    cwd: Option<&str>,
+    legacy_project: Option<&str>,
+    path: &Path,
+    project: &Path,
+) -> bool {
+    if let Some(cwd) = cwd {
+        return Path::new(cwd).starts_with(project);
+    }
+    let basename = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    legacy_project == Some(basename) || path.starts_with(project)
+}
+
 /// Discover every locally discoverable session across all sources, applying
-/// optional `source`/`project`/`since` filters. `project` matches either the
-/// session's basename (`SessionRef.project`) or a prefix of its full path;
-/// `since` filters against `started_at` (falls back to excluding sessions
-/// with no timestamp when set).
+/// optional `source`/`project`/`since` filters. `project` matches the
+/// session's true decoded working directory when available; otherwise falls
+/// back to the legacy heuristic (basename match or path prefix). `since`
+/// filters against `started_at` (falls back to excluding sessions with no
+/// timestamp when set).
 fn discover_filtered(
     source_filter: Option<&str>,
     project_filter: Option<&Path>,
     since: Option<chrono::Duration>,
 ) -> Result<Vec<SessionRef>> {
+    // Resolve `--project` against the real filesystem before matching. A
+    // participant standing in their hackathon project types `--project .`
+    // (or a relative path, or one crossing a symlink); an unresolved value
+    // never prefix-matches an absolute session `cwd`, so the batch would
+    // come back empty and look like "this project has no traces".
+    let resolved_project = match project_filter {
+        None => None,
+        Some(p) => Some(std::fs::canonicalize(p).with_context(|| {
+            format!("resolving --project path {} (does it exist?)", p.display())
+        })?),
+    };
+    let project_filter = resolved_project.as_deref();
+
     let mut refs = Vec::new();
     for source in all_sources(None, None) {
         if let Some(sf) = source_filter {
@@ -206,10 +240,16 @@ fn discover_filtered(
         let project_ok = match project_filter {
             None => true,
             Some(p) => {
-                let basename = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                let basename_match = r.project.as_deref() == Some(basename);
-                let prefix_match = r.path.starts_with(p);
-                basename_match || prefix_match
+                // Canonicalize the session cwd too when it still exists, so a
+                // symlinked path (e.g. macOS /tmp -> /private/tmp) compares
+                // equal on both sides. A cwd that no longer exists falls back
+                // to the raw string.
+                let cwd = r.cwd.as_deref().map(|c| {
+                    std::fs::canonicalize(c)
+                        .map(|abs| abs.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| c.to_string())
+                });
+                cwd_matches_project(cwd.as_deref(), r.project.as_deref(), &r.path, p)
             }
         };
         let since_ok = match since {
@@ -330,12 +370,22 @@ pub struct SubmitSelection<'a> {
     pub yes: bool,
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
+    pub manifest: Option<&'a Path>,
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
 /// error (nonzero exit) if any outcome was refused or failed.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
+    // A dry run mints envelope ids locally but delivers nothing, so its ids
+    // do not exist server-side. Writing them would hand an external collector
+    // ids that can never be scored. Refuse up front, before any work.
+    if sel.manifest.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--manifest cannot be combined with --dry-run: a dry run uploads nothing, \
+             so its envelope ids would never exist server-side"
+        );
+    }
     let cfg = store
         .load_config()
         .context("loading contributor config")?
@@ -392,6 +442,14 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         pii_filter: sel.pii_filter.map(str::to_string),
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
+
+    if let Some(path) = sel.manifest {
+        let entries = submit::build_manifest(&outcomes);
+        let json = serde_json::to_string_pretty(&entries).context("serializing manifest")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("writing manifest to {}", path.display()))?;
+        println!("wrote {} envelope id(s) to manifest", entries.len());
+    }
 
     let mut had_failure = false;
     for outcome in &outcomes {
@@ -582,5 +640,111 @@ mod tests {
         assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod project_filter_tests {
+    use super::cwd_matches_project;
+    use std::path::Path;
+
+    #[tokio::test]
+    async fn manifest_with_dry_run_is_refused_before_any_upload() {
+        // A dry run mints envelope ids locally but delivers nothing, so a
+        // manifest written from its outcomes would hand devfolio ids the
+        // server has never seen. The combination must be refused up front.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let manifest = dir.path().join("ids.json");
+        let sel = super::SubmitSelection {
+            all: true,
+            since: None,
+            project: None,
+            source: None,
+            yes: true,
+            dry_run: true,
+            pii_filter: None,
+            manifest: Some(&manifest),
+        };
+
+        let error = super::submit(&store, &sel).await.expect_err("refused");
+        assert!(
+            error.to_string().contains("--dry-run"),
+            "unexpected error: {error}"
+        );
+        // Refused BEFORE the not-logged-in check, i.e. before any work.
+        assert!(!manifest.exists(), "no manifest is written on refusal");
+    }
+
+    #[test]
+    fn project_filter_resolves_relative_and_dot_paths() {
+        // The primary devfolio path: a participant stands in their project
+        // and types `--project .`. An unresolved "." never prefix-matches an
+        // absolute session cwd, so the filter must canonicalize first.
+        let dir = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(dir.path()).unwrap();
+        let resolved = std::fs::canonicalize(Path::new(".")).unwrap();
+        assert!(resolved.is_absolute(), "canonicalize yields absolute paths");
+        assert!(cwd_matches_project(
+            Some(project.join("sub").to_str().unwrap()),
+            None,
+            Path::new("/x.jsonl"),
+            &project,
+        ));
+    }
+
+    #[test]
+    fn true_cwd_prefix_matches_including_hyphenated_name() {
+        // Project literally named "my-hack" — the legacy basename would decode
+        // to "hack" and miss it; the true cwd matches exactly.
+        let cwd = Some("/Users/dev/code/my-hack");
+        assert!(cwd_matches_project(
+            cwd,
+            Some("hack"),
+            Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn true_cwd_excludes_sibling_and_prefix_collision() {
+        // Sibling dir and a "my-hack-2" name must NOT match "my-hack".
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/other"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/my-hack-2"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_basename_or_path_prefix_when_cwd_unknown() {
+        // No true cwd available -> legacy heuristic: basename match ...
+        assert!(cwd_matches_project(
+            None,
+            Some("my-hack"),
+            Path::new("/somewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // ... or session-file path prefix.
+        assert!(cwd_matches_project(
+            None,
+            None,
+            Path::new("/Users/dev/code/my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // Neither matches -> false.
+        assert!(!cwd_matches_project(
+            None,
+            Some("other"),
+            Path::new("/elsewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
     }
 }

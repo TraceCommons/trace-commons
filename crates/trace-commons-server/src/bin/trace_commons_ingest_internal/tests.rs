@@ -3912,6 +3912,12 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         "revocation-worker-token-a",
         TokenRole::RevocationWorker,
     );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "competition-read-worker-token-a",
+        TokenRole::CompetitionReadWorker,
+    );
     insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
     insert_token(
         &mut tokens,
@@ -4271,6 +4277,16 @@ fn token_role_parses_worker_roles() {
             TokenRole::RevocationWorker,
             "revocation_worker",
         ),
+        (
+            "competition_read_worker",
+            TokenRole::CompetitionReadWorker,
+            "competition_read_worker",
+        ),
+        (
+            "competition-read-worker",
+            TokenRole::CompetitionReadWorker,
+            "competition_read_worker",
+        ),
     ];
 
     for (raw, expected, storage_name) in cases {
@@ -4279,6 +4295,31 @@ fn token_role_parses_worker_roles() {
         assert_eq!(parsed.storage_name(), storage_name);
     }
     assert!(TokenRole::parse("trainer").is_err());
+}
+
+#[test]
+fn require_competition_operator_admits_admin_and_competition_worker_denies_others() {
+    let build_auth = |role: TokenRole| TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role,
+        principal_ref: principal_storage_ref("competition-read-worker-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    let reviewer_err = require_competition_operator(&build_auth(TokenRole::Reviewer))
+        .expect_err("reviewer token must be rejected");
+    assert_eq!(reviewer_err.0, StatusCode::FORBIDDEN);
+
+    require_competition_operator(&build_auth(TokenRole::CompetitionReadWorker))
+        .expect("competition read worker token is admitted");
+
+    require_competition_operator(&build_auth(TokenRole::Admin)).expect("admin token is admitted");
 }
 
 #[test]
@@ -63260,6 +63301,9 @@ struct PerplexityDriverTestDb {
     /// epoch, version)`.
     contributor_cap:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, i64, i64, i32)>>,
+    /// Hash-only audit rows appended via `append_trace_audit_event`, so
+    /// handler tests can assert an audited read emitted its event.
+    audit_events: std::sync::RwLock<Vec<StorageTraceAuditEventWrite>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -63274,6 +63318,7 @@ impl PerplexityDriverTestDb {
             credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
             dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
+            audit_events: std::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -63888,11 +63933,14 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
     ) -> Result<u64, DatabaseError> {
         todo!("stub")
     }
+    /// Records the hash-only control-plane audit rows so handler tests can
+    /// assert an audited read actually emitted its event.
     async fn append_trace_audit_event(
         &self,
-        _: StorageTraceAuditEventWrite,
+        write: StorageTraceAuditEventWrite,
     ) -> Result<(), DatabaseError> {
-        todo!("stub")
+        self.audit_events.write().unwrap().push(write);
+        Ok(())
     }
     async fn list_trace_audit_events(
         &self,
@@ -63900,12 +63948,14 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
     ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
         todo!("stub")
     }
+    /// The double keeps no hash chain; an empty tail makes every appended
+    /// event the chain head, which is all the audited-read tests need.
     async fn list_recent_trace_audit_events(
         &self,
         _: &str,
         _: usize,
     ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
-        todo!("stub")
+        Ok(Vec::new())
     }
     async fn get_trace_audit_event_by_id(
         &self,
@@ -64470,6 +64520,60 @@ impl Database for PerplexityDriverTestDb {
         });
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    /// In-memory analogue of the Postgres `list_scores_by_submission_ids`
+    /// read: filters stored gate-decision rows to the requested ids
+    /// (ignoring tenant — the real method is cross-tenant by construction),
+    /// keeps the LATEST row per submission by `(decided_at, decision_id)`,
+    /// and projects the score fields. The `decision_id` tiebreaker mirrors
+    /// the Postgres impl's `ORDER BY submission_id, decided_at DESC,
+    /// decision_id DESC` so ties on `decided_at` resolve identically between
+    /// the double and the real backend. `credit_quality_micros` comes from
+    /// the `credit_quality_scores` side table, mirroring
+    /// `gate_decision_with_credit_quality_by_id`.
+    async fn list_scores_by_submission_ids(
+        &self,
+        submission_ids: &[Uuid],
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow>,
+        DatabaseError,
+    > {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let mut latest: std::collections::HashMap<Uuid, (String, &StorageTraceGateDecisionRow)> =
+            std::collections::HashMap::new();
+        for (tenant_id, row) in decisions.iter() {
+            if !submission_ids.contains(&row.submission_id) {
+                continue;
+            }
+            let candidate_key = (row.decided_at, row.decision_id);
+            match latest.get(&row.submission_id) {
+                Some((_, existing))
+                    if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                _ => {
+                    latest.insert(row.submission_id, (tenant_id.clone(), row));
+                }
+            }
+        }
+        Ok(latest
+            .into_values()
+            .map(|(tenant_id, row)| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id, row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                }
+            })
+            .collect())
     }
 }
 
@@ -65854,6 +65958,115 @@ async fn recompute_contributor_caps_bounds_epoch_total_by_k() {
         last_factor < first_factor * 0.3,
         "last decision's factor must be much smaller than the first's: \
          first={first_factor} last={last_factor}"
+    );
+}
+
+/// Store-level test for the devfolio score read-back surface:
+/// `list_scores_by_submission_ids` must return the LATEST decision per
+/// submission, cross-tenant, dropping unknown ids and leaving
+/// `credit_quality_micros` `None` when the shadow-mode credit-quality pass
+/// has not scored the decision yet.
+#[tokio::test]
+async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cross_tenant() {
+    let db = PerplexityDriverTestDb::new();
+
+    // id1, tenant-a: fully scored (gate passed, q present).
+    let id1 = Uuid::new_v4();
+    let mut row1 = rescore_test_decision_row(id1);
+    row1.perplexity_passed = true;
+    row1.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.update_trace_gate_decision_credit_quality("tenant-a", row1.decision_id, 700_000, 0, 1)
+        .await
+        .expect("seed row1 credit quality");
+
+    // id2, tenant-b (DIFFERENT tenant): gated but the credit-quality pass has
+    // not run yet, so q stays NULL. One gate failed.
+    let id2 = Uuid::new_v4();
+    let mut row2 = rescore_test_decision_row(id2);
+    row2.perplexity_passed = false;
+    row2.novelty_passed = true;
+    db.seed_gate_decision("tenant-b", row2.clone());
+
+    // id3, tenant-a: TWO decisions at different decided_at — the latest must
+    // win.
+    let id3 = Uuid::new_v4();
+    let mut row3_old = rescore_test_decision_row(id3);
+    row3_old.decided_at = Utc::now() - chrono::Duration::seconds(120);
+    row3_old.perplexity_micros = 111;
+    let mut row3_new = rescore_test_decision_row(id3);
+    row3_new.decided_at = Utc::now();
+    row3_new.perplexity_micros = 999;
+    db.seed_gate_decision("tenant-a", row3_old);
+    db.seed_gate_decision("tenant-a", row3_new);
+
+    // id4, tenant-a: TWO decisions with the SAME decided_at but different
+    // decision_id — the tiebreaker (highest decision_id wins) must be
+    // deterministic, matching the Postgres impl's
+    // `ORDER BY submission_id, decided_at DESC, decision_id DESC`.
+    let id4 = Uuid::new_v4();
+    let tie_decided_at = Utc::now();
+    let mut row4_low_id = rescore_test_decision_row(id4);
+    row4_low_id.decision_id = Uuid::from_u128(1);
+    row4_low_id.decided_at = tie_decided_at;
+    row4_low_id.perplexity_micros = 111;
+    let mut row4_high_id = rescore_test_decision_row(id4);
+    row4_high_id.decision_id = Uuid::from_u128(2);
+    row4_high_id.decided_at = tie_decided_at;
+    row4_high_id.perplexity_micros = 222;
+    // Seed the LOWER decision_id FIRST: a naive "first-seen wins on ties"
+    // implementation (comparing decided_at alone with `>=`) would keep
+    // row4_low_id and fail this assertion. Only an explicit
+    // (decided_at, decision_id) comparison correctly picks row4_high_id
+    // regardless of insertion order.
+    db.seed_gate_decision("tenant-a", row4_low_id);
+    db.seed_gate_decision("tenant-a", row4_high_id);
+
+    let unknown_id = Uuid::new_v4();
+
+    // Empty input short-circuits to Ok(vec![]) without touching storage.
+    let empty = db
+        .list_scores_by_submission_ids(&[])
+        .await
+        .expect("empty input succeeds");
+    assert_eq!(empty, Vec::new(), "empty submission_ids returns Ok(vec![])");
+
+    let rows = db
+        .list_scores_by_submission_ids(&[id1, id2, id3, id4, unknown_id])
+        .await
+        .expect("cross-tenant read succeeds");
+    assert_eq!(
+        rows.len(),
+        4,
+        "unknown id must be absent, not an error: {rows:?}"
+    );
+
+    let by_id: std::collections::HashMap<Uuid, _> =
+        rows.into_iter().map(|r| (r.submission_id, r)).collect();
+
+    let r1 = by_id.get(&id1).expect("id1 present");
+    assert_eq!(r1.credit_quality_micros, Some(700_000));
+    assert!(r1.gate_passed, "both sub-gates passed for id1");
+
+    let r2 = by_id.get(&id2).expect("id2 present (different tenant)");
+    assert_eq!(r2.credit_quality_micros, None, "q not yet scored for id2");
+    assert!(!r2.gate_passed, "perplexity sub-gate failed for id2");
+
+    let r3 = by_id.get(&id3).expect("id3 present");
+    assert_eq!(
+        r3.perplexity_micros, 999,
+        "the LATEST decision row must win, not the first-seeded one"
+    );
+
+    let r4 = by_id.get(&id4).expect("id4 present");
+    assert_eq!(
+        r4.perplexity_micros, 222,
+        "tied decided_at must break deterministically on the HIGHEST decision_id"
+    );
+
+    assert!(
+        !by_id.contains_key(&unknown_id),
+        "unknown id must not appear in the result"
     );
 }
 
@@ -76778,4 +76991,137 @@ async fn revocation_enqueues_one_item_per_chunk_vector_entry() {
             .await
             .expect("planner rerun");
     assert_eq!(again, 0);
+}
+
+/// Handler-level test for the devfolio score read-back route
+/// (`POST /v1/admin/scores-by-submission`). Covers the scoped credential
+/// (`CompetitionReadWorker` admitted, contributor rejected), the batch cap,
+/// the cross-tenant bundle shape, and the fail-closed 503 when no DB mirror
+/// is configured.
+#[tokio::test]
+async fn scores_by_submission_handler_serves_competition_worker_and_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+
+    // id1 lives in tenant-a and is fully scored; id2 lives in tenant-b and has
+    // no credit-quality score yet. The route must return BOTH (cross-tenant).
+    let id1 = Uuid::new_v4();
+    let mut row1 = rescore_test_decision_row(id1);
+    row1.perplexity_passed = true;
+    row1.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.update_trace_gate_decision_credit_quality("tenant-a", row1.decision_id, 700_000, 0, 1)
+        .await
+        .expect("seed row1 credit quality");
+
+    let id2 = Uuid::new_v4();
+    let mut row2 = rescore_test_decision_row(id2);
+    row2.perplexity_passed = false;
+    row2.novelty_passed = true;
+    db.seed_gate_decision("tenant-b", row2);
+
+    let unknown_id = Uuid::new_v4();
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    // DB-first audit writes, matching the production posture; the in-memory
+    // double records the mirrored row rather than serving a read-back chain.
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // A contributor token must never reach the competition read-back.
+    let forbidden = scores_by_submission_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(ScoresBySubmissionRequest {
+            submission_ids: vec![id1],
+        }),
+    )
+    .await
+    .expect_err("contributor tokens are rejected");
+    assert_eq!(forbidden.0, StatusCode::FORBIDDEN);
+
+    // Oversized batches are refused before any read.
+    let too_large = scores_by_submission_handler(
+        State(state.clone()),
+        auth_headers("competition-read-worker-token-a"),
+        Json(ScoresBySubmissionRequest {
+            submission_ids: (0..501).map(|_| Uuid::new_v4()).collect(),
+        }),
+    )
+    .await
+    .expect_err("batches over the cap are rejected");
+    assert_eq!(too_large.0, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let Json(scores) = scores_by_submission_handler(
+        State(state.clone()),
+        auth_headers("competition-read-worker-token-a"),
+        Json(ScoresBySubmissionRequest {
+            submission_ids: vec![id1, id2, unknown_id],
+        }),
+    )
+    .await
+    .expect("competition read worker token is admitted");
+    assert_eq!(
+        scores.len(),
+        2,
+        "unknown ids are omitted, not an error: {scores:?}"
+    );
+
+    let by_id: std::collections::HashMap<Uuid, _> =
+        scores.into_iter().map(|s| (s.submission_id, s)).collect();
+    let s1 = by_id.get(&id1).expect("id1 present");
+    assert_eq!(s1.credit_quality_micros, Some(700_000));
+    assert!(s1.gate_passed);
+    let s2 = by_id
+        .get(&id2)
+        .expect("id2 present even though it lives in another tenant");
+    assert_eq!(
+        s2.credit_quality_micros, None,
+        "an unscored decision reports null q rather than being dropped"
+    );
+    assert!(!s2.gate_passed);
+
+    // The successful read emits exactly one hash-only Read audit row, and it
+    // carries no submission id (surface label + count only).
+    {
+        let audit = db.audit_events.read().unwrap();
+        let reads = audit
+            .iter()
+            .filter(|event| event.action == StorageTraceAuditAction::Read)
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 1, "one audited read: {audit:?}");
+        assert!(
+            reads[0].submission_id.is_none(),
+            "score read-back audit must not name a submission"
+        );
+    }
+
+    // Fail closed when the cross-tenant read backend is not configured.
+    let no_mirror_state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let unavailable = scores_by_submission_handler(
+        State(no_mirror_state),
+        auth_headers("competition-read-worker-token-a"),
+        Json(ScoresBySubmissionRequest {
+            submission_ids: vec![id1],
+        }),
+    )
+    .await
+    .expect_err("no DB mirror fails closed");
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
 }

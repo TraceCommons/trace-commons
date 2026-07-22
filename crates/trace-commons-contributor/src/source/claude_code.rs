@@ -96,10 +96,12 @@ impl TraceSource for ClaudeCodeSource {
                     .modified()
                     .ok()
                     .map(chrono::DateTime::<chrono::Utc>::from);
+                let cwd = peek_cwd(&path);
                 sessions.push(SessionRef {
                     source: SOURCE_CLAUDE_CODE,
                     path,
                     project: discovery_project.clone(),
+                    cwd,
                     started_at,
                     size_bytes: metadata.len(),
                 });
@@ -117,6 +119,42 @@ impl TraceSource for ClaudeCodeSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// parses each line as JSON in turn and stops at the first record carrying
+/// a `cwd` field, skipping the full parse of the file's events. Reads the
+/// file the same way `load_session` does (`std::fs::read` then
+/// `String::from_utf8_lossy`), so an invalid-UTF-8 line elsewhere in the
+/// file does not abort the scan before it reaches a later cwd-bearing line.
+/// `load_session` never errors on bad UTF-8 either, so peek and load must
+/// tolerate it identically, or `--project` filtering can silently disagree
+/// with what `submit_sessions` actually delivers. Mirrors the exact field
+/// access `load_session` uses (`record.get("cwd").and_then(|v|
+/// v.as_str())`). Returns `None` if the file cannot be read or no record
+/// carries `cwd`.
+///
+/// Cost: the file is still read whole (as `load_session` does); what is
+/// saved is parsing and building every event. Discovery therefore pays one
+/// read per session file, which is far less than the full loads the
+/// interactive picker already performs.
+fn peek_cwd(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(c) = record.get("cwd").and_then(|v| v.as_str()) {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
@@ -383,6 +421,46 @@ mod tests {
         // heuristic takes the segment after the final '-' as a best-effort
         // project basename, ahead of `load()` reading the true cwd.
         assert_eq!(found[0].project, Some("myproj".to_string()));
+        // Discovery now peeks the true cwd cheaply too, matching `load()`.
+        assert_eq!(found[0].cwd.as_deref(), Some("/Users/testuser/code/myproj"));
+    }
+
+    #[test]
+    fn peek_cwd_reads_first_hit_and_round_trips_hyphenated_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n{\"type\":\"assistant\"}\n",
+        )
+        .unwrap();
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
+    }
+
+    #[test]
+    fn peek_cwd_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+        assert_eq!(peek_cwd(&path), None);
+    }
+
+    #[test]
+    fn peek_cwd_tolerates_invalid_utf8_before_the_cwd_line() {
+        // A malformed-UTF-8 line ahead of the cwd-bearing line must not abort
+        // the scan: `load_session` reads via `String::from_utf8_lossy` and
+        // keeps going past bad bytes, so `peek_cwd` must match exactly or
+        // `--project` filtering can silently disagree with what
+        // `submit_sessions` actually delivers.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"bad\":\"");
+        bytes.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 sequence
+        bytes.extend_from_slice(b"not json}\n");
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
     }
 
     #[test]

@@ -91,14 +91,59 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .modified()
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
+        let cwd = peek_cwd(&path);
         sessions.push(SessionRef {
             source: SOURCE_CODEX,
             path,
             project: None,
+            cwd,
             started_at,
             size_bytes: metadata.len(),
         });
     }
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// parses each line as JSON in turn and stops at the first `session_meta`
+/// record carrying a `payload.cwd` field, skipping the full parse of the
+/// file's events. Reads the file the same way `load_session` does
+/// (`std::fs::read` then `String::from_utf8_lossy`), so an invalid-UTF-8
+/// line elsewhere in the file does not abort the scan before it reaches a
+/// later cwd-bearing line. `load_session` never errors on bad UTF-8 either,
+/// so peek and load must tolerate it identically, or `--project` filtering
+/// can silently disagree with what `submit_sessions` actually delivers.
+/// Mirrors the exact field path `load_session` uses
+/// (`payload.and_then(|p| p.get("cwd"))`). Returns `None` if the file
+/// cannot be read or no record carries `cwd`.
+///
+/// Cost: the file is still read whole (as `load_session` does); what is
+/// saved is parsing and building every event. Discovery therefore pays one
+/// read per session file, which is far less than the full loads the
+/// interactive picker already performs.
+fn peek_cwd(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+            continue;
+        }
+        if let Some(c) = record
+            .get("payload")
+            .and_then(|p| p.get("cwd"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {

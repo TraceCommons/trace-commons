@@ -3845,6 +3845,56 @@ impl Database for PgBackend {
             })
             .collect())
     }
+
+    async fn list_scores_by_submission_ids(
+        &self,
+        submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (submission_id)
+                    submission_id,
+                    credit_quality_micros,
+                    perplexity_micros,
+                    novelty_score_micros,
+                    perplexity_passed,
+                    novelty_passed
+                 FROM trace_gate_decisions
+                 WHERE submission_id = ANY($1)
+                 -- decision_id is the final, unique tiebreaker (mirrors
+                 -- list_contributor_cap_signals) so decisions that share a
+                 -- decided_at sort deterministically instead of Postgres
+                 -- picking an arbitrary row among ties on repeated reads.
+                 ORDER BY submission_id, decided_at DESC, decision_id DESC",
+                &[&submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let perplexity_passed: bool = row.get("perplexity_passed");
+                let novelty_passed: bool = row.get("novelty_passed");
+                crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.get("submission_id"),
+                    credit_quality_micros: row.get("credit_quality_micros"),
+                    perplexity_micros: row.get("perplexity_micros"),
+                    novelty_score_micros: row.get("novelty_score_micros"),
+                    gate_passed: perplexity_passed && novelty_passed,
+                }
+            })
+            .collect())
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

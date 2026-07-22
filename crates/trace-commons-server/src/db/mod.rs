@@ -999,6 +999,19 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Vec<crate::trace_corpus_storage::ContributorCapSignalRow>, DatabaseError> {
         Ok(Vec::new())
     }
+
+    /// Look up the LATEST gate-decision score for each of `submission_ids`,
+    /// cross-tenant. Reads through the gate-driver reader pool with NO tenant
+    /// GUC (the trace_gate_driver role's permissive cross-tenant SELECT
+    /// policies authorize it). Ids with no decision row are simply absent
+    /// from the result — this is not an error. Default: empty (test doubles
+    /// / backends without a gate-driver pool).
+    async fn list_scores_by_submission_ids(
+        &self,
+        _submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

@@ -17,6 +17,7 @@ pub struct SessionRef {
     pub source: &'static str,
     pub path: PathBuf,
     pub project: Option<String>, // basename only, never a full path
+    pub cwd: Option<String>, // true working dir if cheaply known at discovery; used for --project matching, NEVER serialized
     pub started_at: Option<DateTime<Utc>>,
     pub size_bytes: u64,
 }
