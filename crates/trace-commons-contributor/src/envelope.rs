@@ -275,6 +275,7 @@ pub fn build_raw_contribution(
             .map(|cwd| session_hash(cwd.as_bytes()))
             .unwrap_or_else(|| "unknown".to_string()),
     );
+
     let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
 
     RawTraceContribution {

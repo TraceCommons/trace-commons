@@ -1877,6 +1877,12 @@ pub struct ContributorCapSignalRow {
 /// submission has more than one decision row, the row with the latest
 /// `decided_at` wins. `credit_quality_micros` is `None` until the shadow-mode
 /// credit-quality pass has scored the decision (migration V39).
+///
+/// Note that `submission_id` is derived from session content, so the same
+/// session uploaded by two contributors in different tenants shares one id
+/// and collapses to a single row here — deliberately, since the score is a
+/// function of that content, but callers must not read a row as belonging
+/// to any particular contributor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceScoreBySubmissionRow {
     pub submission_id: Uuid,

@@ -133,6 +133,11 @@ impl TraceSource for ClaudeCodeSource {
 /// access `load_session` uses (`record.get("cwd").and_then(|v|
 /// v.as_str())`). Returns `None` if the file cannot be read or no record
 /// carries `cwd`.
+///
+/// Cost: the file is still read whole (as `load_session` does); what is
+/// saved is parsing and building every event. Discovery therefore pays one
+/// read per session file, which is far less than the full loads the
+/// interactive picker already performs.
 fn peek_cwd(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let text = String::from_utf8_lossy(&bytes);

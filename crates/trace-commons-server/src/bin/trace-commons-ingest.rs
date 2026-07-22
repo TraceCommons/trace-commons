@@ -46119,7 +46119,17 @@ async fn scores_by_submission_handler(
     let rows = db
         .list_scores_by_submission_ids(&body.submission_ids)
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| match error {
+            // The cross-tenant read runs only through the narrow gate-driver
+            // pool; an unconfigured pool is a missing control, not an
+            // internal fault, so surface the same fail-closed 503 as a
+            // missing DB mirror rather than a 500.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score read-back requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
     let scores = rows
         .into_iter()
         .map(|row| SubmissionScoreBundle {

@@ -47,7 +47,9 @@ submission_id)`), so it threads cleanly upload → devfolio → score read-back.
 basename/path heuristic only when the true cwd is unavailable. The decoded cwd
 is populated onto `SessionRef` at discovery via a cheap, UTF-8-tolerant
 early-stop peek (mirrors `load_session`), so filtering does not full-load the
-corpus. The interactive picker remains the final control.
+corpus. The interactive picker remains the final control. The `--project` value is
+canonicalized before matching (so `--project .`, relative paths, and
+symlinked paths resolve), as is the session cwd when it still exists.
 
 ### Part 2 — Upload manifest (`submit --manifest`) — DONE
 
@@ -55,7 +57,9 @@ corpus. The interactive picker remains the final control.
 `{ submission_id, status }` for the batch's uploaded traces (the
 `Submitted` and `AlreadySubmitted` outcomes; refused/failed/skipped are
 excluded). The participant hands that file's ids to devfolio. Logging is
-count-only. No trace-schema change.
+count-only. No trace-schema change. `--manifest` with `--dry-run` is refused
+up front: a dry run mints ids locally without delivering them, so its ids
+would never exist server-side.
 
 ### Part 3 — Score read-back by envelope id — DONE
 
@@ -94,8 +98,14 @@ A new server-side worker route lets devfolio pull scores for a set of
   novelty_passed`). An id with a decision row but no `q` yet is returned with
   `credit_quality_micros: null` (distinguishable "gated but not credit-scored");
   an id with no decision row is omitted (distinguishable "not yet gated").
-- **Guard.** If the gate-driver pool / `db_mirror` is not configured, the route
-  fails closed with `503 SERVICE_UNAVAILABLE` (mirrors the recompute handlers).
+- **Guard.** If `db_mirror` or the gate-driver pool is not configured, the
+  route fails closed with `503 SERVICE_UNAVAILABLE` (mirrors the recompute
+  handlers); a missing gate-driver pool surfaces as 503 rather than 500.
+- **Content-derived ids.** `submission_id` is derived from session content, so
+  the same session uploaded by two contributors in different tenants shares
+  one id and collapses to a single row. Deliberate — the score is a function
+  of the content — but a returned row must not be read as belonging to any
+  particular contributor.
 - **Hash-only audit.** Emit `append_control_plane_read_audit(state, &auth,
   "scores_by_submission", results.len())` before returning — surface label +
   count only, never the score values or submission ids.
