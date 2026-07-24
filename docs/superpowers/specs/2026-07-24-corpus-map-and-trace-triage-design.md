@@ -39,7 +39,8 @@ that separated distributions without measuring value:
   signal — a reinterpretation, not a validation.
 
 Shreya Shankar's evals framework (analyze → measure → improve) names the
-underlying problem directly: quality is subjective, it lives in the judgment of
+underlying problem directly ([talk](https://www.youtube.com/watch?v=tqUDjc1HzO4)):
+quality is subjective, it lives in the judgment of
 the team building the product, and pointing a model at raw data to "find the
 issues" yields surface-level or hallucinated findings. The correct use of
 automation is to build the interface where a human applies judgment efficiently,
