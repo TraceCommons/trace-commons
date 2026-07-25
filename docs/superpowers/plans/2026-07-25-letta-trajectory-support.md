@@ -1418,9 +1418,9 @@ Run: `cargo test -p trace-commons-contributor trajectory_session_builds_an_envel
 
 Expected: PASS.
 
-- [ ] **Step 3: Commit the fixture and test**
+- [ ] **Step 3: Commit the test**
 
-Save the same JSON body to `crates/trace-commons-contributor/fixtures/trajectory-openhands.json` for reuse, with the sanitized content above (no real paths, no real content).
+The trajectory JSON stays inline in the test. Do not create a separate fixture file: nothing else reads it, and a second copy of the same sanitized body would only drift.
 
 ```bash
 git add crates/trace-commons-contributor/
