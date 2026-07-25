@@ -98,8 +98,8 @@ Three changes in the contributor crate, plus one protocol addition:
 2. `SessionEventKind::Reasoning` (contributor) and
    `TraceContributionEventType::Reasoning` (protocol), wired through both
    existing adapters.
-3. `SessionRef.source` and `SessionTranscript.source` widened from
-   `&'static str` to `Cow<'static, str>`.
+3. `SessionTranscript.source` widened from `&'static str` to
+   `Cow<'static, str>`. See "Provenance" for why `SessionRef.source` is not.
 
 ### Record mapping
 
@@ -128,9 +128,16 @@ Notes:
 
 ### Provenance
 
-`Cow<'static, str>` lets the native adapters keep their `&'static` constants at
-zero cost while Trajectory carries the file's own `meta.source`, preserving
-per-harness attribution for exactly the harnesses this change unlocks.
+Only `SessionTranscript.source` is widened to `Cow<'static, str>`, carrying the
+file's own `meta.source` and preserving per-harness attribution for exactly the
+harnesses this change unlocks. The native adapters keep their `&'static`
+constants at zero cost.
+
+`SessionRef.source` deliberately stays `&'static str` and keeps the *adapter*
+name (`"trajectory"`), because `commands::source_for(name)` pairs a discovered
+`SessionRef` back to its adapter by that name. Putting the inner harness name
+there would break that lookup. The two fields therefore carry different things:
+`SessionRef.source` is a routing key, `SessionTranscript.source` is provenance.
 
 Verified safe end to end: `transcript.source` flows only into
 `feature_flags["agent"]` and the local receipt, both free-form strings. Ingest
