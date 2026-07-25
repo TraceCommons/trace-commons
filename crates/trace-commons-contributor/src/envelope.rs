@@ -386,6 +386,11 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
             e.content.clone(),
             e.structured.clone(),
         ),
+        SessionEventKind::Reasoning => (
+            TraceContributionEventType::Reasoning,
+            e.content.clone(),
+            e.structured.clone(),
+        ),
         SessionEventKind::ToolCall => (
             TraceContributionEventType::ToolCall,
             e.content.clone(),
@@ -690,5 +695,23 @@ mod tests {
 
         let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&small).is_ok());
+    }
+
+    #[test]
+    fn reasoning_events_map_to_the_reasoning_event_type() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Reasoning,
+            timestamp: None,
+            content: Some("weighing two approaches".to_string()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        };
+        let raw = super::raw_event_for(&event, chrono::Utc::now());
+        assert_eq!(
+            raw.event_type,
+            trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning
+        );
+        assert_eq!(raw.content.as_deref(), Some("weighing two approaches"));
     }
 }

@@ -26,6 +26,7 @@ pub struct SessionRef {
 pub enum SessionEventKind {
     User,
     Assistant,
+    Reasoning,
     ToolCall,
     ToolResult,
     Opaque,
