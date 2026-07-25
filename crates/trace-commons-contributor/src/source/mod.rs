@@ -9,9 +9,11 @@ use sha2::{Digest, Sha256};
 
 pub mod claude_code;
 pub mod codex;
+pub mod trajectory;
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
+pub const SOURCE_TRAJECTORY: &str = "trajectory";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
