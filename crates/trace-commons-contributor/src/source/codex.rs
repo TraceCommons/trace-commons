@@ -7,6 +7,7 @@
 //! unknown payload/record type) carry only a record-type marker, never a
 //! payload. `reasoning` items are captured as `Reasoning` events.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -239,7 +240,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CODEX,
+        source: Cow::Borrowed(SOURCE_CODEX),
         agent_version,
         model,
         project,

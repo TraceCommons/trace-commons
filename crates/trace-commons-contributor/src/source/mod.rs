@@ -1,6 +1,7 @@
 //! Source model: the `TraceSource` trait, session/transcript types shared by
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -44,7 +45,12 @@ pub struct SessionEvent {
 
 #[derive(Debug, Clone)]
 pub struct SessionTranscript {
-    pub source: &'static str,
+    /// Provenance: the harness that produced this session. For the native
+    /// adapters this equals the adapter name; for trajectory files it is the
+    /// file's own `meta.source`, so a session normalized from OpenHands is
+    /// attributed to OpenHands rather than to the trajectory reader.
+    /// Distinct from `SessionRef.source`, which is the adapter routing key.
+    pub source: Cow<'static, str>,
     pub agent_version: Option<String>,
     pub model: Option<String>,
     pub project: Option<String>, // basename

@@ -7,6 +7,7 @@
 //! payload. Reasoning (`thinking`) blocks are captured as `Reasoning`
 //! events and redacted like any other content.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -320,7 +321,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CLAUDE_CODE,
+        source: Cow::Borrowed(SOURCE_CLAUDE_CODE),
         agent_version,
         model,
         project,
