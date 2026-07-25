@@ -3,9 +3,9 @@
 //! Reads `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`
 //! session files and maps them into the shared `SessionTranscript` model.
 //! See `docs/superpowers/plans/` (Task 8) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `reasoning`, `event_msg`, `web_search_call`, and any unknown payload/record
-//! type) carry only the record type string, never the record payload.
+//! rules; `Opaque` events (covering `event_msg`, `web_search_call`, and any
+//! unknown payload/record type) carry only a record-type marker, never a
+//! payload. `reasoning` items are captured as `Reasoning` events.
 
 use std::path::{Path, PathBuf};
 
@@ -352,6 +352,34 @@ fn map_response_item(
                 token_counts: None,
             });
         }
+        "reasoning" => {
+            // Reasoning is captured as a first-class event and redacted
+            // through the same client-side pipeline as every other kind.
+            let mut parts = Vec::new();
+            for key in ["summary", "content"] {
+                if let Some(blocks) = payload.get(key).and_then(|v| v.as_array()) {
+                    for block in blocks {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // A reasoning item with no recoverable text carries no signal;
+            // emitting an empty event would only add noise to the transcript.
+            if !parts.is_empty() {
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Reasoning,
+                    timestamp,
+                    content: Some(parts.join("\n")),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                });
+            }
+        }
         other => {
             events.push(SessionEvent {
                 kind: SessionEventKind::Opaque,
@@ -396,15 +424,40 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
-                SessionEventKind::Opaque, // reasoning
+                SessionEventKind::Reasoning,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
                 SessionEventKind::Assistant,
             ]
         );
+        assert_eq!(t.events[1].content.as_deref(), Some("thinking about it"));
         assert_eq!(t.events[2].tool_name.as_deref(), Some("shell"));
         assert_eq!(t.events[2].structured["command"], "ls src/");
-        // Reasoning summary text must not survive.
-        assert!(!format!("{:?}", t.events).contains("thinking about it"));
+    }
+
+    #[test]
+    fn reasoning_items_become_reasoning_events() {
+        let payload = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": "planning the edit" }],
+            "content": [{ "type": "reasoning_text", "text": "file A needs a guard" }]
+        });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, SessionEventKind::Reasoning);
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("planning the edit\nfile A needs a guard")
+        );
+    }
+
+    #[test]
+    fn reasoning_items_with_no_text_are_dropped() {
+        let payload = serde_json::json!({ "type": "reasoning" });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+        assert!(events.is_empty());
     }
 }
