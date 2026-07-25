@@ -3,9 +3,9 @@
 //! Reads `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` session files and
 //! maps them into the shared `SessionTranscript` model. See
 //! `docs/superpowers/plans/` (Task 7) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `system`, `attachment`, and any unknown record `type`) carry only the
-//! record type string, never the record payload.
+//! rules; `Opaque` events carry only a record-type marker and never a
+//! payload. Reasoning (`thinking`) blocks are captured as `Reasoning`
+//! events and redacted like any other content.
 
 use std::path::{Path, PathBuf};
 
@@ -457,8 +457,20 @@ fn map_assistant_record(
                 });
             }
             Some("thinking") => {
-                // Deliberately dropped: v1 privacy posture excludes model
-                // reasoning traces from the transcript entirely.
+                // Reasoning is captured as a first-class event and redacted
+                // through the same client-side pipeline as every other kind.
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    if !t.is_empty() {
+                        events.push(SessionEvent {
+                            kind: SessionEventKind::Reasoning,
+                            timestamp,
+                            content: Some(t.to_string()),
+                            structured: Value::Null,
+                            tool_name: None,
+                            token_counts: None,
+                        });
+                    }
+                }
             }
             _ => {}
         }
@@ -653,6 +665,30 @@ mod tests {
     }
 
     #[test]
+    fn thinking_blocks_become_reasoning_events() {
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "thinking", "thinking": "the user wants X, so I should Y" },
+                    { "type": "text", "text": "Here is the answer." }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::Reasoning, SessionEventKind::Assistant]
+        );
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("the user wants X, so I should Y")
+        );
+    }
+
+    #[test]
     fn loads_and_maps_events_leniently() {
         let src = ClaudeCodeSource::new(fixture_root());
         let r = &src.discover().unwrap()[0];
@@ -666,6 +702,7 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
+                SessionEventKind::Reasoning,
                 SessionEventKind::Assistant,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
@@ -675,15 +712,19 @@ mod tests {
                 SessionEventKind::Opaque, // future-unknown-record
             ]
         );
-        // Thinking dropped; token counts captured on the assistant text event.
-        assert_eq!(t.events[1].token_counts, Some((100, 25)));
-        assert_eq!(t.events[2].tool_name.as_deref(), Some("Read"));
+        // Token counts captured on the assistant text event.
+        assert_eq!(t.events[2].token_counts, Some((100, 25)));
+        assert_eq!(t.events[3].tool_name.as_deref(), Some("Read"));
         // Opaque events carry only the record type, never payloads.
-        let serialized = serde_json::to_string(&t.events[6].structured).unwrap();
+        let serialized = serde_json::to_string(&t.events[7].structured).unwrap();
         assert!(!serialized.contains("do not leak me"));
         assert!(serialized.contains("attachment"));
-        // Thinking text is gone entirely.
-        let all = format!("{:?}", t.events);
-        assert!(!all.contains("secret reasoning"));
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.kind == SessionEventKind::Reasoning
+                    && e.content.as_deref() == Some("secret reasoning")),
+            "reasoning is now captured as a first-class event"
+        );
     }
 }
