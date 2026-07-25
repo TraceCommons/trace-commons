@@ -130,8 +130,12 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
             }
             "assistant" => {
                 let timestamp = parse_timestamp(record)?;
+                let has_content = !matches!(record.get("content"), None | Some(Value::Null));
                 match record.get("tool_calls").and_then(|v| v.as_array()) {
                     Some(calls) if !calls.is_empty() => {
+                        if has_content {
+                            bail!("malformed_record");
+                        }
                         for call in calls {
                             let id = required_str(call, "id")?;
                             let name = required_str(call, "name")?;
@@ -280,6 +284,17 @@ mod tests {
         assert!(validate_source_name("../../etc/passwd").is_err());
         assert!(validate_source_name(&"a".repeat(65)).is_err());
         assert!(validate_source_name(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_assistant_with_both_content_and_tool_calls() {
+        let bad = r#"[
+          {"role":"meta","source":"pi"},
+          {"role":"assistant","content":"hello","tool_calls":[{"id":"c1","name":"t","args":"{}"}],"timestamp":"2026-07-10T12:00:00Z"}
+        ]"#;
+        let err = parse_trajectory(bad.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("malformed_record"), "got: {err}");
+        assert!(!err.contains("hello"), "error must not echo file content");
     }
 
     #[test]
