@@ -95,6 +95,18 @@ impl TraceSource for ClaudeCodeSource {
                     // unrelated nested directory under a session-uuid dir
                     // must not be swept in.
                     let subagents_dir = path.join("subagents");
+                    // `read_dir` FOLLOWS a symlinked directory. A `subagents`
+                    // symlink planted by any process with write access under
+                    // the transcript root would otherwise steer discovery at
+                    // arbitrary directories, and everything discovered here is
+                    // a candidate for upload. `symlink_metadata` does not
+                    // follow, so a link reports as a symlink and is refused.
+                    // (The top-level walk is already safe: `DirEntry::
+                    // file_type` does not follow either.)
+                    match std::fs::symlink_metadata(&subagents_dir) {
+                        Ok(md) if md.is_dir() => {}
+                        _ => continue,
+                    }
                     let Ok(subagent_entries) = std::fs::read_dir(&subagents_dir) else {
                         continue;
                     };
@@ -152,6 +164,18 @@ fn push_session_if_jsonl(
     let path = entry.path();
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
         return;
+    }
+    // Refuse symlinks. `entry.metadata()` and the later `std::fs::read` both
+    // follow them, so a symlinked `.jsonl` is a path out of the transcript
+    // root and into any file the user can read. `DirEntry::file_type` does
+    // not follow, so it is the check that can tell the difference.
+    match entry.file_type() {
+        Ok(ft) if ft.is_file() => {}
+        Ok(_) => return,
+        Err(_) => {
+            *skipped += 1;
+            return;
+        }
     }
     let metadata = match entry.metadata() {
         Ok(m) => m,
@@ -463,6 +487,48 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn discovery_refuses_symlinks_that_escape_the_transcript_root() {
+        // Everything discovery returns is a candidate for upload, so a
+        // symlink planted under the transcript root by any same-user process
+        // must not be able to steer it at files elsewhere on disk.
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secrets.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"private\"}}\n",
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+
+        // Case 1: the `subagents` directory itself is a symlink outward.
+        let session_a = project_dir.join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        std::fs::create_dir_all(&session_a).unwrap();
+        symlink(outside.path(), session_a.join("subagents")).unwrap();
+
+        // Case 2: a real `subagents` directory holding a symlinked file.
+        let session_b = project_dir.join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        let subagents_b = session_b.join("subagents");
+        std::fs::create_dir_all(&subagents_b).unwrap();
+        symlink(
+            outside.path().join("secrets.jsonl"),
+            subagents_b.join("agent-link.jsonl"),
+        )
+        .unwrap();
+
+        let found = ClaudeCodeSource::new(root.path().to_path_buf())
+            .discover()
+            .unwrap();
+        assert!(
+            found.is_empty(),
+            "symlinks must not be discovered, got: {found:?}"
+        );
     }
 
     #[test]
