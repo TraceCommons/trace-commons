@@ -714,4 +714,47 @@ mod tests {
         );
         assert_eq!(raw.content.as_deref(), Some("weighing two approaches"));
     }
+
+    #[test]
+    fn trajectory_session_builds_an_envelope_with_reasoning_and_no_cwd_leak() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // `cwd` is nested one level below the "secretproj" marker: the
+        // project field derived from the cwd basename ("workdir") is
+        // expected to survive into the raw contribution (same as every
+        // other source), but the full cwd path -- and therefore the
+        // "secretproj" marker itself -- must never appear in the
+        // serialized output. Only its hash (`cwd_hash`) may.
+        f.write_all(
+            br#"[
+              {"role":"meta","source":"openhands","cwd":"/home/dev/secretproj/workdir","model":"gpt-5"},
+              {"role":"user","content":"fix the bug","timestamp":"2026-07-10T12:00:00Z"},
+              {"role":"reasoning","content":"the guard clause is inverted","timestamp":"2026-07-10T12:00:01Z"},
+              {"role":"assistant","content":"Fixed it.","timestamp":"2026-07-10T12:00:02Z"}
+            ]"#,
+        )
+        .unwrap();
+
+        let src = crate::source::trajectory::TrajectorySource::new(path);
+        let r = &crate::source::TraceSource::discover(&src).unwrap()[0];
+        let t = crate::source::TraceSource::load(&src, r).unwrap();
+
+        assert_eq!(t.source.as_ref(), "openhands");
+
+        let cfg = test_config();
+        let raw = super::build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        assert!(
+            raw.events.iter().any(|e| e.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning),
+            "reasoning must survive into the raw contribution"
+        );
+
+        let serialized = serde_json::to_string(&raw).unwrap();
+        assert!(
+            !serialized.contains("secretproj"),
+            "cwd must never be serialized"
+        );
+    }
 }
