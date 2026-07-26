@@ -1220,14 +1220,45 @@ Run: `cargo test -p trace-commons-contributor`
 
 Expected: PASS. Fix any remaining `SubmitSelection` literals in tests by adding `trajectory: None`.
 
-- [ ] **Step 7: Verify the binary works end to end**
+- [ ] **Step 7: Reject a nonexistent --trajectory path**
+
+An explicitly-supplied path that does not exist is user error, not an empty result. Silent-empty makes a typo indistinguishable from "this file had no sessions". Follow the existing `--project` precedent in `discover_filtered`, which canonicalizes and reports a clear failure.
+
+In `discover_filtered`, before building the sources, validate the path:
+
+```rust
+    if let Some(p) = trajectory {
+        if !p.exists() {
+            anyhow::bail!(
+                "--trajectory path {} does not exist",
+                p.display()
+            );
+        }
+    }
+```
+
+This is the one place a user-supplied path may appear in an error message. It is the contributor's own typed argument echoed back on their own terminal, not a stored audit row or log line, so it does not violate the hash-only rule. Do not log it via `tracing`.
+
+Add the covering test:
+
+```rust
+#[test]
+fn nonexistent_trajectory_path_is_an_error() {
+    let err = super::discover_filtered(None, None, None, Some(Path::new("/nonexistent/x.json")))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not exist"), "got: {err}");
+}
+```
+
+- [ ] **Step 7b: Verify the binary works end to end**
 
 ```bash
 cargo run -p trace-commons-contributor --bin trace-commons-contributor -- list
 cargo run -p trace-commons-contributor --bin trace-commons-contributor -- list --trajectory /nonexistent
 ```
 
-Expected: both exit 0. The second prints `no sessions found` rather than erroring — a missing path yields empty discovery, not a crash.
+Expected: the first exits 0. The second exits nonzero with the "does not exist" message.
 
 - [ ] **Step 8: Commit**
 
