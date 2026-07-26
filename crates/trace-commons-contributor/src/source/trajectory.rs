@@ -7,17 +7,17 @@
 //! Fails closed: any malformed record, unparseable timestamp, orphaned
 //! `tool_call_id`, or invalid `meta.source` rejects the entire file. Error
 //! strings are reason labels only and never carry record content.
-//!
-//! `ParsedTrajectory`, `parse_trajectory`, and `validate_source_name` have no
-//! caller yet -- Task 6 wires this reader into a `TraceSource` impl. The
-//! `#[allow(dead_code)]` below is temporary and Task 6 removes it.
 
-#![allow(dead_code)]
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::source::{SessionEvent, SessionEventKind};
+use crate::source::{
+    SOURCE_TRAJECTORY, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
+    session_hash,
+};
 
 const MAX_SOURCE_LEN: usize = 64;
 
@@ -195,6 +195,112 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
     })
 }
 
+/// Reads trajectory-v1 files from an explicitly supplied path. Unlike the
+/// native adapters there is no conventional local store to scan, so this
+/// source is only constructed when the contributor passes `--trajectory`.
+pub struct TrajectorySource {
+    path: PathBuf,
+}
+
+impl TrajectorySource {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+fn is_trajectory_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("json") | Some("jsonl")
+    )
+}
+
+fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
+    let metadata = std::fs::metadata(&path).ok()?;
+    let started_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    // `cwd` is left None at discovery: determining it requires a full parse,
+    // and unlike the codex adapter there is no cheap single-line peek. The
+    // `--project` filter therefore falls back to the path heuristic for
+    // trajectory files.
+    Some(SessionRef {
+        source: SOURCE_TRAJECTORY,
+        path,
+        project: None,
+        cwd: None,
+        started_at,
+        size_bytes: metadata.len(),
+    })
+}
+
+impl TraceSource for TrajectorySource {
+    fn name(&self) -> &'static str {
+        SOURCE_TRAJECTORY
+    }
+
+    fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+        if self.path.is_file() {
+            return Ok(session_ref_for(self.path.clone()).into_iter().collect());
+        }
+        let Ok(entries) = std::fs::read_dir(&self.path) else {
+            return Ok(Vec::new());
+        };
+        let mut sessions = Vec::new();
+        let mut skipped = 0usize;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                skipped += 1;
+                continue;
+            };
+            let path = entry.path();
+            if !path.is_file() || !is_trajectory_file(&path) {
+                continue;
+            }
+            match session_ref_for(path) {
+                Some(r) => sessions.push(r),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped unreadable trajectory entries during discovery"
+            );
+        }
+        Ok(sessions)
+    }
+
+    fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
+        let bytes = std::fs::read(&r.path).map_err(|_| anyhow!("unreadable_trajectory_file"))?;
+        let hash = session_hash(&bytes);
+        let parsed = parse_trajectory(&bytes)?;
+
+        let project = parsed
+            .cwd
+            .as_deref()
+            .map(Path::new)
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        let started_at = parsed.events.iter().find_map(|e| e.timestamp);
+
+        Ok(SessionTranscript {
+            source: Cow::Owned(parsed.source),
+            // Trajectory carries no harness version field.
+            agent_version: None,
+            model: parsed.model,
+            project,
+            cwd: parsed.cwd,
+            started_at,
+            session_hash: hash,
+            events: parsed.events,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +413,74 @@ mod tests {
         let s = serde_json::to_string(&p.events[0].structured).unwrap();
         assert!(!s.contains("not json"), "raw args must not be embedded");
         assert_eq!(p.events[0].structured["arguments_raw_len"], 8);
+    }
+
+    use crate::source::TraceSource;
+    use std::io::Write;
+
+    fn write_temp(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn discovers_a_single_file_and_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_temp(dir.path(), "a.json", SAMPLE);
+        write_temp(dir.path(), "b.jsonl", "{\"role\":\"meta\",\"source\":\"pi\"}\n");
+        write_temp(dir.path(), "ignored.txt", "not a trajectory");
+
+        let src = super::TrajectorySource::new(dir.path().to_path_buf());
+        let mut found: Vec<_> = src
+            .discover()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["a.json", "b.jsonl"]);
+
+        let one = write_temp(dir.path(), "c.json", SAMPLE);
+        let src = super::TrajectorySource::new(one.clone());
+        assert_eq!(src.discover().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn load_carries_inner_source_as_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_temp(dir.path(), "a.json", SAMPLE);
+        let src = super::TrajectorySource::new(p.clone());
+        let r = &src.discover().unwrap()[0];
+
+        // The routing key stays the adapter name so `source_for` can pair
+        // the ref back to this adapter.
+        assert_eq!(r.source, crate::source::SOURCE_TRAJECTORY);
+
+        let t = src.load(r).unwrap();
+        // Provenance is the harness that actually produced the session.
+        assert_eq!(t.source.as_ref(), "openhands");
+        assert_eq!(t.model.as_deref(), Some("gpt-5"));
+        assert_eq!(t.project.as_deref(), Some("proj"));
+        assert_eq!(t.cwd.as_deref(), Some("/home/dev/proj"));
+        assert!(t.session_hash.starts_with("sha256:"));
+        assert_eq!(
+            t.started_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-07-10T12:00:00.000Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+    }
+
+    #[test]
+    fn a_malformed_file_rejects_the_whole_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_temp(dir.path(), "bad.json", "{ not json");
+        let src = super::TrajectorySource::new(p.clone());
+        let r = &src.discover().unwrap()[0];
+        assert!(src.load(r).is_err());
     }
 }

@@ -80,10 +80,13 @@ pub fn submission_id_for(session_hash: &str) -> uuid::Uuid {
 }
 
 /// Construct the set of available `TraceSource` adapters, defaulting roots to
-/// `~/.claude/projects` and `~/.codex/sessions` when not overridden.
+/// `~/.claude/projects` and `~/.codex/sessions` when not overridden. The
+/// trajectory source is included only when an explicit path is supplied,
+/// because trajectory files have no conventional local store.
 pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
+    trajectory_path: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
     let claude_root = claude_root.unwrap_or_else(|| {
         dirs::home_dir()
@@ -92,10 +95,13 @@ pub fn all_sources(
     });
     let codex_root =
         codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
-    let sources: Vec<Box<dyn TraceSource>> = vec![
+    let mut sources: Vec<Box<dyn TraceSource>> = vec![
         Box::new(claude_code::ClaudeCodeSource::new(claude_root)),
         Box::new(codex::CodexSource::new(codex_root)),
     ];
+    if let Some(path) = trajectory_path {
+        sources.push(Box::new(trajectory::TrajectorySource::new(path)));
+    }
     sources
 }
 

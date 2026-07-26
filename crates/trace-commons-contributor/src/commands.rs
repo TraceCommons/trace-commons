@@ -226,7 +226,7 @@ fn discover_filtered(
     let project_filter = resolved_project.as_deref();
 
     let mut refs = Vec::new();
-    for source in all_sources(None, None) {
+    for source in all_sources(None, None, None) {
         if let Some(sf) = source_filter {
             if source.name() != sf {
                 continue;
@@ -264,7 +264,7 @@ fn discover_filtered(
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
 fn source_for(name: &str) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None)
+    all_sources(None, None, None)
         .into_iter()
         .find(|s| s.name() == name)
 }
