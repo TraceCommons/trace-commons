@@ -187,6 +187,26 @@ consent on already-submitted traces are deferred to a future slice. See
 [`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`](docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md)
 for the full design.
 
+#### Contributing sessions from other harnesses
+
+The CLI reads Claude Code and Codex sessions natively. For any other harness
+covered by [Letta Trajectory](https://github.com/letta-ai/trajectory) —
+Hermes, Letta Code, OpenClaw, OpenHands, Pi, or Deep Agents — normalize the
+session first, then point the CLI at the result:
+
+```bash
+npx @letta-ai/trajectory > session.json
+trace-commons-contributor submit --trajectory session.json
+```
+
+`--trajectory` also accepts a directory, in which case every `*.json` and
+`*.jsonl` file directly inside it is offered. Trajectory files are never
+discovered implicitly; without `--trajectory` they are invisible to `list`
+and `submit`.
+
+Model reasoning is captured by default and redacted client-side like any
+other content. Pass `--no-reasoning` to exclude it from a submission.
+
 ### Run a Local Ingest Server
 
 ```bash
