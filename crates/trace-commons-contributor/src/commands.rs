@@ -20,7 +20,7 @@ use crate::identity::{
 };
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{SessionRef, TraceSource, all_sources};
+use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
@@ -384,6 +384,15 @@ pub struct SubmitSelection<'a> {
     /// Path to a trajectory-v1 file or a directory of them. Trajectory
     /// sessions are only discoverable when this is set.
     pub trajectory: Option<&'a Path>,
+    /// Drop model reasoning from this run. Reasoning is included by default.
+    pub no_reasoning: bool,
+}
+
+/// Drop reasoning events before envelope construction. Reasoning is captured
+/// by default; this is the per-run opt-out behind `--no-reasoning`.
+pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
+    t.events
+        .retain(|e| e.kind != crate::source::SessionEventKind::Reasoning);
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
@@ -453,6 +462,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
+        no_reasoning: sel.no_reasoning,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -654,6 +664,39 @@ mod tests {
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
     }
+
+    #[test]
+    fn strip_reasoning_removes_only_reasoning_events() {
+        use crate::source::{SessionEvent, SessionEventKind};
+        let mk = |kind: SessionEventKind| SessionEvent {
+            kind,
+            timestamp: None,
+            content: Some("x".to_string()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        };
+        let mut t = crate::source::SessionTranscript {
+            source: std::borrow::Cow::Borrowed("claude-code"),
+            agent_version: None,
+            model: None,
+            project: None,
+            cwd: None,
+            started_at: None,
+            session_hash: "sha256:aa".to_string(),
+            events: vec![
+                mk(SessionEventKind::User),
+                mk(SessionEventKind::Reasoning),
+                mk(SessionEventKind::Assistant),
+            ],
+        };
+        super::strip_reasoning(&mut t);
+        let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::User, SessionEventKind::Assistant]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -679,6 +722,7 @@ mod project_filter_tests {
             pii_filter: None,
             manifest: Some(&manifest),
             trajectory: None,
+            no_reasoning: false,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");

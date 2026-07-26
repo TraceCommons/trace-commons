@@ -44,6 +44,9 @@ pub enum SubmitOutcome {
 pub struct SubmitOptions {
     pub dry_run: bool,
     pub pii_filter: Option<String>,
+    /// Drop model reasoning from every session in this run before envelope
+    /// construction. Reasoning is included by default.
+    pub no_reasoning: bool,
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -111,7 +114,7 @@ pub async fn submit_sessions(
     let mut canary_checked = false;
 
     for (source, session_ref) in sessions {
-        let transcript = match source.load(&session_ref) {
+        let mut transcript = match source.load(&session_ref) {
             Ok(t) => t,
             Err(_) => {
                 outcomes.push(SubmitOutcome::SkippedParseFailure {
@@ -120,6 +123,10 @@ pub async fn submit_sessions(
                 continue;
             }
         };
+
+        if opts.no_reasoning {
+            crate::commands::strip_reasoning(&mut transcript);
+        }
 
         let receipts = store.load_receipts().context("loading receipts")?;
         if receipts.iter().any(|r| {
@@ -625,6 +632,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -732,6 +740,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -794,6 +803,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: None,
+            no_reasoning: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -821,6 +831,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
+            no_reasoning: false,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -862,6 +873,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -914,6 +926,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -941,6 +954,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -968,6 +982,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1069,6 +1084,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1205,6 +1221,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1262,6 +1279,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)

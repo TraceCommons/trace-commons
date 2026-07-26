@@ -907,6 +907,7 @@ async fn enroll_mint_submit_round_trip() {
         &trace_commons_contributor::submit::SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         },
     )
     .await

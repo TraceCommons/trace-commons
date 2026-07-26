@@ -67,6 +67,9 @@ enum Command {
         /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
         #[arg(long)]
         trajectory: Option<PathBuf>,
+        /// Exclude model reasoning from this submission (reasoning is included by default)
+        #[arg(long)]
+        no_reasoning: bool,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -123,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
             pii_filter,
             manifest,
             trajectory,
+            no_reasoning,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -134,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
                 trajectory: trajectory.as_deref(),
+                no_reasoning,
             };
             commands::submit(&store, &sel).await
         }
