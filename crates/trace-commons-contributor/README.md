@@ -168,19 +168,32 @@ files left behind by a crash mid-write.
   session rather than folded into its parent. Only those two layouts are
   walked; other nested directories are ignored.
 - **Codex** — `~/.codex/sessions/**/rollout-*.jsonl`.
+- **Trajectory** — a [Letta Trajectory](https://github.com/letta-ai/trajectory)
+  v1 file or directory of them, named explicitly with `--trajectory`. Covers
+  any harness Letta adapts (Hermes, Letta Code, OpenClaw, OpenHands, Pi, Deep
+  Agents). Never discovered implicitly: without `--trajectory` these files are
+  invisible to `list` and `submit`, and a path that does not exist is an error
+  rather than an empty result.
 
-Both readers drop `thinking`/`reasoning` content entirely; unknown record
-types are kept only as a record-type-only marker (no payload). Full local
-file paths are never included in an uploaded envelope — only what the
-redactor and mapper produce from message content.
+All three readers capture model reasoning (`thinking` blocks, codex
+`reasoning` items, trajectory `reasoning` records) as a distinct event type,
+redacted through the same client-side pipeline as every other event. Pass
+`--no-reasoning` to exclude it from a submission. Reasoning is the least
+sanitized part of a transcript — it routinely quotes file contents verbatim
+and restates values the model just read — so review what you are contributing
+if the session touched sensitive material.
+
+Unknown record types are kept only as a record-type-only marker (no payload).
+Full local file paths are never included in an uploaded envelope — only what
+the redactor and mapper produce from message content.
 
 ## Subcommands
 
 | Command | What it does |
 |---|---|
 | `login [--grant <b64>] [--allowed-hosts <csv>]` | Without `--grant`, prints this device's key id to hand to an instance operator. With `--grant`, redeems an enrollment grant and saves local config. |
-| `list` | Lists discoverable local sessions from all sources (no network). |
-| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
+| `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear only when `--trajectory` names a file or directory. |
+| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |
 | `logout` | Deletes local config, device key, and receipts, plus orphaned temp files. |
