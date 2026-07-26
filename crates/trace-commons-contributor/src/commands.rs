@@ -20,7 +20,7 @@ use crate::identity::{
 };
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{SessionRef, TraceSource, all_sources};
+use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
@@ -211,7 +211,17 @@ fn discover_filtered(
     source_filter: Option<&str>,
     project_filter: Option<&Path>,
     since: Option<chrono::Duration>,
+    trajectory: Option<&Path>,
 ) -> Result<Vec<SessionRef>> {
+    // An explicitly-supplied path that does not exist is user error, not an
+    // empty result. Silent-empty makes a typo indistinguishable from "this
+    // file had no sessions". Follows the --project precedent below.
+    if let Some(p) = trajectory {
+        if !p.exists() {
+            anyhow::bail!("--trajectory path {} does not exist", p.display());
+        }
+    }
+
     // Resolve `--project` against the real filesystem before matching. A
     // participant standing in their hackathon project types `--project .`
     // (or a relative path, or one crossing a symlink); an unresolved value
@@ -226,7 +236,7 @@ fn discover_filtered(
     let project_filter = resolved_project.as_deref();
 
     let mut refs = Vec::new();
-    for source in all_sources(None, None) {
+    for source in all_sources(None, None, trajectory.map(|p| p.to_path_buf())) {
         if let Some(sf) = source_filter {
             if source.name() != sf {
                 continue;
@@ -263,8 +273,8 @@ fn discover_filtered(
 
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
-fn source_for(name: &str) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None)
+fn source_for(name: &str, trajectory: Option<&Path>) -> Option<Box<dyn TraceSource>> {
+    all_sources(None, None, trajectory.map(|p| p.to_path_buf()))
         .into_iter()
         .find(|s| s.name() == name)
 }
@@ -340,8 +350,8 @@ fn submit_picker_row(idx: usize, r: &SessionRef, submitted: Option<bool>) -> Vec
 
 /// List every discoverable local session in a numbered table. Never prints
 /// full paths -- only the source name, project basename, age, and size.
-pub fn list() -> Result<()> {
-    let sessions = discover_filtered(None, None, None)?;
+pub fn list(trajectory: Option<&Path>) -> Result<()> {
+    let sessions = discover_filtered(None, None, None, trajectory)?;
     if sessions.is_empty() {
         println!("no sessions found");
         return Ok(());
@@ -371,6 +381,18 @@ pub struct SubmitSelection<'a> {
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
     pub manifest: Option<&'a Path>,
+    /// Path to a trajectory-v1 file or a directory of them. Trajectory
+    /// sessions are only discoverable when this is set.
+    pub trajectory: Option<&'a Path>,
+    /// Drop model reasoning from this run. Reasoning is included by default.
+    pub no_reasoning: bool,
+}
+
+/// Drop reasoning events before envelope construction. Reasoning is captured
+/// by default; this is the per-run opt-out behind `--no-reasoning`.
+pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
+    t.events
+        .retain(|e| e.kind != crate::source::SessionEventKind::Reasoning);
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
@@ -392,7 +414,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         .context("not logged in; run `login` first")?;
 
     let since = sel.since.map(picker::parse_since).transpose()?;
-    let mut refs = discover_filtered(sel.source, sel.project, since)?;
+    let mut refs = discover_filtered(sel.source, sel.project, since, sel.trajectory)?;
     refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
 
     if refs.is_empty() {
@@ -408,7 +430,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let marker = source_for(r.source)
+                let marker = source_for(r.source, sel.trajectory)
                     .and_then(|src| submitted_marker(src.as_ref(), r, &receipts));
                 submit_picker_row(i, r, marker)
             })
@@ -431,7 +453,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         .into_iter()
         .map(|i| {
             let r = refs[i].clone();
-            let src = source_for(r.source)
+            let src = source_for(r.source, sel.trajectory)
                 .with_context(|| format!("no adapter registered for source '{}'", r.source))?;
             Ok((src, r))
         })
@@ -440,6 +462,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
+        no_reasoning: sel.no_reasoning,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -641,6 +664,39 @@ mod tests {
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
     }
+
+    #[test]
+    fn strip_reasoning_removes_only_reasoning_events() {
+        use crate::source::{SessionEvent, SessionEventKind};
+        let mk = |kind: SessionEventKind| SessionEvent {
+            kind,
+            timestamp: None,
+            content: Some("x".to_string()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        };
+        let mut t = crate::source::SessionTranscript {
+            source: std::borrow::Cow::Borrowed("claude-code"),
+            agent_version: None,
+            model: None,
+            project: None,
+            cwd: None,
+            started_at: None,
+            session_hash: "sha256:aa".to_string(),
+            events: vec![
+                mk(SessionEventKind::User),
+                mk(SessionEventKind::Reasoning),
+                mk(SessionEventKind::Assistant),
+            ],
+        };
+        super::strip_reasoning(&mut t);
+        let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::User, SessionEventKind::Assistant]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +721,8 @@ mod project_filter_tests {
             dry_run: true,
             pii_filter: None,
             manifest: Some(&manifest),
+            trajectory: None,
+            no_reasoning: false,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");
@@ -704,6 +762,38 @@ mod project_filter_tests {
             Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
             Path::new("/Users/dev/code/my-hack"),
         ));
+    }
+
+    #[test]
+    fn discover_filtered_includes_trajectory_only_when_a_path_is_given() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.json");
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(
+            br#"[{"role":"meta","source":"pi"},
+                 {"role":"user","content":"hi","timestamp":"2026-07-10T12:00:00Z"}]"#,
+        )
+        .unwrap();
+
+        let without = super::discover_filtered(Some("trajectory"), None, None, None).unwrap();
+        assert!(
+            without.is_empty(),
+            "trajectory files must never appear without an explicit path"
+        );
+
+        let with = super::discover_filtered(Some("trajectory"), None, None, Some(&p)).unwrap();
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].source, crate::source::SOURCE_TRAJECTORY);
+    }
+
+    #[test]
+    fn nonexistent_trajectory_path_is_an_error() {
+        let err =
+            super::discover_filtered(None, None, None, Some(Path::new("/nonexistent/x.json")))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("does not exist"), "got: {err}");
     }
 
     #[test]

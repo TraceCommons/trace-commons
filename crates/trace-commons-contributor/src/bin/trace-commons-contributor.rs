@@ -34,7 +34,11 @@ enum Command {
         scopes: Option<String>,
     },
     /// List discoverable local sessions
-    List,
+    List {
+        /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
+        #[arg(long)]
+        trajectory: Option<PathBuf>,
+    },
     /// Redact and submit selected sessions
     Submit {
         #[arg(long)]
@@ -45,7 +49,7 @@ enum Command {
         /// Only sessions whose working directory is at or under this path
         #[arg(long)]
         project: Option<PathBuf>,
-        /// Restrict to one source: claude-code | codex
+        /// Restrict to one source: claude-code | codex | trajectory
         #[arg(long)]
         source: Option<String>,
         /// Skip the interactive picker confirmation
@@ -60,6 +64,12 @@ enum Command {
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
         #[arg(long)]
         manifest: Option<PathBuf>,
+        /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
+        #[arg(long)]
+        trajectory: Option<PathBuf>,
+        /// Exclude model reasoning from this submission (reasoning is included by default)
+        #[arg(long)]
+        no_reasoning: bool,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -105,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        Command::List => commands::list(),
+        Command::List { trajectory } => commands::list(trajectory.as_deref()),
         Command::Submit {
             all,
             since,
@@ -115,6 +125,8 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             pii_filter,
             manifest,
+            trajectory,
+            no_reasoning,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -125,6 +137,8 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
+                trajectory: trajectory.as_deref(),
+                no_reasoning,
             };
             commands::submit(&store, &sel).await
         }

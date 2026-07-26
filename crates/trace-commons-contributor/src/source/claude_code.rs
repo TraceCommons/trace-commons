@@ -3,10 +3,11 @@
 //! Reads `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` session files and
 //! maps them into the shared `SessionTranscript` model. See
 //! `docs/superpowers/plans/` (Task 7) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `system`, `attachment`, and any unknown record `type`) carry only the
-//! record type string, never the record payload.
+//! rules; `Opaque` events carry only a record-type marker and never a
+//! payload. Reasoning (`thinking`) blocks are captured as `Reasoning`
+//! events and redacted like any other content.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -320,7 +321,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CLAUDE_CODE,
+        source: Cow::Borrowed(SOURCE_CLAUDE_CODE),
         agent_version,
         model,
         project,
@@ -426,22 +427,43 @@ fn map_assistant_record(
         return;
     };
 
-    // Text blocks are joined into a single Assistant event, inserted at the
-    // position of the first text block encountered so event order still
-    // reflects the original block order relative to tool_use events.
-    let mut texts = Vec::new();
-    let mut text_insert_at: Option<usize> = None;
+    // Contiguous runs of text blocks are joined into one Assistant event and
+    // emitted where the run ends, so every block keeps its position relative
+    // to the reasoning and tool calls around it. Joining ALL text and hoisting
+    // it to the first text position (the previous behavior) reordered the
+    // transcript: prose written after a thinking block or a tool result
+    // appeared before it. For a corpus whose value is showing how an agent
+    // actually proceeded, that ordering is the signal.
+    //
+    // `token_counts` belongs to the record as a whole, so it is attached to
+    // the first emitted Assistant event only, rather than being duplicated
+    // across every run.
+    let mut texts: Vec<String> = Vec::new();
+    let mut token_counts_unused = token_counts;
+    macro_rules! flush_text {
+        () => {
+            if !texts.is_empty() {
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Assistant,
+                    timestamp,
+                    content: Some(texts.join("\n")),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: token_counts_unused.take(),
+                });
+                texts.clear();
+            }
+        };
+    }
     for block in blocks {
         match block.get("type").and_then(|v| v.as_str()) {
             Some("text") => {
                 if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    if text_insert_at.is_none() {
-                        text_insert_at = Some(events.len());
-                    }
                     texts.push(t.to_string());
                 }
             }
             Some("tool_use") => {
+                flush_text!();
                 let name = block
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -457,26 +479,27 @@ fn map_assistant_record(
                 });
             }
             Some("thinking") => {
-                // Deliberately dropped: v1 privacy posture excludes model
-                // reasoning traces from the transcript entirely.
+                flush_text!();
+                // Reasoning is captured as a first-class event and redacted
+                // through the same client-side pipeline as every other kind.
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    if !t.is_empty() {
+                        events.push(SessionEvent {
+                            kind: SessionEventKind::Reasoning,
+                            timestamp,
+                            content: Some(t.to_string()),
+                            structured: Value::Null,
+                            tool_name: None,
+                            token_counts: None,
+                        });
+                    }
+                }
             }
             _ => {}
         }
     }
 
-    if let Some(idx) = text_insert_at {
-        events.insert(
-            idx,
-            SessionEvent {
-                kind: SessionEventKind::Assistant,
-                timestamp,
-                content: Some(texts.join("\n")),
-                structured: Value::Null,
-                tool_name: None,
-                token_counts,
-            },
-        );
-    }
+    flush_text!();
 }
 
 #[cfg(test)]
@@ -653,6 +676,91 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_text_blocks_keep_their_position() {
+        // A single assistant record can interleave prose with reasoning and
+        // tool calls. Merging every text block and hoisting it to the first
+        // text position reorders the transcript: text written AFTER the model
+        // finished thinking would appear before the reasoning that produced
+        // it. That misrepresents what happened, which is precisely what makes
+        // the trace worth collecting.
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "text", "text": "First." },
+                    { "type": "thinking", "thinking": "considering options" },
+                    { "type": "text", "text": "Second." },
+                    { "type": "tool_use", "name": "Read", "input": {"path": "a"} },
+                    { "type": "text", "text": "Third." }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                SessionEventKind::Assistant,
+                SessionEventKind::Reasoning,
+                SessionEventKind::Assistant,
+                SessionEventKind::ToolCall,
+                SessionEventKind::Assistant,
+            ],
+            "block order must be preserved"
+        );
+        assert_eq!(events[0].content.as_deref(), Some("First."));
+        assert_eq!(events[2].content.as_deref(), Some("Second."));
+        assert_eq!(events[4].content.as_deref(), Some("Third."));
+    }
+
+    #[test]
+    fn contiguous_text_blocks_are_joined() {
+        // Adjacent text blocks are a rendering artifact, not separate turns.
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "text", "text": "One." },
+                    { "type": "text", "text": "Two." },
+                    { "type": "tool_use", "name": "Read", "input": {} }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::Assistant, SessionEventKind::ToolCall]
+        );
+        assert_eq!(events[0].content.as_deref(), Some("One.\nTwo."));
+    }
+
+    #[test]
+    fn thinking_blocks_become_reasoning_events() {
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "thinking", "thinking": "the user wants X, so I should Y" },
+                    { "type": "text", "text": "Here is the answer." }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::Reasoning, SessionEventKind::Assistant]
+        );
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("the user wants X, so I should Y")
+        );
+    }
+
+    #[test]
     fn loads_and_maps_events_leniently() {
         let src = ClaudeCodeSource::new(fixture_root());
         let r = &src.discover().unwrap()[0];
@@ -666,6 +774,7 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
+                SessionEventKind::Reasoning,
                 SessionEventKind::Assistant,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
@@ -675,15 +784,19 @@ mod tests {
                 SessionEventKind::Opaque, // future-unknown-record
             ]
         );
-        // Thinking dropped; token counts captured on the assistant text event.
-        assert_eq!(t.events[1].token_counts, Some((100, 25)));
-        assert_eq!(t.events[2].tool_name.as_deref(), Some("Read"));
+        // Token counts captured on the assistant text event.
+        assert_eq!(t.events[2].token_counts, Some((100, 25)));
+        assert_eq!(t.events[3].tool_name.as_deref(), Some("Read"));
         // Opaque events carry only the record type, never payloads.
-        let serialized = serde_json::to_string(&t.events[6].structured).unwrap();
+        let serialized = serde_json::to_string(&t.events[7].structured).unwrap();
         assert!(!serialized.contains("do not leak me"));
         assert!(serialized.contains("attachment"));
-        // Thinking text is gone entirely.
-        let all = format!("{:?}", t.events);
-        assert!(!all.contains("secret reasoning"));
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.kind == SessionEventKind::Reasoning
+                    && e.content.as_deref() == Some("secret reasoning")),
+            "reasoning is now captured as a first-class event"
+        );
     }
 }

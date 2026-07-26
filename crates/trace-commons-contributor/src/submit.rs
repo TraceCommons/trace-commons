@@ -44,6 +44,9 @@ pub enum SubmitOutcome {
 pub struct SubmitOptions {
     pub dry_run: bool,
     pub pii_filter: Option<String>,
+    /// Drop model reasoning from every session in this run before envelope
+    /// construction. Reasoning is included by default.
+    pub no_reasoning: bool,
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -111,7 +114,7 @@ pub async fn submit_sessions(
     let mut canary_checked = false;
 
     for (source, session_ref) in sessions {
-        let transcript = match source.load(&session_ref) {
+        let mut transcript = match source.load(&session_ref) {
             Ok(t) => t,
             Err(_) => {
                 outcomes.push(SubmitOutcome::SkippedParseFailure {
@@ -120,6 +123,10 @@ pub async fn submit_sessions(
                 continue;
             }
         };
+
+        if opts.no_reasoning {
+            crate::commands::strip_reasoning(&mut transcript);
+        }
 
         let receipts = store.load_receipts().context("loading receipts")?;
         if receipts.iter().any(|r| {
@@ -613,6 +620,66 @@ mod tests {
         }
     }
 
+    /// Drives the real submit path twice and inspects what actually reached
+    /// the wire.
+    ///
+    /// The unit test on `strip_reasoning` alone is not enough: deleting the
+    /// call site in `submit_sessions` would leave it green while every
+    /// submission silently carried reasoning. `--no-reasoning` is a privacy
+    /// control, so its failure mode has to be caught at the boundary it
+    /// actually protects.
+    #[tokio::test]
+    async fn no_reasoning_controls_what_reaches_the_wire() {
+        async fn run(no_reasoning: bool) -> serde_json::Value {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let issuer = spawn(stub_issuer()).await;
+            let ingest = spawn(stub_ingest(received.clone())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+            let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+            let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+            let opts = SubmitOptions {
+                dry_run: false,
+                pii_filter: None,
+                no_reasoning,
+            };
+            submit_sessions(&store, &cfg, fixture_selection(), &opts)
+                .await
+                .unwrap();
+            let guard = received.lock().unwrap();
+            guard[0].clone()
+        }
+
+        fn reasoning_events(envelope: &serde_json::Value) -> usize {
+            envelope["events"]
+                .as_array()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter(|e| e["event_type"] == "reasoning")
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+
+        // The committed fixture contains a thinking block, so the default
+        // path must carry reasoning. If this ever reaches zero the fixture
+        // stopped exercising the feature and the opt-out assertion below
+        // would pass vacuously.
+        let with = run(false).await;
+        assert!(
+            reasoning_events(&with) > 0,
+            "reasoning must reach the wire by default"
+        );
+
+        let without = run(true).await;
+        assert_eq!(
+            reasoning_events(&without),
+            0,
+            "--no-reasoning must strip reasoning before upload"
+        );
+    }
+
     #[tokio::test]
     async fn submits_fixture_session_and_is_idempotent_on_rerun() {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -625,6 +692,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -732,6 +800,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -794,6 +863,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: None,
+            no_reasoning: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -821,6 +891,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
+            no_reasoning: false,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -862,6 +933,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -914,6 +986,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -941,6 +1014,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -968,6 +1042,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1069,6 +1144,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1205,6 +1281,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1262,6 +1339,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
