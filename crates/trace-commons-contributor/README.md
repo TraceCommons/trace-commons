@@ -108,12 +108,23 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
   4. **NEAR AI (optional add-on).** A separate, optional pass for prose
      PII (not secrets) — see below.
 
-  This layering was validated against ~100 real local Claude Code session
-  transcripts (a developer-only, `#[ignore]`d harness in
-  `tests/local_redaction_audit.rs`, never run in CI): pattern-shaped
-  secrets (API keys, GitHub/npm/Google tokens, JWTs, bearer headers, PEM
-  key blocks) and cue-gated high-entropy candidates all showed zero
-  survivors in the post-redaction envelope.
+  This layering is validated against every real local Claude Code session
+  transcript, 992 of them at last run, by a developer-only `#[ignore]`d
+  harness in `tests/local_redaction_audit.rs` (never run in CI). Pattern-shaped
+  secrets (API keys, GitHub/npm/Google/provider tokens, JWTs, PEM key blocks)
+  and cue-gated high-entropy candidates all show zero survivors in the
+  post-redaction envelope: 1003 cue-gated tokens, 243 `sk-` keys, and 154 PEM
+  private keys found and removed on the most recent run.
+
+  **Known gap: opaque bearer tokens.** Production covers `Bearer ` values only
+  through the cue-gated entropy pass, which a realistic opaque token evades in
+  four ways — a UUID-shaped token is allowlisted, lowercase hex of 32+ chars is
+  treated as a content hash, a token under 16 characters misses the minimum
+  length, and a low-entropy static credential falls under the 3.2 bits/char
+  floor. The audit reports surviving bearer values as advisories so the gap
+  stays visible, but they are not redacted today. If a session pasted a bearer
+  token of one of those shapes, assume it is still present and do not submit
+  that session until this is closed.
 - An optional second pass, `--pii-filter near-ai`, sends the
   already-locally-redacted **message text only** (`content`/
   `human_correction` fields — not structured tool payloads) through a NEAR AI
