@@ -235,6 +235,20 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     false
 }
 
+/// Patterns that are deliberately BROADER than any production detector, and
+/// so must not fail the run.
+///
+/// Every other matcher here mirrors a detector exactly, which makes a
+/// post-redaction hit a genuine leak. `bearer value` is different by design:
+/// production covers bearer tokens only through the cue-gated entropy rule,
+/// which UUID-shaped, lowercase-hex, short, and low-entropy tokens all evade.
+/// This matcher exists to make that gap visible, so its hits are expected
+/// until the detector grows a real bearer rule. Reporting them as hard
+/// failures would leave the audit permanently red and train everyone to
+/// ignore it -- the exact failure mode that let five false positives sit
+/// unexamined. They are printed for triage instead.
+const ADVISORY_PATTERNS: &[&str] = &["bearer value"];
+
 const CUE_WINDOW: usize = 48;
 const ENTROPY_MIN_LEN: usize = 16;
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -420,13 +434,89 @@ fn count_pem_private_key(hay: &str) -> usize {
     n
 }
 
-/// Safe diagnostic for a surviving match: a short (<=4 char) prefix, the
-/// full matched length, its Shannon entropy, and a structural shape
-/// signature. Never returns the full secret value.
-fn safe_diag(token: &str) -> (String, usize, f64, String) {
-    let prefix: String = token.chars().take(4).collect();
+/// Count credential-shaped values following a `Bearer ` header.
+///
+/// This matcher deliberately does NOT mirror a single detector regex, and it
+/// is the one place in this file where being broader than production is
+/// correct. Production covers bearer tokens only through the cue-gated
+/// entropy rule, which a realistic opaque token evades in at least four ways:
+/// a UUID-shaped token is allowlisted outright, a lowercase-hex token of 32+
+/// chars is treated as a content hash, a token under 16 chars is below the
+/// minimum length, and a low-entropy static credential falls under the 3.2
+/// bits/char threshold. A bearer header is an unambiguous declaration that
+/// what follows is a credential, so anything of plausible token shape after
+/// it is worth surfacing even when production would not redact it.
+///
+/// Prose is excluded by requiring at least one digit or uppercase character:
+/// "bearer per-a-slot-based" is all-lowercase kebab case, whereas real
+/// opaque tokens essentially always carry mixed case or digits. That one
+/// condition is what separates this from the loose matcher removed earlier,
+/// which fired on exactly that phrase.
+fn count_bearer_values(hay: &str) -> usize {
+    const MIN_LEN: usize = 8;
+    let lower = hay.to_ascii_lowercase();
+    let mut n = 0;
+    let mut from = 0;
+    while let Some(pos) = lower[from..].find("bearer ") {
+        let start = from + pos + "bearer ".len();
+        let token: String = hay[start..]
+            .chars()
+            .take_while(|c| entropy_candidate_char(*c))
+            .collect();
+        let looks_like_a_token = token.len() >= MIN_LEN
+            && token
+                .chars()
+                .any(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+            && !is_placeholder_identifier(&token);
+        if looks_like_a_token {
+            n += 1;
+        }
+        from = start;
+    }
+    n
+}
+
+/// True for screaming-snake identifiers such as `YOUR_API_KEY` or
+/// `SLACK_BOT_TOKEN`. These are environment-variable names and
+/// documentation placeholders, never credential values, and they dominated
+/// this matcher's output on a real corpus before being excluded.
+fn is_placeholder_identifier(token: &str) -> bool {
+    token.contains('_')
+        && token
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// First `Bearer `-following value, for the leak diagnostic.
+fn first_bearer_value(hay: &str) -> Option<&str> {
+    let lower = hay.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(pos) = lower[from..].find("bearer ") {
+        let start = from + pos + "bearer ".len();
+        let len = hay[start..]
+            .chars()
+            .take_while(|c| entropy_candidate_char(*c))
+            .count();
+        let token = &hay[start..start + len];
+        if token.len() >= 8
+            && token
+                .chars()
+                .any(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+            && !is_placeholder_identifier(token)
+        {
+            return Some(token);
+        }
+        from = start;
+    }
+    None
+}
+
+/// Safe diagnostic for a surviving match: the matched length, its Shannon
+/// entropy, and a structural shape signature. Never returns the value, and
+/// deliberately no raw prefix: the pattern name already names the credential
+/// family, so a prefix adds nothing but real secret bytes to the output.
+fn safe_diag(token: &str) -> (usize, f64, String) {
     (
-        prefix,
         token.chars().count(),
         token_shannon_entropy(token),
         shape_signature(token, 24),
@@ -437,20 +527,27 @@ fn safe_diag(token: &str) -> (String, usize, f64, String) {
 /// matching logic in `scan`) and return a safe diagnostic for it, so a
 /// LEAKS report can show *why* something survived without ever printing
 /// the secret itself.
-fn diag_for(hay: &str, pattern_name: &str) -> Option<(String, usize, f64, String)> {
+fn diag_for(hay: &str, pattern_name: &str) -> Option<(usize, f64, String)> {
     match pattern_name {
         "anthropic sk-ant-" => first_keyish(hay, "sk-", 20, detector_token_char).map(safe_diag),
         "github ghp_" => first_keyish(hay, "ghp_", 10, github_tail_char).map(safe_diag),
-        "github gho_" => first_keyish(hay, "gho_", 10, github_tail_char).map(safe_diag),
+        "github gh*_" => ["gho_", "ghu_", "ghs_", "ghr_"]
+            .iter()
+            .find_map(|a| first_keyish(hay, a, 10, github_tail_char))
+            .map(safe_diag),
         "github pat" => first_keyish(hay, "github_pat_", 10, github_tail_char).map(safe_diag),
         "aws AKIA" => first_keyish(hay, "AKIA", 16, |c| {
             c.is_ascii_uppercase() || c.is_ascii_digit()
         })
         .map(safe_diag),
         "google AIza" => first_keyish(hay, "AIza", 35, detector_token_char).map(safe_diag),
-        "slack xoxb" => first_keyish(hay, "xoxb-", 8, detector_token_char).map(safe_diag),
+        "provider token" => ["rk", "pk", "glpat", "xoxb", "xoxa", "xoxp", "xoxr", "xoxs"]
+            .iter()
+            .find_map(|a| first_keyish(hay, a, 8, detector_token_char))
+            .map(safe_diag),
         "npm token" => first_keyish(hay, "npm_", 36, |c| c.is_ascii_alphanumeric()).map(safe_diag),
         "PEM private key" => find_pem_header(hay, 0).map(|r| safe_diag(&hay[r])),
+        "bearer value" => first_bearer_value(hay).map(safe_diag),
         "jwt (eyJ.eyJ.)" => first_jwt(hay).map(safe_diag),
         "cue-gated entropy" => first_cue_gated_entropy(hay).map(safe_diag),
         _ => None,
@@ -572,8 +669,17 @@ fn scan(hay: &str) -> Vec<(&'static str, usize)> {
             count_keyish(hay, "sk-", 20, detector_token_char),
         ),
         // Mirrors `\bgh[pousr]_[A-Za-z0-9_]{10,}\b` — note no hyphen.
-        ("github ghp_", count_keyish(hay, "ghp_", 10, github_tail_char)),
-        ("github gho_", count_keyish(hay, "gho_", 10, github_tail_char)),
+        (
+            "github ghp_",
+            count_keyish(hay, "ghp_", 10, github_tail_char),
+        ),
+        (
+            "github gh*_",
+            ["gho_", "ghu_", "ghs_", "ghr_"]
+                .iter()
+                .map(|a| count_keyish(hay, a, 10, github_tail_char))
+                .sum(),
+        ),
         (
             "github pat",
             count_keyish(hay, "github_pat_", 10, github_tail_char),
@@ -590,10 +696,16 @@ fn scan(hay: &str) -> Vec<(&'static str, usize)> {
             "google AIza",
             count_keyish(hay, "AIza", 35, detector_token_char),
         ),
-        // Mirrors the `xox[baprs]` arm of the provider-token regex.
+        // Mirrors the full provider-token regex
+        // `(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b`. Checking only
+        // `xoxb-` left the harness NARROWER than production, which is its own
+        // kind of blind spot.
         (
-            "slack xoxb",
-            count_keyish(hay, "xoxb-", 8, detector_token_char),
+            "provider token",
+            ["rk", "pk", "glpat", "xoxb", "xoxa", "xoxp", "xoxr", "xoxs"]
+                .iter()
+                .map(|a| count_keyish(hay, a, 8, detector_token_char))
+                .sum(),
         ),
         // Mirrors `\bnpm_[A-Za-z0-9]{36}\b`.
         (
@@ -601,6 +713,7 @@ fn scan(hay: &str) -> Vec<(&'static str, usize)> {
             count_keyish(hay, "npm_", 36, |c| c.is_ascii_alphanumeric()),
         ),
         ("PEM private key", count_pem_private_key(hay)),
+        ("bearer value", count_bearer_values(hay)),
         ("jwt (eyJ.eyJ.)", count_jwt(hay)),
         ("cue-gated entropy", count_cue_gated_entropy(hay)),
     ]
@@ -650,7 +763,8 @@ async fn audit_real_sessions_for_key_leakage() {
     let mut sessions_ok = 0usize;
     let mut sessions_skipped = 0usize;
     let mut sessions_excluded_live = 0usize;
-    let mut leaks: Vec<(String, String, usize, Option<(String, usize, f64, String)>)> = Vec::new();
+    let mut leaks: Vec<(String, String, usize, Option<(usize, f64, String)>)> = Vec::new();
+    let mut advisories: Vec<(String, String, usize, Option<(usize, f64, String)>)> = Vec::new();
     let mut pre: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut post: std::collections::BTreeMap<&'static str, usize> = Default::default();
 
@@ -695,7 +809,11 @@ async fn audit_real_sessions_for_key_leakage() {
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_default();
-                leaks.push((name.to_string(), fname, n, diag_for(&json, name)));
+                if ADVISORY_PATTERNS.contains(&name) {
+                    advisories.push((name.to_string(), fname, n, diag_for(&json, name)));
+                } else {
+                    leaks.push((name.to_string(), fname, n, diag_for(&json, name)));
+                }
             }
         }
         sessions_ok += 1;
@@ -713,16 +831,25 @@ async fn audit_real_sessions_for_key_leakage() {
             post.get(name).copied().unwrap_or(0)
         );
     }
+    if !advisories.is_empty() {
+        println!("ADVISORY (deliberately broader than production; triage, does not fail the run):");
+        for (p, f, n, diag) in &advisories {
+            match diag {
+                Some((len, entropy, shape)) => {
+                    println!("  {p} | {f} | {n} | len={len} entropy={entropy:.2} shape={shape}");
+                }
+                None => println!("  {p} | {f} | {n}"),
+            }
+        }
+    }
     if !leaks.is_empty() {
         println!(
-            "LEAKS (pattern, session file, count, sample prefix/len/entropy/shape — never the full secret):"
+            "LEAKS (pattern, session file, count, sample len/entropy/shape — never the full secret):"
         );
         for (p, f, n, diag) in &leaks {
             match diag {
-                Some((prefix, len, entropy, shape)) => {
-                    println!(
-                        "  {p} | {f} | {n} | prefix={prefix:?} len={len} entropy={entropy:.2} shape={shape}"
-                    );
+                Some((len, entropy, shape)) => {
+                    println!("  {p} | {f} | {n} | len={len} entropy={entropy:.2} shape={shape}");
                 }
                 None => println!("  {p} | {f} | {n} | (no sample located)"),
             }
@@ -794,7 +921,8 @@ fn scan_does_not_flag_source_code_and_docs_about_secrets() {
 
 #[test]
 fn scan_still_counts_real_credential_shapes() {
-    let counts: std::collections::HashMap<&str, usize> = scan(REAL_SECRET_SHAPES).into_iter().collect();
+    let counts: std::collections::HashMap<&str, usize> =
+        scan(REAL_SECRET_SHAPES).into_iter().collect();
     for pattern in [
         "github ghp_",
         "anthropic sk-ant-",
@@ -808,4 +936,43 @@ fn scan_still_counts_real_credential_shapes() {
             "{pattern} must still be detected; tightening went too far. counts={counts:?}"
         );
     }
+}
+
+/// Bearer values that the production cue-gated entropy rule does NOT redact.
+/// Each line encodes one documented evasion, so if the detector is ever
+/// hardened these become the regression cases proving it.
+const BEARER_EVASIONS: &str = concat!(
+    // UUID-shaped: explicitly allowlisted by is_allowlisted_entropy_candidate.
+    "Authorization: Bearer 3f2504e0-4f89-11d3-9a0c-0305e82c3301\n",
+    // Lowercase hex, 32+ chars: treated as a content hash, allowlisted.
+    "Authorization: Bearer 9f86d081884c7d659a2feaa0c55ad015\n",
+    // Under the 16-char entropy-candidate minimum.
+    "Authorization: Bearer Tk9QRTEyMw\n",
+    // Long but low entropy: below the 3.2 bits/char threshold.
+    "Authorization: Bearer AAAAAAAAAAAAAAAAAAAAAAAA1\n",
+);
+
+#[test]
+fn bearer_matcher_catches_values_the_detector_misses() {
+    // This matcher is intentionally broader than production. It exists to
+    // surface the gap, not to mirror it -- see count_bearer_values.
+    let counts: std::collections::HashMap<&str, usize> =
+        scan(BEARER_EVASIONS).into_iter().collect();
+    assert_eq!(
+        counts.get("bearer value").copied().unwrap_or(0),
+        4,
+        "every documented bearer evasion must be surfaced, counts={counts:?}"
+    );
+}
+
+#[test]
+fn bearer_matcher_ignores_prose() {
+    // The matcher this replaced fired on exactly this phrase, which is what
+    // made it look like a leak. All-lowercase kebab case is prose, not a
+    // credential.
+    let counts: std::collections::HashMap<&str, usize> =
+        scan("the bearer per-a-slot-based scheme\n")
+            .into_iter()
+            .collect();
+    assert_eq!(counts.get("bearer value").copied().unwrap_or(0), 0);
 }
