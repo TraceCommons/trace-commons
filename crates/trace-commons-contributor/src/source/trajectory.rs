@@ -77,6 +77,16 @@ fn parse_timestamp(record: &Value) -> Result<Option<chrono::DateTime<chrono::Utc
     Ok(Some(parsed.with_timezone(&chrono::Utc)))
 }
 
+/// Read an optional string field. Absent or JSON null yields `None`;
+/// present-but-not-a-string is a malformed record.
+fn optional_string(record: &Value, key: &str) -> Result<Option<String>> {
+    match record.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => bail!("malformed_record"),
+    }
+}
+
 fn required_str(record: &Value, key: &str) -> Result<String> {
     record
         .get(key)
@@ -95,17 +105,15 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
     }
 
     let source = validate_source_name(&required_str(first, "source")?)?;
-    let model = first
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // A present-but-wrong-typed optional field is a malformed file, not an
+    // absent field. Coercing it to None fails OPEN, and for `cwd` that
+    // silently drops a redactor path prefix, weakening path stripping on a
+    // file the module documents as fail-closed.
+    let model = optional_string(first, "model")?;
     // `meta.cwd` feeds the redactor's path-prefix stripping and is never
     // serialized. `meta.git_branch` is deliberately dropped: it has no home
     // in SessionTranscript and is identity-adjacent.
-    let cwd = first
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let cwd = optional_string(first, "cwd")?;
 
     let mut events = Vec::new();
     let mut seen_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -147,7 +155,13 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             // would smuggle unparsed content into the payload.
                             let structured = serde_json::from_str::<Value>(&args)
                                 .unwrap_or_else(|_| json!({ "arguments_raw_len": args.len() }));
-                            seen_call_ids.insert(id);
+                            // A duplicate id makes the orphan check
+                            // meaningless: a later `tool` record would pair
+                            // against the wrong call. The schema gives ids
+                            // per call, so a repeat is a malformed file.
+                            if !seen_call_ids.insert(id) {
+                                bail!("duplicate_tool_call_id");
+                            }
                             events.push(SessionEvent {
                                 kind: SessionEventKind::ToolCall,
                                 timestamp,
@@ -159,10 +173,17 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                         }
                     }
                     _ => {
+                        // The schema requires a non-empty content string when
+                        // there are no tool calls. An empty string is neither
+                        // a valid content assistant nor a tool-call assistant.
+                        let content = required_str(record, "content")?;
+                        if content.is_empty() {
+                            bail!("malformed_record");
+                        }
                         events.push(SessionEvent {
                             kind: SessionEventKind::Assistant,
                             timestamp,
-                            content: Some(required_str(record, "content")?),
+                            content: Some(content),
                             structured: Value::Null,
                             tool_name: None,
                             token_counts: None,
@@ -391,6 +412,40 @@ mod tests {
         assert!(validate_source_name("../../etc/passwd").is_err());
         assert!(validate_source_name(&"a".repeat(65)).is_err());
         assert!(validate_source_name(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_tool_call_ids() {
+        let bad = r#"[
+          {"role":"meta","source":"pi"},
+          {"role":"assistant","content":null,"tool_calls":[{"id":"c1","name":"t","args":"{}"},{"id":"c1","name":"u","args":"{}"}],"timestamp":"2026-07-10T12:00:00Z"}
+        ]"#;
+        let err = parse_trajectory(bad.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("duplicate_tool_call_id"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_wrong_typed_optional_meta_fields() {
+        for bad in [
+            r#"[{"role":"meta","source":"pi","cwd":5}]"#,
+            r#"[{"role":"meta","source":"pi","model":["x"]}]"#,
+        ] {
+            let err = parse_trajectory(bad.as_bytes()).unwrap_err().to_string();
+            assert!(err.contains("malformed_record"), "got: {err}");
+        }
+        // Absent and explicit null remain valid.
+        let ok = r#"[{"role":"meta","source":"pi","cwd":null}]"#;
+        assert!(parse_trajectory(ok.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_assistant_content() {
+        let bad = r#"[
+          {"role":"meta","source":"pi"},
+          {"role":"assistant","content":"","timestamp":"2026-07-10T12:00:00Z"}
+        ]"#;
+        let err = parse_trajectory(bad.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("malformed_record"), "got: {err}");
     }
 
     #[test]

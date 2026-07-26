@@ -620,6 +620,66 @@ mod tests {
         }
     }
 
+    /// Drives the real submit path twice and inspects what actually reached
+    /// the wire.
+    ///
+    /// The unit test on `strip_reasoning` alone is not enough: deleting the
+    /// call site in `submit_sessions` would leave it green while every
+    /// submission silently carried reasoning. `--no-reasoning` is a privacy
+    /// control, so its failure mode has to be caught at the boundary it
+    /// actually protects.
+    #[tokio::test]
+    async fn no_reasoning_controls_what_reaches_the_wire() {
+        async fn run(no_reasoning: bool) -> serde_json::Value {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let issuer = spawn(stub_issuer()).await;
+            let ingest = spawn(stub_ingest(received.clone())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+            let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+            let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+            let opts = SubmitOptions {
+                dry_run: false,
+                pii_filter: None,
+                no_reasoning,
+            };
+            submit_sessions(&store, &cfg, fixture_selection(), &opts)
+                .await
+                .unwrap();
+            let guard = received.lock().unwrap();
+            guard[0].clone()
+        }
+
+        fn reasoning_events(envelope: &serde_json::Value) -> usize {
+            envelope["events"]
+                .as_array()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter(|e| e["event_type"] == "reasoning")
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+
+        // The committed fixture contains a thinking block, so the default
+        // path must carry reasoning. If this ever reaches zero the fixture
+        // stopped exercising the feature and the opt-out assertion below
+        // would pass vacuously.
+        let with = run(false).await;
+        assert!(
+            reasoning_events(&with) > 0,
+            "reasoning must reach the wire by default"
+        );
+
+        let without = run(true).await;
+        assert_eq!(
+            reasoning_events(&without),
+            0,
+            "--no-reasoning must strip reasoning before upload"
+        );
+    }
+
     #[tokio::test]
     async fn submits_fixture_session_and_is_idempotent_on_rerun() {
         let received = Arc::new(Mutex::new(Vec::new()));
