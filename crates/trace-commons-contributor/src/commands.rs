@@ -789,9 +789,10 @@ mod project_filter_tests {
 
     #[test]
     fn nonexistent_trajectory_path_is_an_error() {
-        let err = super::discover_filtered(None, None, None, Some(Path::new("/nonexistent/x.json")))
-            .unwrap_err()
-            .to_string();
+        let err =
+            super::discover_filtered(None, None, None, Some(Path::new("/nonexistent/x.json")))
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("does not exist"), "got: {err}");
     }
 

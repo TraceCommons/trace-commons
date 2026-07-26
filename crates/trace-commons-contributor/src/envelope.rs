@@ -746,8 +746,10 @@ mod tests {
         let cfg = test_config();
         let raw = super::build_raw_contribution(&t, &cfg, chrono::Utc::now());
         assert!(
-            raw.events.iter().any(|e| e.event_type
-                == trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning),
+            raw.events.iter().any(|e| {
+                e.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning
+            }),
             "reasoning must survive into the raw contribution"
         );
 

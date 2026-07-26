@@ -72,7 +72,8 @@ fn parse_timestamp(record: &Value) -> Result<Option<chrono::DateTime<chrono::Utc
     let Some(raw) = record.get("timestamp").and_then(|v| v.as_str()) else {
         bail!("invalid_timestamp");
     };
-    let parsed = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| anyhow!("invalid_timestamp"))?;
+    let parsed =
+        chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| anyhow!("invalid_timestamp"))?;
     Ok(Some(parsed.with_timezone(&chrono::Utc)))
 }
 
@@ -429,7 +430,11 @@ mod tests {
     fn discovers_a_single_file_and_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         write_temp(dir.path(), "a.json", SAMPLE);
-        write_temp(dir.path(), "b.jsonl", "{\"role\":\"meta\",\"source\":\"pi\"}\n");
+        write_temp(
+            dir.path(),
+            "b.jsonl",
+            "{\"role\":\"meta\",\"source\":\"pi\"}\n",
+        );
         write_temp(dir.path(), "ignored.txt", "not a trajectory");
 
         let src = super::TrajectorySource::new(dir.path().to_path_buf());
