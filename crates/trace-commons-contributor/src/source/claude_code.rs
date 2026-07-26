@@ -581,18 +581,21 @@ mod tests {
         let subagent = &found[1];
 
         assert_eq!(top_level.source, "claude-code");
-        assert!(top_level.path.ends_with("11111111-1111-1111-1111-111111111111.jsonl"));
+        assert!(
+            top_level
+                .path
+                .ends_with("11111111-1111-1111-1111-111111111111.jsonl")
+        );
 
         assert_eq!(subagent.source, "claude-code");
         assert!(subagent.path.ends_with("subagents/agent-abc123.jsonl"));
-        assert_eq!(
-            subagent.cwd.as_deref(),
-            Some("/Users/testuser/code/myproj")
-        );
+        assert_eq!(subagent.cwd.as_deref(), Some("/Users/testuser/code/myproj"));
 
         // The unrelated nested directory must not be discovered.
         assert!(
-            !found.iter().any(|s| s.path.ends_with("not-a-session.jsonl")),
+            !found
+                .iter()
+                .any(|s| s.path.ends_with("not-a-session.jsonl")),
             "unrelated nested directory was swept into discovery"
         );
     }
