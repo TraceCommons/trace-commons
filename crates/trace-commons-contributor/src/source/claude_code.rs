@@ -82,29 +82,57 @@ impl TraceSource for ClaudeCodeSource {
                     }
                 };
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
+                let entry_is_dir = match entry.file_type() {
+                    Ok(ft) => ft.is_dir(),
                     Err(_) => {
                         skipped += 1;
                         continue;
                     }
                 };
-                let started_at = metadata
-                    .modified()
-                    .ok()
-                    .map(chrono::DateTime::<chrono::Utc>::from);
-                let cwd = peek_cwd(&path);
-                sessions.push(SessionRef {
-                    source: SOURCE_CLAUDE_CODE,
-                    path,
-                    project: discovery_project.clone(),
-                    cwd,
-                    started_at,
-                    size_bytes: metadata.len(),
-                });
+                if entry_is_dir {
+                    // Known layout only: `<project-dir>/<session-uuid>/subagents/*.jsonl`.
+                    // Deliberately not a general recursive walk -- an
+                    // unrelated nested directory under a session-uuid dir
+                    // must not be swept in.
+                    let subagents_dir = path.join("subagents");
+                    // `read_dir` FOLLOWS a symlinked directory. A `subagents`
+                    // symlink planted by any process with write access under
+                    // the transcript root would otherwise steer discovery at
+                    // arbitrary directories, and everything discovered here is
+                    // a candidate for upload. `symlink_metadata` does not
+                    // follow, so a link reports as a symlink and is refused.
+                    // (The top-level walk is already safe: `DirEntry::
+                    // file_type` does not follow either.)
+                    match std::fs::symlink_metadata(&subagents_dir) {
+                        Ok(md) if md.is_dir() => {}
+                        _ => continue,
+                    }
+                    let Ok(subagent_entries) = std::fs::read_dir(&subagents_dir) else {
+                        continue;
+                    };
+                    for sub_entry in subagent_entries {
+                        let sub_entry = match sub_entry {
+                            Ok(e) => e,
+                            Err(_) => {
+                                skipped += 1;
+                                continue;
+                            }
+                        };
+                        push_session_if_jsonl(
+                            &sub_entry,
+                            discovery_project.clone(),
+                            &mut sessions,
+                            &mut skipped,
+                        );
+                    }
+                    continue;
+                }
+                push_session_if_jsonl(
+                    &entry,
+                    discovery_project.clone(),
+                    &mut sessions,
+                    &mut skipped,
+                );
             }
         }
         if skipped > 0 {
@@ -119,6 +147,56 @@ impl TraceSource for ClaudeCodeSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+}
+
+/// Builds a `SessionRef` for `entry` if it is a `.jsonl` file, pushing it
+/// onto `sessions`. Shared between the top-level `<project-dir>/*.jsonl`
+/// walk and the nested `<project-dir>/<session-uuid>/subagents/*.jsonl`
+/// walk so both produce identically-shaped `SessionRef`s. Each subagent
+/// transcript becomes its own `SessionRef` (not merged into its parent
+/// session), matching the existing one-file-one-session model.
+fn push_session_if_jsonl(
+    entry: &std::fs::DirEntry,
+    discovery_project: Option<String>,
+    sessions: &mut Vec<SessionRef>,
+    skipped: &mut usize,
+) {
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return;
+    }
+    // Refuse symlinks. `entry.metadata()` and the later `std::fs::read` both
+    // follow them, so a symlinked `.jsonl` is a path out of the transcript
+    // root and into any file the user can read. `DirEntry::file_type` does
+    // not follow, so it is the check that can tell the difference.
+    match entry.file_type() {
+        Ok(ft) if ft.is_file() => {}
+        Ok(_) => return,
+        Err(_) => {
+            *skipped += 1;
+            return;
+        }
+    }
+    let metadata = match entry.metadata() {
+        Ok(m) => m,
+        Err(_) => {
+            *skipped += 1;
+            return;
+        }
+    };
+    let started_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let cwd = peek_cwd(&path);
+    sessions.push(SessionRef {
+        source: SOURCE_CLAUDE_CODE,
+        path,
+        project: discovery_project,
+        cwd,
+        started_at,
+        size_bytes: metadata.len(),
+    });
 }
 
 /// Cheap discovery-time peek at a session file's true working directory:
@@ -409,6 +487,117 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn discovery_refuses_symlinks_that_escape_the_transcript_root() {
+        // Everything discovery returns is a candidate for upload, so a
+        // symlink planted under the transcript root by any same-user process
+        // must not be able to steer it at files elsewhere on disk.
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secrets.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"private\"}}\n",
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+
+        // Case 1: the `subagents` directory itself is a symlink outward.
+        let session_a = project_dir.join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        std::fs::create_dir_all(&session_a).unwrap();
+        symlink(outside.path(), session_a.join("subagents")).unwrap();
+
+        // Case 2: a real `subagents` directory holding a symlinked file.
+        let session_b = project_dir.join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        let subagents_b = session_b.join("subagents");
+        std::fs::create_dir_all(&subagents_b).unwrap();
+        symlink(
+            outside.path().join("secrets.jsonl"),
+            subagents_b.join("agent-link.jsonl"),
+        )
+        .unwrap();
+
+        let found = ClaudeCodeSource::new(root.path().to_path_buf())
+            .discover()
+            .unwrap();
+        assert!(
+            found.is_empty(),
+            "symlinks must not be discovered, got: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discovers_subagent_transcripts_one_level_deeper() {
+        // Claude Code stores subagent transcripts at
+        // `<project-dir>/<session-uuid>/subagents/agent-<id>.jsonl`, one
+        // level below ordinary top-level sessions
+        // (`<project-dir>/<uuid>.jsonl`). discover() must walk into that
+        // known layout and surface each subagent transcript as its own
+        // SessionRef, without recursing into unrelated nested directories.
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // An ordinary top-level session.
+        std::fs::write(
+            project_dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        // A subagent transcript nested under the session's subagents dir.
+        let subagents_dir = project_dir
+            .join("22222222-2222-2222-2222-222222222222")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join("agent-abc123.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\"message\":{\"role\":\"user\",\"content\":\"sub hi\"}}\n",
+        )
+        .unwrap();
+
+        // An unrelated nested directory that must NOT be swept in.
+        let unrelated_dir = project_dir
+            .join("22222222-2222-2222-2222-222222222222")
+            .join("scratch");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        std::fs::write(
+            unrelated_dir.join("not-a-session.jsonl"),
+            "{\"type\":\"user\"}\n",
+        )
+        .unwrap();
+
+        let src = ClaudeCodeSource::new(root.path().to_path_buf());
+        let mut found = src.discover().unwrap();
+        assert_eq!(found.len(), 2, "found: {found:?}");
+
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        let top_level = &found[0];
+        let subagent = &found[1];
+
+        assert_eq!(top_level.source, "claude-code");
+        assert!(
+            top_level
+                .path
+                .ends_with("11111111-1111-1111-1111-111111111111.jsonl")
+        );
+
+        assert_eq!(subagent.source, "claude-code");
+        assert!(subagent.path.ends_with("subagents/agent-abc123.jsonl"));
+        assert_eq!(subagent.cwd.as_deref(), Some("/Users/testuser/code/myproj"));
+
+        // The unrelated nested directory must not be discovered.
+        assert!(
+            !found
+                .iter()
+                .any(|s| s.path.ends_with("not-a-session.jsonl")),
+            "unrelated nested directory was swept into discovery"
+        );
     }
 
     #[test]

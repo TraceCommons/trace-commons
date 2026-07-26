@@ -162,7 +162,11 @@ files left behind by a crash mid-write.
 
 ## Sources
 
-- **Claude Code** — `~/.claude/projects/**/*.jsonl`.
+- **Claude Code** — `~/.claude/projects/<project>/*.jsonl` for ordinary
+  sessions, plus `~/.claude/projects/<project>/<session-id>/subagents/*.jsonl`
+  for subagent transcripts. Each subagent transcript is offered as its own
+  session rather than folded into its parent. Only those two layouts are
+  walked; other nested directories are ignored.
 - **Codex** — `~/.codex/sessions/**/rollout-*.jsonl`.
 
 Both readers drop `thinking`/`reasoning` content entirely; unknown record
