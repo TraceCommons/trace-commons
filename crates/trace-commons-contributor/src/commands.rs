@@ -483,8 +483,14 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             } => {
                 println!("submitted {submission_id} {status}");
             }
-            SubmitOutcome::AlreadySubmitted { submission_id } => {
-                println!("already-submitted {submission_id}");
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => {
+                // Name the status it already has. "already-submitted" alone
+                // reads as a failure when it usually means the trace was
+                // accepted on an earlier run.
+                println!("already-submitted {submission_id} ({prior_status})");
             }
             SubmitOutcome::SkippedParseFailure { reason_label } => {
                 println!("skipped ({reason_label})");

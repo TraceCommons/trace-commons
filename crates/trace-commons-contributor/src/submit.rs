@@ -34,11 +34,27 @@ pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
-    Submitted { submission_id: Uuid, status: String },
-    AlreadySubmitted { submission_id: Uuid },
-    SkippedParseFailure { reason_label: String },
-    Refused { reason_label: String }, // canary hit, fail-closed PII filter, too large
-    Failed { reason_label: String },  // network/auth after retries
+    Submitted {
+        submission_id: Uuid,
+        status: String,
+    },
+    AlreadySubmitted {
+        submission_id: Uuid,
+        /// The status this session already carries server-side, from the
+        /// stored receipt. Without it, a re-run reports "already-submitted"
+        /// and the contributor cannot tell whether the trace was accepted,
+        /// quarantined, or merely delivered.
+        prior_status: String,
+    },
+    SkippedParseFailure {
+        reason_label: String,
+    },
+    Refused {
+        reason_label: String,
+    }, // canary hit, fail-closed PII filter, too large
+    Failed {
+        reason_label: String,
+    }, // network/auth after retries
 }
 
 pub struct SubmitOptions {
@@ -71,9 +87,12 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
                 submission_id: *submission_id,
                 status: status.clone(),
             }),
-            SubmitOutcome::AlreadySubmitted { submission_id } => Some(ManifestEntry {
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => Some(ManifestEntry {
                 submission_id: *submission_id,
-                status: "already-submitted".to_string(),
+                status: prior_status.clone(),
             }),
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
@@ -129,12 +148,20 @@ pub async fn submit_sessions(
         }
 
         let receipts = store.load_receipts().context("loading receipts")?;
-        if receipts.iter().any(|r| {
-            r.session_hash == transcript.session_hash
-                && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
-        }) {
+        // Take the most recent matching receipt, so a session that was
+        // delivered and later accepted reports "accepted" rather than the
+        // first status it ever had.
+        let prior = receipts
+            .iter()
+            .filter(|r| {
+                r.session_hash == transcript.session_hash
+                    && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
+            })
+            .max_by_key(|r| r.submitted_at);
+        if let Some(prior) = prior {
             outcomes.push(SubmitOutcome::AlreadySubmitted {
-                submission_id: crate::source::submission_id_for(&transcript.session_hash),
+                submission_id: prior.submission_id,
+                prior_status: prior.status.clone(),
             });
             continue;
         }
@@ -628,6 +655,27 @@ mod tests {
     /// submission silently carried reasoning. `--no-reasoning` is a privacy
     /// control, so its failure mode has to be caught at the boundary it
     /// actually protects.
+    #[test]
+    fn already_submitted_preserves_the_prior_status() {
+        // A re-run reports already-submitted for every session it has seen.
+        // Reporting only that is what made three re-submitted traces look
+        // like three failures to a contributor and to the collector reading
+        // the manifest: nothing told them the traces had been ACCEPTED the
+        // first time. The prior status is in the receipt; carry it through.
+        let id = Uuid::new_v4();
+        let outcomes = vec![SubmitOutcome::AlreadySubmitted {
+            submission_id: id,
+            prior_status: "accepted".to_string(),
+        }];
+        let manifest = build_manifest(&outcomes);
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].submission_id, id);
+        assert_eq!(
+            manifest[0].status, "accepted",
+            "the manifest must carry the real server status, not the literal \"already-submitted\""
+        );
+    }
+
     #[tokio::test]
     async fn no_reasoning_controls_what_reaches_the_wire() {
         async fn run(no_reasoning: bool) -> serde_json::Value {
@@ -1306,7 +1354,10 @@ mod tests {
                 submission_id: u1,
                 status: "submitted".to_string(),
             },
-            SubmitOutcome::AlreadySubmitted { submission_id: u2 },
+            SubmitOutcome::AlreadySubmitted {
+                submission_id: u2,
+                prior_status: "quarantined".to_string(),
+            },
             SubmitOutcome::Refused {
                 reason_label: "secret-leak-detected".to_string(),
             },
@@ -1324,7 +1375,10 @@ mod tests {
         assert_eq!(manifest[0].submission_id, u1);
         assert_eq!(manifest[0].status, "submitted");
         assert_eq!(manifest[1].submission_id, u2);
-        assert_eq!(manifest[1].status, "already-submitted");
+        // Previously the literal "already-submitted". A collector reading the
+        // manifest could not distinguish an accepted trace from a quarantined
+        // one, so a contributor's re-run looked like a batch of failures.
+        assert_eq!(manifest[1].status, "quarantined");
     }
 
     #[tokio::test]
