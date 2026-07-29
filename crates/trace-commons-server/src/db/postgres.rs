@@ -3895,6 +3895,63 @@ impl Database for PgBackend {
             })
             .collect())
     }
+
+    async fn list_own_gate_decision_scores(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The `s.tenant_id = $1 AND
+        // s.auth_principal_ref = $2` predicates are what actually scope the
+        // read to the caller's own rows — both values come from the
+        // authenticated request context, never from a client-supplied
+        // parameter (see `trace_score_attestation` and the ingest binary's
+        // `score_attestation_handler`).
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (d.submission_id)
+                    d.submission_id,
+                    d.credit_quality_micros,
+                    d.perplexity_micros,
+                    d.novelty_score_micros,
+                    d.perplexity_passed,
+                    d.novelty_passed
+                 FROM trace_gate_decisions d
+                 JOIN trace_submissions s
+                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                 WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                 -- decision_id is the final, unique tiebreaker (mirrors
+                 -- list_scores_by_submission_ids) so decisions that share a
+                 -- decided_at sort deterministically instead of Postgres
+                 -- picking an arbitrary row among ties on repeated reads.
+                 ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                 LIMIT $3",
+                &[&tenant_id, &auth_principal_ref, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let perplexity_passed: bool = row.get("perplexity_passed");
+                let novelty_passed: bool = row.get("novelty_passed");
+                crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.get("submission_id"),
+                    credit_quality_micros: row.get("credit_quality_micros"),
+                    perplexity_micros: row.get("perplexity_micros"),
+                    novelty_score_micros: row.get("novelty_score_micros"),
+                    gate_passed: perplexity_passed && novelty_passed,
+                }
+            })
+            .collect())
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

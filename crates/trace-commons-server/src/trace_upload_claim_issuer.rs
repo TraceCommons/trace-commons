@@ -61,27 +61,95 @@ const DEFAULT_ALLOWLIST_MAX_STALE_SECONDS: u64 = 3600;
 const DEFAULT_DENIAL_COUNTER_WINDOW_SECONDS: u64 = 3600;
 const INVITE_LANDING_TEXT: &str = r#"Trace Commons invite link
 
-This GET route does not consume invites.
+You are reading this because someone opened a Trace Commons invite. This page
+is instructions, not an action. Fetching it (GET) consumes nothing; only the
+POST in step 2 does.
 
-Agents should onboard by sending a JSON POST to /v1/onboard on this origin:
+Onboarding enrolls a machine as a contributor to a corpus of coding-agent
+sessions. Before proceeding, tell the user plainly:
+
+  - Redacted records of their coding-agent sessions will be contributed
+  - Onboarding permanently spends one use of this invite, whether or not
+    they later submit anything
+  - Only contribute sessions from repositories they have the right to share
+
+Proceed only on an explicit yes.
+
+--------------------------------------------------------------------------
+1. Use the CLI if you can
+--------------------------------------------------------------------------
+
+trace-commons-contributor login --invite '<full invite link>'
+
+That registers a device key, redeems the code, and writes the config in one
+step. It is the supported path and everything below is what it does for you.
+
+The CLI ships as source in TraceCommons/trace-commons-server; build it with
+  cargo build --release -p trace-commons-contributor
+There is no published binary on npm, Homebrew, or PyPI.
+
+--------------------------------------------------------------------------
+2. Or POST /v1/onboard yourself
+--------------------------------------------------------------------------
+
+The code is the URL fragment: .../onboard#VQWWPGYSG8Y4LTP6 means the code is
+VQWWPGYSG8Y4LTP6. Fragments are not sent to servers, so this page cannot read
+it and cannot tell you whether it is valid. A ?code= query parameter also
+works.
+
+Generate an Ed25519 keypair if you do not have one, then POST its PUBLIC half:
+
+POST /v1/onboard
+content-type: application/json
 
 {
   "schema_version": "trace_commons.onboard_request.v1",
-  "invite_code": "<code from the invite URL fragment or code query parameter>",
-  "device_public_key": "<base64 Ed25519 public key>",
-  "client_info": {
-    "agent": "ironclaw",
-    "version": "<agent version>"
-  }
+  "invite_code": "<code from the invite URL>",
+  "device_public_key": "<base64 of the raw 32-byte Ed25519 public key>",
+  "client_info": { "agent": "<your client>", "version": "<your version>" }
 }
 
-After a successful response, store the returned device_key_id, tenant_id,
-issuer_url, ingest_url, and community URLs, then start Trace Commons trace
-submission using the registered device key.
+device_public_key is the raw key, base64-encoded. It is NOT a fingerprint,
+NOT a PEM block, and NOT a hash. If you are holding a device_key_id that
+looks like "sha256:...", that is a digest OF the key and will be rejected
+here.
 
-IronClaw users can run:
+THIS REQUEST IS NOT IDEMPOTENT. Every success spends one use of the invite,
+including re-registering a key that is already enrolled. Send it once.
 
-ironclaw traces onboard '<full invite link>'
+--------------------------------------------------------------------------
+3. Persist the response
+--------------------------------------------------------------------------
+
+The response carries tenant_id, ingest_url, issuer_url, audience,
+device_key_id, and community URLs. It is returned once and never again.
+
+Onboarding does not configure your client. Write the response to your
+client's configuration store immediately or the registration is unusable and
+the invite use is wasted. For trace-commons-contributor that means
+<config-dir>/contributor.json carrying issuer_url, ingest_url, audience,
+tenant_id, device_key_id, and consent_scopes.
+
+Confirm with `trace-commons-contributor whoami`. If it reports "not logged
+in", the config was not written and nothing will submit.
+
+--------------------------------------------------------------------------
+4. Stop there
+--------------------------------------------------------------------------
+
+Onboarding registers a device; it does not choose what to contribute.
+Submission is a separate, explicit decision. When the user asks for it, run
+`submit --dry-run` first and show them what the envelope contains: session
+transcripts routinely contain credentials pasted while working.
+
+--------------------------------------------------------------------------
+Errors
+--------------------------------------------------------------------------
+
+403 InviteNotValid        Code unknown or malformed. Re-read the fragment.
+                          Nothing was consumed; do not retry with guesses.
+403 InviteAlreadyConsumed Invite is exhausted. Ask for a new one.
+4xx schema error          Check device_public_key is base64 of 32 raw bytes.
 "#;
 
 pub const TRACE_COMMONS_ALLOWLIST_SOURCE_ENV: &str = "TRACE_COMMONS_ALLOWLIST_SOURCE";
@@ -2678,7 +2746,7 @@ fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
     Ok(trimmed.to_string())
 }
 
-fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2689,7 +2757,7 @@ fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     Ok(format!("{pem}\n"))
 }
 
-fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2715,11 +2783,11 @@ fn required_pem_or_file(
     }
 }
 
-fn required_env(name: &'static str) -> anyhow::Result<String> {
+pub(crate) fn required_env(name: &'static str) -> anyhow::Result<String> {
     optional_env(name)?.ok_or_else(|| anyhow::anyhow!("{name} is required"))
 }
 
-fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
+pub(crate) fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) => {
             let trimmed = value.trim();
@@ -3116,11 +3184,38 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Trace Commons invite link"));
-        assert!(body.contains("POST to /v1/onboard"));
+        assert!(body.contains("/v1/onboard"));
         assert!(body.contains("trace_commons.onboard_request.v1"));
         assert!(body.contains("invite_code"));
         assert!(body.contains("device_public_key"));
-        assert!(body.contains("ironclaw traces onboard"));
+
+        // The page points at the supported CLI entry point rather than
+        // leaving an agent to hand-roll the POST.
+        assert!(body.contains("login --invite"));
+
+        // Each of these is a step a real contributor got wrong by reading the
+        // source instead of this page. Losing any of them regresses the
+        // onboarding experience even though the route still returns 200.
+        assert!(
+            body.contains("NOT IDEMPOTENT"),
+            "must warn that a repeat POST spends another invite use"
+        );
+        assert!(
+            body.contains("sha256:"),
+            "must distinguish the raw public key from the device_key_id digest"
+        );
+        assert!(
+            body.contains("contributor.json"),
+            "must say where the response has to be persisted"
+        );
+        assert!(
+            body.contains("--dry-run"),
+            "must steer a first submit through a dry run"
+        );
+
+        // The landing page never echoes the invite code: the fragment is not
+        // sent to the server, and a code in a response body would be a
+        // credential in a log.
         assert!(!body.contains("INV9K3RT5FBQ72JX"));
     }
 
