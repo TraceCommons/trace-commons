@@ -36350,20 +36350,24 @@ async fn process_one_pii_backstop(
     // Step 3: now flip the on-disk record and release the DB hold. The file
     // record's object_key was already repointed to the rescrubbed artifact
     // above, so the file-record read path is safe regardless of ordering here;
-    // the DB status release is the single authoritative status write to the
-    // target (the earlier upsert wrote the still-held status).
+    // the DB release is the single authoritative status write to the target
+    // (the earlier upsert wrote the still-held status).
     //
-    // Partial-failure window: this flips the on-disk record to
-    // Accepted/Quarantined together with clearing the DB hold. If the DB
-    // release fails, the file record shows the released status while the DB
-    // still reads `awaiting_pii_backstop`. The next tick re-enumerates off the
-    // DB status (still held, submitted_envelope ref still active), reloads via
-    // the now-rescrubbed record pointer, and self-heals by re-running the
-    // release. Nothing is exported off the file status alone, so the transient
-    // skew is safe.
-    record.status = target_status;
-    write_submission_record(&state.root, &record)?;
-    db.update_trace_submission_status(
+    // The status flip and the invalidation of the pre-backstop
+    // `submitted_envelope` ref(s) happen ATOMICALLY via
+    // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
+    // commit without the other: by-ref export consumers select
+    // `SubmittedEnvelope` explicitly (see e.g. the export revalidation path),
+    // so a status release with a still-active pre-backstop ref would publish
+    // un-scrubbed, PII-bearing bytes on an ordinary transient DB failure with
+    // no re-enumeration path to heal it (enumeration only selects
+    // `awaiting_pii_backstop`). Conversely the driver's own re-enumeration
+    // INNER JOINs an active `submitted_envelope` ref, so invalidating it
+    // without also releasing the status would strand the submission forever.
+    // Atomicity resolves both hazards: on any failure the transaction rolls
+    // back, the on-disk record write below is skipped, and the submission
+    // stays held and re-enumerable for the next tick to retry.
+    db.release_pii_backstop_hold(
         &item.tenant_id,
         item.submission_id,
         storage_corpus_status(target_status),
@@ -36371,30 +36375,10 @@ async fn process_one_pii_backstop(
         Some(PII_BACKSTOP_REDACTION_LABEL),
     )
     .await
-    .context("failed to release PII backstop hold")?;
+    .context("failed to atomically release PII backstop hold")?;
 
-    // Defensive ref invalidation, done AFTER the hold is released: retire the
-    // pre-backstop `submitted_envelope` object ref(s) now that the rescrubbed
-    // ref is written and the status is no longer `awaiting_pii_backstop`. The
-    // primary read path resolves the record pointer (rescrubbed), so a stale
-    // `submitted_envelope` ref is not a leak on the main path, but invalidating
-    // it ensures no export-by-ref path can resolve pre-backstop bytes.
-    //
-    // Ordering matters: this runs only after the status release. The driver
-    // enumeration INNER JOINs an active `submitted_envelope` ref, so invalidating
-    // that ref before a (possibly failing) release could hide a still-held
-    // submission from the next tick. Releasing first keeps the submission
-    // re-enumerable until it is truly Accepted/Quarantined. If this invalidation
-    // itself fails the submission is already released, so it will not be
-    // reprocessed; the stale ref stays active but is unreachable on the primary
-    // read path.
-    db.invalidate_trace_object_refs_by_kind(
-        &item.tenant_id,
-        item.submission_id,
-        StorageTraceObjectArtifactKind::SubmittedEnvelope,
-    )
-    .await
-    .context("failed to invalidate pre-backstop submitted-envelope object ref")?;
+    record.status = target_status;
+    write_submission_record(&state.root, &record)?;
 
     Ok(())
 }

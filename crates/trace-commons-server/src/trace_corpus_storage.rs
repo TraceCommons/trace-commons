@@ -2030,6 +2030,50 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(0)
     }
 
+    /// Atomically release a PII-backstop hold: flip `trace_submissions.status`
+    /// to the target Accepted/Quarantined status AND invalidate every active
+    /// `submitted_envelope` object ref for the submission, as a single
+    /// tenant-scoped operation. Both must succeed or neither may take effect:
+    ///
+    /// - If the status flip committed but the invalidation did not, the
+    ///   pre-backstop `submitted_envelope` ref stays active while the
+    ///   submission reads as released. By-ref consumers (e.g. export
+    ///   revalidation) select `SubmittedEnvelope` explicitly, so this would
+    ///   publish un-scrubbed, PII-bearing bytes with no re-enumeration path to
+    ///   heal it (enumeration only selects `awaiting_pii_backstop`).
+    /// - If the invalidation committed but the status flip did not, the
+    ///   submission becomes invisible to the driver's re-enumeration (which
+    ///   INNER JOINs an active `submitted_envelope` ref) while still reading
+    ///   `awaiting_pii_backstop` — it would stay held forever.
+    ///
+    /// Returns the number of object refs invalidated. The default
+    /// implementation composes the two existing calls non-atomically (used by
+    /// in-memory test doubles); the Postgres store overrides it with a single
+    /// transaction so the two effects are all-or-nothing.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            TraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+
     async fn append_trace_derived_record(
         &self,
         derived_record: TraceDerivedRecordWrite,

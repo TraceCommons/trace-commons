@@ -77285,6 +77285,12 @@ struct PiiBackstopDriverTestDb {
     /// failure.
     pii_backstop_attempts:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// When set, `release_pii_backstop_hold` simulates the invalidation half
+    /// of the atomic release failing (e.g. a transient DB error after the
+    /// status UPDATE would have applied). Neither the status flip nor the
+    /// invalidation bookkeeping may be observed in this case — that is
+    /// exactly the atomicity the fix under test provides.
+    fail_release_invalidation: std::sync::atomic::AtomicBool,
 }
 
 impl PiiBackstopDriverTestDb {
@@ -77302,7 +77308,15 @@ impl PiiBackstopDriverTestDb {
             seeded_refs: std::sync::RwLock::new(Vec::new()),
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
             pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Arrange for the next `release_pii_backstop_hold` call to fail as if the
+    /// invalidation half of the atomic release hit a transient DB error.
+    fn set_fail_release_invalidation(&self, fail: bool) {
+        self.fail_release_invalidation
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Register a submission held on `AwaitingPiiBackstop`: seed its metadata
@@ -77710,6 +77724,96 @@ async fn pii_backstop_process_one_releases_and_scrubs_trace() {
     );
 }
 
+// --- release atomicity: a failing invalidation must not release the hold ---
+
+/// CRITICAL regression coverage: if the invalidation half of
+/// `release_pii_backstop_hold` fails (simulating a transient DB error), the
+/// submission MUST stay `AwaitingPiiBackstop` and re-enumerable — not
+/// "Accepted with the pre-backstop `submitted_envelope` ref still active",
+/// which would let an export-by-ref consumer publish un-scrubbed, PII-bearing
+/// bytes with no path back to healing. Before the fix, the status release and
+/// the ref invalidation were two independent DB calls; a failure of the
+/// second left exactly that inconsistent, unrecoverable state. The atomic
+/// `release_pii_backstop_hold` must make both effects all-or-nothing.
+#[tokio::test]
+async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_failure() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    // Simulate the invalidation half of the atomic release failing (e.g. a
+    // transient DB error after the status UPDATE would otherwise have
+    // applied).
+    db.set_fail_release_invalidation(true);
+
+    let outcome = process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter).await;
+    assert!(
+        outcome.is_err(),
+        "a failing atomic release must propagate an error"
+    );
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held, not Accepted-with-active-original, \
+         when the atomic release fails"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the pre-backstop SubmittedEnvelope ref must NOT be invalidated \
+         when the paired status release did not durably commit"
+    );
+
+    // The on-disk record must not have been flipped either — the write only
+    // happens after the atomic DB release succeeds.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        record.status,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "the on-disk record must stay held when the DB release fails"
+    );
+
+    // The submission must still satisfy the driver's own re-enumeration
+    // invariant: still `awaiting_pii_backstop` with the `SubmittedEnvelope`
+    // ref still active (the sole prerequisite the enumeration query INNER
+    // JOINs on), so the next tick will retry it rather than losing it.
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the submission must remain re-enumerable (submitted_envelope ref \
+         still active) so the next tick retries it"
+    );
+
+    // Retrying without the injected failure must succeed and release
+    // normally, proving the held state is not permanently stuck.
+    db.set_fail_release_invalidation(false);
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("retry succeeds once the transient failure clears");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the retried release must succeed and clear the hold"
+    );
+}
+
 // --- (b) process-one fail leaves the hold in place ----------------------
 
 /// (b, process-one half) A prose-filter error propagates out of
@@ -78113,6 +78217,41 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
             artifact_kind,
         ));
         Ok(matched)
+    }
+    /// Override the trait default so the fault-injection flag can prove
+    /// atomicity: when `fail_release_invalidation` is set, this returns an
+    /// error WITHOUT recording the status flip or the invalidation, exactly
+    /// as the real Postgres transaction rolls back both writes together.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: StorageTraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        if self
+            .fail_release_invalidation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DatabaseError::Query(
+                "simulated-transient-release-failure".to_string(),
+            ));
+        }
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
     }
     async fn list_trace_object_refs(
         &self,
