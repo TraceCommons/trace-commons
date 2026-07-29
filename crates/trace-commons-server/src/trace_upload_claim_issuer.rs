@@ -2746,7 +2746,7 @@ fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
     Ok(trimmed.to_string())
 }
 
-fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2757,7 +2757,7 @@ fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     Ok(format!("{pem}\n"))
 }
 
-fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2783,11 +2783,11 @@ fn required_pem_or_file(
     }
 }
 
-fn required_env(name: &'static str) -> anyhow::Result<String> {
+pub(crate) fn required_env(name: &'static str) -> anyhow::Result<String> {
     optional_env(name)?.ok_or_else(|| anyhow::anyhow!("{name} is required"))
 }
 
-fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
+pub(crate) fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) => {
             let trimmed = value.trim();

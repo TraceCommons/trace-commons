@@ -4039,6 +4039,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -23474,6 +23475,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -47286,11 +47288,11 @@ async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_prof
     assert_eq!(scheduler.skipped_count, 1);
     assert_eq!(scheduler_value["eligible_count"].as_u64(), Some(0));
     assert_eq!(
-            scheduler_value["skipped_reason_counts"]
-                ["credit_settlement_central_issuer_profile_incomplete"]
-                .as_u64(),
-            Some(1)
-        );
+        scheduler_value["skipped_reason_counts"]
+            ["credit_settlement_central_issuer_profile_incomplete"]
+            .as_u64(),
+        Some(1)
+    );
     assert_eq!(
         scheduler_value["decisions"][0]["action"].as_str(),
         Some("skipped")
@@ -64575,6 +64577,68 @@ impl Database for PerplexityDriverTestDb {
             })
             .collect())
     }
+
+    /// In-memory analogue of the Postgres `list_own_gate_decision_scores`
+    /// read behind score attestations: joins each decision row to its
+    /// seeded submission (dropping decisions with no matching seeded
+    /// submission, like `list_contributor_cap_signals`), filters to the
+    /// requested `(tenant_id, auth_principal_ref)` — the caller-authenticated
+    /// identity, never a client-supplied filter — keeps the LATEST row per
+    /// submission by `(decided_at, decision_id)` (mirroring
+    /// `list_scores_by_submission_ids`), and projects the score fields.
+    async fn list_own_gate_decision_scores(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        limit: i64,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow>,
+        DatabaseError,
+    > {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let submissions = self.submissions.read().unwrap();
+        let mut latest: std::collections::HashMap<Uuid, &StorageTraceGateDecisionRow> =
+            std::collections::HashMap::new();
+        for (row_tenant_id, row) in decisions.iter() {
+            if row_tenant_id != tenant_id {
+                continue;
+            }
+            let owns_submission = submissions
+                .get(&(row_tenant_id.clone(), row.submission_id))
+                .is_some_and(|s| s.auth_principal_ref == auth_principal_ref);
+            if !owns_submission {
+                continue;
+            }
+            let candidate_key = (row.decided_at, row.decision_id);
+            match latest.get(&row.submission_id) {
+                Some(existing) if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                _ => {
+                    latest.insert(row.submission_id, row);
+                }
+            }
+        }
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow> =
+            latest
+                .into_values()
+                .map(|row| {
+                    let credit_quality_micros = credit
+                        .get(&(tenant_id.to_string(), row.decision_id))
+                        .map(|(q, _, _)| *q);
+                    trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                        submission_id: row.submission_id,
+                        credit_quality_micros,
+                        perplexity_micros: row.perplexity_micros,
+                        novelty_score_micros: row.novelty_score_micros,
+                        gate_passed: row.perplexity_passed && row.novelty_passed,
+                    }
+                })
+                .collect();
+        rows.sort_by_key(|row| row.submission_id);
+        rows.truncate(limit);
+        Ok(rows)
+    }
 }
 
 /// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
@@ -77124,4 +77188,177 @@ async fn scores_by_submission_handler_serves_competition_worker_and_fails_closed
     .await
     .expect_err("no DB mirror fails closed");
     assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Attach a test attestation signing key (the same PKCS#8/SPKI Ed25519 pair
+/// used by the eddsa-signed-token tests) so
+/// `score_attestation_handler`/`attestation_keyset_handler` leave their
+/// fail-closed branch.
+fn test_state_with_attestation_signing(mut state: Arc<AppState>) -> Arc<AppState> {
+    let config = trace_commons_server::trace_score_attestation::AttestationConfig {
+        signing_private_key_pem: TEST_EDDSA_PRIVATE_KEY_PEM.to_string(),
+        signing_public_key_pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+        signing_kid: "test-attestation-kid".to_string(),
+        ttl_seconds: 3600,
+    };
+    let signing =
+        trace_commons_server::trace_score_attestation::AttestationSigningState::build(&config)
+            .expect("test attestation signing state builds");
+    Arc::make_mut(&mut state).attestation_signing = Some(Arc::new(signing));
+    state
+}
+
+/// Handler-level test for the score-attestation route
+/// (`GET /v1/contributors/me/score-attestation`). Covers the fail-closed 503
+/// when the signing key is unconfigured, the fail-closed 503 when no DB
+/// mirror is configured, a successful signed attestation that verifies
+/// against the published key and contains only the caller's own submission,
+/// and — the non-negotiable this endpoint exists to enforce — that a SECOND
+/// contributor authenticated with their own token gets their OWN scores back,
+/// never the first contributor's, even though both submissions live in the
+/// same tenant. `score_attestation_handler`'s signature takes only
+/// `State`/`HeaderMap` (no body, no query extractor), so there is no
+/// request parameter this test could even try to forge through — the
+/// property is structural, and this test pins the resulting behavior.
+#[tokio::test]
+async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+
+    let principal_a = principal_storage_ref("token-a");
+    let principal_a2 = principal_storage_ref("token-a-2");
+
+    let id1 = Uuid::new_v4();
+    let mut row1 = rescore_test_decision_row(id1);
+    row1.perplexity_passed = true;
+    row1.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.seed_submission_with_principal("tenant-a", id1, &principal_a);
+    db.update_trace_gate_decision_credit_quality("tenant-a", row1.decision_id, 750_000, 0, 1)
+        .await
+        .expect("seed row1 credit quality");
+
+    // A decision belonging to a DIFFERENT contributor in the SAME tenant —
+    // must never appear in token-a's attestation.
+    let id2 = Uuid::new_v4();
+    let mut row2 = rescore_test_decision_row(id2);
+    row2.perplexity_passed = true;
+    row2.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row2.clone());
+    db.seed_submission_with_principal("tenant-a", id2, &principal_a2);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Fails closed when the attestation signing key is unconfigured — the
+    // endpoint must NEVER return an unsigned document.
+    let unconfigured = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect_err("unconfigured signing key fails closed");
+    assert_eq!(unconfigured.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unconfigured.1.0.error,
+        trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED
+    );
+
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("configured signing key succeeds");
+
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    let decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&response.attestation, &decoding_key, &validation)
+    .expect("attestation verifies against the published key");
+
+    assert_eq!(decoded.claims.tenant_id, "tenant-a");
+    assert_eq!(decoded.claims.auth_principal_ref, principal_a);
+    assert!(decoded.claims.expires_at > decoded.claims.issued_at);
+    assert_eq!(
+        decoded.claims.submissions.len(),
+        1,
+        "only the caller's own submission is attested: {:?}",
+        decoded.claims.submissions
+    );
+    assert_eq!(decoded.claims.submissions[0].submission_id, id1);
+    assert_eq!(
+        decoded.claims.submissions[0].credit_quality_micros,
+        Some(750_000)
+    );
+    assert!(decoded.claims.submissions[0].gate_passed);
+
+    // The second contributor's own request returns THEIR OWN scores, never
+    // token-a's — the resolution is auth-only, with no parameter through
+    // which either caller could name the other.
+    let Json(other_response) =
+        score_attestation_handler(State(state.clone()), auth_headers("token-a-2"))
+            .await
+            .expect("second contributor's own request succeeds");
+    let other_decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&other_response.attestation, &decoding_key, &validation)
+    .expect("second attestation verifies");
+    assert_eq!(other_decoded.claims.auth_principal_ref, principal_a2);
+    assert_eq!(other_decoded.claims.submissions.len(), 1);
+    assert_eq!(other_decoded.claims.submissions[0].submission_id, id2);
+
+    // Fails closed when no DB mirror is configured.
+    let no_mirror_state = test_state_with_attestation_signing(test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    ));
+    let unavailable = score_attestation_handler(State(no_mirror_state), auth_headers("token-a"))
+        .await
+        .expect_err("no DB mirror fails closed");
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// The attestation keyset endpoint fails closed (503, same missing-control
+/// label) when signing is unconfigured, and publishes the configured key
+/// under its `kid` otherwise — mirroring
+/// `trace_upload_claim_issuer::keyset_handler`'s shape exactly so a
+/// collector that already parses that response needs no new client code.
+#[tokio::test]
+async fn attestation_keyset_handler_fails_closed_then_publishes_the_key() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let unconfigured = attestation_keyset_handler(State(state.clone()))
+        .await
+        .expect_err("unconfigured signing key fails closed");
+    assert_eq!(unconfigured.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unconfigured.1.0.error,
+        trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED
+    );
+
+    let state = test_state_with_attestation_signing(state);
+    let Json(keyset) = attestation_keyset_handler(State(state))
+        .await
+        .expect("configured signing key publishes the keyset");
+    assert_eq!(keyset["keys"][0]["kid"], "test-attestation-kid");
+    assert_eq!(
+        keyset["keys"][0]["public_key_pem"].as_str(),
+        Some(TEST_EDDSA_PUBLIC_KEY_PEM)
+    );
 }
