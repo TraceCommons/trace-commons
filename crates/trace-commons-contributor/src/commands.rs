@@ -126,12 +126,28 @@ fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
-pub fn whoami(store: &ConfigStore) -> Result<()> {
+pub fn whoami(store: &ConfigStore, json: bool) -> Result<()> {
     let cfg = store
         .load_config()
         .context("loading contributor config")?
         .context("not logged in; run `login` first")?;
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+
+    if json {
+        // The raw user_subject is never emitted, in either mode: it is
+        // contributor identity, and this output is exactly what an
+        // automating caller will log.
+        let out = serde_json::json!({
+            "schema_version": "trace_commons.whoami.v1",
+            "instance_id": cfg.instance_id,
+            "tenant_id": cfg.tenant_id,
+            "device_key_id": device.device_key_id,
+            "user_subject_hash": user_subject_hash(&cfg.user_subject),
+            "config_dir": store.dir().display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     println!("instance_id: {}", cfg.instance_id);
     println!("tenant_id: {}", cfg.tenant_id);
@@ -363,8 +379,30 @@ fn submit_picker_row(idx: usize, r: &SessionRef, submitted: Option<bool>) -> Vec
 
 /// List every discoverable local session in a numbered table. Never prints
 /// full paths -- only the source name, project basename, age, and size.
-pub fn list(trajectory: Option<&Path>) -> Result<()> {
+pub fn list(trajectory: Option<&Path>, json: bool) -> Result<()> {
     let sessions = discover_filtered(None, None, None, trajectory)?;
+    if json {
+        // Never the full path: it is a local filesystem path and this output
+        // is machine-consumed. Source, project basename, and size are what a
+        // caller needs to choose a session.
+        let items: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "source": r.source,
+                    "project": r.project,
+                    "started_at": r.started_at,
+                    "size_bytes": r.size_bytes,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "schema_version": "trace_commons.session_list.v1",
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     if sessions.is_empty() {
         println!("no sessions found");
         return Ok(());
@@ -397,6 +435,9 @@ pub struct SubmitSelection<'a> {
     /// Path to a trajectory-v1 file or a directory of them. Trajectory
     /// sessions are only discoverable when this is set.
     pub trajectory: Option<&'a Path>,
+    /// Emit machine-readable JSON instead of human lines, for callers
+    /// driving this CLI programmatically.
+    pub json: bool,
     /// Drop model reasoning from this run. Reasoning is included by default.
     pub no_reasoning: bool,
 }
@@ -485,6 +526,25 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         std::fs::write(path, json)
             .with_context(|| format!("writing manifest to {}", path.display()))?;
         println!("wrote {} envelope id(s) to manifest", entries.len());
+    }
+
+    if sel.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&submit::outcomes_to_json(&outcomes))?
+        );
+        // Still fail the process on a refusal or failure: an automating
+        // caller that ignores the body must not read exit 0 as success.
+        let had_failure = outcomes.iter().any(|o| {
+            matches!(
+                o,
+                SubmitOutcome::Refused { .. } | SubmitOutcome::Failed { .. }
+            )
+        });
+        if had_failure {
+            anyhow::bail!("one or more sessions were refused or failed");
+        }
+        return Ok(());
     }
 
     let mut had_failure = false;
@@ -747,6 +807,7 @@ mod project_filter_tests {
             pii_filter: None,
             manifest: Some(&manifest),
             trajectory: None,
+            json: false,
             no_reasoning: false,
         };
 

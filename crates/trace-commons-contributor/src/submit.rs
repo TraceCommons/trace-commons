@@ -1419,3 +1419,106 @@ mod tests {
         assert_eq!(parsed[0]["status"], "accepted");
     }
 }
+
+/// Machine-readable form of a submit run, for callers driving this CLI
+/// programmatically (an MCP server, CI, a hackathon collector).
+///
+/// Every outcome is represented, including the ones `build_manifest` drops:
+/// a caller automating submission needs to know a session was refused and
+/// why, not merely that it is absent from the manifest.
+pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| match o {
+            SubmitOutcome::Submitted {
+                submission_id,
+                status,
+            } => serde_json::json!({
+                "outcome": "submitted",
+                "submission_id": submission_id,
+                "status": status,
+            }),
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => serde_json::json!({
+                "outcome": "already-submitted",
+                "submission_id": submission_id,
+                "status": prior_status,
+            }),
+            SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
+                "outcome": "skipped",
+                "reason": reason_label,
+            }),
+            SubmitOutcome::Refused { reason_label } => serde_json::json!({
+                "outcome": "refused",
+                "reason": reason_label,
+            }),
+            SubmitOutcome::Failed { reason_label } => serde_json::json!({
+                "outcome": "failed",
+                "reason": reason_label,
+            }),
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": "trace_commons.submit_result.v1",
+        "results": entries,
+    })
+}
+
+#[cfg(test)]
+mod json_output_tests {
+    use super::*;
+
+    #[test]
+    fn every_outcome_kind_is_represented() {
+        let id = Uuid::new_v4();
+        let out = outcomes_to_json(&[
+            SubmitOutcome::Submitted {
+                submission_id: id,
+                status: "accepted".to_string(),
+            },
+            SubmitOutcome::AlreadySubmitted {
+                submission_id: id,
+                prior_status: "quarantined".to_string(),
+            },
+            SubmitOutcome::Refused {
+                reason_label: "secret-leak-detected".to_string(),
+            },
+            SubmitOutcome::Failed {
+                reason_label: "claim-mint-failed".to_string(),
+            },
+            SubmitOutcome::SkippedParseFailure {
+                reason_label: "parse-failed".to_string(),
+            },
+        ]);
+
+        let results = out["results"].as_array().unwrap();
+        // A caller automating submission must be able to see a refusal. The
+        // manifest deliberately omits these, so JSON output cannot reuse it.
+        assert_eq!(results.len(), 5, "no outcome may be silently dropped");
+        assert_eq!(results[0]["outcome"], "submitted");
+        assert_eq!(results[1]["outcome"], "already-submitted");
+        assert_eq!(
+            results[1]["status"], "quarantined",
+            "the real prior status must survive into JSON"
+        );
+        assert_eq!(results[2]["outcome"], "refused");
+        assert_eq!(results[2]["reason"], "secret-leak-detected");
+        assert_eq!(results[3]["outcome"], "failed");
+        assert_eq!(results[4]["outcome"], "skipped");
+    }
+
+    #[test]
+    fn reasons_stay_labels_and_never_carry_content() {
+        // Reason labels are fixed strings by construction. Pinning it here
+        // stops a future change from surfacing a response body or path to a
+        // caller that logs this output.
+        let out = outcomes_to_json(&[SubmitOutcome::Refused {
+            reason_label: "session-too-large".to_string(),
+        }]);
+        let reason = out["results"][0]["reason"].as_str().unwrap();
+        assert!(!reason.contains('/'), "a label must not look like a path");
+        assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+    }
+}
