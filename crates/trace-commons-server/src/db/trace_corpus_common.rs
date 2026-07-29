@@ -31,6 +31,7 @@ pub(crate) fn audit_action_for_status(status: TraceCorpusStatus) -> TraceAuditAc
     match status {
         TraceCorpusStatus::Accepted
         | TraceCorpusStatus::Quarantined
+        | TraceCorpusStatus::AwaitingPiiBackstop
         | TraceCorpusStatus::Rejected => TraceAuditAction::Review,
         TraceCorpusStatus::Revoked => TraceAuditAction::Revoke,
         TraceCorpusStatus::Purged => TraceAuditAction::Purge,

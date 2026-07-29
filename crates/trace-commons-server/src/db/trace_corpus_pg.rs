@@ -1762,6 +1762,117 @@ impl TraceCorpusStore for PgBackend {
         .await
     }
 
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let status_value = enum_to_storage(status)?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET status = $3,
+                     updated_at = NOW(),
+                     reviewed_at = CASE
+                         WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
+                         ELSE reviewed_at
+                     END,
+                     review_assigned_to_principal_ref = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_to_principal_ref
+                     END,
+                     review_assigned_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_at
+                     END,
+                     review_lease_expires_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_lease_expires_at
+                     END,
+                     review_due_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_due_at
+                     END,
+                     revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
+                     purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
+                     credit_points_pending = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_pending
+                     END,
+                     credit_points_final = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_final
+                     END
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id, &status_value],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "trace_submission".to_string(),
+                id: submission_id.to_string(),
+            });
+        }
+
+        // Invalidate the pre-backstop `submitted_envelope` ref(s) in the SAME
+        // transaction as the status flip above. Both must commit together:
+        // see the trait doc comment on `release_pii_backstop_hold` for why a
+        // partial commit either leaks pre-backstop bytes via export-by-ref or
+        // strands the submission on `awaiting_pii_backstop` forever.
+        let submitted_envelope_kind = enum_to_storage(TraceObjectArtifactKind::SubmittedEnvelope)?;
+        let invalidated = tx
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND artifact_kind = $3
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &submitted_envelope_kind],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        self.append_trace_audit_event(TraceAuditEventWrite {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            actor_principal_ref: actor_principal_ref.to_string(),
+            actor_role: "system".to_string(),
+            action: audit_action_for_status(status),
+            reason: reason.map(str::to_string),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: TraceAuditSafeMetadata::ReviewDecision {
+                decision: status_value,
+                resulting_status: status,
+                reason_code: reason.map(str::to_string),
+            },
+        })
+        .await?;
+
+        Ok(invalidated)
+    }
+
     async fn claim_trace_review_lease(
         &self,
         tenant_id: &str,
@@ -5241,6 +5352,33 @@ impl TraceCorpusStore for PgBackend {
         Ok(deleted)
     }
 
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let artifact_kind = enum_to_storage(artifact_kind)?;
+        let invalidated = tx
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND artifact_kind = $3
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &artifact_kind],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(invalidated)
+    }
+
     async fn stream_trace_gate_decisions_for_replay(
         &self,
         tenant_id: &str,
@@ -5663,6 +5801,33 @@ impl TraceCorpusStore for PgBackend {
                  VALUES ($1, $2, 1, $3, $4)
                  ON CONFLICT (tenant_id, submission_id) DO UPDATE
                      SET attempts = trace_gate_evaluation_attempts.attempts + 1,
+                         last_attempt_at = $3,
+                         last_error_label = $4
+                 RETURNING attempts",
+                &[&tenant_id, &submission_id, &now, &error_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get(0))
+    }
+
+    async fn bump_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "INSERT INTO trace_pii_backstop
+                     (tenant_id, submission_id, attempts, last_attempt_at, last_error_label)
+                 VALUES ($1, $2, 1, $3, $4)
+                 ON CONFLICT (tenant_id, submission_id) DO UPDATE
+                     SET attempts = trace_pii_backstop.attempts + 1,
                          last_attempt_at = $3,
                          last_error_label = $4
                  RETURNING attempts",

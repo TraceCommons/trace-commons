@@ -22,6 +22,8 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url:
+            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -4010,6 +4012,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -23446,6 +23449,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -77055,6 +77059,1976 @@ async fn revocation_enqueues_one_item_per_chunk_vector_entry() {
             .await
             .expect("planner rerun");
     assert_eq!(again, 0);
+}
+
+#[test]
+fn awaiting_pii_backstop_status_roundtrips_and_is_not_accepted() {
+    let s = TraceCorpusStatus::AwaitingPiiBackstop;
+    // Manual wire accessor mirrors the snake_case serde encoding.
+    assert_eq!(s.as_str(), "awaiting_pii_backstop");
+    let encoded = serde_json::to_string(&s).expect("encode status");
+    assert_eq!(encoded, "\"awaiting_pii_backstop\"");
+    let decoded: TraceCorpusStatus =
+        serde_json::from_str("\"awaiting_pii_backstop\"").expect("decode status");
+    assert_eq!(decoded, s);
+    // Held state must never be mistaken for the consumer-visible Accepted state.
+    assert_ne!(s, TraceCorpusStatus::Accepted);
+}
+
+// Task 4: PII backstop driver config. `TRACE_COMMONS_PII_BACKSTOP_ENABLED` is
+// unset in the default test process env, so the parse fn must return `None`
+// regardless of any other PII-backstop var. Run with --test-threads=1 like
+// the other env-var-driven config tests in this suite: a parallel test that
+// happens to set `TRACE_COMMONS_PII_BACKSTOP_ENABLED` would otherwise race
+// this one.
+#[test]
+fn pii_backstop_config_off_when_disabled() {
+    assert!(
+        parse_pii_backstop_driver_config_from_env()
+            .unwrap()
+            .is_none()
+    );
+}
+
+// Task 6: the driver's POST-backstop status transition is exactly
+// `status_for_risk` over the re-redacted envelope's residual risk. Low always
+// releases to Accepted; High always re-quarantines; Medium is gated on the
+// `accept_medium_risk_submissions` policy. A filter that fails to lower risk
+// therefore never silently accepts a still-risky trace. This is a pure-logic
+// check; the live re-redaction + release path is covered by Task 8.
+#[test]
+fn pii_backstop_target_status_follows_post_backstop_risk() {
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Low, false),
+        TraceCorpusStatus::Accepted
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::High, true),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, false),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, true),
+        TraceCorpusStatus::Accepted
+    );
+}
+
+// Task 7: the ingest hold decision. Only an Accepted, message-text-bearing
+// trace with the backstop driver enabled is held on `AwaitingPiiBackstop`;
+// flipping any one of the three conditions leaves the risk-derived status
+// unchanged. This is a pure-logic check; the full submit-handler + DB path
+// (that the held status is persisted and the trace stays out of the corpus)
+// is covered by Task 8.
+#[test]
+fn pii_backstop_hold_only_holds_accepted_message_text_when_enabled() {
+    // All three conditions true -> held.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, true),
+        TraceCorpusStatus::AwaitingPiiBackstop
+    );
+    // Backstop disabled -> unchanged (Accepted lands in the corpus as today).
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, false),
+        TraceCorpusStatus::Accepted
+    );
+    // No message text -> unchanged.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, false, true),
+        TraceCorpusStatus::Accepted
+    );
+    // Non-Accepted risk (Quarantined) is never rerouted, even with text + enabled.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Quarantined, true, true),
+        TraceCorpusStatus::Quarantined
+    );
+}
+
+// Task 6: the per-tick tally starts empty and counts released vs. held items
+// independently.
+#[test]
+fn pii_backstop_tick_summary_defaults_and_tallies() {
+    let mut summary = PiiBackstopDriverTickSummary::default();
+    assert_eq!(summary.done, 0);
+    assert_eq!(summary.failed, 0);
+    summary.done += 2;
+    summary.failed += 1;
+    assert_eq!(summary.done, 2);
+    assert_eq!(summary.failed, 1);
+}
+
+// =======================================================================
+// Task 8: server-side NEAR AI PII backstop — end-to-end + release-gate
+// coverage. Tasks 1-7 were compile-only; these tests exercise the real
+// state transitions of the driver tick / process-one loop and prove the
+// held `AwaitingPiiBackstop` status is never consumer-visible.
+//
+// NEAR AI is mocked two ways:
+//   * `BackstopEmailStubAdapter` / `FailingBackstopAdapter` drive
+//     `process_one_pii_backstop` directly through the `PrivacyFilterAdapter`
+//     trait — deterministic, no env, no network. Used for the (a)/(b)
+//     process-one assertions.
+//   * A `wiremock` `MockServer` speaking the `/privacy/classify` contract
+//     backs the full `run_pii_backstop_driver_tick` path (adapter built from
+//     env, canary gate, enumeration, per-item bump). Used for the (a)/(b)/(c)
+//     tick-wrapper behavior. Env is serialized through `near_ai_env_lock()`.
+//
+// All tests here run in CI (no Postgres). A `#[ignore]` live-pg variant at
+// the end exercises the released-backstop trace through a
+// `require_object_refs` reader (the Task 7 finding) when
+// `TRACE_COMMONS_TEST_DATABASE_URL` is set.
+// =======================================================================
+
+/// Fail-atomicity marker used by the process-one fail test: an adapter that
+/// always errors, so `rescrub_envelope_prose_pii_with` returns before any
+/// envelope field is mutated and `process_one_pii_backstop` propagates the
+/// error without releasing the hold.
+struct FailingBackstopAdapter;
+
+#[async_trait::async_trait]
+impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for FailingBackstopAdapter {
+    async fn redact_text(
+        &self,
+        _text: &str,
+    ) -> Result<
+        Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+        trace_commons_protocol::trace_contribution::TraceContributionError,
+    > {
+        Err(
+            trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+                reason: "synthetic backstop failure".to_string(),
+            },
+        )
+    }
+}
+
+/// Prose-PII stub that removes exactly `needle`, tagging it `private_email`
+/// (a non-secret label, so post-backstop residual risk does not escalate to
+/// High). Mirrors `NearAiPrivacyFilterAdapter::apply_spans` book-keeping.
+struct BackstopEmailStubAdapter {
+    needle: String,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for BackstopEmailStubAdapter {
+    async fn redact_text(
+        &self,
+        text: &str,
+    ) -> Result<
+        Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+        trace_commons_protocol::trace_contribution::TraceContributionError,
+    > {
+        use trace_commons_protocol::trace_contribution::{
+            RedactionReport, SafePrivacyFilterRedaction, SafePrivacyFilterSummary,
+        };
+        if !text.contains(&self.needle) {
+            return Ok(None);
+        }
+        let report = RedactionReport {
+            counts: BTreeMap::from([("privacy_filter:private_email".to_string(), 1)]),
+            pii_labels_present: vec!["private_email".to_string()],
+            blocked_secret_detected: false,
+            ..Default::default()
+        };
+        Ok(Some(SafePrivacyFilterRedaction {
+            redacted_text: text.replace(&self.needle, "[REDACTED:private_email]"),
+            summary: SafePrivacyFilterSummary {
+                schema_version: 1,
+                output_mode: "redacted_text_only".to_string(),
+                span_count: 1,
+                by_label: BTreeMap::from([("private_email".to_string(), 1)]),
+                decoded_mismatch: false,
+            },
+            report,
+        }))
+    }
+}
+
+/// In-memory `Database` double for the PII backstop driver. Mirrors the shape
+/// of `PerplexityDriverTestDb` (every unrelated `TraceCorpusStore`/`Database`
+/// method is an unreachable stub) but overrides the methods the backstop path
+/// actually drives with real in-memory behavior: `upsert_trace_submission`,
+/// `append_trace_object_ref`, `update_trace_submission_status`,
+/// `invalidate_trace_object_refs_by_kind`, `list_submissions_awaiting_pii_backstop`,
+/// and `bump_pii_backstop_attempt`. Without these overrides the defaulted
+/// "not configured"/"not implemented" bodies would make the tick hit the error
+/// path and the tests would be vacuous.
+struct PiiBackstopDriverTestDb {
+    submissions:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
+    object_refs:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
+    gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
+    ungated: std::sync::RwLock<Vec<GateWorkItem>>,
+    derived_records: std::sync::RwLock<Vec<(String, StorageTraceDerivedRecord)>>,
+    gate_evaluation_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Authoritative corpus status per submission, updated by
+    /// `upsert_trace_submission` and `update_trace_submission_status`. The
+    /// backstop release flips `AwaitingPiiBackstop` -> `Accepted`/`Quarantined`.
+    statuses:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceCorpusStatus>>,
+    /// Object refs the driver appended on release (expected: a
+    /// `RescrubbedEnvelope`).
+    appended_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// Kinds the driver invalidated after release (expected: the pre-backstop
+    /// `SubmittedEnvelope`).
+    invalidated_kinds: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// Refs seeded as "active" at setup so `invalidate_trace_object_refs_by_kind`
+    /// can return a non-zero count for the pre-backstop ref.
+    seeded_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// The `awaiting_pii_backstop` backlog enumerated by the driver tick.
+    awaiting_pii_backstop: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Per-submission PII-backstop attempt bookkeeping bumped on redaction
+    /// failure.
+    pii_backstop_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// When set, `release_pii_backstop_hold` simulates the invalidation half
+    /// of the atomic release failing (e.g. a transient DB error after the
+    /// status UPDATE would have applied). Neither the status flip nor the
+    /// invalidation bookkeeping may be observed in this case — that is
+    /// exactly the atomicity the fix under test provides.
+    fail_release_invalidation: std::sync::atomic::AtomicBool,
+}
+
+impl PiiBackstopDriverTestDb {
+    fn new() -> Self {
+        Self {
+            submissions: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_refs: std::sync::RwLock::new(std::collections::HashMap::new()),
+            gate_decisions: std::sync::RwLock::new(Vec::new()),
+            ungated: std::sync::RwLock::new(Vec::new()),
+            derived_records: std::sync::RwLock::new(Vec::new()),
+            gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            statuses: std::sync::RwLock::new(std::collections::HashMap::new()),
+            appended_refs: std::sync::RwLock::new(Vec::new()),
+            invalidated_kinds: std::sync::RwLock::new(Vec::new()),
+            seeded_refs: std::sync::RwLock::new(Vec::new()),
+            awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
+            pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Arrange for the next `release_pii_backstop_hold` call to fail as if the
+    /// invalidation half of the atomic release hit a transient DB error.
+    fn set_fail_release_invalidation(&self, fail: bool) {
+        self.fail_release_invalidation
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Register a submission held on `AwaitingPiiBackstop`: seed its metadata
+    /// record, its status, an active `SubmittedEnvelope` ref (so invalidation
+    /// counts a real ref), and the awaiting backlog entry the tick enumerates.
+    fn seed_awaiting(&self, tenant_id: &str, submission_id: Uuid) {
+        let key = (tenant_id.to_string(), submission_id);
+        self.submissions.write().unwrap().insert(
+            key.clone(),
+            seeded_storage_submission_record(
+                tenant_id,
+                submission_id,
+                StorageTraceCorpusStatus::AwaitingPiiBackstop,
+            ),
+        );
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key, StorageTraceCorpusStatus::AwaitingPiiBackstop);
+        self.seeded_refs.write().unwrap().push((
+            tenant_id.to_string(),
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        ));
+        self.awaiting_pii_backstop
+            .write()
+            .unwrap()
+            .push(GateWorkItem {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+            });
+    }
+
+    fn status_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<StorageTraceCorpusStatus> {
+        self.statuses
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .copied()
+    }
+
+    fn pii_attempts_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<i32> {
+        self.pii_backstop_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .map(|(count, _)| *count)
+    }
+
+    fn appended_kinds(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<StorageTraceObjectArtifactKind> {
+        self.appended_refs
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, _)| t == tenant_id && *s == submission_id)
+            .map(|(_, _, kind)| *kind)
+            .collect()
+    }
+
+    fn invalidated_kinds_of(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<StorageTraceObjectArtifactKind> {
+        self.invalidated_kinds
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, _)| t == tenant_id && *s == submission_id)
+            .map(|(_, _, kind)| *kind)
+            .collect()
+    }
+}
+
+/// A fully-populated `StorageTraceSubmissionRecord` template used to seed the
+/// in-memory double. Mirrors the perplexity driver double's template; only the
+/// status varies per caller.
+fn seeded_storage_submission_record(
+    tenant_id: &str,
+    submission_id: Uuid,
+    status: StorageTraceCorpusStatus,
+) -> StorageTraceSubmissionRecord {
+    let now = Utc::now();
+    StorageTraceSubmissionRecord {
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        trace_id: Uuid::new_v4(),
+        status,
+        auth_principal_ref: principal_storage_ref("pii-backstop-test"),
+        contributor_pseudonym: Some("pii-backstop-test-pseudonym".to_string()),
+        submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+        schema_version: "trace_contribution.v1".to_string(),
+        consent_policy_version: "trace-consent-v1".to_string(),
+        consent_scopes: vec!["debugging_evaluation".to_string()],
+        allowed_uses: vec!["evaluation".to_string()],
+        retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+        privacy_risk: "medium".to_string(),
+        redaction_pipeline_version: "test-redactor-v1".to_string(),
+        redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+        redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+        canonical_summary_hash: None,
+        submission_score: None,
+        credit_points_pending: Some(1.0),
+        credit_points_final: None,
+        received_at: now,
+        updated_at: now,
+        reviewed_at: None,
+        review_assigned_to_principal_ref: None,
+        review_assigned_at: None,
+        review_lease_expires_at: None,
+        review_due_at: None,
+        revoked_at: None,
+        expires_at: None,
+        purged_at: None,
+    }
+}
+
+/// Build a held on-disk submission (metadata record + encrypted envelope) the
+/// way ingest would have persisted an `AwaitingPiiBackstop` trace, so the
+/// driver's file-backed `read_submission_record`/`read_envelope_by_record`
+/// path resolves it. The envelope is message-text-bearing and still carries
+/// `pii_marker` in prose the deterministic redactor left behind; the NEAR AI
+/// backstop is what must remove it. Returns the submission id.
+async fn seed_held_backstop_submission(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    pii_marker: &str,
+) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+    envelope.consent.message_text_included = true;
+    envelope.contributor.tenant_scope_ref = Some(tenant_storage_ref(tenant_id));
+    envelope.events[0].redacted_content = Some(format!("please contact {pii_marker} soon"));
+
+    let stored = store_envelope(
+        state.as_ref(),
+        tenant_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "submitted-envelope",
+        &envelope,
+    )
+    .expect("seed store_envelope");
+
+    let receipt_value = serde_json::to_value(
+        stored
+            .artifact_receipt
+            .as_ref()
+            .expect("seed artifact receipt present"),
+    )
+    .expect("receipt serializes");
+    let record_value = serde_json::json!({
+        "tenant_id": tenant_id,
+        "tenant_storage_ref": tenant_storage_ref(tenant_id),
+        "submitted_tenant_scope_ref": tenant_storage_ref(tenant_id),
+        "auth_principal_ref": principal_storage_ref("pii-backstop-test"),
+        "submission_id": submission_id,
+        "trace_id": Uuid::new_v4(),
+        "status": "awaiting_pii_backstop",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 1.0,
+        "consent_scopes": [],
+        "received_at": "2026-07-11T00:00:00Z",
+        "object_key": stored.object_key,
+        "artifact_receipt": receipt_value,
+        "artifact_object_store": stored.artifact_object_store,
+    });
+    let record: TraceCommonsSubmissionRecord =
+        serde_json::from_value(record_value).expect("held record deserializes");
+    write_submission_record(&state.root, &record).expect("seed write record");
+    submission_id
+}
+
+/// State wired for the backstop driver: in-memory DB double + encrypted
+/// artifact store + `accept_medium_risk_submissions` (the pilot config under
+/// which message-text traces are Accepted-then-held, then released back to
+/// Accepted once residual risk stays Medium after the backstop pass).
+fn backstop_driver_state(
+    root: PathBuf,
+    db: Arc<dyn Database>,
+    artifact_store: ConfiguredTraceArtifactStore,
+) -> Arc<AppState> {
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        root,
+        Some(db),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+    state
+}
+
+// --- NEAR AI `/privacy/classify` wiremock harness -----------------------
+
+#[derive(Clone, Copy)]
+enum ClassifierMode {
+    /// Span every known needle in every window -> canary healthy, submission
+    /// PII redacted.
+    Healthy,
+    /// Canary windows are spanned healthy, but any non-canary window (the real
+    /// submission) returns 500 after the adapter's own retries exhaust.
+    FailSubmission,
+    /// Return no spans for anything, so the canary's raw values survive and the
+    /// filter reports unhealthy -> the tick aborts before touching submissions.
+    UnhealthyCanary,
+}
+
+/// Codepoint-indexed spans (the NEAR AI wire contract) for every occurrence of
+/// each needle in `input`, tagged `private_email`.
+fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
+    let mut spans = Vec::new();
+    for needle in needles {
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0usize;
+        while let Some(rel) = input[from..].find(needle.as_str()) {
+            let byte = from + rel;
+            let start = input[..byte].chars().count();
+            let end = start + needle.chars().count();
+            spans.push(serde_json::json!({
+                "category": "private_email",
+                "start": start,
+                "end": end,
+                "score": 0.99,
+            }));
+            from = byte + needle.len();
+        }
+    }
+    spans
+}
+
+fn near_ai_classify_response(
+    input: &str,
+    marker: &str,
+    mode: ClassifierMode,
+) -> wiremock::ResponseTemplate {
+    let canary_values =
+        trace_commons_protocol::trace_contribution::synthetic_privacy_filter_canary_values();
+    let is_canary = canary_values
+        .iter()
+        .any(|value| input.contains(value.as_str()));
+    match mode {
+        ClassifierMode::UnhealthyCanary => wiremock::ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
+        ClassifierMode::FailSubmission if !is_canary => wiremock::ResponseTemplate::new(500)
+            .set_body_json(serde_json::json!({"error": "synthetic upstream failure"})),
+        _ => {
+            let mut needles = canary_values;
+            needles.push(marker.to_string());
+            let spans = near_ai_spans(input, &needles);
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"spans": spans}]}))
+        }
+    }
+}
+
+async fn mount_near_ai_classifier(
+    server: &wiremock::MockServer,
+    marker: &str,
+    mode: ClassifierMode,
+) {
+    let marker = marker.to_string();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/privacy/classify"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            near_ai_classify_response(input, &marker, mode)
+        })
+        .mount(server)
+        .await;
+}
+
+/// Process-global lock serializing the `TRACE_NEAR_AI_PRIVACY_*` env mutation
+/// that `build_from_env` reads. A `tokio::sync::Mutex` (not `std`) so the guard
+/// may be held across the tick's `.await`s without tripping
+/// `clippy::await_holding_lock`.
+fn near_ai_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+struct NearAiEnvGuard {
+    keys: Vec<&'static str>,
+}
+
+impl NearAiEnvGuard {
+    fn set(base_url: &str) -> Self {
+        let vars = [
+            ("TRACE_NEAR_AI_PRIVACY_API_KEY", "backstop-test-key"),
+            ("TRACE_NEAR_AI_PRIVACY_BASE_URL", base_url),
+        ];
+        for (key, value) in vars {
+            // SAFETY: all NEAR-AI env mutation is serialized through
+            // `near_ai_env_lock()`, held by the caller for the whole test.
+            unsafe { std::env::set_var(key, value) };
+        }
+        NearAiEnvGuard {
+            keys: vars.iter().map(|(k, _)| *k).collect(),
+        }
+    }
+}
+
+impl Drop for NearAiEnvGuard {
+    fn drop(&mut self) {
+        for key in &self.keys {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+}
+
+fn backstop_driver_config() -> PiiBackstopDriverConfig {
+    PiiBackstopDriverConfig {
+        interval: StdDuration::from_secs(30),
+        batch_size: 10,
+        max_attempts: 5,
+        backoff_base_seconds: 30,
+    }
+}
+
+// --- (a) process-one happy path ----------------------------------------
+
+/// (a) `process_one_pii_backstop` on a held, message-text Low/Medium trace:
+/// the NEAR AI prose filter removes the PII, the envelope is re-stored under
+/// the `near-ai-pii-backstop-v1` pipeline label, the DB hold is released to
+/// `Accepted`, a `RescrubbedEnvelope` ref is written, and the pre-backstop
+/// `SubmittedEnvelope` ref is invalidated. Deterministic — no env, no network.
+#[tokio::test]
+async fn pii_backstop_process_one_releases_and_scrubs_trace() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("process_one releases the hold");
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "hold must be released to Accepted"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id)
+            .contains(&StorageTraceObjectArtifactKind::RescrubbedEnvelope),
+        "a RescrubbedEnvelope ref must be written on release"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .contains(&StorageTraceObjectArtifactKind::SubmittedEnvelope),
+        "the pre-backstop SubmittedEnvelope ref must be invalidated"
+    );
+
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    let envelope = read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "rescrubbed envelope must carry the backstop pipeline label: {}",
+        envelope.privacy.redaction_pipeline_version
+    );
+    let prose: String = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.redacted_content.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!prose.contains(marker), "flagged PII must be gone: {prose}");
+    assert!(
+        prose.contains("[REDACTED:private_email]"),
+        "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
+}
+
+// --- release atomicity: a failing invalidation must not release the hold ---
+
+/// CRITICAL regression coverage: if the invalidation half of
+/// `release_pii_backstop_hold` fails (simulating a transient DB error), the
+/// submission MUST stay `AwaitingPiiBackstop` and re-enumerable — not
+/// "Accepted with the pre-backstop `submitted_envelope` ref still active",
+/// which would let an export-by-ref consumer publish un-scrubbed, PII-bearing
+/// bytes with no path back to healing. Before the fix, the status release and
+/// the ref invalidation were two independent DB calls; a failure of the
+/// second left exactly that inconsistent, unrecoverable state. The atomic
+/// `release_pii_backstop_hold` must make both effects all-or-nothing.
+#[tokio::test]
+async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_failure() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    // Simulate the invalidation half of the atomic release failing (e.g. a
+    // transient DB error after the status UPDATE would otherwise have
+    // applied).
+    db.set_fail_release_invalidation(true);
+
+    let outcome = process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter).await;
+    assert!(
+        outcome.is_err(),
+        "a failing atomic release must propagate an error"
+    );
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held, not Accepted-with-active-original, \
+         when the atomic release fails"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the pre-backstop SubmittedEnvelope ref must NOT be invalidated \
+         when the paired status release did not durably commit"
+    );
+
+    // The on-disk record must not have been flipped either — the write only
+    // happens after the atomic DB release succeeds.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        record.status,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "the on-disk record must stay held when the DB release fails"
+    );
+
+    // The submission must still satisfy the driver's own re-enumeration
+    // invariant: still `awaiting_pii_backstop` with the `SubmittedEnvelope`
+    // ref still active (the sole prerequisite the enumeration query INNER
+    // JOINs on), so the next tick will retry it rather than losing it.
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the submission must remain re-enumerable (submitted_envelope ref \
+         still active) so the next tick retries it"
+    );
+
+    // Retrying without the injected failure must succeed and release
+    // normally, proving the held state is not permanently stuck.
+    db.set_fail_release_invalidation(false);
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("retry succeeds once the transient failure clears");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the retried release must succeed and clear the hold"
+    );
+}
+
+// --- (b) process-one fail leaves the hold in place ----------------------
+
+/// (b, process-one half) A prose-filter error propagates out of
+/// `process_one_pii_backstop` WITHOUT releasing the hold or writing a
+/// rescrubbed ref — the submission stays `AwaitingPiiBackstop`. The attempt
+/// bump is the caller's (tick's) job, covered by the tick fail test below.
+#[tokio::test]
+async fn pii_backstop_process_one_error_leaves_submission_held() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+
+    let outcome =
+        process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &FailingBackstopAdapter).await;
+    assert!(outcome.is_err(), "a filter error must propagate");
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held on redaction failure"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "no rescrubbed ref may be written when redaction fails"
+    );
+}
+
+// --- (a) tick happy path (full wrapper: env + canary + enumerate) -------
+
+/// (a, tick half) One `run_pii_backstop_driver_tick` builds the NEAR AI
+/// adapter from env, passes the synthetic canary, enumerates the single held
+/// submission, re-redacts it through the wiremock classifier, and releases it
+/// to `Accepted`.
+#[tokio::test]
+async fn pii_backstop_driver_tick_releases_held_submission() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::Healthy).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
+        .await
+        .expect("healthy tick succeeds");
+    assert_eq!((summary.done, summary.failed), (1, 0), "{summary:?}");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the held submission must be released to Accepted"
+    );
+
+    // Read the re-stored envelope back to prove the redaction actually
+    // happened through the wiremock/`NearAiPrivacyFilterAdapter` span-decoding
+    // path, not just that status/summary read success.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope = read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "rescrubbed envelope must carry the backstop pipeline label: {}",
+        envelope.privacy.redaction_pipeline_version
+    );
+    let prose: String = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.redacted_content.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!prose.contains(marker), "flagged PII must be gone: {prose}");
+    assert!(
+        prose.contains("[REDACTED:private_email]"),
+        "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
+}
+
+// --- (b) tick fail path bumps the attempt counter and keeps the hold ----
+
+/// (b) The canary passes but the submission's classify returns 5xx (after the
+/// adapter's retries exhaust): the tick tallies a failure, the submission stays
+/// `AwaitingPiiBackstop`, and its attempt counter is bumped.
+#[tokio::test]
+async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
+        .await
+        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    assert_eq!((summary.done, summary.failed), (0, 1), "{summary:?}");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "a classifier failure must leave the submission held"
+    );
+    assert!(
+        db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0) >= 1,
+        "the failed attempt must be bumped"
+    );
+}
+
+// --- (c) canary failure aborts the tick without mutating anything -------
+
+/// (c) An unhealthy canary (the synthetic PII survives the filter) aborts the
+/// whole tick before any submission is loaded: the call errors, the held
+/// submission is untouched, and no attempt is bumped. This is the fail-closed
+/// guarantee — never run real traces through a broken filter.
+#[tokio::test]
+async fn pii_backstop_driver_tick_aborts_when_canary_unhealthy() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::UnhealthyCanary).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let outcome = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config()).await;
+    assert!(
+        outcome.is_err(),
+        "an unhealthy canary must abort the tick, got {outcome:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "no submission may be mutated when the canary is unhealthy"
+    );
+    assert!(
+        db.pii_attempts_of("tenant-a", submission_id).is_none(),
+        "no attempt may be bumped when the tick aborts on the canary"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "no rescrubbed ref may be written when the tick aborts on the canary"
+    );
+}
+
+// --- (d) release-gate regression: held traces are never consumer-visible -
+
+/// (d) The security guarantee. A submission held on `AwaitingPiiBackstop` is
+/// excluded from BOTH the file-record export/benchmark eligibility gate
+/// (`is_export_eligible`) and the storage-record export-source gate
+/// (`storage_submission_is_export_source_eligible`); flipping the same record
+/// to `Accepted` (as the backstop release does) makes it eligible. This proves
+/// no consumer-selection path can leak a held, not-yet-rescrubbed trace.
+#[test]
+fn awaiting_pii_backstop_excluded_from_export_until_released() {
+    // File record path (is_export_eligible / is_benchmark_eligible).
+    let held: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": "tenant-a",
+        "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "awaiting_pii_backstop",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 1.0,
+        "consent_scopes": [],
+        "received_at": "2026-07-11T00:00:00Z",
+        "object_key": "obj/held",
+    }))
+    .expect("held record deserializes");
+    assert!(
+        !held.is_export_eligible(),
+        "a held trace must never be export-eligible"
+    );
+    assert!(
+        !held.is_benchmark_eligible(),
+        "a held trace must never be benchmark-eligible"
+    );
+
+    let mut released = held.clone();
+    released.status = TraceCorpusStatus::Accepted;
+    assert!(
+        released.is_export_eligible(),
+        "the released Accepted trace becomes export-eligible"
+    );
+
+    // Storage record path (storage_submission_is_export_source_eligible).
+    let submission_id = Uuid::new_v4();
+    let held_storage = seeded_storage_submission_record(
+        "tenant-a",
+        submission_id,
+        StorageTraceCorpusStatus::AwaitingPiiBackstop,
+    );
+    assert!(
+        !storage_submission_is_export_source_eligible(&held_storage),
+        "a held storage record must never be an export source"
+    );
+    let released_storage = seeded_storage_submission_record(
+        "tenant-a",
+        submission_id,
+        StorageTraceCorpusStatus::Accepted,
+    );
+    assert!(
+        storage_submission_is_export_source_eligible(&released_storage),
+        "the released Accepted storage record becomes an export source"
+    );
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBackstopDriverTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        write: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        // The PII backstop driver mirrors the rescrubbed submission metadata
+        // here (status set to the target). Update the in-memory status and hand
+        // back the seeded record with the new status; the caller discards it.
+        let key = (write.tenant_id.clone(), write.submission_id);
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key.clone(), write.status);
+        let mut record = self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| panic!("upsert for unseeded submission"));
+        record.status = write.status;
+        Ok(record)
+    }
+    async fn get_trace_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        Ok(self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _: &str,
+        _: &str,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: StorageTraceCorpusStatus,
+        _actor_ref: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        // The backstop release transition. Record the new status so the test
+        // can assert the hold was cleared (Accepted/Quarantined) or left held.
+        self.statuses
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id), status);
+        Ok(())
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        write: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        // Record the rescrubbed-envelope ref the backstop mirrors on release.
+        self.appended_refs.write().unwrap().push((
+            write.tenant_id.clone(),
+            write.submission_id,
+            write.artifact_kind,
+        ));
+        Ok(())
+    }
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: StorageTraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        // Retire the pre-backstop submitted-envelope ref. Count the seeded
+        // active ref(s) of this kind so the test can assert the invalidation
+        // fired against a real ref.
+        let matched = self
+            .seeded_refs
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, k)| t == tenant_id && *s == submission_id && *k == artifact_kind)
+            .count() as u64;
+        self.invalidated_kinds.write().unwrap().push((
+            tenant_id.to_string(),
+            submission_id,
+            artifact_kind,
+        ));
+        Ok(matched)
+    }
+    /// Override the trait default so the fault-injection flag can prove
+    /// atomicity: when `fail_release_invalidation` is set, this returns an
+    /// error WITHOUT recording the status flip or the invalidation, exactly
+    /// as the real Postgres transaction rolls back both writes together.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: StorageTraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        if self
+            .fail_release_invalidation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DatabaseError::Query(
+                "simulated-transient-release-failure".to_string(),
+            ));
+        }
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        Ok(self
+            .object_refs
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        Ok(self
+            .derived_records
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == tenant_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        let submission_id = decision.submission_id;
+        self.gate_decisions
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), decision));
+        self.ungated
+            .write()
+            .unwrap()
+            .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
+        Ok(())
+    }
+    /// Overrides the default "not implemented for this backend" error so
+    /// CI-running (non-PG) tests can exercise `score_one_submission`'s
+    /// failed-scorer cost-control branch: increments and records the
+    /// in-memory attempt counter for `(tenant_id, submission_id)`, returning
+    /// the new count the same way the real Postgres backend does.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.gate_evaluation_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
+    }
+    /// Override the defaulted "not implemented" body so a driver-tick test can
+    /// assert the fail path bumped the PII-backstop attempt counter for a held
+    /// submission. Mirrors the real Postgres upsert's return of the new count.
+    async fn bump_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.pii_backstop_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for PiiBackstopDriverTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        _now: DateTime<Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .ungated
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    /// Override the defaulted "pool not configured" body: enumerate every
+    /// seeded submission still held on `AwaitingPiiBackstop` whose attempt
+    /// count is below `max_attempts`, mirroring the real cross-tenant query the
+    /// production driver runs. A released (Accepted/Quarantined) submission
+    /// drops out, so a second tick against a drained backlog returns empty.
+    async fn list_submissions_awaiting_pii_backstop(
+        &self,
+        _now: DateTime<Utc>,
+        max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let statuses = self.statuses.read().unwrap();
+        let attempts = self.pii_backstop_attempts.read().unwrap();
+        Ok(self
+            .awaiting_pii_backstop
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                statuses
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .copied()
+                    == Some(StorageTraceCorpusStatus::AwaitingPiiBackstop)
+            })
+            .filter(|item| {
+                attempts
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .map(|(count, _)| *count < max_attempts)
+                    .unwrap_or(true)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+// --- Live-PG variant (Task 7 read-path finding) ------------------------
+//
+// `#[ignore]`d and gated on a reachable Postgres (`postgres_backend_for_ingest_test`).
+// CI never runs Postgres, so this does not run in CI; it compiles under
+// `cargo test --no-run` and is meant for local/PG runs. It pins the Task 7
+// finding: a released-backstop trace (pre-backstop `SubmittedEnvelope` ref
+// invalidated, only a `RescrubbedEnvelope` ref active) must still be resolvable
+// by a `require_object_refs` reader via `read_envelope_from_active_db_object_ref`.
+#[tokio::test]
+#[ignore = "requires PostgreSQL (TRACE_COMMONS_PG_TEST_DATABASE_URL); not run in CI"]
+async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_temp.path().to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let mut state =
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+            false,
+        );
+    {
+        let state_mut = Arc::make_mut(&mut state);
+        // The hardening whose satisfiability the Task 7 fix restores.
+        state_mut.db_reviewer_require_object_refs = true;
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+            tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                BTreeSet::from(["tenant-a".to_string()]),
+            )])),
+        };
+    }
+
+    // A normal Accepted submission mirrors an active `SubmittedEnvelope` ref.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
+
+    // Before invalidation the read path resolves the submitted envelope.
+    read_envelope_from_active_db_object_ref(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("submitted read succeeds")
+        .expect("submitted envelope resolves before backstop release");
+
+    // Simulate the backstop release: write a rescrubbed envelope + ref, then
+    // invalidate the pre-backstop submitted ref (exactly what
+    // `process_one_pii_backstop` does).
+    let tenant_ref = tenant_storage_ref("tenant-a");
+    let store = state
+        .artifact_store
+        .as_ref()
+        .expect("artifact store configured");
+    let mut rescrubbed = sample_envelope().await;
+    make_metadata_only_low_risk(&mut rescrubbed);
+    rescrubbed.submission_id = submission_id;
+    rescrubbed.contributor.tenant_scope_ref = Some(tenant_ref.clone());
+    rescrubbed.privacy.redaction_pipeline_version = format!(
+        "{}+near-ai-pii-backstop-v1",
+        rescrubbed.privacy.redaction_pipeline_version
+    );
+    let rescrubbed_receipt = store
+        .put_json(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            "backstop-released-rescrubbed-envelope",
+            &rescrubbed,
+        )
+        .expect("rescrubbed envelope artifact writes");
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: store.object_store_name().to_string(),
+            object_key: rescrubbed_receipt.object_key,
+            content_sha256: format!("sha256:{}", rescrubbed_receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{tenant_ref}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("rescrubbed object ref writes");
+    backend
+        .invalidate_trace_object_refs_by_kind(
+            "tenant-a",
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+        .expect("pre-backstop submitted ref invalidated");
+
+    // The Task 7 guarantee: with only the rescrubbed ref active, a
+    // require_object_refs reader still resolves the released-backstop trace,
+    // and it carries the backstop pipeline label.
+    let body = read_envelope_from_active_db_object_ref(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("released-backstop read succeeds")
+        .expect("rescrubbed envelope resolves after submitted ref invalidated");
+    assert!(
+        body.envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "resolved body must be the rescrubbed envelope"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 /// Handler-level test for the devfolio score read-back route

@@ -92,6 +92,17 @@ pub struct PgBackend {
     /// V36). `None` keeps the gate driver's enumeration path fail-closed.
     /// NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
+    /// enumeration query (server-side NEAR AI PII backstop). Built only when
+    /// `pii_backstop_driver_url` is configured; its DB user is the
+    /// operator-provisioned `trace_pii_backstop_driver` role (NOLOGIN base,
+    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
+    /// V38). `None` keeps the backstop driver's enumeration path fail-closed.
+    /// NEVER aliased to `pool`. Mirrors `gate_driver_pool`. Query methods
+    /// against this pool land in a follow-up task; this field is wired but
+    /// unused until then.
+    #[allow(dead_code)]
+    pii_backstop_driver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -248,10 +259,37 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small PII-backstop driver pool only when a
+        // distinct PII-backstop driver connection string is configured. This
+        // pool runs as the narrow `trace_pii_backstop_driver` role and is
+        // never aliased to the runtime pool. Mirrors the gate-driver pool
+        // above exactly.
+        let pii_backstop_driver_pool = match config.pii_backstop_driver_url() {
+            Some(pii_backstop_driver_url) => {
+                let pii_backstop_driver_config = pii_backstop_driver_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!(
+                            "invalid pii-backstop-driver PostgreSQL URL: {e}"
+                        ))
+                    })?;
+                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
+                    pii_backstop_driver_config,
+                    tokio_postgres::NoTls,
+                );
+                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
+                    .max_size(2)
+                    .build()?;
+                Some(pii_backstop_driver_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
             gate_driver_pool,
+            pii_backstop_driver_pool,
         })
     }
 
@@ -1150,6 +1188,31 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&37_i32, &"large_trace_chunked_scoring"],
+                )
+                .await?;
+        }
+        // V38 ships with the server-side PII backstop. It is applied here
+        // out of numeric order relative to what a long-lived pilot may
+        // already hold (V39-V41 landed on main while this sat unmerged);
+        // that is safe because each block gates on its own version number,
+        // not on sequence position.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&38_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V38__trace_pii_backstop.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&38_i32, &"trace_pii_backstop"],
                 )
                 .await?;
         }
@@ -3675,6 +3738,62 @@ impl Database for PgBackend {
                  LEFT JOIN trace_gate_evaluation_attempts a
                    ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
                  WHERE d.decision_id IS NULL
+                   AND COALESCE(a.attempts, 0) < $1
+                   AND (a.last_attempt_at IS NULL
+                        OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                 ORDER BY s.received_at ASC
+                 LIMIT $4",
+                &[&max_attempts, &backoff_base_seconds, &now, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateWorkItem {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
+
+    async fn list_submissions_awaiting_pii_backstop(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_attempts: i32,
+        backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        let pool = self.pii_backstop_driver_pool.as_ref().ok_or_else(|| {
+            DatabaseError::Pool("pii-backstop-driver pool not configured".to_string())
+        })?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant context is set on this connection: the
+        // trace_pii_backstop_driver role's permissive cross-tenant SELECT
+        // policies (migration V38) are what authorize this read across every
+        // tenant's submissions.
+        let rows = client
+            .query(
+                // DISTINCT: a submission can carry more than one active
+                // submitted_envelope object ref, so the INNER JOIN can fan out
+                // to multiple rows per submission. Deduplicate to one work item
+                // per (tenant, submission) — otherwise a multi-ref submission
+                // wastes LIMIT slots and gets attempted concurrently more than
+                // once. `received_at` is included in the projection only so it
+                // is a legal DISTINCT + ORDER BY target; it is a per-submission
+                // constant, so it does not change dedup cardinality, and it is
+                // dropped when mapping to GateWorkItem.
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                 FROM trace_submissions s
+                 JOIN trace_object_refs o
+                   ON o.tenant_id = s.tenant_id
+                  AND o.submission_id = s.submission_id
+                  AND o.artifact_kind = 'submitted_envelope'
+                  AND o.invalidated_at IS NULL
+                  AND o.deleted_at IS NULL
+                 LEFT JOIN trace_pii_backstop a
+                   ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                 WHERE s.status = 'awaiting_pii_backstop'
                    AND COALESCE(a.attempts, 0) < $1
                    AND (a.last_attempt_at IS NULL
                         OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
