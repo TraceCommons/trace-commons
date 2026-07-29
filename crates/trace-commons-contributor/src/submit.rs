@@ -351,6 +351,48 @@ pub async fn status(
     Ok(updates)
 }
 
+/// Fetch a server-signed attestation of this contributor's own scores.
+///
+/// The returned value is a compact JWS the contributor hands to a collector
+/// (a hackathon scorer, say). The collector verifies it against the ingest
+/// attestation keyset rather than trusting a relayed list of submission ids,
+/// which is forgeable by anyone who learns an id.
+///
+/// The endpoint takes no parameters: the principal comes from this call's
+/// authentication, so there is nothing here that could request someone
+/// else's scores.
+pub async fn fetch_score_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status`: the attestation is a read of scores
+    // the server already holds, so it must not depend on whatever scopes were
+    // narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for score attestation")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+
+    #[derive(serde::Deserialize)]
+    struct AttestationBody {
+        attestation: String,
+    }
+
+    let body: AttestationBody = client
+        .call_json(
+            Method::GET,
+            "/v1/contributors/me/score-attestation",
+            &[],
+            None::<&()>,
+        )
+        .await
+        .context("fetching score attestation")?;
+    Ok(body.attestation)
+}
+
 /// Re-scan a finished envelope for a residual secret shape. Returns
 /// `Ok(Some(Refused))` (emitting the same `refusing session` warn every
 /// caller relies on) when the redactor's re-scan still finds a secret shape

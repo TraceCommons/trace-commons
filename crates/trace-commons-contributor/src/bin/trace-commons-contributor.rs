@@ -82,6 +82,14 @@ enum Command {
     },
     /// Show server-side status of previously submitted sessions
     Status,
+    /// Fetch a server-signed attestation of your own scores, for handing to
+    /// a collector. Unlike a list of submission ids, it cannot be forged by
+    /// someone who merely learns the ids.
+    Attest {
+        /// Write the attestation here instead of printing it
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Print local identity (no network)
     Whoami,
     /// Delete local keystore, config, and receipts
@@ -181,6 +189,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             commands::submit(&store, &sel).await
         }
         Command::Status => commands::status(&store).await,
+        Command::Attest { out } => commands::attest(&store, out.as_deref(), cli.json).await,
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
         Command::MintGrant {

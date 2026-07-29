@@ -996,6 +996,42 @@ async fn login_with_invite(
     Ok(())
 }
 
+/// Fetch a server-signed attestation of this contributor's own scores and
+/// write it out.
+///
+/// This is what a contributor hands to a collector instead of a list of
+/// submission ids. An id list is forgeable by anyone who learns the ids --
+/// they have been published in plain text before now -- whereas forging an
+/// attestation requires the server's signing key.
+pub async fn attest(store: &ConfigStore, out: Option<&Path>, json: bool) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    let attestation = submit::fetch_score_attestation(store, &cfg).await?;
+
+    if let Some(path) = out {
+        std::fs::write(path, &attestation)
+            .with_context(|| format!("writing attestation to {}", path.display()))?;
+    }
+
+    if json {
+        let value = serde_json::json!({
+            "schema_version": "trace_commons.attest_result.v1",
+            "attestation": attestation,
+            "written_to": out.map(|p| p.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if let Some(path) = out {
+        println!("wrote score attestation to {}", path.display());
+        println!("hand this to your collector; they verify it against the server keyset");
+    } else {
+        println!("{attestation}");
+    }
+    Ok(())
+}
+
 /// An invite as handed to a contributor: the issuer origin plus the code.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ParsedInvite {
