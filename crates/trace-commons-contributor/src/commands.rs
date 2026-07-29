@@ -555,6 +555,16 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 status,
             } => {
                 println!("submitted {submission_id} {status}");
+                // "quarantined" reads as rejection to a first-time
+                // contributor. It is not: the trace was delivered and is
+                // held pending operator privacy review. Say so at the moment
+                // they see the word, not only if they later run `status`.
+                if status == "quarantined" {
+                    println!(
+                        "  held for privacy review, not rejected; credit is 0.00 until it \
+                         completes. Run `status` for the server's explanation."
+                    );
+                }
             }
             SubmitOutcome::AlreadySubmitted {
                 submission_id,
@@ -636,6 +646,29 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
         &rows,
     )
     .context("printing status table")?;
+
+    // The server already explains a non-accepted status, and the table drops
+    // it. Quarantine in particular means "held for operator privacy review",
+    // not "rejected" -- a contributor who only sees the word reads it as
+    // failure and has nothing to act on.
+    let explained: Vec<&trace_commons_protocol::trace_contribution::TraceSubmissionStatusUpdate> =
+        updates
+            .iter()
+            .filter(|u| !u.explanation.is_empty() || !u.delayed_credit_explanations.is_empty())
+            .collect();
+    if !explained.is_empty() {
+        println!();
+        for u in explained {
+            println!("{} ({}):", u.submission_id, u.status);
+            for line in u
+                .explanation
+                .iter()
+                .chain(u.delayed_credit_explanations.iter())
+            {
+                println!("  {line}");
+            }
+        }
+    }
     Ok(())
 }
 
