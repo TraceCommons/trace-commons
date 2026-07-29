@@ -1191,6 +1191,31 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V38 ships with the server-side PII backstop. It is applied here
+        // out of numeric order relative to what a long-lived pilot may
+        // already hold (V39-V41 landed on main while this sat unmerged);
+        // that is safe because each block gates on its own version number,
+        // not on sequence position.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&38_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V38__trace_pii_backstop.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&38_i32, &"trace_pii_backstop"],
+                )
+                .await?;
+        }
         let already_applied = client
             .query_opt(
                 "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
