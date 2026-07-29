@@ -207,6 +207,7 @@ pub struct TraceContributionEvent {
 pub enum TraceContributionEventType {
     UserMessage,
     AssistantMessage,
+    Reasoning,
     ToolCall,
     ToolResult,
     RoutingDecision,
@@ -3168,6 +3169,7 @@ fn side_effect_for(
     match event_type {
         TraceContributionEventType::UserMessage
         | TraceContributionEventType::AssistantMessage
+        | TraceContributionEventType::Reasoning
         | TraceContributionEventType::Feedback => SideEffectLevel::None,
         TraceContributionEventType::RoutingDecision => SideEffectLevel::None,
         TraceContributionEventType::ToolResult => SideEffectLevel::None,

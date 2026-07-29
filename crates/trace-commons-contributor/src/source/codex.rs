@@ -3,10 +3,11 @@
 //! Reads `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`
 //! session files and maps them into the shared `SessionTranscript` model.
 //! See `docs/superpowers/plans/` (Task 8) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `reasoning`, `event_msg`, `web_search_call`, and any unknown payload/record
-//! type) carry only the record type string, never the record payload.
+//! rules; `Opaque` events (covering `event_msg`, `web_search_call`, and any
+//! unknown payload/record type) carry only a record-type marker, never a
+//! payload. `reasoning` items are captured as `Reasoning` events.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -91,14 +92,59 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .modified()
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
+        let cwd = peek_cwd(&path);
         sessions.push(SessionRef {
             source: SOURCE_CODEX,
             path,
             project: None,
+            cwd,
             started_at,
             size_bytes: metadata.len(),
         });
     }
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// parses each line as JSON in turn and stops at the first `session_meta`
+/// record carrying a `payload.cwd` field, skipping the full parse of the
+/// file's events. Reads the file the same way `load_session` does
+/// (`std::fs::read` then `String::from_utf8_lossy`), so an invalid-UTF-8
+/// line elsewhere in the file does not abort the scan before it reaches a
+/// later cwd-bearing line. `load_session` never errors on bad UTF-8 either,
+/// so peek and load must tolerate it identically, or `--project` filtering
+/// can silently disagree with what `submit_sessions` actually delivers.
+/// Mirrors the exact field path `load_session` uses
+/// (`payload.and_then(|p| p.get("cwd"))`). Returns `None` if the file
+/// cannot be read or no record carries `cwd`.
+///
+/// Cost: the file is still read whole (as `load_session` does); what is
+/// saved is parsing and building every event. Discovery therefore pays one
+/// read per session file, which is far less than the full loads the
+/// interactive picker already performs.
+fn peek_cwd(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+            continue;
+        }
+        if let Some(c) = record
+            .get("payload")
+            .and_then(|p| p.get("cwd"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
@@ -194,7 +240,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CODEX,
+        source: Cow::Borrowed(SOURCE_CODEX),
         agent_version,
         model,
         project,
@@ -307,6 +353,34 @@ fn map_response_item(
                 token_counts: None,
             });
         }
+        "reasoning" => {
+            // Reasoning is captured as a first-class event and redacted
+            // through the same client-side pipeline as every other kind.
+            let mut parts = Vec::new();
+            for key in ["summary", "content"] {
+                if let Some(blocks) = payload.get(key).and_then(|v| v.as_array()) {
+                    for block in blocks {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // A reasoning item with no recoverable text carries no signal;
+            // emitting an empty event would only add noise to the transcript.
+            if !parts.is_empty() {
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Reasoning,
+                    timestamp,
+                    content: Some(parts.join("\n")),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                });
+            }
+        }
         other => {
             events.push(SessionEvent {
                 kind: SessionEventKind::Opaque,
@@ -351,15 +425,40 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
-                SessionEventKind::Opaque, // reasoning
+                SessionEventKind::Reasoning,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
                 SessionEventKind::Assistant,
             ]
         );
+        assert_eq!(t.events[1].content.as_deref(), Some("thinking about it"));
         assert_eq!(t.events[2].tool_name.as_deref(), Some("shell"));
         assert_eq!(t.events[2].structured["command"], "ls src/");
-        // Reasoning summary text must not survive.
-        assert!(!format!("{:?}", t.events).contains("thinking about it"));
+    }
+
+    #[test]
+    fn reasoning_items_become_reasoning_events() {
+        let payload = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": "planning the edit" }],
+            "content": [{ "type": "reasoning_text", "text": "file A needs a guard" }]
+        });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, SessionEventKind::Reasoning);
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("planning the edit\nfile A needs a guard")
+        );
+    }
+
+    #[test]
+    fn reasoning_items_with_no_text_are_dropped() {
+        let payload = serde_json::json!({ "type": "reasoning" });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+        assert!(events.is_empty());
     }
 }

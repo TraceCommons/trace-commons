@@ -1,6 +1,7 @@
 //! Source model: the `TraceSource` trait, session/transcript types shared by
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -8,15 +9,18 @@ use sha2::{Digest, Sha256};
 
 pub mod claude_code;
 pub mod codex;
+pub mod trajectory;
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
+pub const SOURCE_TRAJECTORY: &str = "trajectory";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
     pub source: &'static str,
     pub path: PathBuf,
     pub project: Option<String>, // basename only, never a full path
+    pub cwd: Option<String>, // true working dir if cheaply known at discovery; used for --project matching, NEVER serialized
     pub started_at: Option<DateTime<Utc>>,
     pub size_bytes: u64,
 }
@@ -25,6 +29,7 @@ pub struct SessionRef {
 pub enum SessionEventKind {
     User,
     Assistant,
+    Reasoning,
     ToolCall,
     ToolResult,
     Opaque,
@@ -42,7 +47,12 @@ pub struct SessionEvent {
 
 #[derive(Debug, Clone)]
 pub struct SessionTranscript {
-    pub source: &'static str,
+    /// Provenance: the harness that produced this session. For the native
+    /// adapters this equals the adapter name; for trajectory files it is the
+    /// file's own `meta.source`, so a session normalized from OpenHands is
+    /// attributed to OpenHands rather than to the trajectory reader.
+    /// Distinct from `SessionRef.source`, which is the adapter routing key.
+    pub source: Cow<'static, str>,
     pub agent_version: Option<String>,
     pub model: Option<String>,
     pub project: Option<String>, // basename
@@ -70,10 +80,13 @@ pub fn submission_id_for(session_hash: &str) -> uuid::Uuid {
 }
 
 /// Construct the set of available `TraceSource` adapters, defaulting roots to
-/// `~/.claude/projects` and `~/.codex/sessions` when not overridden.
+/// `~/.claude/projects` and `~/.codex/sessions` when not overridden. The
+/// trajectory source is included only when an explicit path is supplied,
+/// because trajectory files have no conventional local store.
 pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
+    trajectory_path: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
     let claude_root = claude_root.unwrap_or_else(|| {
         dirs::home_dir()
@@ -82,10 +95,13 @@ pub fn all_sources(
     });
     let codex_root =
         codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
-    let sources: Vec<Box<dyn TraceSource>> = vec![
+    let mut sources: Vec<Box<dyn TraceSource>> = vec![
         Box::new(claude_code::ClaudeCodeSource::new(claude_root)),
         Box::new(codex::CodexSource::new(codex_root)),
     ];
+    if let Some(path) = trajectory_path {
+        sources.push(Box::new(trajectory::TrajectorySource::new(path)));
+    }
     sources
 }
 

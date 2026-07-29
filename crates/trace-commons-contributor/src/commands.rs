@@ -11,6 +11,10 @@ use chrono::Utc;
 use trace_commons_operator_client::format::print_table;
 use trace_commons_protocol::onboarding::user_subject_hash;
 
+use trace_commons_protocol::onboarding::{
+    TRACE_ONBOARD_REQUEST_SCHEMA_VERSION, TraceOnboardClientInfo, TraceOnboardRequest,
+};
+
 use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
@@ -20,7 +24,7 @@ use crate::identity::{
 };
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{SessionRef, TraceSource, all_sources};
+use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
@@ -38,18 +42,27 @@ use trace_commons_protocol::trace_contribution::ConsentScope;
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
+    invite: Option<&str>,
     allowed_hosts: Option<&str>,
     scopes: Option<&str>,
 ) -> Result<()> {
+    if grant_b64.is_some() && invite.is_some() {
+        anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
+    }
     let consent_scopes = resolve_consent_scopes(scopes)?;
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+
+    if let Some(invite) = invite {
+        return login_with_invite(store, invite, allowed_hosts, &device, consent_scopes).await;
+    }
 
     let Some(grant_b64) = grant_b64 else {
         println!("device_key_id: {}", device.device_key_id);
         println!(
             "give this to your instance to mint an enrollment grant, then re-run \
-             `login --grant <grant>`"
+             `login --grant <grant>` -- or, if you were handed an invite link, run \
+             `login --invite <url>`"
         );
         return Ok(());
     };
@@ -113,12 +126,28 @@ fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
-pub fn whoami(store: &ConfigStore) -> Result<()> {
+pub fn whoami(store: &ConfigStore, json: bool) -> Result<()> {
     let cfg = store
         .load_config()
         .context("loading contributor config")?
         .context("not logged in; run `login` first")?;
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+
+    if json {
+        // The raw user_subject is never emitted, in either mode: it is
+        // contributor identity, and this output is exactly what an
+        // automating caller will log.
+        let out = serde_json::json!({
+            "schema_version": "trace_commons.whoami.v1",
+            "instance_id": cfg.instance_id,
+            "tenant_id": cfg.tenant_id,
+            "device_key_id": device.device_key_id,
+            "user_subject_hash": user_subject_hash(&cfg.user_subject),
+            "config_dir": store.dir().display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     println!("instance_id: {}", cfg.instance_id);
     println!("tenant_id: {}", cfg.tenant_id);
@@ -181,18 +210,62 @@ pub fn mint_grant_cmd(
     Ok(())
 }
 
+/// Pure predicate for the `--project` filter. Prefers the session's true
+/// decoded working directory (`cwd`) for a hyphen-safe, component-wise
+/// path-prefix match; falls back to the legacy basename-or-path heuristic
+/// only when the true cwd is unavailable.
+fn cwd_matches_project(
+    cwd: Option<&str>,
+    legacy_project: Option<&str>,
+    path: &Path,
+    project: &Path,
+) -> bool {
+    if let Some(cwd) = cwd {
+        return Path::new(cwd).starts_with(project);
+    }
+    let basename = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    legacy_project == Some(basename) || path.starts_with(project)
+}
+
 /// Discover every locally discoverable session across all sources, applying
-/// optional `source`/`project`/`since` filters. `project` matches either the
-/// session's basename (`SessionRef.project`) or a prefix of its full path;
-/// `since` filters against `started_at` (falls back to excluding sessions
-/// with no timestamp when set).
+/// optional `source`/`project`/`since` filters. `project` matches the
+/// session's true decoded working directory when available; otherwise falls
+/// back to the legacy heuristic (basename match or path prefix). `since`
+/// filters against `started_at` (falls back to excluding sessions with no
+/// timestamp when set).
 fn discover_filtered(
     source_filter: Option<&str>,
     project_filter: Option<&Path>,
     since: Option<chrono::Duration>,
+    trajectory: Option<&Path>,
 ) -> Result<Vec<SessionRef>> {
+    // An explicitly-supplied path that does not exist is user error, not an
+    // empty result. Silent-empty makes a typo indistinguishable from "this
+    // file had no sessions". Follows the --project precedent below.
+    if let Some(p) = trajectory {
+        if !p.exists() {
+            anyhow::bail!("--trajectory path {} does not exist", p.display());
+        }
+    }
+
+    // Resolve `--project` against the real filesystem before matching. A
+    // participant standing in their hackathon project types `--project .`
+    // (or a relative path, or one crossing a symlink); an unresolved value
+    // never prefix-matches an absolute session `cwd`, so the batch would
+    // come back empty and look like "this project has no traces".
+    let resolved_project = match project_filter {
+        None => None,
+        Some(p) => Some(std::fs::canonicalize(p).with_context(|| {
+            format!("resolving --project path {} (does it exist?)", p.display())
+        })?),
+    };
+    let project_filter = resolved_project.as_deref();
+
     let mut refs = Vec::new();
-    for source in all_sources(None, None) {
+    for source in all_sources(None, None, trajectory.map(|p| p.to_path_buf())) {
         if let Some(sf) = source_filter {
             if source.name() != sf {
                 continue;
@@ -206,10 +279,16 @@ fn discover_filtered(
         let project_ok = match project_filter {
             None => true,
             Some(p) => {
-                let basename = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                let basename_match = r.project.as_deref() == Some(basename);
-                let prefix_match = r.path.starts_with(p);
-                basename_match || prefix_match
+                // Canonicalize the session cwd too when it still exists, so a
+                // symlinked path (e.g. macOS /tmp -> /private/tmp) compares
+                // equal on both sides. A cwd that no longer exists falls back
+                // to the raw string.
+                let cwd = r.cwd.as_deref().map(|c| {
+                    std::fs::canonicalize(c)
+                        .map(|abs| abs.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| c.to_string())
+                });
+                cwd_matches_project(cwd.as_deref(), r.project.as_deref(), &r.path, p)
             }
         };
         let since_ok = match since {
@@ -223,8 +302,8 @@ fn discover_filtered(
 
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
-fn source_for(name: &str) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None)
+fn source_for(name: &str, trajectory: Option<&Path>) -> Option<Box<dyn TraceSource>> {
+    all_sources(None, None, trajectory.map(|p| p.to_path_buf()))
         .into_iter()
         .find(|s| s.name() == name)
 }
@@ -300,8 +379,30 @@ fn submit_picker_row(idx: usize, r: &SessionRef, submitted: Option<bool>) -> Vec
 
 /// List every discoverable local session in a numbered table. Never prints
 /// full paths -- only the source name, project basename, age, and size.
-pub fn list() -> Result<()> {
-    let sessions = discover_filtered(None, None, None)?;
+pub fn list(trajectory: Option<&Path>, json: bool) -> Result<()> {
+    let sessions = discover_filtered(None, None, None, trajectory)?;
+    if json {
+        // Never the full path: it is a local filesystem path and this output
+        // is machine-consumed. Source, project basename, and size are what a
+        // caller needs to choose a session.
+        let items: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "source": r.source,
+                    "project": r.project,
+                    "started_at": r.started_at,
+                    "size_bytes": r.size_bytes,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "schema_version": "trace_commons.session_list.v1",
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     if sessions.is_empty() {
         println!("no sessions found");
         return Ok(());
@@ -330,19 +431,44 @@ pub struct SubmitSelection<'a> {
     pub yes: bool,
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
+    pub manifest: Option<&'a Path>,
+    /// Path to a trajectory-v1 file or a directory of them. Trajectory
+    /// sessions are only discoverable when this is set.
+    pub trajectory: Option<&'a Path>,
+    /// Emit machine-readable JSON instead of human lines, for callers
+    /// driving this CLI programmatically.
+    pub json: bool,
+    /// Drop model reasoning from this run. Reasoning is included by default.
+    pub no_reasoning: bool,
+}
+
+/// Drop reasoning events before envelope construction. Reasoning is captured
+/// by default; this is the per-run opt-out behind `--no-reasoning`.
+pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
+    t.events
+        .retain(|e| e.kind != crate::source::SessionEventKind::Reasoning);
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
 /// error (nonzero exit) if any outcome was refused or failed.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
+    // A dry run mints envelope ids locally but delivers nothing, so its ids
+    // do not exist server-side. Writing them would hand an external collector
+    // ids that can never be scored. Refuse up front, before any work.
+    if sel.manifest.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--manifest cannot be combined with --dry-run: a dry run uploads nothing, \
+             so its envelope ids would never exist server-side"
+        );
+    }
     let cfg = store
         .load_config()
         .context("loading contributor config")?
         .context("not logged in; run `login` first")?;
 
     let since = sel.since.map(picker::parse_since).transpose()?;
-    let mut refs = discover_filtered(sel.source, sel.project, since)?;
+    let mut refs = discover_filtered(sel.source, sel.project, since, sel.trajectory)?;
     refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
 
     if refs.is_empty() {
@@ -358,7 +484,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let marker = source_for(r.source)
+                let marker = source_for(r.source, sel.trajectory)
                     .and_then(|src| submitted_marker(src.as_ref(), r, &receipts));
                 submit_picker_row(i, r, marker)
             })
@@ -381,7 +507,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         .into_iter()
         .map(|i| {
             let r = refs[i].clone();
-            let src = source_for(r.source)
+            let src = source_for(r.source, sel.trajectory)
                 .with_context(|| format!("no adapter registered for source '{}'", r.source))?;
             Ok((src, r))
         })
@@ -390,8 +516,36 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
+        no_reasoning: sel.no_reasoning,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
+
+    if let Some(path) = sel.manifest {
+        let entries = submit::build_manifest(&outcomes);
+        let json = serde_json::to_string_pretty(&entries).context("serializing manifest")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("writing manifest to {}", path.display()))?;
+        println!("wrote {} envelope id(s) to manifest", entries.len());
+    }
+
+    if sel.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&submit::outcomes_to_json(&outcomes))?
+        );
+        // Still fail the process on a refusal or failure: an automating
+        // caller that ignores the body must not read exit 0 as success.
+        let had_failure = outcomes.iter().any(|o| {
+            matches!(
+                o,
+                SubmitOutcome::Refused { .. } | SubmitOutcome::Failed { .. }
+            )
+        });
+        if had_failure {
+            anyhow::bail!("one or more sessions were refused or failed");
+        }
+        return Ok(());
+    }
 
     let mut had_failure = false;
     for outcome in &outcomes {
@@ -401,9 +555,25 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 status,
             } => {
                 println!("submitted {submission_id} {status}");
+                // "quarantined" reads as rejection to a first-time
+                // contributor. It is not: the trace was delivered and is
+                // held pending operator privacy review. Say so at the moment
+                // they see the word, not only if they later run `status`.
+                if status == "quarantined" {
+                    println!(
+                        "  held for privacy review, not rejected; credit is 0.00 until it \
+                         completes. Run `status` for the server's explanation."
+                    );
+                }
             }
-            SubmitOutcome::AlreadySubmitted { submission_id } => {
-                println!("already-submitted {submission_id}");
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => {
+                // Name the status it already has. "already-submitted" alone
+                // reads as a failure when it usually means the trace was
+                // accepted on an earlier run.
+                println!("already-submitted {submission_id} ({prior_status})");
             }
             SubmitOutcome::SkippedParseFailure { reason_label } => {
                 println!("skipped ({reason_label})");
@@ -476,6 +646,29 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
         &rows,
     )
     .context("printing status table")?;
+
+    // The server already explains a non-accepted status, and the table drops
+    // it. Quarantine in particular means "held for operator privacy review",
+    // not "rejected" -- a contributor who only sees the word reads it as
+    // failure and has nothing to act on.
+    let explained: Vec<&trace_commons_protocol::trace_contribution::TraceSubmissionStatusUpdate> =
+        updates
+            .iter()
+            .filter(|u| !u.explanation.is_empty() || !u.delayed_credit_explanations.is_empty())
+            .collect();
+    if !explained.is_empty() {
+        println!();
+        for u in explained {
+            println!("{} ({}):", u.submission_id, u.status);
+            for line in u
+                .explanation
+                .iter()
+                .chain(u.delayed_credit_explanations.iter())
+            {
+                println!("  {line}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -575,12 +768,384 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), Some("api.example"), None)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            Some("api.example"),
+            None,
+        )
+        .await
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn strip_reasoning_removes_only_reasoning_events() {
+        use crate::source::{SessionEvent, SessionEventKind};
+        let mk = |kind: SessionEventKind| SessionEvent {
+            kind,
+            timestamp: None,
+            content: Some("x".to_string()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        };
+        let mut t = crate::source::SessionTranscript {
+            source: std::borrow::Cow::Borrowed("claude-code"),
+            agent_version: None,
+            model: None,
+            project: None,
+            cwd: None,
+            started_at: None,
+            session_hash: "sha256:aa".to_string(),
+            events: vec![
+                mk(SessionEventKind::User),
+                mk(SessionEventKind::Reasoning),
+                mk(SessionEventKind::Assistant),
+            ],
+        };
+        super::strip_reasoning(&mut t);
+        let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::User, SessionEventKind::Assistant]
+        );
+    }
+}
+
+#[cfg(test)]
+mod project_filter_tests {
+    use super::cwd_matches_project;
+    use std::path::Path;
+
+    #[tokio::test]
+    async fn manifest_with_dry_run_is_refused_before_any_upload() {
+        // A dry run mints envelope ids locally but delivers nothing, so a
+        // manifest written from its outcomes would hand devfolio ids the
+        // server has never seen. The combination must be refused up front.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let manifest = dir.path().join("ids.json");
+        let sel = super::SubmitSelection {
+            all: true,
+            since: None,
+            project: None,
+            source: None,
+            yes: true,
+            dry_run: true,
+            pii_filter: None,
+            manifest: Some(&manifest),
+            trajectory: None,
+            json: false,
+            no_reasoning: false,
+        };
+
+        let error = super::submit(&store, &sel).await.expect_err("refused");
+        assert!(
+            error.to_string().contains("--dry-run"),
+            "unexpected error: {error}"
+        );
+        // Refused BEFORE the not-logged-in check, i.e. before any work.
+        assert!(!manifest.exists(), "no manifest is written on refusal");
+    }
+
+    #[test]
+    fn project_filter_resolves_relative_and_dot_paths() {
+        // The primary devfolio path: a participant stands in their project
+        // and types `--project .`. An unresolved "." never prefix-matches an
+        // absolute session cwd, so the filter must canonicalize first.
+        let dir = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(dir.path()).unwrap();
+        let resolved = std::fs::canonicalize(Path::new(".")).unwrap();
+        assert!(resolved.is_absolute(), "canonicalize yields absolute paths");
+        assert!(cwd_matches_project(
+            Some(project.join("sub").to_str().unwrap()),
+            None,
+            Path::new("/x.jsonl"),
+            &project,
+        ));
+    }
+
+    #[test]
+    fn true_cwd_prefix_matches_including_hyphenated_name() {
+        // Project literally named "my-hack" — the legacy basename would decode
+        // to "hack" and miss it; the true cwd matches exactly.
+        let cwd = Some("/Users/dev/code/my-hack");
+        assert!(cwd_matches_project(
+            cwd,
+            Some("hack"),
+            Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn discover_filtered_includes_trajectory_only_when_a_path_is_given() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.json");
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(
+            br#"[{"role":"meta","source":"pi"},
+                 {"role":"user","content":"hi","timestamp":"2026-07-10T12:00:00Z"}]"#,
+        )
+        .unwrap();
+
+        let without = super::discover_filtered(Some("trajectory"), None, None, None).unwrap();
+        assert!(
+            without.is_empty(),
+            "trajectory files must never appear without an explicit path"
+        );
+
+        let with = super::discover_filtered(Some("trajectory"), None, None, Some(&p)).unwrap();
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].source, crate::source::SOURCE_TRAJECTORY);
+    }
+
+    #[test]
+    fn nonexistent_trajectory_path_is_an_error() {
+        let err =
+            super::discover_filtered(None, None, None, Some(Path::new("/nonexistent/x.json")))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn true_cwd_excludes_sibling_and_prefix_collision() {
+        // Sibling dir and a "my-hack-2" name must NOT match "my-hack".
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/other"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/my-hack-2"),
+            None,
+            Path::new("/x.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_basename_or_path_prefix_when_cwd_unknown() {
+        // No true cwd available -> legacy heuristic: basename match ...
+        assert!(cwd_matches_project(
+            None,
+            Some("my-hack"),
+            Path::new("/somewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // ... or session-file path prefix.
+        assert!(cwd_matches_project(
+            None,
+            None,
+            Path::new("/Users/dev/code/my-hack/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+        // Neither matches -> false.
+        assert!(!cwd_matches_project(
+            None,
+            Some("other"),
+            Path::new("/elsewhere/s.jsonl"),
+            Path::new("/Users/dev/code/my-hack"),
+        ));
+    }
+}
+
+/// Redeem an invite link: register this device with the issuer and write
+/// `contributor.json` from the response.
+///
+/// This exists so an agent does not have to hand-roll `POST /v1/onboard`,
+/// base64 a raw Ed25519 public key, and then know that the response has to be
+/// persisted. Every one of those was a step contributors got wrong by reading
+/// the source instead of a document.
+async fn login_with_invite(
+    store: &ConfigStore,
+    invite: &str,
+    allowed_hosts: Option<&str>,
+    device: &DeviceIdentity,
+    consent_scopes: Vec<String>,
+) -> Result<()> {
+    let parsed = parse_invite(invite)?;
+
+    // Redeeming spends one use of the invite whether or not the config write
+    // later succeeds, so refuse before the network call rather than burning
+    // the invite on a device that is already enrolled.
+    if store
+        .load_config()
+        .context("loading contributor config")?
+        .is_some()
+    {
+        anyhow::bail!(
+            "this device is already enrolled; redeeming an invite would spend one of its uses              for nothing. Run `logout` first if you intend to re-enroll."
+        );
+    }
+
+    let req = TraceOnboardRequest {
+        schema_version: TRACE_ONBOARD_REQUEST_SCHEMA_VERSION.to_string(),
+        invite_code: parsed.code.clone(),
+        device_public_key: device.public_key_b64.clone(),
+        client_info: TraceOnboardClientInfo {
+            agent: "trace-commons-contributor".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+
+    let client =
+        IssuerClient::new(allowlist_for(allowed_hosts)).context("building issuer client")?;
+    let response = client.onboard(&parsed.issuer_url, &req).await?;
+
+    let cfg = ContributorConfig {
+        schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+        issuer_url: parsed.issuer_url.clone(),
+        ingest_url: response.ingest_url,
+        audience: response.audience,
+        tenant_id: response.tenant_id,
+        // An invite enrolls a device directly, with no instance vouching for
+        // it, so there is no instance identity to record.
+        instance_id: String::new(),
+        user_subject: response
+            .contributor_label
+            .clone()
+            .unwrap_or_else(|| device.device_key_id.clone()),
+        device_key_id: response.device_key_id,
+        consent_scopes,
+        pii_filter: None,
+        allowed_hosts: allowed_hosts.map(str::to_string),
+    };
+    store
+        .save_config(&cfg)
+        .context("saving contributor config")?;
+
+    println!("enrolled: tenant_id={}", cfg.tenant_id);
+    println!("this invite use is now spent");
+    println!("run `whoami` to confirm, then `submit --dry-run` before contributing anything");
+    Ok(())
+}
+
+/// Fetch a server-signed attestation of this contributor's own scores and
+/// write it out.
+///
+/// This is what a contributor hands to a collector instead of a list of
+/// submission ids. An id list is forgeable by anyone who learns the ids --
+/// they have been published in plain text before now -- whereas forging an
+/// attestation requires the server's signing key.
+pub async fn attest(store: &ConfigStore, out: Option<&Path>, json: bool) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    let attestation = submit::fetch_score_attestation(store, &cfg).await?;
+
+    if let Some(path) = out {
+        std::fs::write(path, &attestation)
+            .with_context(|| format!("writing attestation to {}", path.display()))?;
+    }
+
+    if json {
+        let value = serde_json::json!({
+            "schema_version": "trace_commons.attest_result.v1",
+            "attestation": attestation,
+            "written_to": out.map(|p| p.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if let Some(path) = out {
+        println!("wrote score attestation to {}", path.display());
+        println!("hand this to your collector; they verify it against the server keyset");
+    } else {
+        println!("{attestation}");
+    }
+    Ok(())
+}
+
+/// An invite as handed to a contributor: the issuer origin plus the code.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ParsedInvite {
+    pub issuer_url: String,
+    pub code: String,
+}
+
+/// Parse an invite link into its issuer origin and code.
+///
+/// Contributors are handed a URL like
+/// `https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6`. The code is the
+/// fragment; a `?code=` query parameter is also accepted because some clients
+/// strip fragments. A bare code is rejected: without an origin there is
+/// nothing to POST to, and guessing a default issuer would silently send an
+/// invite to the wrong host.
+pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
+    let raw = raw.trim();
+    let url = reqwest::Url::parse(raw)
+        .map_err(|_| anyhow::anyhow!("--invite must be the full invite URL, not a bare code"))?;
+    if !matches!(url.scheme(), "https" | "http") {
+        anyhow::bail!("--invite must be an http(s) URL");
+    }
+    let code = url
+        .fragment()
+        .map(str::to_string)
+        .filter(|f| !f.is_empty())
+        .or_else(|| {
+            url.query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.into_owned())
+        })
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("invite URL carries no code (expected #CODE or ?code=CODE)")
+        })?;
+    let mut origin = url.clone();
+    origin.set_fragment(None);
+    origin.set_query(None);
+    origin.set_path("");
+    Ok(ParsedInvite {
+        issuer_url: origin.as_str().trim_end_matches('/').to_string(),
+        code: code.trim().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::parse_invite;
+
+    #[test]
+    fn parses_fragment_form() {
+        let p = parse_invite("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        assert_eq!(p.code, "VQWWPGYSG8Y4LTP6");
+    }
+
+    #[test]
+    fn parses_query_form_when_fragment_was_stripped() {
+        let p = parse_invite("https://issuer.tracecommons.ai/onboard?code=ABC123XYZ").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        assert_eq!(p.code, "ABC123XYZ");
+    }
+
+    #[test]
+    fn rejects_a_bare_code() {
+        // Guessing a default issuer would send someone's invite to the wrong
+        // host, and the code is single-use.
+        let err = parse_invite("VQWWPGYSG8Y4LTP6").unwrap_err().to_string();
+        assert!(err.contains("full invite URL"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_url_with_no_code() {
+        let err = parse_invite("https://issuer.tracecommons.ai/onboard")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no code"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_non_http_scheme() {
+        assert!(parse_invite("file:///etc/passwd#CODE").is_err());
     }
 }

@@ -876,6 +876,7 @@ async fn enroll_mint_submit_round_trip() {
         &store,
         Some(&grant.encode()),
         None,
+        None,
         Some("debugging_evaluation,model_training"),
     )
     .await
@@ -907,6 +908,7 @@ async fn enroll_mint_submit_round_trip() {
         &trace_commons_contributor::submit::SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         },
     )
     .await

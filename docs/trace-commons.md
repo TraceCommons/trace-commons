@@ -138,6 +138,14 @@ stable even while the server side fills in.
 | `training_dynamics` | Optional dataset-cartography labels such as easy / ambiguous / hard. |
 | `contributor` | Pseudonymous attribution only: `pseudonymous_contributor_id` and a separate `tenant_scope_ref`. **Never** an authorization input — see [Multitenant permissioning](#multitenant-permissioning-trust-model). |
 
+Reasoning events (`TraceContributionEventType::Reasoning`) became part of the
+envelope on 2026-07-25. `canonical_whole_trace_representation` truncates at
+the first 12 events, so reasoning occupies slots that previously held other
+event types. Traces submitted before that date are unchanged and were not
+re-scored, but novelty and dedup comparisons spanning the boundary are not
+like-for-like. Re-check `gate-calibrate` floors against a post-change sample
+before treating scores from the two cohorts as comparable.
+
 ## Lifecycle of a trace
 
 1. **Capture** — a recorded trace exists locally.

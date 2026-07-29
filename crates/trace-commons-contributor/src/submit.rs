@@ -34,16 +34,71 @@ pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
-    Submitted { submission_id: Uuid, status: String },
-    AlreadySubmitted { submission_id: Uuid },
-    SkippedParseFailure { reason_label: String },
-    Refused { reason_label: String }, // canary hit, fail-closed PII filter, too large
-    Failed { reason_label: String },  // network/auth after retries
+    Submitted {
+        submission_id: Uuid,
+        status: String,
+    },
+    AlreadySubmitted {
+        submission_id: Uuid,
+        /// The status this session already carries server-side, from the
+        /// stored receipt. Without it, a re-run reports "already-submitted"
+        /// and the contributor cannot tell whether the trace was accepted,
+        /// quarantined, or merely delivered.
+        prior_status: String,
+    },
+    SkippedParseFailure {
+        reason_label: String,
+    },
+    Refused {
+        reason_label: String,
+    }, // canary hit, fail-closed PII filter, too large
+    Failed {
+        reason_label: String,
+    }, // network/auth after retries
 }
 
 pub struct SubmitOptions {
     pub dry_run: bool,
     pub pii_filter: Option<String>,
+    /// Drop model reasoning from every session in this run before envelope
+    /// construction. Reasoning is included by default.
+    pub no_reasoning: bool,
+}
+
+/// One entry in a `submit --manifest` file: an envelope id that reached the
+/// server, for handing to an external collector (e.g. devfolio).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManifestEntry {
+    pub submission_id: Uuid,
+    pub status: String,
+}
+
+/// Envelope ids that reached the server, for handing to an external
+/// collector (e.g. devfolio). Includes freshly submitted and
+/// already-submitted traces; skips refused/failed/skipped outcomes.
+pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
+    outcomes
+        .iter()
+        .filter_map(|o| match o {
+            SubmitOutcome::Submitted {
+                submission_id,
+                status,
+            } => Some(ManifestEntry {
+                submission_id: *submission_id,
+                status: status.clone(),
+            }),
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => Some(ManifestEntry {
+                submission_id: *submission_id,
+                status: prior_status.clone(),
+            }),
+            SubmitOutcome::SkippedParseFailure { .. }
+            | SubmitOutcome::Refused { .. }
+            | SubmitOutcome::Failed { .. } => None,
+        })
+        .collect()
 }
 
 /// Redact-and-upload every selected session. Sessions are independent: one
@@ -78,7 +133,7 @@ pub async fn submit_sessions(
     let mut canary_checked = false;
 
     for (source, session_ref) in sessions {
-        let transcript = match source.load(&session_ref) {
+        let mut transcript = match source.load(&session_ref) {
             Ok(t) => t,
             Err(_) => {
                 outcomes.push(SubmitOutcome::SkippedParseFailure {
@@ -88,13 +143,25 @@ pub async fn submit_sessions(
             }
         };
 
+        if opts.no_reasoning {
+            crate::commands::strip_reasoning(&mut transcript);
+        }
+
         let receipts = store.load_receipts().context("loading receipts")?;
-        if receipts.iter().any(|r| {
-            r.session_hash == transcript.session_hash
-                && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
-        }) {
+        // Take the most recent matching receipt, so a session that was
+        // delivered and later accepted reports "accepted" rather than the
+        // first status it ever had.
+        let prior = receipts
+            .iter()
+            .filter(|r| {
+                r.session_hash == transcript.session_hash
+                    && ALREADY_SUBMITTED_STATUSES.contains(&r.status.as_str())
+            })
+            .max_by_key(|r| r.submitted_at);
+        if let Some(prior) = prior {
             outcomes.push(SubmitOutcome::AlreadySubmitted {
-                submission_id: crate::source::submission_id_for(&transcript.session_hash),
+                submission_id: prior.submission_id,
+                prior_status: prior.status.clone(),
             });
             continue;
         }
@@ -282,6 +349,48 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+/// Fetch a server-signed attestation of this contributor's own scores.
+///
+/// The returned value is a compact JWS the contributor hands to a collector
+/// (a hackathon scorer, say). The collector verifies it against the ingest
+/// attestation keyset rather than trusting a relayed list of submission ids,
+/// which is forgeable by anyone who learns an id.
+///
+/// The endpoint takes no parameters: the principal comes from this call's
+/// authentication, so there is nothing here that could request someone
+/// else's scores.
+pub async fn fetch_score_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status`: the attestation is a read of scores
+    // the server already holds, so it must not depend on whatever scopes were
+    // narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for score attestation")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+
+    #[derive(serde::Deserialize)]
+    struct AttestationBody {
+        attestation: String,
+    }
+
+    let body: AttestationBody = client
+        .call_json(
+            Method::GET,
+            "/v1/contributors/me/score-attestation",
+            &[],
+            None::<&()>,
+        )
+        .await
+        .context("fetching score attestation")?;
+    Ok(body.attestation)
 }
 
 /// Re-scan a finished envelope for a residual secret shape. Returns
@@ -580,6 +689,87 @@ mod tests {
         }
     }
 
+    /// Drives the real submit path twice and inspects what actually reached
+    /// the wire.
+    ///
+    /// The unit test on `strip_reasoning` alone is not enough: deleting the
+    /// call site in `submit_sessions` would leave it green while every
+    /// submission silently carried reasoning. `--no-reasoning` is a privacy
+    /// control, so its failure mode has to be caught at the boundary it
+    /// actually protects.
+    #[test]
+    fn already_submitted_preserves_the_prior_status() {
+        // A re-run reports already-submitted for every session it has seen.
+        // Reporting only that is what made three re-submitted traces look
+        // like three failures to a contributor and to the collector reading
+        // the manifest: nothing told them the traces had been ACCEPTED the
+        // first time. The prior status is in the receipt; carry it through.
+        let id = Uuid::new_v4();
+        let outcomes = vec![SubmitOutcome::AlreadySubmitted {
+            submission_id: id,
+            prior_status: "accepted".to_string(),
+        }];
+        let manifest = build_manifest(&outcomes);
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].submission_id, id);
+        assert_eq!(
+            manifest[0].status, "accepted",
+            "the manifest must carry the real server status, not the literal \"already-submitted\""
+        );
+    }
+
+    #[tokio::test]
+    async fn no_reasoning_controls_what_reaches_the_wire() {
+        async fn run(no_reasoning: bool) -> serde_json::Value {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let issuer = spawn(stub_issuer()).await;
+            let ingest = spawn(stub_ingest(received.clone())).await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+            let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+            let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+            let opts = SubmitOptions {
+                dry_run: false,
+                pii_filter: None,
+                no_reasoning,
+            };
+            submit_sessions(&store, &cfg, fixture_selection(), &opts)
+                .await
+                .unwrap();
+            let guard = received.lock().unwrap();
+            guard[0].clone()
+        }
+
+        fn reasoning_events(envelope: &serde_json::Value) -> usize {
+            envelope["events"]
+                .as_array()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter(|e| e["event_type"] == "reasoning")
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+
+        // The committed fixture contains a thinking block, so the default
+        // path must carry reasoning. If this ever reaches zero the fixture
+        // stopped exercising the feature and the opt-out assertion below
+        // would pass vacuously.
+        let with = run(false).await;
+        assert!(
+            reasoning_events(&with) > 0,
+            "reasoning must reach the wire by default"
+        );
+
+        let without = run(true).await;
+        assert_eq!(
+            reasoning_events(&without),
+            0,
+            "--no-reasoning must strip reasoning before upload"
+        );
+    }
+
     #[tokio::test]
     async fn submits_fixture_session_and_is_idempotent_on_rerun() {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -592,6 +782,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -699,6 +890,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -761,6 +953,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: None,
+            no_reasoning: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -788,6 +981,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
+            no_reasoning: false,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -829,6 +1023,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -881,6 +1076,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -908,6 +1104,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -935,6 +1132,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1036,6 +1234,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1172,6 +1371,7 @@ mod tests {
         let opts = SubmitOptions {
             dry_run: false,
             pii_filter: None,
+            no_reasoning: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1185,5 +1385,182 @@ mod tests {
         }
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_manifest_includes_only_delivered_ids() {
+        let u1 = Uuid::new_v4();
+        let u2 = Uuid::new_v4();
+        let outcomes = vec![
+            SubmitOutcome::Submitted {
+                submission_id: u1,
+                status: "submitted".to_string(),
+            },
+            SubmitOutcome::AlreadySubmitted {
+                submission_id: u2,
+                prior_status: "quarantined".to_string(),
+            },
+            SubmitOutcome::Refused {
+                reason_label: "secret-leak-detected".to_string(),
+            },
+            SubmitOutcome::Failed {
+                reason_label: "claim-mint-failed".to_string(),
+            },
+            SubmitOutcome::SkippedParseFailure {
+                reason_label: "parse-failed".to_string(),
+            },
+        ];
+
+        let manifest = build_manifest(&outcomes);
+
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0].submission_id, u1);
+        assert_eq!(manifest[0].status, "submitted");
+        assert_eq!(manifest[1].submission_id, u2);
+        // Previously the literal "already-submitted". A collector reading the
+        // manifest could not distinguish an accepted trace from a quarantined
+        // one, so a contributor's re-run looked like a batch of failures.
+        assert_eq!(manifest[1].status, "quarantined");
+    }
+
+    #[tokio::test]
+    async fn submit_sessions_outcomes_round_trip_through_manifest_file() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+
+        let entries = build_manifest(&outcomes);
+        let manifest_path = tempfile::NamedTempFile::new().unwrap();
+        let json = serde_json::to_string_pretty(&entries).unwrap();
+        std::fs::write(manifest_path.path(), json).unwrap();
+
+        let read_back = std::fs::read_to_string(manifest_path.path()).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&read_back).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let SubmitOutcome::Submitted { submission_id, .. } = &outcomes[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            parsed[0]["submission_id"],
+            serde_json::Value::String(submission_id.to_string())
+        );
+        assert_eq!(parsed[0]["status"], "accepted");
+    }
+}
+
+/// Machine-readable form of a submit run, for callers driving this CLI
+/// programmatically (an MCP server, CI, a hackathon collector).
+///
+/// Every outcome is represented, including the ones `build_manifest` drops:
+/// a caller automating submission needs to know a session was refused and
+/// why, not merely that it is absent from the manifest.
+pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| match o {
+            SubmitOutcome::Submitted {
+                submission_id,
+                status,
+            } => serde_json::json!({
+                "outcome": "submitted",
+                "submission_id": submission_id,
+                "status": status,
+            }),
+            SubmitOutcome::AlreadySubmitted {
+                submission_id,
+                prior_status,
+            } => serde_json::json!({
+                "outcome": "already-submitted",
+                "submission_id": submission_id,
+                "status": prior_status,
+            }),
+            SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
+                "outcome": "skipped",
+                "reason": reason_label,
+            }),
+            SubmitOutcome::Refused { reason_label } => serde_json::json!({
+                "outcome": "refused",
+                "reason": reason_label,
+            }),
+            SubmitOutcome::Failed { reason_label } => serde_json::json!({
+                "outcome": "failed",
+                "reason": reason_label,
+            }),
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": "trace_commons.submit_result.v1",
+        "results": entries,
+    })
+}
+
+#[cfg(test)]
+mod json_output_tests {
+    use super::*;
+
+    #[test]
+    fn every_outcome_kind_is_represented() {
+        let id = Uuid::new_v4();
+        let out = outcomes_to_json(&[
+            SubmitOutcome::Submitted {
+                submission_id: id,
+                status: "accepted".to_string(),
+            },
+            SubmitOutcome::AlreadySubmitted {
+                submission_id: id,
+                prior_status: "quarantined".to_string(),
+            },
+            SubmitOutcome::Refused {
+                reason_label: "secret-leak-detected".to_string(),
+            },
+            SubmitOutcome::Failed {
+                reason_label: "claim-mint-failed".to_string(),
+            },
+            SubmitOutcome::SkippedParseFailure {
+                reason_label: "parse-failed".to_string(),
+            },
+        ]);
+
+        let results = out["results"].as_array().unwrap();
+        // A caller automating submission must be able to see a refusal. The
+        // manifest deliberately omits these, so JSON output cannot reuse it.
+        assert_eq!(results.len(), 5, "no outcome may be silently dropped");
+        assert_eq!(results[0]["outcome"], "submitted");
+        assert_eq!(results[1]["outcome"], "already-submitted");
+        assert_eq!(
+            results[1]["status"], "quarantined",
+            "the real prior status must survive into JSON"
+        );
+        assert_eq!(results[2]["outcome"], "refused");
+        assert_eq!(results[2]["reason"], "secret-leak-detected");
+        assert_eq!(results[3]["outcome"], "failed");
+        assert_eq!(results[4]["outcome"], "skipped");
+    }
+
+    #[test]
+    fn reasons_stay_labels_and_never_carry_content() {
+        // Reason labels are fixed strings by construction. Pinning it here
+        // stops a future change from surfacing a response body or path to a
+        // caller that logs this output.
+        let out = outcomes_to_json(&[SubmitOutcome::Refused {
+            reason_label: "session-too-large".to_string(),
+        }]);
+        let reason = out["results"][0]["reason"].as_str().unwrap();
+        assert!(!reason.contains('/'), "a label must not look like a path");
+        assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
     }
 }

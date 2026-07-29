@@ -172,6 +172,10 @@ use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
     TenantCtx as GateTenantCtx, TraceGateService,
 };
+use trace_commons_server::trace_score_attestation::{
+    AttestationConfig, AttestationSigningState, ScoreAttestationSubmissionEntry,
+    sign_score_attestation,
+};
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
@@ -1240,6 +1244,13 @@ struct AppState {
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
     account_near_config: Option<Arc<NearConfig>>,
+    /// Server-signed score attestations: `None` when
+    /// `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` (and its sibling
+    /// public-key/kid envs) are unconfigured, which makes the
+    /// score-attestation surface fail closed (503
+    /// `attestation_signing_key_unconfigured`) rather than ever return an
+    /// unsigned document. See `trace_score_attestation`.
+    attestation_signing: Option<Arc<AttestationSigningState>>,
     /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
     /// instance from the novelty index — sharing the novelty index would
     /// pollute its nearest-neighbor results and silently change novelty
@@ -2671,6 +2682,7 @@ enum TokenRole {
     UtilityWorker,
     ProcessEvalWorker,
     RevocationWorker,
+    CompetitionReadWorker,
 }
 
 impl TokenRole {
@@ -2689,6 +2701,9 @@ impl TokenRole {
             | "process_evaluation_worker"
             | "process-evaluation-worker" => Ok(Self::ProcessEvalWorker),
             "revocation_worker" | "revocation-worker" => Ok(Self::RevocationWorker),
+            "competition_read_worker" | "competition-read-worker" => {
+                Ok(Self::CompetitionReadWorker)
+            }
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -2721,6 +2736,7 @@ impl TokenRole {
             Self::UtilityWorker => "utility_worker",
             Self::ProcessEvalWorker => "process_eval_worker",
             Self::RevocationWorker => "revocation_worker",
+            Self::CompetitionReadWorker => "competition_read_worker",
         }
     }
 }
@@ -3362,6 +3378,15 @@ impl AppState {
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
 
+        // Score attestations: `from_env` fails startup on a partial
+        // configuration (a signing key with no matching public key/kid is an
+        // operator error, not a silent disable) and returns `None` only when
+        // ALL three envs are absent, which keeps the surface fail-closed.
+        let attestation_signing = match AttestationConfig::from_env()? {
+            Some(config) => Some(Arc::new(AttestationSigningState::build(&config)?)),
+            None => None,
+        };
+
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
@@ -3482,6 +3507,7 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_near_config,
+            attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -6692,6 +6718,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
         )
+        .route(
+            "/v1/contributors/me/score-attestation",
+            get(score_attestation_handler),
+        )
+        .route(
+            "/.well-known/trace-commons-attestation-keyset.json",
+            get(attestation_keyset_handler),
+        )
         // UNAUTHENTICATED account endpoints. These do NOT use `resolve_account_ctx`
         // and MUST NOT sit behind the account-auth middleware:
         //  - `login-links` mint authenticates the DEVICE bearer via
@@ -6952,6 +6986,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
+        )
+        .route(
+            "/v1/admin/scores-by-submission",
+            post(scores_by_submission_handler),
         )
         .route(
             "/v1/admin/credit-settlements",
@@ -12569,6 +12607,118 @@ async fn submission_status_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(statuses))
+}
+
+/// Cap on submissions bundled into a single score attestation, mirroring the
+/// batch caps on the sibling `/v1/contributors/me/*` and
+/// `/v1/admin/scores-by-submission` surfaces.
+const SCORE_ATTESTATION_MAX_SUBMISSIONS: i64 = 500;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScoreAttestationResponse {
+    /// Compact JWS (`header.payload.signature`), `kid` in the header. See
+    /// `trace_score_attestation::ScoreAttestationClaims` for the signed
+    /// payload shape.
+    attestation: String,
+}
+
+/// `GET /v1/contributors/me/score-attestation` — signs a statement of the
+/// CALLER'S OWN scored submissions, resolved entirely from the authenticated
+/// upload claim (`tenant.tenant_id()` / `tenant.principal_ref()`).
+///
+/// NON-NEGOTIABLE (see
+/// `docs/superpowers/specs/2026-07-29-score-attestation-design.md`): this
+/// handler takes NO request body and NO query parameters. It cannot accept
+/// an `auth_principal_ref` (or any other principal) as a request parameter
+/// even by omission-of-validation, because there is no extractor here that
+/// could carry one. Reintroducing a caller-suppliable identity parameter on
+/// this route would rebuild the exact forgery hole this endpoint exists to
+/// close — a participant relaying someone else's identifier the same way a
+/// bare submission id could be relayed today. See
+/// `score_attestation_handler_resolves_principal_from_auth_only_never_from_a_parameter`
+/// in the test module, which pins this property.
+async fn score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score attestation requires a configured DB mirror",
+        ));
+    };
+    let rows = db
+        .list_own_gate_decision_scores(
+            tenant.tenant_id(),
+            tenant.principal_ref(),
+            SCORE_ATTESTATION_MAX_SUBMISSIONS,
+        )
+        .await
+        .map_err(|error| match error {
+            // The cross-tenant-pool read runs only through the narrow
+            // gate-driver pool; an unconfigured pool is a missing control,
+            // not an internal fault, so surface the same fail-closed 503 as
+            // an unconfigured signing key rather than a 500.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score attestation requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
+    let submissions = rows
+        .into_iter()
+        .map(|row| ScoreAttestationSubmissionEntry {
+            submission_id: row.submission_id,
+            credit_quality_micros: row.credit_quality_micros,
+            perplexity_micros: row.perplexity_micros,
+            novelty_score_micros: row.novelty_score_micros,
+            gate_passed: row.gate_passed,
+        })
+        .collect::<Vec<_>>();
+    let item_count = submissions.len();
+    let token = sign_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "score_attestation",
+        item_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
+/// attestation verifying key(s) so a collector can check a signature without
+/// out-of-band key distribution. Unauthenticated by design, mirroring
+/// `trace_upload_claim_issuer`'s keyset endpoint: the keyset is public key
+/// material only. Fails closed (503) rather than returning an empty `keys`
+/// array when signing is unconfigured, so a misconfigured deployment cannot
+/// be mistaken for "no keys yet, retry later" by an automated collector.
+async fn attestation_keyset_handler(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    Ok(Json(attestation.keyset_json()))
 }
 
 /// Max outstanding (unconsumed, unexpired) login links a single principal may
@@ -46454,6 +46604,84 @@ async fn recompute_contributor_caps_handler(
     }))
 }
 
+/// Devfolio score read-back request: the envelope ids a competition operator
+/// collected from participants' upload manifests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScoresBySubmissionRequest {
+    submission_ids: Vec<Uuid>,
+}
+
+/// Score bundle reported per envelope id. `credit_quality_micros` is the
+/// headline graded credit quality `q`; it is `None` when the submission has a
+/// gate decision but the shadow-mode credit-quality pass has not scored it
+/// yet. Ids with no gate decision at all are omitted from the response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubmissionScoreBundle {
+    submission_id: Uuid,
+    credit_quality_micros: Option<i64>,
+    perplexity_micros: i64,
+    novelty_score_micros: i64,
+    gate_passed: bool,
+}
+
+/// Maximum envelope ids per score read-back request, mirroring the
+/// submission-status batch cap.
+const SCORES_BY_SUBMISSION_MAX_IDS: usize = 500;
+
+async fn scores_by_submission_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ScoresBySubmissionRequest>,
+) -> ApiResult<Json<Vec<SubmissionScoreBundle>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_competition_operator(&tenant)?;
+    if body.submission_ids.len() > SCORES_BY_SUBMISSION_MAX_IDS {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "score read-back requests are limited to 500 ids",
+        ));
+    }
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score read-back requires a configured DB mirror",
+        ));
+    };
+    let rows = db
+        .list_scores_by_submission_ids(&body.submission_ids)
+        .await
+        .map_err(|error| match error {
+            // The cross-tenant read runs only through the narrow gate-driver
+            // pool; an unconfigured pool is a missing control, not an
+            // internal fault, so surface the same fail-closed 503 as a
+            // missing DB mirror rather than a 500.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score read-back requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
+    let scores = rows
+        .into_iter()
+        .map(|row| SubmissionScoreBundle {
+            submission_id: row.submission_id,
+            credit_quality_micros: row.credit_quality_micros,
+            perplexity_micros: row.perplexity_micros,
+            novelty_score_micros: row.novelty_score_micros,
+            gate_passed: row.gate_passed,
+        })
+        .collect::<Vec<_>>();
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "scores_by_submission",
+        scores.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(scores))
+}
+
 /// Per-submission cost-control knobs for the in-process perplexity-scoring
 /// driver's `score_one_submission` wrapper (Task 4).
 #[derive(Debug, Clone, Copy)]
@@ -48182,6 +48410,9 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::UtilityWorker => StorageTraceTenantAccessGrantRole::UtilityWorker,
         TokenRole::ProcessEvalWorker => StorageTraceTenantAccessGrantRole::ProcessEvalWorker,
         TokenRole::RevocationWorker => StorageTraceTenantAccessGrantRole::RevocationWorker,
+        TokenRole::CompetitionReadWorker => {
+            StorageTraceTenantAccessGrantRole::CompetitionReadWorker
+        }
     }
 }
 
@@ -49229,6 +49460,17 @@ fn require_process_evaluation_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "admin or process evaluation worker token required",
+        ))
+    }
+}
+
+fn require_competition_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::CompetitionReadWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or competition read worker token required",
         ))
     }
 }

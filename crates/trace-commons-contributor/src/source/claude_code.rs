@@ -3,10 +3,11 @@
 //! Reads `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` session files and
 //! maps them into the shared `SessionTranscript` model. See
 //! `docs/superpowers/plans/` (Task 7) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `system`, `attachment`, and any unknown record `type`) carry only the
-//! record type string, never the record payload.
+//! rules; `Opaque` events carry only a record-type marker and never a
+//! payload. Reasoning (`thinking`) blocks are captured as `Reasoning`
+//! events and redacted like any other content.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -82,27 +83,57 @@ impl TraceSource for ClaudeCodeSource {
                     }
                 };
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
+                let entry_is_dir = match entry.file_type() {
+                    Ok(ft) => ft.is_dir(),
                     Err(_) => {
                         skipped += 1;
                         continue;
                     }
                 };
-                let started_at = metadata
-                    .modified()
-                    .ok()
-                    .map(chrono::DateTime::<chrono::Utc>::from);
-                sessions.push(SessionRef {
-                    source: SOURCE_CLAUDE_CODE,
-                    path,
-                    project: discovery_project.clone(),
-                    started_at,
-                    size_bytes: metadata.len(),
-                });
+                if entry_is_dir {
+                    // Known layout only: `<project-dir>/<session-uuid>/subagents/*.jsonl`.
+                    // Deliberately not a general recursive walk -- an
+                    // unrelated nested directory under a session-uuid dir
+                    // must not be swept in.
+                    let subagents_dir = path.join("subagents");
+                    // `read_dir` FOLLOWS a symlinked directory. A `subagents`
+                    // symlink planted by any process with write access under
+                    // the transcript root would otherwise steer discovery at
+                    // arbitrary directories, and everything discovered here is
+                    // a candidate for upload. `symlink_metadata` does not
+                    // follow, so a link reports as a symlink and is refused.
+                    // (The top-level walk is already safe: `DirEntry::
+                    // file_type` does not follow either.)
+                    match std::fs::symlink_metadata(&subagents_dir) {
+                        Ok(md) if md.is_dir() => {}
+                        _ => continue,
+                    }
+                    let Ok(subagent_entries) = std::fs::read_dir(&subagents_dir) else {
+                        continue;
+                    };
+                    for sub_entry in subagent_entries {
+                        let sub_entry = match sub_entry {
+                            Ok(e) => e,
+                            Err(_) => {
+                                skipped += 1;
+                                continue;
+                            }
+                        };
+                        push_session_if_jsonl(
+                            &sub_entry,
+                            discovery_project.clone(),
+                            &mut sessions,
+                            &mut skipped,
+                        );
+                    }
+                    continue;
+                }
+                push_session_if_jsonl(
+                    &entry,
+                    discovery_project.clone(),
+                    &mut sessions,
+                    &mut skipped,
+                );
             }
         }
         if skipped > 0 {
@@ -117,6 +148,92 @@ impl TraceSource for ClaudeCodeSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+}
+
+/// Builds a `SessionRef` for `entry` if it is a `.jsonl` file, pushing it
+/// onto `sessions`. Shared between the top-level `<project-dir>/*.jsonl`
+/// walk and the nested `<project-dir>/<session-uuid>/subagents/*.jsonl`
+/// walk so both produce identically-shaped `SessionRef`s. Each subagent
+/// transcript becomes its own `SessionRef` (not merged into its parent
+/// session), matching the existing one-file-one-session model.
+fn push_session_if_jsonl(
+    entry: &std::fs::DirEntry,
+    discovery_project: Option<String>,
+    sessions: &mut Vec<SessionRef>,
+    skipped: &mut usize,
+) {
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return;
+    }
+    // Refuse symlinks. `entry.metadata()` and the later `std::fs::read` both
+    // follow them, so a symlinked `.jsonl` is a path out of the transcript
+    // root and into any file the user can read. `DirEntry::file_type` does
+    // not follow, so it is the check that can tell the difference.
+    match entry.file_type() {
+        Ok(ft) if ft.is_file() => {}
+        Ok(_) => return,
+        Err(_) => {
+            *skipped += 1;
+            return;
+        }
+    }
+    let metadata = match entry.metadata() {
+        Ok(m) => m,
+        Err(_) => {
+            *skipped += 1;
+            return;
+        }
+    };
+    let started_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let cwd = peek_cwd(&path);
+    sessions.push(SessionRef {
+        source: SOURCE_CLAUDE_CODE,
+        path,
+        project: discovery_project,
+        cwd,
+        started_at,
+        size_bytes: metadata.len(),
+    });
+}
+
+/// Cheap discovery-time peek at a session file's true working directory:
+/// parses each line as JSON in turn and stops at the first record carrying
+/// a `cwd` field, skipping the full parse of the file's events. Reads the
+/// file the same way `load_session` does (`std::fs::read` then
+/// `String::from_utf8_lossy`), so an invalid-UTF-8 line elsewhere in the
+/// file does not abort the scan before it reaches a later cwd-bearing line.
+/// `load_session` never errors on bad UTF-8 either, so peek and load must
+/// tolerate it identically, or `--project` filtering can silently disagree
+/// with what `submit_sessions` actually delivers. Mirrors the exact field
+/// access `load_session` uses (`record.get("cwd").and_then(|v|
+/// v.as_str())`). Returns `None` if the file cannot be read or no record
+/// carries `cwd`.
+///
+/// Cost: the file is still read whole (as `load_session` does); what is
+/// saved is parsing and building every event. Discovery therefore pays one
+/// read per session file, which is far less than the full loads the
+/// interactive picker already performs.
+fn peek_cwd(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(c) = record.get("cwd").and_then(|v| v.as_str()) {
+            return Some(c.to_string());
+        }
+    }
+    None
 }
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
@@ -204,7 +321,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CLAUDE_CODE,
+        source: Cow::Borrowed(SOURCE_CLAUDE_CODE),
         agent_version,
         model,
         project,
@@ -310,22 +427,43 @@ fn map_assistant_record(
         return;
     };
 
-    // Text blocks are joined into a single Assistant event, inserted at the
-    // position of the first text block encountered so event order still
-    // reflects the original block order relative to tool_use events.
-    let mut texts = Vec::new();
-    let mut text_insert_at: Option<usize> = None;
+    // Contiguous runs of text blocks are joined into one Assistant event and
+    // emitted where the run ends, so every block keeps its position relative
+    // to the reasoning and tool calls around it. Joining ALL text and hoisting
+    // it to the first text position (the previous behavior) reordered the
+    // transcript: prose written after a thinking block or a tool result
+    // appeared before it. For a corpus whose value is showing how an agent
+    // actually proceeded, that ordering is the signal.
+    //
+    // `token_counts` belongs to the record as a whole, so it is attached to
+    // the first emitted Assistant event only, rather than being duplicated
+    // across every run.
+    let mut texts: Vec<String> = Vec::new();
+    let mut token_counts_unused = token_counts;
+    macro_rules! flush_text {
+        () => {
+            if !texts.is_empty() {
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Assistant,
+                    timestamp,
+                    content: Some(texts.join("\n")),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: token_counts_unused.take(),
+                });
+                texts.clear();
+            }
+        };
+    }
     for block in blocks {
         match block.get("type").and_then(|v| v.as_str()) {
             Some("text") => {
                 if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    if text_insert_at.is_none() {
-                        text_insert_at = Some(events.len());
-                    }
                     texts.push(t.to_string());
                 }
             }
             Some("tool_use") => {
+                flush_text!();
                 let name = block
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -341,26 +479,27 @@ fn map_assistant_record(
                 });
             }
             Some("thinking") => {
-                // Deliberately dropped: v1 privacy posture excludes model
-                // reasoning traces from the transcript entirely.
+                flush_text!();
+                // Reasoning is captured as a first-class event and redacted
+                // through the same client-side pipeline as every other kind.
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    if !t.is_empty() {
+                        events.push(SessionEvent {
+                            kind: SessionEventKind::Reasoning,
+                            timestamp,
+                            content: Some(t.to_string()),
+                            structured: Value::Null,
+                            tool_name: None,
+                            token_counts: None,
+                        });
+                    }
+                }
             }
             _ => {}
         }
     }
 
-    if let Some(idx) = text_insert_at {
-        events.insert(
-            idx,
-            SessionEvent {
-                kind: SessionEventKind::Assistant,
-                timestamp,
-                content: Some(texts.join("\n")),
-                structured: Value::Null,
-                tool_name: None,
-                token_counts,
-            },
-        );
-    }
+    flush_text!();
 }
 
 #[cfg(test)]
@@ -374,6 +513,117 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn discovery_refuses_symlinks_that_escape_the_transcript_root() {
+        // Everything discovery returns is a candidate for upload, so a
+        // symlink planted under the transcript root by any same-user process
+        // must not be able to steer it at files elsewhere on disk.
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secrets.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"private\"}}\n",
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+
+        // Case 1: the `subagents` directory itself is a symlink outward.
+        let session_a = project_dir.join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        std::fs::create_dir_all(&session_a).unwrap();
+        symlink(outside.path(), session_a.join("subagents")).unwrap();
+
+        // Case 2: a real `subagents` directory holding a symlinked file.
+        let session_b = project_dir.join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        let subagents_b = session_b.join("subagents");
+        std::fs::create_dir_all(&subagents_b).unwrap();
+        symlink(
+            outside.path().join("secrets.jsonl"),
+            subagents_b.join("agent-link.jsonl"),
+        )
+        .unwrap();
+
+        let found = ClaudeCodeSource::new(root.path().to_path_buf())
+            .discover()
+            .unwrap();
+        assert!(
+            found.is_empty(),
+            "symlinks must not be discovered, got: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discovers_subagent_transcripts_one_level_deeper() {
+        // Claude Code stores subagent transcripts at
+        // `<project-dir>/<session-uuid>/subagents/agent-<id>.jsonl`, one
+        // level below ordinary top-level sessions
+        // (`<project-dir>/<uuid>.jsonl`). discover() must walk into that
+        // known layout and surface each subagent transcript as its own
+        // SessionRef, without recursing into unrelated nested directories.
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // An ordinary top-level session.
+        std::fs::write(
+            project_dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        // A subagent transcript nested under the session's subagents dir.
+        let subagents_dir = project_dir
+            .join("22222222-2222-2222-2222-222222222222")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join("agent-abc123.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\"message\":{\"role\":\"user\",\"content\":\"sub hi\"}}\n",
+        )
+        .unwrap();
+
+        // An unrelated nested directory that must NOT be swept in.
+        let unrelated_dir = project_dir
+            .join("22222222-2222-2222-2222-222222222222")
+            .join("scratch");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        std::fs::write(
+            unrelated_dir.join("not-a-session.jsonl"),
+            "{\"type\":\"user\"}\n",
+        )
+        .unwrap();
+
+        let src = ClaudeCodeSource::new(root.path().to_path_buf());
+        let mut found = src.discover().unwrap();
+        assert_eq!(found.len(), 2, "found: {found:?}");
+
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        let top_level = &found[0];
+        let subagent = &found[1];
+
+        assert_eq!(top_level.source, "claude-code");
+        assert!(
+            top_level
+                .path
+                .ends_with("11111111-1111-1111-1111-111111111111.jsonl")
+        );
+
+        assert_eq!(subagent.source, "claude-code");
+        assert!(subagent.path.ends_with("subagents/agent-abc123.jsonl"));
+        assert_eq!(subagent.cwd.as_deref(), Some("/Users/testuser/code/myproj"));
+
+        // The unrelated nested directory must not be discovered.
+        assert!(
+            !found
+                .iter()
+                .any(|s| s.path.ends_with("not-a-session.jsonl")),
+            "unrelated nested directory was swept into discovery"
+        );
+    }
+
+    #[test]
     fn discovers_fixture_session() {
         let src = ClaudeCodeSource::new(fixture_root());
         let found = src.discover().unwrap();
@@ -383,6 +633,131 @@ mod tests {
         // heuristic takes the segment after the final '-' as a best-effort
         // project basename, ahead of `load()` reading the true cwd.
         assert_eq!(found[0].project, Some("myproj".to_string()));
+        // Discovery now peeks the true cwd cheaply too, matching `load()`.
+        assert_eq!(found[0].cwd.as_deref(), Some("/Users/testuser/code/myproj"));
+    }
+
+    #[test]
+    fn peek_cwd_reads_first_hit_and_round_trips_hyphenated_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n{\"type\":\"assistant\"}\n",
+        )
+        .unwrap();
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
+    }
+
+    #[test]
+    fn peek_cwd_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+        assert_eq!(peek_cwd(&path), None);
+    }
+
+    #[test]
+    fn peek_cwd_tolerates_invalid_utf8_before_the_cwd_line() {
+        // A malformed-UTF-8 line ahead of the cwd-bearing line must not abort
+        // the scan: `load_session` reads via `String::from_utf8_lossy` and
+        // keeps going past bad bytes, so `peek_cwd` must match exactly or
+        // `--project` filtering can silently disagree with what
+        // `submit_sessions` actually delivers.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"bad\":\"");
+        bytes.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8 sequence
+        bytes.extend_from_slice(b"not json}\n");
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"cwd\":\"/Users/dev/code/my-hack\"}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(peek_cwd(&path), Some("/Users/dev/code/my-hack".to_string()));
+    }
+
+    #[test]
+    fn interleaved_text_blocks_keep_their_position() {
+        // A single assistant record can interleave prose with reasoning and
+        // tool calls. Merging every text block and hoisting it to the first
+        // text position reorders the transcript: text written AFTER the model
+        // finished thinking would appear before the reasoning that produced
+        // it. That misrepresents what happened, which is precisely what makes
+        // the trace worth collecting.
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "text", "text": "First." },
+                    { "type": "thinking", "thinking": "considering options" },
+                    { "type": "text", "text": "Second." },
+                    { "type": "tool_use", "name": "Read", "input": {"path": "a"} },
+                    { "type": "text", "text": "Third." }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                SessionEventKind::Assistant,
+                SessionEventKind::Reasoning,
+                SessionEventKind::Assistant,
+                SessionEventKind::ToolCall,
+                SessionEventKind::Assistant,
+            ],
+            "block order must be preserved"
+        );
+        assert_eq!(events[0].content.as_deref(), Some("First."));
+        assert_eq!(events[2].content.as_deref(), Some("Second."));
+        assert_eq!(events[4].content.as_deref(), Some("Third."));
+    }
+
+    #[test]
+    fn contiguous_text_blocks_are_joined() {
+        // Adjacent text blocks are a rendering artifact, not separate turns.
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "text", "text": "One." },
+                    { "type": "text", "text": "Two." },
+                    { "type": "tool_use", "name": "Read", "input": {} }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::Assistant, SessionEventKind::ToolCall]
+        );
+        assert_eq!(events[0].content.as_deref(), Some("One.\nTwo."));
+    }
+
+    #[test]
+    fn thinking_blocks_become_reasoning_events() {
+        let record = serde_json::json!({
+            "message": {
+                "content": [
+                    { "type": "thinking", "thinking": "the user wants X, so I should Y" },
+                    { "type": "text", "text": "Here is the answer." }
+                ]
+            }
+        });
+        let mut events = Vec::new();
+        super::map_assistant_record(&record, None, &mut events);
+
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![SessionEventKind::Reasoning, SessionEventKind::Assistant]
+        );
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("the user wants X, so I should Y")
+        );
     }
 
     #[test]
@@ -399,6 +774,7 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
+                SessionEventKind::Reasoning,
                 SessionEventKind::Assistant,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
@@ -408,15 +784,19 @@ mod tests {
                 SessionEventKind::Opaque, // future-unknown-record
             ]
         );
-        // Thinking dropped; token counts captured on the assistant text event.
-        assert_eq!(t.events[1].token_counts, Some((100, 25)));
-        assert_eq!(t.events[2].tool_name.as_deref(), Some("Read"));
+        // Token counts captured on the assistant text event.
+        assert_eq!(t.events[2].token_counts, Some((100, 25)));
+        assert_eq!(t.events[3].tool_name.as_deref(), Some("Read"));
         // Opaque events carry only the record type, never payloads.
-        let serialized = serde_json::to_string(&t.events[6].structured).unwrap();
+        let serialized = serde_json::to_string(&t.events[7].structured).unwrap();
         assert!(!serialized.contains("do not leak me"));
         assert!(serialized.contains("attachment"));
-        // Thinking text is gone entirely.
-        let all = format!("{:?}", t.events);
-        assert!(!all.contains("secret reasoning"));
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.kind == SessionEventKind::Reasoning
+                    && e.content.as_deref() == Some("secret reasoning")),
+            "reasoning is now captured as a first-class event"
+        );
     }
 }
