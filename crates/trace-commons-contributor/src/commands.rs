@@ -11,6 +11,10 @@ use chrono::Utc;
 use trace_commons_operator_client::format::print_table;
 use trace_commons_protocol::onboarding::user_subject_hash;
 
+use trace_commons_protocol::onboarding::{
+    TRACE_ONBOARD_REQUEST_SCHEMA_VERSION, TraceOnboardClientInfo, TraceOnboardRequest,
+};
+
 use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
@@ -38,18 +42,27 @@ use trace_commons_protocol::trace_contribution::ConsentScope;
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
+    invite: Option<&str>,
     allowed_hosts: Option<&str>,
     scopes: Option<&str>,
 ) -> Result<()> {
+    if grant_b64.is_some() && invite.is_some() {
+        anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
+    }
     let consent_scopes = resolve_consent_scopes(scopes)?;
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+
+    if let Some(invite) = invite {
+        return login_with_invite(store, invite, allowed_hosts, &device, consent_scopes).await;
+    }
 
     let Some(grant_b64) = grant_b64 else {
         println!("device_key_id: {}", device.device_key_id);
         println!(
             "give this to your instance to mint an enrollment grant, then re-run \
-             `login --grant <grant>`"
+             `login --grant <grant>` -- or, if you were handed an invite link, run \
+             `login --invite <url>`"
         );
         return Ok(());
     };
@@ -662,9 +675,15 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), Some("api.example"), None)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            Some("api.example"),
+            None,
+        )
+        .await
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
         // No config was persisted.
@@ -842,5 +861,161 @@ mod project_filter_tests {
             Path::new("/elsewhere/s.jsonl"),
             Path::new("/Users/dev/code/my-hack"),
         ));
+    }
+}
+
+/// Redeem an invite link: register this device with the issuer and write
+/// `contributor.json` from the response.
+///
+/// This exists so an agent does not have to hand-roll `POST /v1/onboard`,
+/// base64 a raw Ed25519 public key, and then know that the response has to be
+/// persisted. Every one of those was a step contributors got wrong by reading
+/// the source instead of a document.
+async fn login_with_invite(
+    store: &ConfigStore,
+    invite: &str,
+    allowed_hosts: Option<&str>,
+    device: &DeviceIdentity,
+    consent_scopes: Vec<String>,
+) -> Result<()> {
+    let parsed = parse_invite(invite)?;
+
+    // Redeeming spends one use of the invite whether or not the config write
+    // later succeeds, so refuse before the network call rather than burning
+    // the invite on a device that is already enrolled.
+    if store
+        .load_config()
+        .context("loading contributor config")?
+        .is_some()
+    {
+        anyhow::bail!(
+            "this device is already enrolled; redeeming an invite would spend one of its uses              for nothing. Run `logout` first if you intend to re-enroll."
+        );
+    }
+
+    let req = TraceOnboardRequest {
+        schema_version: TRACE_ONBOARD_REQUEST_SCHEMA_VERSION.to_string(),
+        invite_code: parsed.code.clone(),
+        device_public_key: device.public_key_b64.clone(),
+        client_info: TraceOnboardClientInfo {
+            agent: "trace-commons-contributor".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+
+    let client =
+        IssuerClient::new(allowlist_for(allowed_hosts)).context("building issuer client")?;
+    let response = client.onboard(&parsed.issuer_url, &req).await?;
+
+    let cfg = ContributorConfig {
+        schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+        issuer_url: parsed.issuer_url.clone(),
+        ingest_url: response.ingest_url,
+        audience: response.audience,
+        tenant_id: response.tenant_id,
+        // An invite enrolls a device directly, with no instance vouching for
+        // it, so there is no instance identity to record.
+        instance_id: String::new(),
+        user_subject: response
+            .contributor_label
+            .clone()
+            .unwrap_or_else(|| device.device_key_id.clone()),
+        device_key_id: response.device_key_id,
+        consent_scopes,
+        pii_filter: None,
+        allowed_hosts: allowed_hosts.map(str::to_string),
+    };
+    store
+        .save_config(&cfg)
+        .context("saving contributor config")?;
+
+    println!("enrolled: tenant_id={}", cfg.tenant_id);
+    println!("this invite use is now spent");
+    println!("run `whoami` to confirm, then `submit --dry-run` before contributing anything");
+    Ok(())
+}
+
+/// An invite as handed to a contributor: the issuer origin plus the code.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ParsedInvite {
+    pub issuer_url: String,
+    pub code: String,
+}
+
+/// Parse an invite link into its issuer origin and code.
+///
+/// Contributors are handed a URL like
+/// `https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6`. The code is the
+/// fragment; a `?code=` query parameter is also accepted because some clients
+/// strip fragments. A bare code is rejected: without an origin there is
+/// nothing to POST to, and guessing a default issuer would silently send an
+/// invite to the wrong host.
+pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
+    let raw = raw.trim();
+    let url = reqwest::Url::parse(raw)
+        .map_err(|_| anyhow::anyhow!("--invite must be the full invite URL, not a bare code"))?;
+    if !matches!(url.scheme(), "https" | "http") {
+        anyhow::bail!("--invite must be an http(s) URL");
+    }
+    let code = url
+        .fragment()
+        .map(str::to_string)
+        .filter(|f| !f.is_empty())
+        .or_else(|| {
+            url.query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.into_owned())
+        })
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("invite URL carries no code (expected #CODE or ?code=CODE)")
+        })?;
+    let mut origin = url.clone();
+    origin.set_fragment(None);
+    origin.set_query(None);
+    origin.set_path("");
+    Ok(ParsedInvite {
+        issuer_url: origin.as_str().trim_end_matches('/').to_string(),
+        code: code.trim().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::parse_invite;
+
+    #[test]
+    fn parses_fragment_form() {
+        let p = parse_invite("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        assert_eq!(p.code, "VQWWPGYSG8Y4LTP6");
+    }
+
+    #[test]
+    fn parses_query_form_when_fragment_was_stripped() {
+        let p = parse_invite("https://issuer.tracecommons.ai/onboard?code=ABC123XYZ").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        assert_eq!(p.code, "ABC123XYZ");
+    }
+
+    #[test]
+    fn rejects_a_bare_code() {
+        // Guessing a default issuer would send someone's invite to the wrong
+        // host, and the code is single-use.
+        let err = parse_invite("VQWWPGYSG8Y4LTP6").unwrap_err().to_string();
+        assert!(err.contains("full invite URL"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_url_with_no_code() {
+        let err = parse_invite("https://issuer.tracecommons.ai/onboard")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no code"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_non_http_scheme() {
+        assert!(parse_invite("file:///etc/passwd#CODE").is_err());
     }
 }

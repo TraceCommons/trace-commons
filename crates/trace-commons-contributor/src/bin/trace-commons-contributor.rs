@@ -19,11 +19,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Enroll this device with an instance-signed enrollment grant
+    /// Enroll this device, with an instance-signed grant or an invite link
     Login {
         /// Base64 enrollment grant minted by your instance; omit to print this device's key id
         #[arg(long)]
         grant: Option<String>,
+        /// Invite link you were handed, e.g. https://issuer.example.ai/onboard#CODE.
+        /// Registers this device and writes the config in one step. Spends one
+        /// use of the invite, so run it once.
+        #[arg(long, conflicts_with = "grant")]
+        invite: Option<String>,
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
         allowed_hosts: Option<String>,
@@ -104,12 +109,14 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Login {
             grant,
+            invite,
             allowed_hosts,
             scopes,
         } => {
             commands::login(
                 &store,
                 grant.as_deref(),
+                invite.as_deref(),
                 allowed_hosts.as_deref(),
                 scopes.as_deref(),
             )
