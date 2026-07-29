@@ -67466,6 +67466,131 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+// Community publication privacy preconditions. The leaderboard path
+// published raw counts with a placeholder noise seed, suppression
+// disabled by default, and a single-tenant cohort. These lock the
+// fail-closed gate in place on both the write and read paths.
+
+// Community publication privacy preconditions. The leaderboard path
+// published raw counts with a placeholder noise seed, suppression
+// disabled by default, and a single-tenant cohort. These lock the
+// fail-closed gate in place on both the write and read paths.
+
+#[test]
+fn community_publication_blocks_when_min_cell_count_is_unset() {
+    // Absent config parses to 0, which disables suppression entirely.
+    let missing = community_publication_missing_controls(0, 4, true);
+    assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
+}
+
+#[test]
+fn community_publication_blocks_when_min_cell_count_is_one() {
+    // A threshold of 1 admits every opted-in row: the SQL HAVING
+    // clause is satisfied by a cell of size one.
+    let missing = community_publication_missing_controls(1, 4, true);
+    assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
+}
+
+#[test]
+fn community_publication_blocks_on_unapproved_noise_mechanism() {
+    let missing = community_publication_missing_controls(4, 4, false);
+    assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn community_publication_blocks_single_tenant_cohort() {
+    let missing = community_publication_missing_controls(4, 1, true);
+    assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
+}
+
+#[test]
+fn community_publication_reports_every_missing_control_at_once() {
+    // The pilot's actual configuration: no min-cell value, one tenant,
+    // placeholder seed. An operator should see all three, not just the
+    // first, so a single fix does not look like it unblocked the path.
+    let missing = community_publication_missing_controls(0, 1, false);
+    assert_eq!(
+        missing,
+        vec![
+            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
+            COMMUNITY_NOISE_MECHANISM_CONTROL,
+            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
+        ]
+    );
+}
+
+#[test]
+fn community_publication_allows_a_fully_configured_cohort() {
+    let missing = community_publication_missing_controls(2, 2, true);
+    assert!(
+        missing.is_empty(),
+        "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn no_noise_mechanism_is_approved_yet() {
+    // Guards against someone promoting the deterministic bounded
+    // jitter used elsewhere in this binary to "approved". It is keyed
+    // jitter, not a sensitivity-calibrated mechanism.
+    assert!(!community_noise_mechanism_approved(
+        COMMUNITY_LEADERBOARD_NOISE_SEED_HASH
+    ));
+    assert!(!community_noise_mechanism_approved(
+        "v1:bounded_jitter:abcd"
+    ));
+    assert!(!community_noise_mechanism_approved(""));
+}
+
+#[test]
+fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
+    // Snapshots already in the DB carry no privacy block. They must be
+    // treated as cohort-of-one and refused, not grandfathered in.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"leaderboard": []}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 0,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    let missing = community_snapshot_missing_controls(&row);
+    assert_eq!(
+        missing,
+        vec![
+            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
+            COMMUNITY_NOISE_MECHANISM_CONTROL,
+            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
+        ]
+    );
+}
+
+#[test]
+fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
+    // min-cell and cohort are both satisfied from the stored snapshot,
+    // so the unapproved mechanism must be the only remaining block.
+    // That proves the cohort was read from the privacy block rather
+    // than defaulted to zero.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({
+            "privacy": {"tenant_cohort_size": 3},
+        }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
+    );
+}
+
 #[tokio::test]
 async fn community_snapshot_recompute_requires_admin_token() {
     use axum::body::Body;
