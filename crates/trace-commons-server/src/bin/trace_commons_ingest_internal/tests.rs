@@ -4691,6 +4691,111 @@ fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, cont
     }
 }
 
+// Server-pass risk derivation. The server re-scrub ran on every
+// submission but derived its risk from an empty RedactionReport, so
+// only a blocked secret could raise the classification.
+
+// Server-pass risk derivation. The server re-scrub ran on every
+// submission but threw away what it found: risk was recomputed from an
+// empty RedactionReport, so only a blocked secret could raise the
+// classification. PII the server itself found and redacted left the
+// envelope labelled Low, and Low maps straight to accepted storage.
+
+#[tokio::test]
+async fn server_rescrub_raises_risk_when_it_redacts_pii_the_client_under_reported() {
+    let mut envelope = sample_envelope().await;
+    // Consent flags claim no message text and no tool payloads, which
+    // is what drives the classification to Low. Then put contact
+    // details in the message anyway: this is the under-reporting case.
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_user_message(&mut envelope, "ping me at alice@personal-domain.test");
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    // Medium, not High: the pass found and removed the address, so the
+    // classification rises, but the residual scan must not then flag
+    // the redaction placeholder it just wrote and escalate to High.
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::Medium,
+        "server pass redacted PII, so it must not stay classified Low"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
+    // Regression guard on the residual scan: the envelope is full of
+    // its own hashes, uuids and handles. None of them may be mistaken
+    // for secret material, or every trace quarantines.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::Low,
+        "a clean metadata-only envelope must not be pushed above Low"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_redacts_feature_flag_keys_and_values() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.ironclaw.feature_flags.insert(
+        "rollout_for_alice@personal-domain.test".to_string(),
+        "enabled for bob@personal-domain.test".to_string(),
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+    assert!(
+        !serialized.contains("alice@personal-domain.test"),
+        "feature-flag keys are attacker-controlled and must be scrubbed"
+    );
+    assert!(
+        !serialized.contains("bob@personal-domain.test"),
+        "feature-flag values are attacker-controlled and must be scrubbed"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_redacts_free_text_side_channels() {
+    use trace_commons_protocol::trace_contribution::TraceFailureMode;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope
+        .outcome
+        .error_taxonomy
+        .push("auth failed for carol@personal-domain.test".to_string());
+    envelope.outcome.failure_modes.push(TraceFailureMode::Other(
+        "operator dave@personal-domain.test intervened".to_string(),
+    ));
+    envelope
+        .replay
+        .replay_notes
+        .push("rerun as erin@personal-domain.test".to_string());
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+    for leaked in [
+        "carol@personal-domain.test",
+        "dave@personal-domain.test",
+        "erin@personal-domain.test",
+    ] {
+        assert!(
+            !serialized.contains(leaked),
+            "{leaked} survived the server re-scrub"
+        );
+    }
+}
+
 #[tokio::test]
 async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     let temp = tempfile::tempdir().expect("temp dir");

@@ -2734,7 +2734,25 @@ pub fn rescrub_trace_envelope_with(
         envelope.outcome.human_correction = Some(redacted);
     }
 
-    let blocked_secret_detected = report.blocked_secret_detected;
+    redact_envelope_side_channels(redactor, envelope, &mut report, &mut state);
+
+    // Detection-only backstop, run after every mutation above. The
+    // typed traversal can only cover fields it knows about, and the
+    // schema keeps growing; this catches whatever the traversal missed.
+    // It never mutates - anything it finds has already survived
+    // redaction, which is what makes it *residual* and why it forces
+    // High rather than Medium.
+    let residual = residual_envelope_scan(redactor, envelope);
+
+    // Derive the server-pass risk from what the pass actually found,
+    // before `report` is drained into the envelope below. Previously
+    // this was computed from an empty report, so only a blocked secret
+    // could raise the classification.
+    let server_pass_risk = residual_risk(&envelope.consent, &report);
+    let residual_hit = !residual.counts.is_empty()
+        || !residual.pii_labels_present.is_empty()
+        || residual.blocked_secret_detected;
+
     for (label, count) in report.counts {
         *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
     }
@@ -2744,17 +2762,13 @@ pub fn rescrub_trace_envelope_with(
         }
     }
 
-    let server_pass_risk = residual_risk(
-        &envelope.consent,
-        &RedactionReport {
-            counts: BTreeMap::new(),
-            pii_labels_present: Vec::new(),
-            warnings: Vec::new(),
-            blocked_secret_detected,
-        },
-    );
     envelope.privacy.residual_pii_risk =
         max_residual_risk(envelope.privacy.residual_pii_risk, server_pass_risk);
+    if residual_hit {
+        // Fail closed: something matched after redaction already ran,
+        // so the envelope still carries it. High quarantines.
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    }
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -2874,9 +2888,195 @@ pub async fn rescrub_envelope_prose_pii_with(
     Ok(())
 }
 
+/// Redact one owned string in place, folding its report into `report`.
+fn redact_string_in_place(
+    redactor: &DeterministicTraceRedactor,
+    value: &mut String,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    let (redacted, child_report) = redactor.redact_text_with_state(value, state);
+    report.merge(child_report);
+    *value = redacted;
+}
+
+fn redact_strings_in_place(
+    redactor: &DeterministicTraceRedactor,
+    values: &mut [String],
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    for value in values {
+        redact_string_in_place(redactor, value, report, state);
+    }
+}
+
+/// Redact the content-bearing fields outside the three surfaces the
+/// original pass covered (`event.redacted_content`,
+/// `event.structured_payload`, `outcome.human_correction`).
+///
+/// Everything here is attacker-controlled free text that reached
+/// accepted storage unscrubbed. Map *keys* are rewritten as well as
+/// values: a key is just as free-form as the string beside it, and no
+/// typed traversal reaches keys by default.
+///
+/// Structural fields are deliberately left alone - ids, hashes,
+/// versions, enum discriminants and revocation handles are server- or
+/// schema-controlled, and rewriting them would break lookups.
+fn redact_envelope_side_channels(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &mut TraceContributionEnvelope,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    if !envelope.ironclaw.feature_flags.is_empty() {
+        let flags = std::mem::take(&mut envelope.ironclaw.feature_flags);
+        for (key, mut value) in flags {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            redact_string_in_place(redactor, &mut value, report, state);
+            envelope.ironclaw.feature_flags.insert(key, value);
+        }
+    }
+    if let Some(model_name) = envelope.ironclaw.model_name.as_mut() {
+        redact_string_in_place(redactor, model_name, report, state);
+    }
+
+    for event in &mut envelope.events {
+        if let Some(tool_name) = event.tool_name.as_mut() {
+            redact_string_in_place(redactor, tool_name, report, state);
+        }
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.outcome.error_taxonomy,
+        report,
+        state,
+    );
+    for failure_mode in &mut envelope.outcome.failure_modes {
+        if let TraceFailureMode::Other(detail) = failure_mode {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    redact_strings_in_place(redactor, &mut envelope.replay.required_tools, report, state);
+    redact_strings_in_place(redactor, &mut envelope.replay.replay_notes, report, state);
+    if !envelope.replay.tool_manifest_hashes.is_empty() {
+        let manifest = std::mem::take(&mut envelope.replay.tool_manifest_hashes);
+        for (key, value) in manifest {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            envelope.replay.tool_manifest_hashes.insert(key, value);
+        }
+    }
+    for assertion in &mut envelope.replay.expected_assertions {
+        let (redacted, child_report) = redactor.redact_json_value(None, assertion, state);
+        report.merge(child_report);
+        *assertion = redacted;
+    }
+
+    if let Some(embedding) = envelope.embedding_analysis.as_mut() {
+        redact_strings_in_place(redactor, &mut embedding.coverage_tags, report, state);
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.trace_card.tool_categories,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.limitations,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.user_visible_explanation,
+        report,
+        state,
+    );
+
+    if let Some(hindsight) = envelope.hindsight.as_mut() {
+        if let Some(summary) = hindsight.original_goal_summary.as_mut() {
+            redact_string_in_place(redactor, summary, report, state);
+        }
+        redact_strings_in_place(redactor, &mut hindsight.achieved_subgoals, report, state);
+        if let Some(TraceFailureMode::Other(detail)) = hindsight.failure_type.as_mut() {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    if let Some(process_evaluation) = envelope.process_evaluation.as_mut() {
+        if let Some(evaluator_name) = process_evaluation.evaluator_name.as_mut() {
+            redact_string_in_place(redactor, evaluator_name, report, state);
+        }
+    }
+}
+
+/// Detection-only scan of the whole envelope after redaction has run.
+///
+/// Each string is scanned *independently* - object keys separately from
+/// their values, one leaf at a time - rather than by scanning the
+/// serialized JSON text. That matters: contextual-entropy detection
+/// looks backwards a fixed window for a secret-shaped cue, so scanning
+/// concatenated JSON would let a key like `"vector_key"` act as the cue
+/// for the hash sitting next to it and flag every envelope. Per-leaf
+/// scanning removes that adjacency entirely.
+fn residual_envelope_scan(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> RedactionReport {
+    let mut report = RedactionReport::default();
+    let Ok(serialized) = serde_json::to_value(envelope) else {
+        // An envelope that will not serialize cannot be stored either;
+        // leave the classification to the callers rather than guessing.
+        return report;
+    };
+    scan_json_leaves(redactor, &serialized, &mut report);
+    report
+}
+
+fn scan_json_leaves(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+    report: &mut RedactionReport,
+) {
+    match value {
+        Value::String(text) => {
+            let (_, child_report) = redactor.redact_text(text);
+            report.merge(child_report);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scan_json_leaves(redactor, item, report);
+            }
+        }
+        Value::Object(entries) => {
+            for (key, item) in entries {
+                let (_, child_report) = redactor.redact_text(key);
+                report.merge(child_report);
+                scan_json_leaves(redactor, item, report);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
     if report.blocked_secret_detected {
         return ResidualPiiRisk::High;
+    }
+
+    // PII the pass actually found and removed raises the floor to
+    // Medium regardless of what the consent flags claim. A contributor
+    // who under-reports risk should not be able to land in accepted
+    // storage with a Low classification just because the flags are
+    // clean; the pass has direct evidence the flags are wrong.
+    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
+        return ResidualPiiRisk::Medium;
     }
 
     if consent.message_text_included || consent.tool_payloads_included {
