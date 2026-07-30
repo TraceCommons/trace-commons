@@ -2776,14 +2776,24 @@ pub fn rescrub_trace_envelope_with(
     let server_pass_risk = residual_risk(&envelope.consent, &report);
 
     let prior_risk = envelope.privacy.residual_pii_risk;
-    // The deterministic pass is infallible over the fields it knows about
-    // (it is a pure function, not a network call), so coverage is complete
-    // and the pass itself is always "useful" - the only way this
-    // assessment can be incomplete is if the residual scan itself failed
-    // to run (serialization error), handled below.
+    // No classifier runs on this path, so there is no classifier evidence and
+    // this assessment can never lower the prior risk.
+    //
+    // An earlier version set this `true` on the reasoning that the
+    // deterministic pass is a pure function and therefore self-evidencing.
+    // That is wrong, and it was a fail-open: being a pure function
+    // establishes *availability*, not detection completeness or the absence
+    // of PII. The prior risk is High because something already found cause
+    // for concern; the deterministic patterns failing to match is a proxy for
+    // cleanliness, not evidence of it. A High trace missed by the regex suite
+    // would have been published without NEAR AI ever examining it.
+    //
+    // The pass still *raises* risk freely -- `resolve_post_scrub_risk` falls
+    // back to `max_residual_risk`, and a residual finding still forces High.
+    // Only the downgrade direction requires classifier evidence.
     let assessment = PostScrubAssessment {
         complete_coverage: residual.is_ok(),
-        useful_classifier_result: true,
+        useful_classifier_result: false,
         findings: report.clone(),
         residual_findings: residual.clone().unwrap_or_default(),
     };
