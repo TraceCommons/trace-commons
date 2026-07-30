@@ -1,0 +1,4 @@
+{"role":"meta","source":"claude-code","model":"claude-fable-5","cwd":"/w"}
+{"role":"user","content":"run it","timestamp":"2026-07-30T10:00:00Z"}
+{"role":"assistant","tool_calls":[{"id":"c1","name":"exec","args":"{\"cmd\":\"ls\"}"}],"timestamp":"2026-07-30T10:00:00Z"}
+{"role":"tool","tool_call_id":"c1","content":"a","timestamp":"2026-07-30T10:00:00Z"}
