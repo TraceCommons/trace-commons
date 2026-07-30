@@ -344,7 +344,13 @@ const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA";
 const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE";
-const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 1.0;
+/// Zero by default. Emission pays this flat delta without consulting
+/// the `credit_quality` and `contributor_cap` signals that are computed
+/// and stored on every gate decision, so a non-zero default issues
+/// value that the quality signals never gated. Operators can set
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` explicitly once
+/// emission consults those signals.
+const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 0.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
 // feature is compiled in; otherwise these constants are dead and the binary
@@ -33112,6 +33118,16 @@ fn average_i128(sum: i128, count: usize) -> Option<i64> {
     Some((sum / count as i128) as i64)
 }
 
+/// Event types whose credit may reach on-chain settlement.
+///
+/// `NoveltyUtility` is deliberately excluded. The graded-credit design
+/// records that novelty and perplexity are cheaply fabricated, and
+/// requires dedup, per-contributor caps, reputation and delayed
+/// settlement before novelty can carry settlement-eligible value.
+/// Those signals (`credit_quality`, `contributor_cap`) are computed and
+/// stored on every gate decision but are still shadow-mode: emission
+/// pays a flat delta without consulting them. Novelty credit therefore
+/// keeps accruing as a signal, but cannot settle.
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
     matches!(
         event_type,
@@ -33119,7 +33135,6 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
-            | TraceCreditLedgerEventType::NoveltyUtility
     )
 }
 

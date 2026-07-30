@@ -51412,6 +51412,54 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
 }
 
 #[test]
+fn novelty_utility_credit_is_not_settlement_eligible() {
+    // Novelty is cheaply fabricated. The graded-credit design requires
+    // dedup, caps, reputation and delayed settlement before novelty can
+    // carry settlement-eligible value; none of those gate emission yet.
+    // Until they do, novelty credit accrues as a signal but must never
+    // reach on-chain issuance.
+    assert!(!trace_credit_event_type_is_settlement_eligible(
+        TraceCreditLedgerEventType::NoveltyUtility
+    ));
+}
+
+#[test]
+fn settlement_eligible_event_types_are_the_reviewed_set() {
+    // Pins the whole set so adding a new event type is a deliberate
+    // decision rather than something that inherits eligibility.
+    for event_type in [
+        TraceCreditLedgerEventType::BenchmarkConversion,
+        TraceCreditLedgerEventType::RegressionCatch,
+        TraceCreditLedgerEventType::TrainingUtility,
+        TraceCreditLedgerEventType::RankingUtility,
+    ] {
+        assert!(
+            trace_credit_event_type_is_settlement_eligible(event_type),
+            "{event_type:?} should stay settlement-eligible"
+        );
+    }
+    for event_type in [
+        TraceCreditLedgerEventType::NoveltyUtility,
+        TraceCreditLedgerEventType::ReviewerBonus,
+        TraceCreditLedgerEventType::AbusePenalty,
+    ] {
+        assert!(
+            !trace_credit_event_type_is_settlement_eligible(event_type),
+            "{event_type:?} should not be settlement-eligible"
+        );
+    }
+}
+
+#[test]
+fn novelty_utility_credit_points_delta_defaults_to_zero() {
+    // Emission pays a flat delta without consulting the credit_quality
+    // and contributor_cap signals that are computed and stored on every
+    // gate decision. Defaulting to zero keeps the accounting path warm
+    // without issuing value the quality signals never gated.
+    assert_eq!(DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA, 0.0);
+}
+
+#[test]
 fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
     assert_eq!(
         trace_credit_event_type_from_storage(StorageTraceCreditEventType::RankingUtility),
