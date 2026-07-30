@@ -13,17 +13,26 @@ struct Cli {
     /// Override the config directory (default: $TRACE_COMMONS_CONTRIBUTOR_DIR, then OS config dir)
     #[arg(long, global = true)]
     config_dir: Option<PathBuf>,
+    /// Emit machine-readable JSON instead of human-readable lines. For
+    /// callers driving this CLI programmatically (MCP servers, CI).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Enroll this device with an instance-signed enrollment grant
+    /// Enroll this device, with an instance-signed grant or an invite link
     Login {
         /// Base64 enrollment grant minted by your instance; omit to print this device's key id
         #[arg(long)]
         grant: Option<String>,
+        /// Invite link you were handed, e.g. https://issuer.example.ai/onboard#CODE.
+        /// Registers this device and writes the config in one step. Spends one
+        /// use of the invite, so run it once.
+        #[arg(long, conflicts_with = "grant")]
+        invite: Option<String>,
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
         allowed_hosts: Option<String>,
@@ -73,6 +82,14 @@ enum Command {
     },
     /// Show server-side status of previously submitted sessions
     Status,
+    /// Fetch a server-signed attestation of your own scores, for handing to
+    /// a collector. Unlike a list of submission ids, it cannot be forged by
+    /// someone who merely learns the ids.
+    Attest {
+        /// Write the attestation here instead of printing it
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Print local identity (no network)
     Whoami,
     /// Delete local keystore, config, and receipts
@@ -98,24 +115,52 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let json = cli.json;
+    match run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // In --json mode a caller parses stdout. Emitting a bare
+            // "Error: ..." line there would force it to special-case
+            // failure, which is exactly when it most needs structure.
+            if json {
+                let out = serde_json::json!({
+                    "schema_version": "trace_commons.cli_error.v1",
+                    "error": format!("{error:#}"),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out)
+                        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+                );
+            } else {
+                eprintln!("Error: {error:#}");
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
         Command::Login {
             grant,
+            invite,
             allowed_hosts,
             scopes,
         } => {
             commands::login(
                 &store,
                 grant.as_deref(),
+                invite.as_deref(),
                 allowed_hosts.as_deref(),
                 scopes.as_deref(),
             )
             .await
         }
-        Command::List { trajectory } => commands::list(trajectory.as_deref()),
+        Command::List { trajectory } => commands::list(trajectory.as_deref(), cli.json),
         Command::Submit {
             all,
             since,
@@ -138,12 +183,14 @@ async fn main() -> anyhow::Result<()> {
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
                 trajectory: trajectory.as_deref(),
+                json: cli.json,
                 no_reasoning,
             };
             commands::submit(&store, &sel).await
         }
         Command::Status => commands::status(&store).await,
-        Command::Whoami => commands::whoami(&store),
+        Command::Attest { out } => commands::attest(&store, out.as_deref(), cli.json).await,
+        Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
         Command::MintGrant {
             instance_key_pem,

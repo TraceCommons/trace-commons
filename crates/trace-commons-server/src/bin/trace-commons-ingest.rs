@@ -31,7 +31,8 @@ use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
     TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
@@ -170,6 +171,10 @@ use trace_commons_server::trace_corpus_storage::{
 use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
     TenantCtx as GateTenantCtx, TraceGateService,
+};
+use trace_commons_server::trace_score_attestation::{
+    AttestationConfig, AttestationSigningState, ScoreAttestationSubmissionEntry,
+    sign_score_attestation,
 };
 use uuid::Uuid;
 
@@ -339,7 +344,13 @@ const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA";
 const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE";
-const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 1.0;
+/// Zero by default. Emission pays this flat delta without consulting
+/// the `credit_quality` and `contributor_cap` signals that are computed
+/// and stored on every gate decision, so a non-zero default issues
+/// value that the quality signals never gated. Operators can set
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` explicitly once
+/// emission consults those signals.
+const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 0.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
 // feature is compiled in; otherwise these constants are dead and the binary
@@ -729,6 +740,13 @@ const TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS: &str =
     "TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS";
 const TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS: &str =
     "TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_ENABLED: &str = "TRACE_COMMONS_PII_BACKSTOP_ENABLED";
+const TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE: &str = "TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE";
+const TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS: &str = "TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS";
+const TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS";
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -938,6 +956,10 @@ const TRACE_PERPLEXITY_DRIVER_DEFAULT_BATCH_SIZE: i64 = 5;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_MAX_ATTEMPTS: i32 = 5;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS: i64 = 900_000;
 const TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
+const TRACE_PII_BACKSTOP_DEFAULT_INTERVAL_SECONDS: u64 = 45;
+const TRACE_PII_BACKSTOP_DEFAULT_BATCH_SIZE: i64 = 5;
+const TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS: i32 = 5;
+const TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
@@ -1045,6 +1067,7 @@ async fn main() -> anyhow::Result<()> {
     );
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
+    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1165,6 +1188,14 @@ struct AppState {
     /// deployments and CI are unaffected until an operator opts in via
     /// `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED`.
     perplexity_score_driver: Option<PerplexityScoreDriverConfig>,
+    /// Server-side NEAR AI PII backstop driver loop config. `None` (the
+    /// default) means the driver is disabled; existing deployments and CI
+    /// are unaffected until an operator opts in via
+    /// `TRACE_COMMONS_PII_BACKSTOP_ENABLED`. The driver spawn/tick itself is
+    /// wired in a follow-up task; this field is populated ahead of that so
+    /// the config + reader-pool plumbing lands first.
+    #[allow(dead_code)]
+    pii_backstop_driver: Option<PiiBackstopDriverConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -1219,6 +1250,13 @@ struct AppState {
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
     account_near_config: Option<Arc<NearConfig>>,
+    /// Server-signed score attestations: `None` when
+    /// `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` (and its sibling
+    /// public-key/kid envs) are unconfigured, which makes the
+    /// score-attestation surface fail closed (503
+    /// `attestation_signing_key_unconfigured`) rather than ever return an
+    /// unsigned document. See `trace_score_attestation`.
+    attestation_signing: Option<Arc<AttestationSigningState>>,
     /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
     /// instance from the novelty index — sharing the novelty index would
     /// pollute its nearest-neighbor results and silently change novelty
@@ -1400,6 +1438,30 @@ struct PerplexityDriverTickSummary {
     scored: usize,
     skipped_duplicate: usize,
     cached: usize,
+    failed: usize,
+}
+
+/// In-process PII-backstop driver loop config (server-side NEAR AI PII
+/// backstop). Like `PerplexityScoreDriverConfig`, it has no worker bearer
+/// token: it runs entirely in-process against `state.db_mirror`'s
+/// cross-tenant PII-backstop-driver pool and never goes through an HTTP
+/// handler.
+#[derive(Clone)]
+struct PiiBackstopDriverConfig {
+    interval: StdDuration,
+    batch_size: i64,
+    max_attempts: i32,
+    backoff_base_seconds: i64,
+}
+
+/// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
+/// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
+/// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
+/// counts submissions that stayed held on `AwaitingPiiBackstop` after an
+/// adapter/redaction error and had their attempt counter bumped.
+#[derive(Debug, Default, Clone, Copy)]
+struct PiiBackstopDriverTickSummary {
+    done: usize,
     failed: usize,
 }
 
@@ -3157,6 +3219,7 @@ impl AppState {
             parse_trace_retention_maintenance_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
+        let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -3321,6 +3384,15 @@ impl AppState {
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
 
+        // Score attestations: `from_env` fails startup on a partial
+        // configuration (a signing key with no matching public key/kid is an
+        // operator error, not a silent disable) and returns `None` only when
+        // ALL three envs are absent, which keeps the surface fail-closed.
+        let attestation_signing = match AttestationConfig::from_env()? {
+            Some(config) => Some(Arc::new(AttestationSigningState::build(&config)?)),
+            None => None,
+        };
+
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
@@ -3411,6 +3483,7 @@ impl AppState {
             retention_maintenance_scheduler,
             vector_index_scheduler,
             perplexity_score_driver,
+            pii_backstop_driver,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -3440,6 +3513,7 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_near_config,
+            attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -5772,6 +5846,66 @@ fn parse_perplexity_score_driver_config_from_env()
     }))
 }
 
+/// Server-side NEAR AI PII backstop driver. Like the perplexity-scoring
+/// driver, it has no bearer-token gate — it drives `state.db_mirror`'s
+/// cross-tenant PII-backstop-driver enumeration directly, so
+/// `TRACE_COMMONS_PII_BACKSTOP_ENABLED` alone turns it on. Off by default
+/// (`Ok(None)` when unset), so existing deployments and CI are unaffected
+/// until an operator explicitly opts in.
+///
+/// Fail-closed boot check: if `_ENABLED` is truthy but either
+/// `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` or
+/// `TRACE_NEAR_AI_PRIVACY_API_KEY` is unset/blank, this refuses at boot with
+/// a safe missing-control label rather than silently leaving the backstop
+/// disabled — secret values themselves are never included in the error.
+fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBackstopDriverConfig>> {
+    if !env_truthy(TRACE_COMMONS_PII_BACKSTOP_ENABLED) {
+        return Ok(None);
+    }
+    let driver_url = DatabaseConfig::pii_backstop_driver_url_from_env();
+    if driver_url.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PII_BACKSTOP_ENABLED}=true but TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL is not set"
+        );
+    }
+    let api_key = optional_trimmed_env("TRACE_NEAR_AI_PRIVACY_API_KEY")?;
+    if api_key.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PII_BACKSTOP_ENABLED}=true but TRACE_NEAR_AI_PRIVACY_API_KEY is not set"
+        );
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE,
+        TRACE_PII_BACKSTOP_DEFAULT_BATCH_SIZE,
+        1,
+        1_000,
+    )?;
+    let max_attempts = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS,
+        i64::from(TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS),
+        1,
+        1_000,
+    )?;
+    let backoff_base_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS,
+        0,
+        86_400,
+    )?;
+    Ok(Some(PiiBackstopDriverConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        batch_size,
+        max_attempts: max_attempts as i32,
+        backoff_base_seconds,
+    }))
+}
+
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -6589,6 +6723,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
+        )
+        .route(
+            "/v1/contributors/me/score-attestation",
+            get(score_attestation_handler),
+        )
+        .route(
+            "/.well-known/trace-commons-attestation-keyset.json",
+            get(attestation_keyset_handler),
         )
         // UNAUTHENTICATED account endpoints. These do NOT use `resolve_account_ctx`
         // and MUST NOT sit behind the account-auth middleware:
@@ -8394,6 +8536,47 @@ fn spawn_perplexity_score_driver_task(
                     tracing::warn!(
                         error_hash = %safe_display_error_hash(&error),
                         "Trace Commons perplexity score driver tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Task 6: spawn the in-process server-side NEAR AI PII-backstop driver loop.
+/// Mirrors the shape of `spawn_perplexity_score_driver_task` (sleep, tick,
+/// hash-only log, repeat) and, like it, has no bearer-token worker route: it
+/// runs entirely in-process against `state.db_mirror` and its cross-tenant
+/// PII-backstop-driver pool. A tick that fails (missing adapter key,
+/// unhealthy canary, pool not configured) leaves every held submission on
+/// `AwaitingPiiBackstop`; the loop logs a warning and retries next interval.
+fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBackstopDriverConfig>) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        batch_size = config.batch_size,
+        max_attempts = config.max_attempts,
+        backoff_base_seconds = config.backoff_base_seconds,
+        "Trace Commons PII backstop driver enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_pii_backstop_driver_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        done = summary.done,
+                        failed = summary.failed,
+                        "Trace Commons PII backstop driver tick completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_hash = %safe_display_error_hash(&error),
+                        "Trace Commons PII backstop driver tick failed"
                     );
                 }
             }
@@ -11507,6 +11690,20 @@ async fn submit_trace_handler(
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
     }
 
+    // PII-backstop hold: an Accepted, message-text-bearing trace is held on
+    // `AwaitingPiiBackstop` (not the corpus) until the driver re-redacts it,
+    // whenever the backstop driver is configured. The credit-zeroing block above
+    // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
+    // keeps its pending credit intact for the eventual release to Accepted; the
+    // consumer/Accepted gates enforce the hold purely off the stored status.
+    // No enrol row is written: the `awaiting_pii_backstop` status is the
+    // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+    let corpus_status = corpus_status_with_pii_backstop_hold(
+        corpus_status,
+        envelope.consent.message_text_included,
+        state.pii_backstop_driver.is_some(),
+    );
+
     let stored_envelope = store_envelope(
         &state,
         tenant.tenant_id(),
@@ -11956,6 +12153,10 @@ struct CommunitySnapshotContents {
     window: String,
     metric: String,
     min_cell_count: i32,
+    /// Absent on snapshots written before the privacy gate existed;
+    /// those deserialize with a cohort of zero and are refused.
+    #[serde(default = "CommunitySnapshotPrivacy::unknown")]
+    privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
     analytics: CommunityCorpusAnalytics,
@@ -11965,7 +12166,138 @@ const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
 const COMMUNITY_LEADERBOARD_METRIC: &str = "novelty_credit";
 const COMMUNITY_LEADERBOARD_WINDOW_DAYS: i32 = 7;
 const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
+/// Seed hash stamped on snapshots computed with no noise mechanism at
+/// all. It is a placeholder, not a mechanism identifier: snapshots
+/// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+
+/// Minimum aggregate cell size enforced before any community aggregate
+/// is published. A cell of size one is the contributor.
+const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
+
+/// Minimum number of distinct tenants in the community cohort before
+/// publication. A single-tenant cohort republishes one tenant's corpus
+/// under a "community" label, which the leaderboard design forbids.
+const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
+
+/// Label-only missing-control name for an unapproved noise mechanism.
+/// Not an env var: no configuration value can approve a mechanism that
+/// has not been implemented.
+const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// Noise-seed prefixes belonging to mechanisms approved for community
+/// publication.
+///
+/// Deliberately empty. The leaderboard path applies no noise, and the
+/// deterministic bounded jitter used elsewhere in this binary is *not*
+/// promoted here: it derives a bounded signed offset from a hash that
+/// includes the exact count, with epsilon accounted separately from any
+/// sensitivity calibration. Listing it would make the public
+/// Laplace-noise claim true by fiat rather than by construction.
+/// The calibrated-mechanism slice adds its prefix here.
+const COMMUNITY_APPROVED_NOISE_SEED_PREFIXES: &[&str] = &[];
+
+/// True when `noise_seed_hash` names a mechanism approved for
+/// publication. See [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`].
+fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
+    COMMUNITY_APPROVED_NOISE_SEED_PREFIXES
+        .iter()
+        .any(|prefix| noise_seed_hash.starts_with(prefix))
+}
+
+/// Controls that must all hold before community aggregates leave the
+/// server. Returns label-only missing-control names, matching the
+/// central-issuer profile convention: no tenant ids, handles, or counts
+/// appear in the result, so it is safe for audit rows and error bodies.
+///
+/// Fail-closed: every caller treats a non-empty result as a refusal.
+/// `noise_mechanism_approved` is passed in rather than looked up so
+/// this stays testable in both directions while
+/// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
+/// derive it with [`community_noise_mechanism_approved`].
+fn community_publication_missing_controls(
+    min_cell_count: usize,
+    tenant_cohort_size: usize,
+    noise_mechanism_approved: bool,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+        missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
+    }
+    if !noise_mechanism_approved {
+        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+    }
+    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    }
+    missing
+}
+
+/// Recompute-path preconditions, evaluated against live config. The
+/// seed is the one recompute would stamp on the snapshot it is about to
+/// write.
+fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+    community_publication_missing_controls(
+        state.analytics_min_cell_count,
+        state.community_tenant_ids.len(),
+        community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
+    )
+}
+
+/// Serve-path preconditions, evaluated against a stored snapshot rather
+/// than current config. A snapshot written before this gate existed
+/// carries no privacy block; it is treated as cohort-of-one and refused
+/// rather than grandfathered in.
+fn community_snapshot_missing_controls(
+    row: &trace_commons_server::db::LeaderboardSnapshotRow,
+) -> Vec<&'static str> {
+    let cohort_size = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("tenant_cohort_size"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    community_publication_missing_controls(
+        usize::try_from(row.min_cell_count).unwrap_or(0),
+        cohort_size,
+        community_noise_mechanism_approved(&row.noise_seed_hash),
+    )
+}
+
+/// Privacy provenance recorded on every snapshot, so a published
+/// artifact carries the controls it was produced under rather than
+/// requiring a reader to trust the pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunitySnapshotPrivacy {
+    /// Seed hash of the mechanism in force when this snapshot was
+    /// computed. [`COMMUNITY_LEADERBOARD_NOISE_SEED_HASH`] means none.
+    noise_seed_hash: String,
+    /// Minimum cell size actually enforced during computation.
+    min_cell_count: i32,
+    /// Number of distinct tenants aggregated.
+    tenant_cohort_size: i32,
+    /// Epsilon charged against the privacy budget. `None` until a
+    /// calibrated mechanism exists to charge against.
+    epsilon_charged: Option<f64>,
+    /// Per-contributor sensitivity the noise was calibrated to. `None`
+    /// for the same reason.
+    sensitivity: Option<f64>,
+}
+
+impl CommunitySnapshotPrivacy {
+    /// Stand-in for snapshots written before this block existed. Every
+    /// field is the refusing value, so an old snapshot cannot pass the
+    /// serve-path gate by omission.
+    fn unknown() -> Self {
+        Self {
+            noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+            min_cell_count: 0,
+            tenant_cohort_size: 0,
+            epsilon_charged: None,
+            sensitivity: None,
+        }
+    }
+}
 
 /// Compute a fresh snapshot from current DB state and persist it.
 /// Returns the inserted snapshot row so the admin handler can echo
@@ -11979,6 +12311,19 @@ async fn recompute_community_snapshot(
             "community snapshot recompute requires the DB mirror to be configured",
         )
     })?;
+    // Fail closed before touching contributor data: a snapshot that
+    // cannot be published is not worth computing, and computing it
+    // anyway leaves un-noised aggregates sitting in the snapshot table.
+    let missing_controls = community_publication_missing_controls_for_state(state);
+    if !missing_controls.is_empty() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "community publication is blocked by missing privacy controls: {}",
+                missing_controls.join(", ")
+            ),
+        ));
+    }
     let min_cell_count = state.analytics_min_cell_count as i64;
     let inputs = db
         .compute_leaderboard_inputs(
@@ -12048,6 +12393,13 @@ async fn recompute_community_snapshot(
         window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
         metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
         min_cell_count: state.analytics_min_cell_count as i32,
+        privacy: CommunitySnapshotPrivacy {
+            noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+            min_cell_count: state.analytics_min_cell_count as i32,
+            tenant_cohort_size: state.community_tenant_ids.len() as i32,
+            epsilon_charged: None,
+            sensitivity: None,
+        },
         leaderboard,
         contributors,
         analytics: CommunityCorpusAnalytics {
@@ -12084,6 +12436,54 @@ async fn recompute_community_snapshot(
         .map_err(internal_error)
 }
 
+/// Fetch the latest snapshot for the public read handlers and refuse to
+/// serve it unless it was produced under the required privacy controls.
+///
+/// Shared by every public community handler so the gate cannot be wired
+/// into one and forgotten on another, and so snapshots already sitting
+/// in the table from before the gate existed stop being served the
+/// moment this ships - without requiring a data migration.
+async fn latest_publishable_community_snapshot(
+    state: &AppState,
+) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community surface is not configured",
+        )
+    })?;
+    let snapshot = db
+        .latest_leaderboard_snapshot(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no community snapshot has been computed yet",
+            )
+        })?;
+    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    if !missing_controls.is_empty() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "community snapshot is withheld by missing privacy controls: {}",
+                missing_controls.join(", ")
+            ),
+        ));
+    }
+    Ok(snapshot)
+}
+
 async fn recompute_community_snapshot_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -12110,31 +12510,7 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     Ok(Json(snapshot.contents))
 }
 
@@ -12142,31 +12518,7 @@ async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12179,31 +12531,7 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     Ok(Json(
@@ -12416,6 +12744,118 @@ async fn submission_status_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(statuses))
+}
+
+/// Cap on submissions bundled into a single score attestation, mirroring the
+/// batch caps on the sibling `/v1/contributors/me/*` and
+/// `/v1/admin/scores-by-submission` surfaces.
+const SCORE_ATTESTATION_MAX_SUBMISSIONS: i64 = 500;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScoreAttestationResponse {
+    /// Compact JWS (`header.payload.signature`), `kid` in the header. See
+    /// `trace_score_attestation::ScoreAttestationClaims` for the signed
+    /// payload shape.
+    attestation: String,
+}
+
+/// `GET /v1/contributors/me/score-attestation` — signs a statement of the
+/// CALLER'S OWN scored submissions, resolved entirely from the authenticated
+/// upload claim (`tenant.tenant_id()` / `tenant.principal_ref()`).
+///
+/// NON-NEGOTIABLE (see
+/// `docs/superpowers/specs/2026-07-29-score-attestation-design.md`): this
+/// handler takes NO request body and NO query parameters. It cannot accept
+/// an `auth_principal_ref` (or any other principal) as a request parameter
+/// even by omission-of-validation, because there is no extractor here that
+/// could carry one. Reintroducing a caller-suppliable identity parameter on
+/// this route would rebuild the exact forgery hole this endpoint exists to
+/// close — a participant relaying someone else's identifier the same way a
+/// bare submission id could be relayed today. See
+/// `score_attestation_handler_resolves_principal_from_auth_only_never_from_a_parameter`
+/// in the test module, which pins this property.
+async fn score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score attestation requires a configured DB mirror",
+        ));
+    };
+    let rows = db
+        .list_own_gate_decision_scores(
+            tenant.tenant_id(),
+            tenant.principal_ref(),
+            SCORE_ATTESTATION_MAX_SUBMISSIONS,
+        )
+        .await
+        .map_err(|error| match error {
+            // The cross-tenant-pool read runs only through the narrow
+            // gate-driver pool; an unconfigured pool is a missing control,
+            // not an internal fault, so surface the same fail-closed 503 as
+            // an unconfigured signing key rather than a 500.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score attestation requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
+    let submissions = rows
+        .into_iter()
+        .map(|row| ScoreAttestationSubmissionEntry {
+            submission_id: row.submission_id,
+            credit_quality_micros: row.credit_quality_micros,
+            perplexity_micros: row.perplexity_micros,
+            novelty_score_micros: row.novelty_score_micros,
+            gate_passed: row.gate_passed,
+        })
+        .collect::<Vec<_>>();
+    let item_count = submissions.len();
+    let token = sign_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "score_attestation",
+        item_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
+/// attestation verifying key(s) so a collector can check a signature without
+/// out-of-band key distribution. Unauthenticated by design, mirroring
+/// `trace_upload_claim_issuer`'s keyset endpoint: the keyset is public key
+/// material only. Fails closed (503) rather than returning an empty `keys`
+/// array when signing is unconfigured, so a misconfigured deployment cannot
+/// be mistaken for "no keys yet, retry later" by an automated collector.
+async fn attestation_keyset_handler(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    Ok(Json(attestation.keyset_json()))
 }
 
 /// Max outstanding (unconsumed, unexpired) login links a single principal may
@@ -32809,6 +33249,16 @@ fn average_i128(sum: i128, count: usize) -> Option<i64> {
     Some((sum / count as i128) as i64)
 }
 
+/// Event types whose credit may reach on-chain settlement.
+///
+/// `NoveltyUtility` is deliberately excluded. The graded-credit design
+/// records that novelty and perplexity are cheaply fabricated, and
+/// requires dedup, per-contributor caps, reputation and delayed
+/// settlement before novelty can carry settlement-eligible value.
+/// Those signals (`credit_quality`, `contributor_cap`) are computed and
+/// stored on every gate decision but are still shadow-mode: emission
+/// pays a flat delta without consulting them. Novelty credit therefore
+/// keeps accruing as a signal, but cannot settle.
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
     matches!(
         event_type,
@@ -32816,7 +33266,6 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
-            | TraceCreditLedgerEventType::NoveltyUtility
     )
 }
 
@@ -35866,6 +36315,218 @@ async fn run_perplexity_score_driver_tick(
         }
     }
     Ok(summary)
+}
+
+/// Audit actor label recorded for status transitions the PII-backstop driver
+/// performs. Label-only, never a secret or contributor identity.
+const PII_BACKSTOP_DRIVER_ACTOR_REF: &str = "trace-commons-pii-backstop-driver";
+/// Snapshot/audit label for the re-redacted envelope the driver produces.
+const PII_BACKSTOP_REDACTION_LABEL: &str = "near-ai-pii-backstop-v1";
+
+/// Task 6: one pass of the in-process server-side NEAR AI PII-backstop driver.
+///
+/// Fail-closed by construction. The whole tick refuses to touch any submission
+/// unless (a) the NEAR AI privacy-filter adapter builds from env, and (b) the
+/// synthetic canary round-trips healthy. Either failing returns `Err` before a
+/// single submission is loaded, so every held trace stays on
+/// `AwaitingPiiBackstop`; the caller logs a hash-only warning and retries next
+/// interval. The adapter is built once per tick and shared across the batch.
+async fn run_pii_backstop_driver_tick(
+    state: Arc<AppState>,
+    config: &PiiBackstopDriverConfig,
+) -> anyhow::Result<PiiBackstopDriverTickSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PII backstop driver requires a configured DB mirror"))?;
+
+    // Build the adapter ONCE per tick. A missing key fails the whole tick
+    // before any submission is loaded — nothing is processed, traces stay held.
+    let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
+        .map_err(|err| anyhow::anyhow!("PII backstop adapter unavailable: {err}"))?;
+
+    // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
+    // touching any real submission; abort without mutating anything when the
+    // filter is unhealthy or errors — never process real traces through a
+    // broken filter.
+    let canary = run_privacy_filter_canary(adapter.as_ref())
+        .await
+        .map_err(|err| anyhow::anyhow!("PII backstop canary errored: {err}"))?;
+    if !canary.healthy {
+        anyhow::bail!("PII backstop canary reported unhealthy filter; tick aborted");
+    }
+
+    let items = db
+        .list_submissions_awaiting_pii_backstop(
+            Utc::now(),
+            config.max_attempts,
+            config.backoff_base_seconds,
+            config.batch_size,
+        )
+        .await?;
+
+    let mut summary = PiiBackstopDriverTickSummary::default();
+    for item in &items {
+        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
+            Ok(()) => summary.done += 1,
+            Err(error) => {
+                // Leave the submission held on `AwaitingPiiBackstop` and bump
+                // its attempt counter with a hash-only error label. A bump
+                // failure is itself logged hash-only; the trace still stays
+                // held either way.
+                let error_label = safe_runtime_error_hash(&error);
+                if let Err(bump_error) = db
+                    .bump_pii_backstop_attempt(
+                        &item.tenant_id,
+                        item.submission_id,
+                        Utc::now(),
+                        &error_label,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error_hash = %safe_runtime_error_hash(&anyhow::Error::new(bump_error)),
+                        submission_id = %item.submission_id,
+                        "Trace Commons PII backstop attempt bump failed"
+                    );
+                }
+                tracing::warn!(
+                    error_hash = %error_label,
+                    submission_id = %item.submission_id,
+                    "Trace Commons PII backstop re-redaction failed; submission held"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// Re-redact a single held submission through the NEAR AI prose PII filter and,
+/// on success, release the hold. Loads the record + envelope, runs
+/// `rescrub_envelope_prose_pii_with`, then re-stores the rescrubbed envelope,
+/// updates the record's object pointers, mirrors a `RescrubbedEnvelope` object
+/// ref, and transitions the submission to `Accepted`/`Quarantined` based on the
+/// POST-backstop residual PII risk. Any error propagates to the caller, which
+/// bumps the attempt counter and leaves the submission on
+/// `AwaitingPiiBackstop`.
+async fn process_one_pii_backstop(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    item: &GateWorkItem,
+    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
+) -> anyhow::Result<()> {
+    let mut record = read_submission_record(&state.root, &item.tenant_id, item.submission_id)?
+        .ok_or_else(|| anyhow::anyhow!("PII backstop submission record not found"))?;
+    let mut envelope = read_envelope_by_record(state, &record)?;
+
+    // Two-pass and atomic inside the protocol helper: any adapter error is
+    // returned before any field of `envelope` is mutated.
+    rescrub_envelope_prose_pii_with(adapter, &mut envelope).await?;
+
+    // Status is chosen from the POST-backstop residual risk: a filter that
+    // still leaves Medium/High risk re-quarantines rather than accepts.
+    let target_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
+
+    let stored = store_envelope(
+        state,
+        &item.tenant_id,
+        target_status,
+        PII_BACKSTOP_REDACTION_LABEL,
+        &envelope,
+    )?;
+    // Repoint the record's object pointers to the rescrubbed artifact but
+    // deliberately DO NOT flip `record.status` to the target yet. The DB
+    // submission upsert below derives its `status` column from `record.status`
+    // (`storage_submission_write_from_record` -> `status = excluded.status`),
+    // so leaving `record.status` on `AwaitingPiiBackstop` keeps the DB hold in
+    // place while we mirror the rescrubbed metadata and write the rescrubbed
+    // object ref. The authoritative release happens later via
+    // `update_trace_submission_status`, only after the rescrubbed ref is active.
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+
+    // Concurrent-read invariant: no DB write may set `status =
+    // Accepted/Quarantined` until an active `RescrubbedEnvelope` object ref
+    // already exists. `read_envelope_from_active_db_object_ref` (the object-ref
+    // read path used by review-decision / process-eval / replay-export /
+    // export-source reads for `require_object_refs` / object-primary tenants)
+    // gates on `status == Accepted` and then PREFERS the `RescrubbedEnvelope`
+    // ref, falling back to the still-active `SubmittedEnvelope` ref. If the DB
+    // status flipped to the target before the rescrubbed ref existed, a
+    // concurrent object-ref read in that window would pass its status gate,
+    // find no rescrubbed ref, and fall through to the pre-backstop
+    // `submitted_envelope` bytes — exactly the residual PII the backstop exists
+    // to remove. So the DB status must not become consumer-visible as released
+    // until the rescrubbed ref is durably written.
+    //
+    // Step 1: mirror the rescrubbed submission metadata with the status STILL
+    // held (`record.status == AwaitingPiiBackstop`). This is a no-op on the
+    // status column (it already reads `awaiting_pii_backstop`) but refreshes the
+    // redaction hash / counts / privacy risk / canonical summary pointers.
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        &record,
+        &envelope,
+        envelope
+            .embedding_analysis
+            .as_ref()
+            .map(|analysis| analysis.canonical_summary_hash.clone()),
+    )?)
+    .await
+    .context("failed to mirror rescrubbed trace submission metadata")?;
+
+    // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
+    // release, so it is already active the instant the status becomes
+    // Accepted/Quarantined below.
+    let (object_ref, _) = trace_object_ref_write_from_record(
+        state,
+        "rescrubbed-envelope",
+        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+        &record,
+        &envelope,
+    )?;
+    db.append_trace_object_ref(object_ref)
+        .await
+        .context("failed to mirror rescrubbed trace object ref")?;
+
+    // Step 3: now flip the on-disk record and release the DB hold. The file
+    // record's object_key was already repointed to the rescrubbed artifact
+    // above, so the file-record read path is safe regardless of ordering here;
+    // the DB release is the single authoritative status write to the target
+    // (the earlier upsert wrote the still-held status).
+    //
+    // The status flip and the invalidation of the pre-backstop
+    // `submitted_envelope` ref(s) happen ATOMICALLY via
+    // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
+    // commit without the other: by-ref export consumers select
+    // `SubmittedEnvelope` explicitly (see e.g. the export revalidation path),
+    // so a status release with a still-active pre-backstop ref would publish
+    // un-scrubbed, PII-bearing bytes on an ordinary transient DB failure with
+    // no re-enumeration path to heal it (enumeration only selects
+    // `awaiting_pii_backstop`). Conversely the driver's own re-enumeration
+    // INNER JOINs an active `submitted_envelope` ref, so invalidating it
+    // without also releasing the status would strand the submission forever.
+    // Atomicity resolves both hazards: on any failure the transaction rolls
+    // back, the on-disk record write below is skipped, and the submission
+    // stays held and re-enumerable for the next tick to retry.
+    db.release_pii_backstop_hold(
+        &item.tenant_id,
+        item.submission_id,
+        storage_corpus_status(target_status),
+        PII_BACKSTOP_DRIVER_ACTOR_REF,
+        Some(PII_BACKSTOP_REDACTION_LABEL),
+    )
+    .await
+    .context("failed to atomically release PII backstop hold")?;
+
+    record.status = target_status;
+    write_submission_record(&state.root, &record)?;
+
+    Ok(())
 }
 
 async fn run_trace_benchmark_registry_scheduler_tick(
@@ -50371,6 +51032,9 @@ fn trace_corpus_status_from_storage(status: StorageTraceCorpusStatus) -> Option<
     match status {
         StorageTraceCorpusStatus::Accepted => Some(TraceCorpusStatus::Accepted),
         StorageTraceCorpusStatus::Quarantined => Some(TraceCorpusStatus::Quarantined),
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => {
+            Some(TraceCorpusStatus::AwaitingPiiBackstop)
+        }
         StorageTraceCorpusStatus::Rejected => Some(TraceCorpusStatus::Rejected),
         StorageTraceCorpusStatus::Revoked => Some(TraceCorpusStatus::Revoked),
         StorageTraceCorpusStatus::Expired => Some(TraceCorpusStatus::Expired),
@@ -50428,6 +51092,30 @@ fn status_for_risk(
     }
 }
 
+/// Decide the stored corpus status for a freshly-submitted trace, applying the
+/// PII-backstop hold. When the risk-derived status is `Accepted`, the trace
+/// carries raw message text, and the backstop driver is enabled, the trace is
+/// held on `AwaitingPiiBackstop` until the driver re-redacts it through the
+/// NEAR AI prose PII filter and releases the hold. Every other case
+/// (non-Accepted risk, no message text, or backstop disabled) is returned
+/// unchanged so those paths behave exactly as before the backstop existed.
+///
+/// The `awaiting_pii_backstop` status IS the enrolment: the driver's
+/// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
+/// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
+/// bookkeeping row on first failure. No explicit enrol write is required here.
+fn corpus_status_with_pii_backstop_hold(
+    risk_status: TraceCorpusStatus,
+    message_text_included: bool,
+    backstop_enabled: bool,
+) -> TraceCorpusStatus {
+    if risk_status == TraceCorpusStatus::Accepted && message_text_included && backstop_enabled {
+        TraceCorpusStatus::AwaitingPiiBackstop
+    } else {
+        risk_status
+    }
+}
+
 fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmissionReceipt {
     let explanation = match record.status {
         TraceCorpusStatus::Accepted => vec![
@@ -50436,6 +51124,11 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
         ],
         TraceCorpusStatus::Quarantined => vec![
             "Quarantined for privacy review; credit is pending review.".to_string(),
+            format!("Attributed to tenant {}", record.tenant_storage_ref),
+        ],
+        TraceCorpusStatus::AwaitingPiiBackstop => vec![
+            "Held pending an automated privacy backstop verdict; not yet in the corpus."
+                .to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Revoked => vec!["Revoked and marked with a tombstone.".to_string()],
@@ -53810,6 +54503,7 @@ fn storage_corpus_status(status: TraceCorpusStatus) -> StorageTraceCorpusStatus 
     match status {
         TraceCorpusStatus::Accepted => StorageTraceCorpusStatus::Accepted,
         TraceCorpusStatus::Quarantined => StorageTraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop => StorageTraceCorpusStatus::AwaitingPiiBackstop,
         TraceCorpusStatus::Rejected => StorageTraceCorpusStatus::Rejected,
         TraceCorpusStatus::Revoked => StorageTraceCorpusStatus::Revoked,
         TraceCorpusStatus::Expired => StorageTraceCorpusStatus::Expired,
@@ -53824,9 +54518,12 @@ fn storage_derived_status(status: TraceCorpusStatus) -> StorageTraceDerivedStatu
             StorageTraceDerivedStatus::Expired
         }
         TraceCorpusStatus::Rejected => StorageTraceDerivedStatus::Invalidated,
-        TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined => {
-            StorageTraceDerivedStatus::Current
-        }
+        // Mirrors `Quarantined`: the derived entry stays Current and inherits
+        // the held corpus status. Consumer/vector paths re-gate on
+        // `corpus_status == Accepted`, so the hold is enforced there, not here.
+        TraceCorpusStatus::Accepted
+        | TraceCorpusStatus::Quarantined
+        | TraceCorpusStatus::AwaitingPiiBackstop => StorageTraceDerivedStatus::Current,
     }
 }
 
@@ -54295,20 +54992,43 @@ async fn read_envelope_from_active_db_object_ref(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(None);
     };
-    let Some(object_ref) = db
+    // Prefer an active `RescrubbedEnvelope` ref: once the PII backstop releases a
+    // held submission it writes a rescrubbed ref and invalidates the pre-backstop
+    // `submitted_envelope` ref, so a released-backstop trace only has an active
+    // rescrubbed ref. Non-backstopped traces have only a `submitted_envelope`
+    // ref, so they fall through to the same query as before. This keeps the
+    // `require_object_refs` hardening satisfiable for released-backstop traces.
+    let object_ref = match db
         .get_latest_active_trace_object_ref(
             tenant_id,
             submission_id,
-            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
         )
         .await
         .with_context(|| {
             format!(
-                "failed to read active submitted envelope object ref for submission {submission_id}"
+                "failed to read active rescrubbed envelope object ref for submission {submission_id}"
             )
-        })?
-    else {
-        return Ok(None);
+        })? {
+        Some(rescrubbed) => rescrubbed,
+        None => {
+            let Some(submitted) = db
+                .get_latest_active_trace_object_ref(
+                    tenant_id,
+                    submission_id,
+                    StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read active submitted envelope object ref for submission {submission_id}"
+                    )
+                })?
+            else {
+                return Ok(None);
+            };
+            submitted
+        }
     };
     let envelope = read_envelope_from_object_ref(state, tenant_id, &object_ref)?;
     Ok(Some(TraceEnvelopeBodyRead {
@@ -54330,6 +55050,7 @@ fn read_envelope_from_object_ref(
         matches!(
             object_ref.artifact_kind,
             StorageTraceObjectArtifactKind::SubmittedEnvelope
+                | StorageTraceObjectArtifactKind::RescrubbedEnvelope
                 | StorageTraceObjectArtifactKind::ReviewSnapshot
         ),
         "trace object ref artifact kind mismatch"
@@ -61989,6 +62710,11 @@ impl std::error::Error for TracePostgresRlsDiagnosticsUnavailable {}
 enum TraceCorpusStatus {
     Accepted,
     Quarantined,
+    // Held state: the trace is out of consumer/export/credit reach pending the
+    // NEAR AI PII backstop verdict. It is NOT reviewer-eligible (distinct from
+    // Quarantined) and NEVER satisfies a `== Accepted` consumer predicate. Set
+    // explicitly by ingest (Task 7) and cleared by the driver (Task 6).
+    AwaitingPiiBackstop,
     Rejected,
     Revoked,
     Expired,
@@ -62000,6 +62726,7 @@ impl TraceCorpusStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Quarantined => "quarantined",
+            Self::AwaitingPiiBackstop => "awaiting_pii_backstop",
             Self::Rejected => "rejected",
             Self::Revoked => "revoked",
             Self::Expired => "expired",
@@ -63611,8 +64338,10 @@ impl TraceRankerTrainingLabel {
     fn from_status(status: TraceCorpusStatus) -> Self {
         match status {
             TraceCorpusStatus::Accepted => Self::Accepted,
-            TraceCorpusStatus::Quarantined => Self::NeedsReview,
-            TraceCorpusStatus::Rejected
+            // Held state is never a ranking-positive label.
+            TraceCorpusStatus::Quarantined
+            | TraceCorpusStatus::AwaitingPiiBackstop
+            | TraceCorpusStatus::Rejected
             | TraceCorpusStatus::Revoked
             | TraceCorpusStatus::Expired
             | TraceCorpusStatus::Purged => Self::NeedsReview,
@@ -65602,7 +66331,12 @@ impl TraceCommonsTenantCreditResponse {
                     response.credit_points_estimated += record.credit_points_pending;
                     response.credit_points_final += record.credit_points_final.unwrap_or(0.0);
                 }
-                TraceCorpusStatus::Quarantined => response.quarantined += 1,
+                // Held pending the PII backstop: no credit is accrued (it is not
+                // Accepted). Reported alongside quarantined as a not-yet-accepted,
+                // non-terminal pending count on this contributor credit summary.
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    response.quarantined += 1
+                }
                 TraceCorpusStatus::Revoked => response.revoked += 1,
                 TraceCorpusStatus::Rejected => response.rejected += 1,
                 TraceCorpusStatus::Expired | TraceCorpusStatus::Purged => response.expired += 1,
@@ -67556,7 +68290,12 @@ impl TraceOperationalSubmissionSummary {
                 .or_insert(0) += 1;
             match record.status {
                 TraceCorpusStatus::Accepted => summary.accepted += 1,
-                TraceCorpusStatus::Quarantined => summary.quarantined += 1,
+                // Held pending the PII backstop: not Accepted. The precise count
+                // is preserved in `by_status["awaiting_pii_backstop"]`; folded
+                // into quarantined for the coarse not-yet-accepted tally.
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    summary.quarantined += 1
+                }
                 TraceCorpusStatus::Rejected => summary.rejected += 1,
                 TraceCorpusStatus::Revoked => summary.revoked += 1,
                 TraceCorpusStatus::Expired => summary.expired += 1,

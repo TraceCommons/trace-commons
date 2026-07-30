@@ -44,6 +44,8 @@ pub enum PrivacyFilterBackendTag {
 /// v2 alongside the deterministic pipeline bump above: the server re-scrub
 /// runs the same detector, so its stamp has to move with it.
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
+#[cfg(feature = "near-ai-privacy-filter")]
+pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
@@ -1541,8 +1543,8 @@ pub fn synthetic_privacy_filter_canary_values() -> Vec<String> {
     ]
 }
 
-pub async fn run_configured_privacy_filter_canary_from_env()
--> Result<Option<PrivacyFilterCanaryReport>, TraceContributionError> {
+pub async fn run_configured_privacy_filter_canary_from_env(
+) -> Result<Option<PrivacyFilterCanaryReport>, TraceContributionError> {
     let Some((adapter, _backend)) = privacy_filter_adapter_from_env().map_err(|err| {
         TraceContributionError::RedactionFailed {
             reason: err.to_string(),
@@ -2837,7 +2839,25 @@ pub fn rescrub_trace_envelope_with(
         envelope.outcome.human_correction = Some(redacted);
     }
 
-    let blocked_secret_detected = report.blocked_secret_detected;
+    redact_envelope_side_channels(redactor, envelope, &mut report, &mut state);
+
+    // Detection-only backstop, run after every mutation above. The
+    // typed traversal can only cover fields it knows about, and the
+    // schema keeps growing; this catches whatever the traversal missed.
+    // It never mutates - anything it finds has already survived
+    // redaction, which is what makes it *residual* and why it forces
+    // High rather than Medium.
+    let residual = residual_envelope_scan(redactor, envelope);
+
+    // Derive the server-pass risk from what the pass actually found,
+    // before `report` is drained into the envelope below. Previously
+    // this was computed from an empty report, so only a blocked secret
+    // could raise the classification.
+    let server_pass_risk = residual_risk(&envelope.consent, &report);
+    let residual_hit = !residual.counts.is_empty()
+        || !residual.pii_labels_present.is_empty()
+        || residual.blocked_secret_detected;
+
     for (label, count) in report.counts {
         *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
     }
@@ -2847,17 +2867,13 @@ pub fn rescrub_trace_envelope_with(
         }
     }
 
-    let server_pass_risk = residual_risk(
-        &envelope.consent,
-        &RedactionReport {
-            counts: BTreeMap::new(),
-            pii_labels_present: Vec::new(),
-            warnings: Vec::new(),
-            blocked_secret_detected,
-        },
-    );
     envelope.privacy.residual_pii_risk =
         max_residual_risk(envelope.privacy.residual_pii_risk, server_pass_risk);
+    if residual_hit {
+        // Fail closed: something matched after redaction already ran,
+        // so the envelope still carries it. High quarantines.
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    }
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -2883,9 +2899,289 @@ pub fn rescrub_trace_envelope_with(
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 }
 
+/// Runs an async prose-PII filter (e.g. the NEAR AI backstop) over an
+/// already-produced envelope's free-text fields — `events[*].redacted_content`
+/// and `outcome.human_correction`. Tool-call `structured_payload` JSON is out
+/// of scope; this is a prose filter only.
+///
+/// Two-pass and atomic: every `adapter.redact_text` call is awaited and
+/// collected in the first pass, so any adapter error is returned before any
+/// field of `envelope` is mutated. The second pass applies the collected
+/// text replacements and metadata updates without further awaits.
+#[cfg(feature = "near-ai-privacy-filter")]
+pub async fn rescrub_envelope_prose_pii_with(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), TraceContributionError> {
+    let mut event_updates: Vec<(usize, String)> = Vec::new();
+    let mut correction_update: Option<String> = None;
+    let mut report = RedactionReport::default();
+    let mut summary: Option<SafePrivacyFilterSummary> = None;
+
+    for (index, event) in envelope.events.iter().enumerate() {
+        let Some(content) = event.redacted_content.as_deref() else {
+            continue;
+        };
+        if let Some(redaction) = adapter.redact_text(content).await? {
+            merge_privacy_filter_summary(&mut summary, &redaction.summary);
+            report.merge(redaction.report);
+            event_updates.push((index, redaction.redacted_text));
+        }
+    }
+
+    if let Some(correction) = envelope.outcome.human_correction.as_deref() {
+        if let Some(redaction) = adapter.redact_text(correction).await? {
+            merge_privacy_filter_summary(&mut summary, &redaction.summary);
+            report.merge(redaction.report);
+            correction_update = Some(redaction.redacted_text);
+        }
+    }
+
+    // Second pass: no awaits below this line, so the updates collected
+    // above are applied atomically.
+    for (index, redacted_text) in event_updates {
+        envelope.events[index].redacted_content = Some(redacted_text);
+    }
+    if let Some(redacted_text) = correction_update {
+        envelope.outcome.human_correction = Some(redacted_text);
+    }
+
+    let blocked_secret_detected = report.blocked_secret_detected;
+    for (label, count) in report.counts {
+        *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
+    }
+    for label in report.pii_labels_present {
+        if !envelope.privacy.pii_labels_present.contains(&label) {
+            envelope.privacy.pii_labels_present.push(label);
+        }
+    }
+    if let Some(summary) = &summary {
+        merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, summary);
+    }
+
+    let backstop_pass_risk = residual_risk(
+        &envelope.consent,
+        &RedactionReport {
+            counts: BTreeMap::new(),
+            pii_labels_present: Vec::new(),
+            warnings: Vec::new(),
+            blocked_secret_detected,
+        },
+    );
+    envelope.privacy.residual_pii_risk =
+        max_residual_risk(envelope.privacy.residual_pii_risk, backstop_pass_risk);
+    if !envelope
+        .privacy
+        .redaction_pipeline_version
+        .contains(NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX)
+    {
+        envelope.privacy.redaction_pipeline_version.push('+');
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .push_str(NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX);
+    }
+    envelope.trace_card.redaction_pipeline_version =
+        envelope.privacy.redaction_pipeline_version.clone();
+    merge_privacy_warnings(
+        &mut envelope.privacy.warnings,
+        privacy_warnings(envelope.privacy.residual_pii_risk),
+    );
+    envelope.privacy.redaction_hash =
+        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
+
+    Ok(())
+}
+
+/// Redact one owned string in place, folding its report into `report`.
+fn redact_string_in_place(
+    redactor: &DeterministicTraceRedactor,
+    value: &mut String,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    let (redacted, child_report) = redactor.redact_text_with_state(value, state);
+    report.merge(child_report);
+    *value = redacted;
+}
+
+fn redact_strings_in_place(
+    redactor: &DeterministicTraceRedactor,
+    values: &mut [String],
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    for value in values {
+        redact_string_in_place(redactor, value, report, state);
+    }
+}
+
+/// Redact the content-bearing fields outside the three surfaces the
+/// original pass covered (`event.redacted_content`,
+/// `event.structured_payload`, `outcome.human_correction`).
+///
+/// Everything here is attacker-controlled free text that reached
+/// accepted storage unscrubbed. Map *keys* are rewritten as well as
+/// values: a key is just as free-form as the string beside it, and no
+/// typed traversal reaches keys by default.
+///
+/// Structural fields are deliberately left alone - ids, hashes,
+/// versions, enum discriminants and revocation handles are server- or
+/// schema-controlled, and rewriting them would break lookups.
+fn redact_envelope_side_channels(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &mut TraceContributionEnvelope,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    if !envelope.ironclaw.feature_flags.is_empty() {
+        let flags = std::mem::take(&mut envelope.ironclaw.feature_flags);
+        for (key, mut value) in flags {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            redact_string_in_place(redactor, &mut value, report, state);
+            envelope.ironclaw.feature_flags.insert(key, value);
+        }
+    }
+    if let Some(model_name) = envelope.ironclaw.model_name.as_mut() {
+        redact_string_in_place(redactor, model_name, report, state);
+    }
+
+    for event in &mut envelope.events {
+        if let Some(tool_name) = event.tool_name.as_mut() {
+            redact_string_in_place(redactor, tool_name, report, state);
+        }
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.outcome.error_taxonomy,
+        report,
+        state,
+    );
+    for failure_mode in &mut envelope.outcome.failure_modes {
+        if let TraceFailureMode::Other(detail) = failure_mode {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    redact_strings_in_place(redactor, &mut envelope.replay.required_tools, report, state);
+    redact_strings_in_place(redactor, &mut envelope.replay.replay_notes, report, state);
+    if !envelope.replay.tool_manifest_hashes.is_empty() {
+        let manifest = std::mem::take(&mut envelope.replay.tool_manifest_hashes);
+        for (key, value) in manifest {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            envelope.replay.tool_manifest_hashes.insert(key, value);
+        }
+    }
+    for assertion in &mut envelope.replay.expected_assertions {
+        let (redacted, child_report) = redactor.redact_json_value(None, assertion, state);
+        report.merge(child_report);
+        *assertion = redacted;
+    }
+
+    if let Some(embedding) = envelope.embedding_analysis.as_mut() {
+        redact_strings_in_place(redactor, &mut embedding.coverage_tags, report, state);
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.trace_card.tool_categories,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.limitations,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.user_visible_explanation,
+        report,
+        state,
+    );
+
+    if let Some(hindsight) = envelope.hindsight.as_mut() {
+        if let Some(summary) = hindsight.original_goal_summary.as_mut() {
+            redact_string_in_place(redactor, summary, report, state);
+        }
+        redact_strings_in_place(redactor, &mut hindsight.achieved_subgoals, report, state);
+        if let Some(TraceFailureMode::Other(detail)) = hindsight.failure_type.as_mut() {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    if let Some(process_evaluation) = envelope.process_evaluation.as_mut() {
+        if let Some(evaluator_name) = process_evaluation.evaluator_name.as_mut() {
+            redact_string_in_place(redactor, evaluator_name, report, state);
+        }
+    }
+}
+
+/// Detection-only scan of the whole envelope after redaction has run.
+///
+/// Each string is scanned *independently* - object keys separately from
+/// their values, one leaf at a time - rather than by scanning the
+/// serialized JSON text. That matters: contextual-entropy detection
+/// looks backwards a fixed window for a secret-shaped cue, so scanning
+/// concatenated JSON would let a key like `"vector_key"` act as the cue
+/// for the hash sitting next to it and flag every envelope. Per-leaf
+/// scanning removes that adjacency entirely.
+fn residual_envelope_scan(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> RedactionReport {
+    let mut report = RedactionReport::default();
+    let Ok(serialized) = serde_json::to_value(envelope) else {
+        // An envelope that will not serialize cannot be stored either;
+        // leave the classification to the callers rather than guessing.
+        return report;
+    };
+    scan_json_leaves(redactor, &serialized, &mut report);
+    report
+}
+
+fn scan_json_leaves(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+    report: &mut RedactionReport,
+) {
+    match value {
+        Value::String(text) => {
+            let (_, child_report) = redactor.redact_text(text);
+            report.merge(child_report);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scan_json_leaves(redactor, item, report);
+            }
+        }
+        Value::Object(entries) => {
+            for (key, item) in entries {
+                let (_, child_report) = redactor.redact_text(key);
+                report.merge(child_report);
+                scan_json_leaves(redactor, item, report);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
     if report.blocked_secret_detected {
         return ResidualPiiRisk::High;
+    }
+
+    // PII the pass actually found and removed raises the floor to
+    // Medium regardless of what the consent flags claim. A contributor
+    // who under-reports risk should not be able to land in accepted
+    // storage with a Low classification just because the flags are
+    // clean; the pass has direct evidence the flags are wrong.
+    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
+        return ResidualPiiRisk::Medium;
     }
 
     if consent.message_text_included || consent.tool_payloads_included {
@@ -4231,8 +4527,8 @@ mod tests {
     #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{
-            DETERMINISTIC_REDACTION_PIPELINE_VERSION, PrivacyFilterBackendTag,
-            redaction_pipeline_version,
+            redaction_pipeline_version, PrivacyFilterBackendTag,
+            DETERMINISTIC_REDACTION_PIPELINE_VERSION,
         };
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::None),
@@ -4261,7 +4557,7 @@ mod tests {
 
     #[test]
     fn privacy_filter_adapter_from_env_rejects_unknown_backend() {
-        use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
@@ -4280,7 +4576,7 @@ mod tests {
 
     #[test]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
-        use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "near-ai");
@@ -4425,7 +4721,7 @@ mod tests {
 
     #[test]
     fn privacy_filter_adapter_from_env_requires_sidecar_command() {
-        use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
@@ -4774,5 +5070,170 @@ mod tests {
                 "report metric label {label:?} wrongly tripped the fail-closed guard"
             );
         }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn sample_envelope_with_event_content(content: &str) -> super::TraceContributionEnvelope {
+        use super::*;
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some(content.to_string()),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn backstop_reredacts_prose_and_marks_pipeline() {
+        use crate::trace_contribution::*;
+        struct Stub;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for Stub {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if text.contains("jane@example.com") {
+                    // Mirrors NearAiPrivacyFilterAdapter::apply_spans: report.counts
+                    // uses the "privacy_filter:{label}" key while summary.by_label
+                    // uses the bare label for the SAME span, as two parallel tallies.
+                    let mut report = RedactionReport::default();
+                    report.increment("privacy_filter:private_email");
+                    report.add_pii_label("private_email");
+                    Ok(Some(SafePrivacyFilterRedaction {
+                        redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
+                        summary: SafePrivacyFilterSummary {
+                            schema_version: 1,
+                            output_mode: "redacted_text_only".into(),
+                            span_count: 1,
+                            by_label: std::collections::BTreeMap::from([(
+                                "private_email".into(),
+                                1,
+                            )]),
+                            decoded_mismatch: false,
+                        },
+                        report,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let mut env = sample_envelope_with_event_content("email jane@example.com now");
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert!(env.events[0]
+            .redacted_content
+            .as_deref()
+            .unwrap()
+            .contains("[REDACTED:private_email]"));
+        assert!(env
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"));
+        assert!(env
+            .privacy
+            .pii_labels_present
+            .iter()
+            .any(|l| l == "private_email"));
+        // report.counts (report-keyed) must be folded into redaction_counts exactly
+        // once, not doubled by also folding summary.by_label (which counts the same
+        // span under the bare label).
+        assert_eq!(
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(env.privacy.redaction_counts.get("private_email"), None);
+        // The summary itself must still be preserved, disjoint from redaction_counts.
+        let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
+        assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
+        // Idempotent suffix: running again does not double-append.
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.privacy
+                .redaction_pipeline_version
+                .matches("near-ai-pii-backstop-v1")
+                .count(),
+            1
+        );
+        // Second pass finds no more "jane@example.com" (already redacted), so the
+        // Stub returns None and the count stays at 1 — never doubled by summary
+        // folding on either pass.
+        assert_eq!(
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
+            Some(1)
+        );
     }
 }
