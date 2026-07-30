@@ -876,6 +876,7 @@ async fn enroll_mint_submit_round_trip() {
         &store,
         Some(&grant.encode()),
         None,
+        None,
         Some("debugging_evaluation,model_training"),
     )
     .await

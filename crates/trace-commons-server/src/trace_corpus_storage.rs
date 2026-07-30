@@ -30,6 +30,10 @@ pub enum TraceCorpusStatus {
     Received,
     Accepted,
     Quarantined,
+    /// Held state pending the NEAR AI PII backstop verdict. Never
+    /// consumer/export/credit eligible and never reviewer-eligible; distinct
+    /// from `Quarantined`. Wire form: `awaiting_pii_backstop`.
+    AwaitingPiiBackstop,
     Rejected,
     Revoked,
     Expired,
@@ -2010,6 +2014,66 @@ pub trait TraceCorpusStore: Send + Sync {
         artifact_kind: TraceObjectArtifactKind,
     ) -> Result<Option<TraceObjectRefRecord>, DatabaseError>;
 
+    /// Invalidate every currently-active object ref of `artifact_kind` for a
+    /// submission by stamping `invalidated_at`. Used defensively by the PII
+    /// backstop driver to retire the pre-backstop `submitted_envelope` bytes
+    /// once the rescrubbed envelope ref is written, so no export-by-ref path
+    /// can resolve pre-backstop bytes. Returns the number of refs invalidated.
+    /// The default is a no-op (0); the Postgres store overrides it with a
+    /// scoped, tenant-context UPDATE.
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        Ok(0)
+    }
+
+    /// Atomically release a PII-backstop hold: flip `trace_submissions.status`
+    /// to the target Accepted/Quarantined status AND invalidate every active
+    /// `submitted_envelope` object ref for the submission, as a single
+    /// tenant-scoped operation. Both must succeed or neither may take effect:
+    ///
+    /// - If the status flip committed but the invalidation did not, the
+    ///   pre-backstop `submitted_envelope` ref stays active while the
+    ///   submission reads as released. By-ref consumers (e.g. export
+    ///   revalidation) select `SubmittedEnvelope` explicitly, so this would
+    ///   publish un-scrubbed, PII-bearing bytes with no re-enumeration path to
+    ///   heal it (enumeration only selects `awaiting_pii_backstop`).
+    /// - If the invalidation committed but the status flip did not, the
+    ///   submission becomes invisible to the driver's re-enumeration (which
+    ///   INNER JOINs an active `submitted_envelope` ref) while still reading
+    ///   `awaiting_pii_backstop` — it would stay held forever.
+    ///
+    /// Returns the number of object refs invalidated. The default
+    /// implementation composes the two existing calls non-atomically (used by
+    /// in-memory test doubles); the Postgres store overrides it with a single
+    /// transaction so the two effects are all-or-nothing.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            TraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+
     async fn append_trace_derived_record(
         &self,
         derived_record: TraceDerivedRecordWrite,
@@ -2571,6 +2635,28 @@ pub trait TraceCorpusStore: Send + Sync {
     ) -> Result<i32, DatabaseError> {
         Err(DatabaseError::Query(
             "bump_gate_evaluation_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Upsert per-`(tenant_id, submission_id)` PII-backstop attempt
+    /// bookkeeping used by the server-side NEAR AI PII backstop driver's
+    /// cost-control wrapper (Task 6). Increments the `attempts` counter and
+    /// stamps `last_attempt_at`/`last_error_label`, returning the new attempt
+    /// count. Implementations MUST scope the upsert by `tenant_id`
+    /// (migration V38 forces RLS on `trace_pii_backstop` bound to
+    /// `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn bump_pii_backstop_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        Err(DatabaseError::Query(
+            "bump_pii_backstop_attempt not implemented for this backend".to_string(),
         ))
     }
 
