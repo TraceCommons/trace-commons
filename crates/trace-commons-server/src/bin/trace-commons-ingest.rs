@@ -12153,6 +12153,10 @@ struct CommunitySnapshotContents {
     window: String,
     metric: String,
     min_cell_count: i32,
+    /// Absent on snapshots written before the privacy gate existed;
+    /// those deserialize with a cohort of zero and are refused.
+    #[serde(default = "CommunitySnapshotPrivacy::unknown")]
+    privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
     analytics: CommunityCorpusAnalytics,
@@ -12162,7 +12166,138 @@ const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
 const COMMUNITY_LEADERBOARD_METRIC: &str = "novelty_credit";
 const COMMUNITY_LEADERBOARD_WINDOW_DAYS: i32 = 7;
 const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
+/// Seed hash stamped on snapshots computed with no noise mechanism at
+/// all. It is a placeholder, not a mechanism identifier: snapshots
+/// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+
+/// Minimum aggregate cell size enforced before any community aggregate
+/// is published. A cell of size one is the contributor.
+const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
+
+/// Minimum number of distinct tenants in the community cohort before
+/// publication. A single-tenant cohort republishes one tenant's corpus
+/// under a "community" label, which the leaderboard design forbids.
+const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
+
+/// Label-only missing-control name for an unapproved noise mechanism.
+/// Not an env var: no configuration value can approve a mechanism that
+/// has not been implemented.
+const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// Noise-seed prefixes belonging to mechanisms approved for community
+/// publication.
+///
+/// Deliberately empty. The leaderboard path applies no noise, and the
+/// deterministic bounded jitter used elsewhere in this binary is *not*
+/// promoted here: it derives a bounded signed offset from a hash that
+/// includes the exact count, with epsilon accounted separately from any
+/// sensitivity calibration. Listing it would make the public
+/// Laplace-noise claim true by fiat rather than by construction.
+/// The calibrated-mechanism slice adds its prefix here.
+const COMMUNITY_APPROVED_NOISE_SEED_PREFIXES: &[&str] = &[];
+
+/// True when `noise_seed_hash` names a mechanism approved for
+/// publication. See [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`].
+fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
+    COMMUNITY_APPROVED_NOISE_SEED_PREFIXES
+        .iter()
+        .any(|prefix| noise_seed_hash.starts_with(prefix))
+}
+
+/// Controls that must all hold before community aggregates leave the
+/// server. Returns label-only missing-control names, matching the
+/// central-issuer profile convention: no tenant ids, handles, or counts
+/// appear in the result, so it is safe for audit rows and error bodies.
+///
+/// Fail-closed: every caller treats a non-empty result as a refusal.
+/// `noise_mechanism_approved` is passed in rather than looked up so
+/// this stays testable in both directions while
+/// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
+/// derive it with [`community_noise_mechanism_approved`].
+fn community_publication_missing_controls(
+    min_cell_count: usize,
+    tenant_cohort_size: usize,
+    noise_mechanism_approved: bool,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+        missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
+    }
+    if !noise_mechanism_approved {
+        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+    }
+    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    }
+    missing
+}
+
+/// Recompute-path preconditions, evaluated against live config. The
+/// seed is the one recompute would stamp on the snapshot it is about to
+/// write.
+fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+    community_publication_missing_controls(
+        state.analytics_min_cell_count,
+        state.community_tenant_ids.len(),
+        community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
+    )
+}
+
+/// Serve-path preconditions, evaluated against a stored snapshot rather
+/// than current config. A snapshot written before this gate existed
+/// carries no privacy block; it is treated as cohort-of-one and refused
+/// rather than grandfathered in.
+fn community_snapshot_missing_controls(
+    row: &trace_commons_server::db::LeaderboardSnapshotRow,
+) -> Vec<&'static str> {
+    let cohort_size = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("tenant_cohort_size"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    community_publication_missing_controls(
+        usize::try_from(row.min_cell_count).unwrap_or(0),
+        cohort_size,
+        community_noise_mechanism_approved(&row.noise_seed_hash),
+    )
+}
+
+/// Privacy provenance recorded on every snapshot, so a published
+/// artifact carries the controls it was produced under rather than
+/// requiring a reader to trust the pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunitySnapshotPrivacy {
+    /// Seed hash of the mechanism in force when this snapshot was
+    /// computed. [`COMMUNITY_LEADERBOARD_NOISE_SEED_HASH`] means none.
+    noise_seed_hash: String,
+    /// Minimum cell size actually enforced during computation.
+    min_cell_count: i32,
+    /// Number of distinct tenants aggregated.
+    tenant_cohort_size: i32,
+    /// Epsilon charged against the privacy budget. `None` until a
+    /// calibrated mechanism exists to charge against.
+    epsilon_charged: Option<f64>,
+    /// Per-contributor sensitivity the noise was calibrated to. `None`
+    /// for the same reason.
+    sensitivity: Option<f64>,
+}
+
+impl CommunitySnapshotPrivacy {
+    /// Stand-in for snapshots written before this block existed. Every
+    /// field is the refusing value, so an old snapshot cannot pass the
+    /// serve-path gate by omission.
+    fn unknown() -> Self {
+        Self {
+            noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+            min_cell_count: 0,
+            tenant_cohort_size: 0,
+            epsilon_charged: None,
+            sensitivity: None,
+        }
+    }
+}
 
 /// Compute a fresh snapshot from current DB state and persist it.
 /// Returns the inserted snapshot row so the admin handler can echo
@@ -12176,6 +12311,19 @@ async fn recompute_community_snapshot(
             "community snapshot recompute requires the DB mirror to be configured",
         )
     })?;
+    // Fail closed before touching contributor data: a snapshot that
+    // cannot be published is not worth computing, and computing it
+    // anyway leaves un-noised aggregates sitting in the snapshot table.
+    let missing_controls = community_publication_missing_controls_for_state(state);
+    if !missing_controls.is_empty() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "community publication is blocked by missing privacy controls: {}",
+                missing_controls.join(", ")
+            ),
+        ));
+    }
     let min_cell_count = state.analytics_min_cell_count as i64;
     let inputs = db
         .compute_leaderboard_inputs(
@@ -12245,6 +12393,13 @@ async fn recompute_community_snapshot(
         window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
         metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
         min_cell_count: state.analytics_min_cell_count as i32,
+        privacy: CommunitySnapshotPrivacy {
+            noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+            min_cell_count: state.analytics_min_cell_count as i32,
+            tenant_cohort_size: state.community_tenant_ids.len() as i32,
+            epsilon_charged: None,
+            sensitivity: None,
+        },
         leaderboard,
         contributors,
         analytics: CommunityCorpusAnalytics {
@@ -12281,6 +12436,54 @@ async fn recompute_community_snapshot(
         .map_err(internal_error)
 }
 
+/// Fetch the latest snapshot for the public read handlers and refuse to
+/// serve it unless it was produced under the required privacy controls.
+///
+/// Shared by every public community handler so the gate cannot be wired
+/// into one and forgotten on another, and so snapshots already sitting
+/// in the table from before the gate existed stop being served the
+/// moment this ships - without requiring a data migration.
+async fn latest_publishable_community_snapshot(
+    state: &AppState,
+) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community surface is not configured",
+        )
+    })?;
+    let snapshot = db
+        .latest_leaderboard_snapshot(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no community snapshot has been computed yet",
+            )
+        })?;
+    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    if !missing_controls.is_empty() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "community snapshot is withheld by missing privacy controls: {}",
+                missing_controls.join(", ")
+            ),
+        ));
+    }
+    Ok(snapshot)
+}
+
 async fn recompute_community_snapshot_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -12307,31 +12510,7 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     Ok(Json(snapshot.contents))
 }
 
@@ -12339,31 +12518,7 @@ async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12376,31 +12531,7 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !state.community_leaderboard_enabled {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "community surface is not enabled on this deployment",
-        ));
-    }
-    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community surface is not configured",
-        )
-    })?;
-    let snapshot = db
-        .latest_leaderboard_snapshot(
-            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
-            COMMUNITY_LEADERBOARD_METRIC,
-        )
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no community snapshot has been computed yet",
-            )
-        })?;
+    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     Ok(Json(
