@@ -4723,6 +4723,56 @@ async fn server_rescrub_raises_risk_when_it_redacts_pii_the_client_under_reporte
     );
 }
 
+// Required test 1: a HIGH trace with a complete, successful re-scrub
+// assessment must be able to downgrade. Before PR #179's downgrade fix,
+// the server pass only ever combined its finding with the PRIOR risk via
+// `max_residual_risk`, so a HIGH prior could never move - this is exactly
+// the bug the 48 stuck pilot quarantines hit.
+#[tokio::test]
+async fn server_rescrub_downgrades_high_prior_risk_when_pass_is_clean_and_complete() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    // Simulate a trace that arrived already classified HIGH (e.g. a
+    // contributor-side scan flagged it), but whose content is in fact
+    // clean once the server's own deterministic pass and residual scan
+    // run over it.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::Low,
+        "a complete, clean re-scrub must be able to downgrade a prior HIGH classification"
+    );
+}
+
+// Required test 2: that downgrade must flip the stored status from
+// Quarantined to Accepted - `status_for_risk` reads the risk this pass
+// just wrote, so if the downgrade above works, the release follows
+// automatically with no separate status-flip logic needed.
+#[tokio::test]
+async fn server_rescrub_downgrade_flips_quarantined_status_to_accepted() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "sanity: a HIGH-risk envelope must start out quarantined"
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Accepted,
+        "a downgrade to Low must release the trace from quarantine"
+    );
+}
+
 #[tokio::test]
 async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
     // Regression guard on the residual scan: the envelope is full of
