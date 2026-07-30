@@ -153,8 +153,12 @@ jobs:
           key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-default-
-      - run: cargo test -p trace-commons-server
-      - run: cargo test -p trace-commons-contributor
+      # Whole workspace, not a hand-maintained crate list. Naming crates
+      # individually meant trace-commons-protocol (45 tests, including the
+      # redaction and secret-detection suites) and trace-commons-operator-client
+      # (41 tests) were never executed by CI at all, and a new crate joins the
+      # workspace untested by default.
+      - run: cargo test --workspace
 
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke
