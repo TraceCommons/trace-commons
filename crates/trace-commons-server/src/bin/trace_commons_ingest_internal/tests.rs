@@ -79614,3 +79614,67 @@ async fn attestation_keyset_handler_fails_closed_then_publishes_the_key() {
         Some(TEST_EDDSA_PUBLIC_KEY_PEM)
     );
 }
+
+#[test]
+fn settlement_cap_bounds_the_account_not_each_principal() {
+    fn event(principal: &str, points: f32) -> TraceCommonsCreditLedgerRecord {
+        TraceCommonsCreditLedgerRecord {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: principal.to_string(),
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: points,
+            reason: None,
+            external_ref: None,
+            actor_role: TokenRole::Admin,
+            actor_principal_ref: principal.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    // Three principals, each individually under a 1.0-point cap, all linked
+    // to one durable account. Together they are 1.8 points against that cap.
+    let events = vec![
+        event("principal-1", 0.6),
+        event("principal-2", 0.6),
+        event("principal-3", 0.6),
+    ];
+    let cap = Some(1_000_000); // 1.0 points in micros
+    let account = Uuid::new_v4();
+    let linked: HashMap<String, Uuid> = ["principal-1", "principal-2", "principal-3"]
+        .into_iter()
+        .map(|p| (p.to_string(), account))
+        .collect();
+
+    let (settled, excluded, reasons) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &linked);
+    assert!(
+        settled.is_empty(),
+        "the account is over cap, so none of its principals may settle"
+    );
+    assert_eq!(excluded, 3);
+    assert_eq!(
+        reasons.get("account_settlement_amount_exceeds_cap"),
+        Some(&3)
+    );
+
+    // Without account linkage there is nothing to fold up, so the legacy
+    // per-principal behaviour is preserved: each is under cap and settles.
+    let (settled_unlinked, excluded_unlinked, _) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &HashMap::new());
+    assert_eq!(
+        settled_unlinked.len(),
+        3,
+        "unlinked principals are each under the cap and settle as before"
+    );
+    assert_eq!(excluded_unlinked, 0);
+
+    // A single principal over the cap is still blocked, linked or not.
+    let (over, over_excluded, _) =
+        apply_credit_settlement_account_cap(vec![event("solo", 1.5)], cap, &HashMap::new());
+    assert!(over.is_empty());
+    assert_eq!(over_excluded, 1);
+}
