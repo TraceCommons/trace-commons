@@ -1004,8 +1004,76 @@ fn default_trace_ranking_joined_evidence_hash() -> String {
     "sha256:legacy".to_string()
 }
 
+/// Printed by `--generate-attestation-keypair`.
+///
+/// Deliberately handled before `AppState::from_env()`: an operator needs this
+/// key in order to configure the server, so requiring a configured server to
+/// mint it would be circular. This path touches no env var, no database, and
+/// no object store.
+fn generate_attestation_keypair_and_print() -> anyhow::Result<()> {
+    // Same generator the issuer uses, so the attestation key is byte-identical
+    // in format to the upload-claim key and round-trips through the same
+    // validation `AttestationSigningState::build` performs at startup.
+    let keypair = trace_commons_server::trace_upload_claim_issuer::generate_upload_claim_keypair()?;
+    println!("# Attestation signing key for trace-commons-ingest.");
+    println!("# Store the private key as an operator secret; never commit it.");
+    println!("# The public key is published at");
+    println!("#   GET /.well-known/trace-commons-attestation-keyset.json");
+    println!("# so collectors can verify score attestations.");
+    println!();
+    println!(
+        "TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID={}",
+        keypair.suggested_kid
+    );
+    println!();
+    println!(
+        "TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM='{}'",
+        keypair.private_key_pem
+    );
+    println!(
+        "TRACE_COMMONS_INGEST_ATTESTATION_PUBLIC_KEY_PEM='{}'",
+        keypair.public_key_pem
+    );
+    Ok(())
+}
+
+const INGEST_HELP_TEXT: &str = "trace-commons-ingest
+
+Hosted Trace Commons ingest / review / admin / worker API.
+
+USAGE:
+    trace-commons-ingest [SUBCOMMAND]
+
+SUBCOMMANDS:
+    (none)                            Start the HTTP server (default)
+    --generate-attestation-keypair    Print a fresh Ed25519 keypair and kid for
+                                      score attestations, as env-var
+                                      assignments. Requires no configuration.
+    -h, --help                        Print this help text
+";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Argument handling precedes any env/config load so the keypair generator
+    // works on an unconfigured host.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        None => {}
+        Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
+        Some("-h") | Some("--help") => {
+            print!("{INGEST_HELP_TEXT}");
+            return Ok(());
+        }
+        Some(other) => {
+            // Fail closed on an unrecognized flag rather than silently booting
+            // the server: an operator who mistypes the generator flag must not
+            // get a running ingest instead of a key. Echoing the argument is
+            // the operator's own input on their own terminal, not a stored row
+            // or a log line, so the hash-only rule does not apply.
+            anyhow::bail!("unrecognized argument {other:?}; run with --help");
+        }
+    }
+
     let _ = tracing_subscriber::fmt::try_init();
     let state = Arc::new(AppState::from_env().await?);
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
