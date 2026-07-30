@@ -49,6 +49,7 @@ the link.
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
+| Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
 | Diagnosing a stuck or failing service | [`./troubleshooting.md`](./troubleshooting.md) |
 | Understanding the deployment topology | [`./architecture.md`](./architecture.md) |
 
