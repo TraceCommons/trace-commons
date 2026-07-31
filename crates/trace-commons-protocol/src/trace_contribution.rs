@@ -1393,6 +1393,13 @@ pub struct RedactionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     pub blocked_secret_detected: bool,
+    /// Set when a classifier flagged an *object key* (not just a value) as
+    /// PII-bearing. Keys are not rewritten in place (rewriting risks
+    /// collisions with sibling keys), so a key finding cannot be resolved by
+    /// redaction the way a value finding can. It forces High rather than
+    /// being silently dropped or merely counted.
+    #[serde(default)]
+    pub key_finding_detected: bool,
 }
 
 impl RedactionReport {
@@ -1427,6 +1434,7 @@ impl RedactionReport {
             self.add_warning(warning);
         }
         self.blocked_secret_detected |= other.blocked_secret_detected;
+        self.key_finding_detected |= other.key_finding_detected;
     }
 }
 
@@ -2556,7 +2564,9 @@ impl DeterministicTraceRedactor {
     /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
     /// reads `TRACE_PRIVACY_FILTER_BACKEND` or its adapter-specific env
     /// vars, so it cannot race concurrent env mutation elsewhere in the
-    /// process and cannot fail from missing/invalid privacy-filter config.
+    /// process and cannot fail from missing/invalid privacy-filter config -
+    /// exactly what the residual scan needs, since it only calls the plain
+    /// `redact_text`, which never consults the attached adapter.
     fn bare() -> Self {
         Self {
             leak_detector: SecretLeakDetector::new(),
@@ -3020,9 +3030,38 @@ pub fn rescrub_trace_envelope_with(
     // this was computed from an empty report, so only a blocked secret
     // could raise the classification.
     let server_pass_risk = residual_risk(&envelope.consent, &report);
-    let residual_hit = !residual.counts.is_empty()
-        || !residual.pii_labels_present.is_empty()
-        || residual.blocked_secret_detected;
+
+    let prior_risk = envelope.privacy.residual_pii_risk;
+    // No classifier runs on this path, so there is no classifier evidence and
+    // this assessment can never lower the prior risk.
+    //
+    // An earlier version set this `true` on the reasoning that the
+    // deterministic pass is a pure function and therefore self-evidencing.
+    // That is wrong, and it was a fail-open: being a pure function
+    // establishes *availability*, not detection completeness or the absence
+    // of PII. The prior risk is High because something already found cause
+    // for concern; the deterministic patterns failing to match is a proxy for
+    // cleanliness, not evidence of it. A High trace missed by the regex suite
+    // would have been published without NEAR AI ever examining it.
+    //
+    // The pass still *raises* risk freely -- `resolve_post_scrub_risk` falls
+    // back to `max_residual_risk`, and a residual finding still forces High.
+    // Only the downgrade direction requires classifier evidence.
+    let assessment = PostScrubAssessment {
+        complete_coverage: residual.is_ok(),
+        useful_classifier_result: false,
+        findings: report.clone(),
+        residual_findings: residual.clone().unwrap_or_default(),
+    };
+    envelope.privacy.residual_pii_risk = match residual {
+        Ok(_) => resolve_post_scrub_risk(prior_risk, server_pass_risk, &assessment),
+        Err(_) => {
+            // Fail closed: the residual scan could not run, so this pass
+            // cannot prove the envelope is clean. Never trust an empty
+            // report produced by a failed scan; force the worst case.
+            ResidualPiiRisk::High
+        }
+    };
 
     for (label, count) in report.counts {
         *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
@@ -3033,13 +3072,6 @@ pub fn rescrub_trace_envelope_with(
         }
     }
 
-    envelope.privacy.residual_pii_risk =
-        max_residual_risk(envelope.privacy.residual_pii_risk, server_pass_risk);
-    if residual_hit {
-        // Fail closed: something matched after redaction already ran,
-        // so the envelope still carries it. High quarantines.
-        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
-    }
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -3065,15 +3097,176 @@ pub fn rescrub_trace_envelope_with(
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 }
 
+/// Byte/node/depth budgets for classifying `event.structured_payload` trees
+/// through the async classifier (Task 3). These bound the async classifier
+/// traffic and CPU work per envelope; hitting any of them makes coverage
+/// incomplete rather than silently skipping the rest of the tree.
+const STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES: usize = 400_000;
+const STRUCTURED_PAYLOAD_MAX_FIELD_BYTES: usize = 32_000;
+const STRUCTURED_PAYLOAD_MAX_NODES: usize = 4_000;
+const STRUCTURED_PAYLOAD_MAX_DEPTH: usize = 24;
+
+#[derive(Default)]
+struct StructuredPayloadBudget {
+    aggregate_bytes: usize,
+    nodes: usize,
+}
+
+/// Recursively classify every string leaf and object key inside a
+/// structured tool payload through the async classifier.
+///
+/// String *values* are replaced with the classifier's redacted text (same
+/// as the prose fields). Object *keys* are classified for detection only -
+/// they are never rewritten, because two distinct keys can classify to
+/// colliding redacted text and a key rewrite has no analogue to the
+/// collision guard `insert_without_collision` gives map values. A finding
+/// on a key therefore forces High via `RedactionReport::key_finding_detected`
+/// rather than being "resolved" by a rewrite that could silently drop data.
+///
+/// Returns `Ok(true)` when the whole subtree was covered within budget, or
+/// `Ok(false)` the moment any budget is exceeded (aggregate bytes, a single
+/// field's bytes, node count, or recursion depth) - the caller treats that
+/// as incomplete coverage, never as a silent skip.
+fn classify_structured_payload_node<'a>(
+    adapter: &'a dyn PrivacyFilterAdapter,
+    value: &'a mut Value,
+    depth: usize,
+    budget: &'a mut StructuredPayloadBudget,
+    report: &'a mut RedactionReport,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+            return Ok(false);
+        }
+        match value {
+            Value::String(text) => {
+                budget.nodes += 1;
+                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
+                    return Ok(false);
+                }
+                if text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
+                    return Ok(false);
+                }
+                budget.aggregate_bytes += text.len();
+                if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                    return Ok(false);
+                }
+                if let Some(redaction) = adapter.redact_text(text).await? {
+                    report.merge(redaction.report);
+                    *text = redaction.redacted_text;
+                }
+                Ok(true)
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() {
+                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Value::Object(entries) => {
+                for (key, item) in entries.iter_mut() {
+                    budget.nodes += 1;
+                    if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
+                        return Ok(false);
+                    }
+                    if key.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
+                        return Ok(false);
+                    }
+                    budget.aggregate_bytes += key.len();
+                    if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                        return Ok(false);
+                    }
+                    if let Some(redaction) = adapter.redact_text(key).await? {
+                        let has_finding = !redaction.report.counts.is_empty()
+                            || !redaction.report.pii_labels_present.is_empty()
+                            || redaction.report.blocked_secret_detected;
+                        if has_finding {
+                            report.key_finding_detected = true;
+                        }
+                    }
+                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    })
+}
+
 /// Runs an async prose-PII filter (e.g. the NEAR AI backstop) over an
-/// already-produced envelope's free-text fields — `events[*].redacted_content`
-/// and `outcome.human_correction`. Tool-call `structured_payload` JSON is out
-/// of scope; this is a prose filter only.
+/// already-produced envelope's content-bearing fields:
+/// `events[*].redacted_content`, `events[*].structured_payload` (every
+/// string leaf and object key, within the budgets above), and
+/// `outcome.human_correction`.
 ///
 /// Two-pass and atomic: every `adapter.redact_text` call is awaited and
 /// collected in the first pass, so any adapter error is returned before any
 /// field of `envelope` is mutated. The second pass applies the collected
 /// text replacements and metadata updates without further awaits.
+///
+/// A HIGH prior risk can be downgraded here ONLY when the reassessment is
+/// complete and convincing: every field was covered within budget, the
+/// classifier's result was evidence-backed (see the zero-finding canary
+/// check below), and a fresh residual scan came back clean. Any gap in that
+/// chain preserves the prior risk instead - see [`resolve_post_scrub_risk`].
+/// Free-text fields that carry contributor- or model-authored prose but that
+/// [`rescrub_envelope_prose_pii_with`] never submits to the classifier. The
+/// scrub pass covers only `events[*].redacted_content`,
+/// `events[*].structured_payload`, and `outcome.human_correction`; everything
+/// listed here is untouched by it, and the deterministic residual scan that
+/// follows only matches patterned secrets, not prose PII such as names or
+/// addresses.
+///
+/// So when any of these carries text, the reassessment did NOT see the whole
+/// envelope and must not claim complete coverage - a High prior risk stays
+/// High. Envelopes that leave these empty (the common case) are unaffected.
+///
+/// Only user-derived prose counts. Identifier-shaped strings are excluded
+/// (versions, enum tags, retention policies, revocation handles, tool
+/// categories, pseudonymous contributor refs), and so is system-authored
+/// text: `value.explanation`, `value_card.limitations`, and
+/// `value_card.user_visible_explanation` are written by the scorer, not by
+/// the contributor. `TraceValueCard::default()` in particular ships a fixed
+/// boilerplate `limitations` entry on every envelope, so counting it would
+/// block every downgrade and make the reassessment dead code. If the scorer
+/// ever begins quoting trace content into those fields, they belong here.
+///
+/// This list is explicit rather than derived, so a newly added prose field
+/// will not be accounted for until it is added here or covered by the scrub.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
+    fn has_text(values: &[String]) -> bool {
+        values.iter().any(|v| !v.trim().is_empty())
+    }
+
+    if has_text(&envelope.replay.replay_notes) {
+        return true;
+    }
+
+    if let Some(hindsight) = envelope.hindsight.as_ref() {
+        if hindsight
+            .original_goal_summary
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+            || has_text(&hindsight.achieved_subgoals)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(feature = "near-ai-privacy-filter")]
 pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
@@ -3081,8 +3274,10 @@ pub async fn rescrub_envelope_prose_pii_with(
 ) -> Result<(), TraceContributionError> {
     let mut event_updates: Vec<(usize, String)> = Vec::new();
     let mut correction_update: Option<String> = None;
+    let mut structured_updates: Vec<(usize, Value)> = Vec::new();
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
+    let mut structured_complete = true;
 
     for (index, event) in envelope.events.iter().enumerate() {
         let Some(content) = event.redacted_content.as_deref() else {
@@ -3103,6 +3298,28 @@ pub async fn rescrub_envelope_prose_pii_with(
         }
     }
 
+    // Structured tool payloads (Task 3): classify every string leaf and
+    // object key of each event's `structured_payload`, working on a clone
+    // so a mid-traversal adapter error (propagated via `?`) leaves the real
+    // envelope untouched, matching the atomicity of the prose passes above.
+    {
+        let mut budget = StructuredPayloadBudget::default();
+        for (index, event) in envelope.events.iter().enumerate() {
+            if event.structured_payload.is_null() {
+                continue;
+            }
+            let mut clone = event.structured_payload.clone();
+            let covered =
+                classify_structured_payload_node(adapter, &mut clone, 0, &mut budget, &mut report)
+                    .await?;
+            structured_updates.push((index, clone));
+            if !covered {
+                structured_complete = false;
+                break;
+            }
+        }
+    }
+
     // Second pass: no awaits below this line, so the updates collected
     // above are applied atomically.
     for (index, redacted_text) in event_updates {
@@ -3111,31 +3328,79 @@ pub async fn rescrub_envelope_prose_pii_with(
     if let Some(redacted_text) = correction_update {
         envelope.outcome.human_correction = Some(redacted_text);
     }
-
-    let blocked_secret_detected = report.blocked_secret_detected;
-    for (label, count) in report.counts {
-        *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
+    for (index, redacted_payload) in structured_updates {
+        envelope.events[index].structured_payload = redacted_payload;
     }
-    for label in report.pii_labels_present {
-        if !envelope.privacy.pii_labels_present.contains(&label) {
-            envelope.privacy.pii_labels_present.push(label);
+
+    for (label, count) in &report.counts {
+        *envelope
+            .privacy
+            .redaction_counts
+            .entry(label.clone())
+            .or_insert(0) += count;
+    }
+    for label in &report.pii_labels_present {
+        if !envelope.privacy.pii_labels_present.contains(label) {
+            envelope.privacy.pii_labels_present.push(label.clone());
         }
     }
     if let Some(summary) = &summary {
         merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, summary);
     }
 
-    let backstop_pass_risk = residual_risk(
-        &envelope.consent,
-        &RedactionReport {
-            counts: BTreeMap::new(),
-            pii_labels_present: Vec::new(),
-            warnings: Vec::new(),
-            blocked_secret_detected,
-        },
-    );
-    envelope.privacy.residual_pii_risk =
-        max_residual_risk(envelope.privacy.residual_pii_risk, backstop_pass_risk);
+    // Zero-finding responses are not automatically trustworthy (Task 2): a
+    // 200 with an empty span list is indistinguishable, on its own, from an
+    // unavailable, misconfigured, or systematically false-negative
+    // classifier. When this pass found *nothing at all* across every field
+    // it covered, demand a fresh, live canary round-trip as explicit
+    // evidence the classifier is actually working before trusting that
+    // emptiness. Any real finding is itself sufficient evidence the
+    // classifier ran for real, so the canary is skipped in that case.
+    let aggregate_empty = report.counts.is_empty()
+        && report.pii_labels_present.is_empty()
+        && !report.blocked_secret_detected
+        && !report.key_finding_detected;
+    // A healthy canary is a liveness signal, not evidence about arbitrary
+    // content: the canary is three static, public constants, so a classifier
+    // can recognise exactly those and miss everything real. This file's own
+    // `CanaryHealthyButFindsNoRealPii` fixture is that classifier, which is
+    // how we know the bypass is constructible. Findings are the only
+    // evidence: a classifier that found and removed PII demonstrably ran,
+    // which permits High -> Medium; one that returned nothing cannot be
+    // told apart from a broken one, so High stays High.
+    let useful_classifier_result = !aggregate_empty;
+
+    // Residual scan (Task 1/4): re-run the deterministic detection-only
+    // scan after the classifier's mutations, exactly as the sync server
+    // rescrub does. `bare()` is infallible and reads no env, since this
+    // scan only ever calls the plain `redact_text` and never touches an
+    // attached privacy-filter adapter.
+    let redactor = DeterministicTraceRedactor::bare();
+    let residual = residual_envelope_scan(&redactor, envelope).map_err(|_| {
+        TraceContributionError::RedactionFailed {
+            reason: "residual envelope scan failed after PII backstop pass".to_string(),
+        }
+    });
+
+    let prior_risk = envelope.privacy.residual_pii_risk;
+    envelope.privacy.residual_pii_risk = match residual {
+        Ok(residual_findings) => {
+            let backstop_pass_risk = residual_risk(&envelope.consent, &report);
+            let assessment = PostScrubAssessment {
+                complete_coverage: structured_complete && !uncovered_prose_present(envelope),
+                useful_classifier_result,
+                findings: report.clone(),
+                residual_findings,
+            };
+            resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment)
+        }
+        Err(_) => {
+            // Fail closed: could not verify the envelope is clean after
+            // this pass, so never trust it enough to downgrade or even
+            // hold steady on an empty report. Force the worst case.
+            ResidualPiiRisk::High
+        }
+    };
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -3206,7 +3471,7 @@ fn redact_envelope_side_channels(
             let mut key = key;
             redact_string_in_place(redactor, &mut key, report, state);
             redact_string_in_place(redactor, &mut value, report, state);
-            envelope.ironclaw.feature_flags.insert(key, value);
+            insert_without_collision(&mut envelope.ironclaw.feature_flags, key, value);
         }
     }
     if let Some(model_name) = envelope.ironclaw.model_name.as_mut() {
@@ -3238,7 +3503,7 @@ fn redact_envelope_side_channels(
         for (key, value) in manifest {
             let mut key = key;
             redact_string_in_place(redactor, &mut key, report, state);
-            envelope.replay.tool_manifest_hashes.insert(key, value);
+            insert_without_collision(&mut envelope.replay.tool_manifest_hashes, key, value);
         }
     }
     for assertion in &mut envelope.replay.expected_assertions {
@@ -3287,6 +3552,41 @@ fn redact_envelope_side_channels(
     }
 }
 
+/// Object keys never collide as long as `map` did not already contain the
+/// candidate key: rewriting a key (e.g. through deterministic redaction)
+/// can produce the same placeholder for two originally-distinct keys, and a
+/// plain `insert` would silently let the second overwrite the first. This
+/// disambiguates instead of losing data.
+fn insert_without_collision(map: &mut BTreeMap<String, String>, key: String, value: String) {
+    if let std::collections::btree_map::Entry::Vacant(entry) = map.entry(key.clone()) {
+        entry.insert(value);
+        return;
+    }
+    let mut suffix = 1u32;
+    loop {
+        let candidate = format!("{key}~dup{suffix}");
+        if let std::collections::btree_map::Entry::Vacant(entry) = map.entry(candidate) {
+            entry.insert(value);
+            return;
+        }
+        suffix += 1;
+    }
+}
+
+/// Node budget for [`residual_envelope_scan`]. The scan clones and
+/// re-serializes the whole envelope, so it needs its own explicit bound
+/// independent of whatever recursion limit `serde_json` enforces on the way
+/// in - relying on that limit implicitly was itself one of the findings
+/// this budget closes.
+const RESIDUAL_SCAN_MAX_DEPTH: usize = 64;
+const RESIDUAL_SCAN_MAX_NODES: usize = 100_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidualScanError {
+    SerializationFailed,
+    BudgetExceeded,
+}
+
 /// Detection-only scan of the whole envelope after redaction has run.
 ///
 /// Each string is scanned *independently* - object keys separately from
@@ -3296,48 +3596,119 @@ fn redact_envelope_side_channels(
 /// concatenated JSON would let a key like `"vector_key"` act as the cue
 /// for the hash sitting next to it and flag every envelope. Per-leaf
 /// scanning removes that adjacency entirely.
+///
+/// Returns `Err` on a serialization failure or a budget overrun rather than
+/// silently reporting "nothing found" - an envelope this scan cannot
+/// actually cover must never be treated as verified clean.
 fn residual_envelope_scan(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
-) -> RedactionReport {
+) -> Result<RedactionReport, ResidualScanError> {
     let mut report = RedactionReport::default();
-    let Ok(serialized) = serde_json::to_value(envelope) else {
-        // An envelope that will not serialize cannot be stored either;
-        // leave the classification to the callers rather than guessing.
-        return report;
-    };
-    scan_json_leaves(redactor, &serialized, &mut report);
-    report
+    let serialized =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    let mut nodes = 0usize;
+    scan_json_leaves(redactor, &serialized, &mut report, 0, &mut nodes)?;
+    Ok(report)
 }
 
 fn scan_json_leaves(
     redactor: &DeterministicTraceRedactor,
     value: &Value,
     report: &mut RedactionReport,
-) {
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), ResidualScanError> {
+    if depth > RESIDUAL_SCAN_MAX_DEPTH {
+        return Err(ResidualScanError::BudgetExceeded);
+    }
     match value {
         Value::String(text) => {
+            *nodes += 1;
+            if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                return Err(ResidualScanError::BudgetExceeded);
+            }
             let (_, child_report) = redactor.redact_text(text);
             report.merge(child_report);
         }
         Value::Array(items) => {
             for item in items {
-                scan_json_leaves(redactor, item, report);
+                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
             }
         }
         Value::Object(entries) => {
             for (key, item) in entries {
+                *nodes += 1;
+                if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                    return Err(ResidualScanError::BudgetExceeded);
+                }
                 let (_, child_report) = redactor.redact_text(key);
                 report.merge(child_report);
-                scan_json_leaves(redactor, item, report);
+                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
             }
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// The result of attempting a complete, evidence-backed reassessment of an
+/// envelope's residual PII risk after a scrub pass.
+///
+/// Downgrade from the prior risk is permitted ONLY when every field here
+/// demonstrates it is safe: `complete_coverage` (every content-bearing
+/// field was processed, no budget was exceeded, no field was skipped),
+/// `useful_classifier_result` (the pass actually produced usable evidence,
+/// not just an unconvincing empty result), and a clean, successfully-run
+/// residual scan (`residual_findings` empty). Any ambiguity must leave this
+/// assessment unable to downgrade; [`resolve_post_scrub_risk`] then falls
+/// back to the old, safe, max-with-prior combination.
+#[derive(Debug, Clone)]
+struct PostScrubAssessment {
+    complete_coverage: bool,
+    useful_classifier_result: bool,
+    findings: RedactionReport,
+    residual_findings: RedactionReport,
+}
+
+impl PostScrubAssessment {
+    fn residual_clean(&self) -> bool {
+        self.residual_findings.counts.is_empty()
+            && self.residual_findings.pii_labels_present.is_empty()
+            && !self.residual_findings.blocked_secret_detected
+            && !self.residual_findings.key_finding_detected
+    }
+
+    fn can_downgrade(&self) -> bool {
+        self.complete_coverage && self.useful_classifier_result && self.residual_clean()
+    }
+}
+
+/// Combine a prior residual-PII risk with a post-scrub assessment's derived
+/// risk. Downgrade only when the assessment proves it is safe to do so;
+/// otherwise the prior risk is preserved (never lowered) via
+/// `max_residual_risk`, exactly as before this pass existed.
+fn resolve_post_scrub_risk(
+    prior_risk: ResidualPiiRisk,
+    derived_risk: ResidualPiiRisk,
+    assessment: &PostScrubAssessment,
+) -> ResidualPiiRisk {
+    if assessment.findings.blocked_secret_detected
+        || assessment.findings.key_finding_detected
+        || assessment.residual_findings.blocked_secret_detected
+        || assessment.residual_findings.key_finding_detected
+    {
+        return ResidualPiiRisk::High;
+    }
+    if assessment.can_downgrade() {
+        derived_risk
+    } else {
+        max_residual_risk(prior_risk, derived_risk)
+    }
 }
 
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    if report.blocked_secret_detected {
+    if report.blocked_secret_detected || report.key_finding_detected {
         return ResidualPiiRisk::High;
     }
 
@@ -5564,6 +5935,451 @@ mod tests {
                 .get("privacy_filter:private_email")
                 .copied(),
             Some(1)
+        );
+    }
+
+    /// Builds a JSON value nested `depth` levels deep, used to trip the
+    /// residual scan's own depth budget without going anywhere near
+    /// `serde_json`'s recursion limit (which the old code relied on
+    /// implicitly - see the depth-budget finding this closes).
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn deeply_nested_json(depth: usize) -> serde_json::Value {
+        let mut value = serde_json::json!("deep leaf");
+        for _ in 0..depth {
+            value = serde_json::json!([value]);
+        }
+        value
+    }
+
+    /// Test 7 (required test list): when the residual scan itself cannot
+    /// complete - here, a depth budget overrun rather than a literal
+    /// serialization error, since `serde_json::to_value` silently maps
+    /// non-finite floats to `null` instead of erroring in this version -
+    /// the pass must force High rather than silently reporting clean. This
+    /// exercises the exact code path the serialization-failure branch
+    /// shares: `residual_envelope_scan` returning `Err`, not `Ok(default)`.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[test]
+    fn residual_scan_failure_forces_high_risk() {
+        use crate::trace_contribution::*;
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        // Nested well past RESIDUAL_SCAN_MAX_DEPTH, in a field the async
+        // structured-payload classifier never touches, so this isolates
+        // the residual-scan budget specifically.
+        env.replay
+            .expected_assertions
+            .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
+        let redactor = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Sanity: confirm the scan itself actually fails on this fixture,
+        // otherwise the test would vacuously pass for the wrong reason.
+        assert!(residual_envelope_scan(&redactor, &env).is_err());
+
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a residual scan that cannot complete must force High"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn residual_scan_failure_forces_high_in_async_backstop() {
+        use crate::trace_contribution::*;
+        struct NeverFindsAnything;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for NeverFindsAnything {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                Ok(None)
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        // Same isolation as the sync test above: nested in a field the
+        // structured-payload classifier never visits, so only the residual
+        // scan's own budget is exercised.
+        env.replay
+            .expected_assertions
+            .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
+
+        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "async backstop must force High when its residual scan cannot complete"
+        );
+    }
+
+    /// Test 3 (required test list): a classifier response that reports
+    /// "zero spans found" for everything it touched must NOT, by itself, be
+    /// trusted enough to downgrade a HIGH prior risk. Without corroborating
+    /// evidence (a healthy canary round-trip), the assessment stays
+    /// incomplete and the prior risk is preserved.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn zero_span_classifier_response_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct AlwaysEmptySpans;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for AlwaysEmptySpans {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                // Mirrors `{"data":[{"spans":[]}]}`: a real 200 response
+                // that found nothing, on both the real field AND the
+                // canary probe text. Text is returned unchanged.
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.to_string(),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 0,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report: RedactionReport::default(),
+                }))
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a zero-span response must not, by itself, downgrade a HIGH prior risk"
+        );
+    }
+
+    /// Test 4 (required test list): a classifier that returns `None` for
+    /// every field (no redaction ever produced, i.e. no result at all, not
+    /// even an explicit empty-spans response) must not be able to lower a
+    /// HIGH prior risk either. Same fail-closed floor as the zero-span case.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn missing_classifier_result_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct NeverFindsAnything;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for NeverFindsAnything {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                Ok(None)
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a classifier producing no result at all must not downgrade a HIGH prior risk"
+        );
+    }
+
+    /// A classifier that passes the canary but finds nothing in real content
+    /// must NOT downgrade a HIGH prior risk, even with complete coverage and
+    /// no budget overrun. Under the previous rule (healthy canary => trust the
+    /// emptiness) this case downgraded; findings are now the only evidence.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn canary_healthy_but_no_findings_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct CanaryHealthyButFindsNoRealPii;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let canary_values = synthetic_privacy_filter_canary_values();
+                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                    return Ok(None);
+                }
+                let mut redacted = text.to_string();
+                let mut report = RedactionReport::default();
+                for v in &canary_values {
+                    if redacted.contains(v.as_str()) {
+                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                        report.increment("privacy_filter:unknown");
+                        report.add_pii_label("unknown");
+                    }
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: redacted,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canary_values.len() as u32,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        // Ordinary content, well inside every budget, so coverage is
+        // complete: the only thing between this and a downgrade is whether a
+        // zero-finding pass counts as evidence.
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a healthy canary is liveness, not proof the content is clean"
+        );
+    }
+
+    /// Test 5 (required test list): exceeding the structured-payload budget
+    /// (depth, in this case) must mark coverage incomplete and refuse to
+    /// downgrade, even though nothing PII-shaped was ever found.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn structured_payload_budget_overrun_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        // A canary-aware stub: it DOES redact the synthetic canary probe
+        // (so a canary round-trip reports healthy) but never finds
+        // anything in real content. This isolates the budget/coverage gate
+        // from the zero-finding/canary gate (Task 2) - without a
+        // canary-aware stub, `NeverFindsAnything` would also fail the
+        // canary check on its own and the test would not distinguish
+        // "coverage incomplete" from "classifier result not useful".
+        struct CanaryHealthyButFindsNoRealPii;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let canary_values = synthetic_privacy_filter_canary_values();
+                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                    return Ok(None);
+                }
+                let mut redacted = text.to_string();
+                let mut report = RedactionReport::default();
+                for v in &canary_values {
+                    if redacted.contains(v.as_str()) {
+                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                        report.increment("privacy_filter:unknown");
+                        report.add_pii_label("unknown");
+                    }
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: redacted,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canary_values.len() as u32,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        // Nest well past STRUCTURED_PAYLOAD_MAX_DEPTH so the budget trips
+        // before any leaf is even reached.
+        let mut nested = serde_json::json!("deep leaf");
+        for _ in 0..(STRUCTURED_PAYLOAD_MAX_DEPTH + 4) {
+            nested = serde_json::json!([nested]);
+        }
+        env.events[0].structured_payload = nested;
+
+        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a structured-payload budget overrun must preserve, not lower, the prior risk"
+        );
+    }
+
+    /// Prose fields the scrub pass never submits to the classifier
+    /// (`replay.replay_notes` here) must block a downgrade when they carry
+    /// text. The classifier below DOES find real PII, so
+    /// `useful_classifier_result` is true and the structured budget is
+    /// untouched - coverage is the only thing standing between this envelope
+    /// and a downgrade.
+    ///
+    /// The note's PII is prose ("their mother Mary in Baltimore"), not a
+    /// patterned secret, so the deterministic residual scan cannot see it
+    /// either. Without the coverage gate it would ride through untouched
+    /// under a lowered risk label.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn uncovered_prose_field_blocks_downgrade() {
+        use crate::trace_contribution::*;
+        struct FindsRealEmail;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for FindsRealEmail {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if !text.contains("ada@example.com") {
+                    return Ok(None);
+                }
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:private_email");
+                report.add_pii_label("private_email");
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("ada@example.com", "[REDACTED:private_email]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let build = || {
+            let mut env = sample_envelope_with_event_content("mail ada@example.com");
+            env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+            env.consent.message_text_included = false;
+            env.consent.tool_payloads_included = false;
+            env
+        };
+
+        // Control: identical envelope with no uncovered prose. This must
+        // downgrade, which is what makes the assertion below non-vacuous -
+        // the only difference between the two cases is the note.
+        let mut clean = build();
+        clean.replay.replay_notes.clear();
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean)
+            .await
+            .unwrap();
+        assert_ne!(
+            clean.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "control: with full coverage and real findings this envelope downgrades"
+        );
+
+        let mut gapped = build();
+        gapped.replay.replay_notes =
+            vec!["they asked about their mother Mary in Baltimore".to_string()];
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped)
+            .await
+            .unwrap();
+        assert_eq!(
+            gapped.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "prose in a field the classifier never saw must block the downgrade"
+        );
+    }
+
+    /// Test 6 (required test list): string leaves AND object keys inside
+    /// `structured_payload` must reach the classifier. A leaf finding gets
+    /// redacted in place; a KEY finding cannot be safely rewritten (collision
+    /// risk), so it forces High instead.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn structured_payload_leaves_and_keys_reach_classifier() {
+        use crate::trace_contribution::*;
+        struct DetectsEmail;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for DetectsEmail {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if text.contains("alice@example.com") {
+                    let mut report = RedactionReport::default();
+                    report.increment("privacy_filter:private_email");
+                    report.add_pii_label("private_email");
+                    Ok(Some(SafePrivacyFilterRedaction {
+                        redacted_text: text
+                            .replace("alice@example.com", "[REDACTED:private_email]"),
+                        summary: SafePrivacyFilterSummary {
+                            schema_version: 1,
+                            output_mode: "redacted_text_only".into(),
+                            span_count: 1,
+                            by_label: std::collections::BTreeMap::from([(
+                                "private_email".into(),
+                                1,
+                            )]),
+                            decoded_mismatch: false,
+                        },
+                        report,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let mut env = sample_envelope_with_event_content("no prose PII here");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        env.events[0].structured_payload = serde_json::json!({
+            "reviewer_alice@example.com": "argument value with alice@example.com inside",
+        });
+
+        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env)
+            .await
+            .unwrap();
+
+        let payload = &env.events[0].structured_payload;
+        let value_text = payload
+            .get("reviewer_alice@example.com")
+            .and_then(Value::as_str)
+            .expect("key is left unrewritten by design");
+        assert!(
+            value_text.contains("[REDACTED:private_email]"),
+            "structured payload string leaf must reach the classifier and be redacted: {value_text}"
+        );
+        assert!(
+            !value_text.contains("alice@example.com"),
+            "the raw email must not survive in the leaf value: {value_text}"
+        );
+        // The key itself is a finding too (classifier flags it), but per the
+        // documented design choice it is not rewritten - it forces High
+        // instead of being silently dropped or losing sibling data to a
+        // rewrite collision.
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a classifier finding on an object KEY must force High"
         );
     }
 }

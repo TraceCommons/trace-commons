@@ -4723,6 +4723,62 @@ async fn server_rescrub_raises_risk_when_it_redacts_pii_the_client_under_reporte
     );
 }
 
+// The synchronous deterministic pass must NOT downgrade a prior HIGH.
+//
+// This test previously asserted the opposite, and that was a fail-open
+// found by security review: the pass set `useful_classifier_result: true`
+// on the reasoning that a pure function is self-evidencing. Being a pure
+// function establishes availability, not detection completeness. The prior
+// risk is HIGH because something already found cause for concern; the
+// deterministic patterns failing to match is a proxy for cleanliness, not
+// evidence of it, so a HIGH trace the regex suite missed would have been
+// published without any classifier examining it.
+#[tokio::test]
+async fn server_rescrub_does_not_downgrade_high_without_classifier_evidence() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    // Simulate a trace that arrived already classified HIGH (e.g. a
+    // contributor-side scan flagged it), but whose content is in fact
+    // clean once the server's own deterministic pass and residual scan
+    // run over it.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::High,
+        "the deterministic pass alone must never lower a prior HIGH: not matching \
+         its own patterns is not evidence the content is clean"
+    );
+}
+
+// The corollary of the test above: because the deterministic pass cannot
+// downgrade a prior HIGH, it cannot release a quarantined trace either.
+// Release requires classifier evidence, which only the async backstop path
+// can supply.
+#[tokio::test]
+async fn server_rescrub_alone_does_not_release_a_quarantined_trace() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "sanity: a HIGH-risk envelope must start out quarantined"
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "the deterministic pass must leave a quarantined trace quarantined"
+    );
+}
+
 #[tokio::test]
 async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
     // Regression guard on the residual scan: the envelope is full of
