@@ -2551,6 +2551,21 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
+    /// A redactor with no attached privacy-filter adapter and no known path
+    /// prefixes, for detection-only work that never touches
+    /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
+    /// reads `TRACE_PRIVACY_FILTER_BACKEND` or its adapter-specific env
+    /// vars, so it cannot race concurrent env mutation elsewhere in the
+    /// process and cannot fail from missing/invalid privacy-filter config.
+    fn bare() -> Self {
+        Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes: Vec::new(),
+            privacy_filter: None,
+            privacy_filter_backend: PrivacyFilterBackendTag::None,
+        }
+    }
+
     pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
         let mut known_path_prefixes: Vec<String> = known_path_prefixes
             .into_iter()
@@ -4775,8 +4790,7 @@ mod tests {
         };
         use std::sync::Arc;
         let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::try_default()
-            .expect("default redactor")
+        let redactor = DeterministicTraceRedactor::bare()
             .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi);
         let mut report = RedactionReport::default();
         let mut summary = None;
@@ -4810,8 +4824,7 @@ mod tests {
         use super::{DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport};
         use std::sync::Arc;
         let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::try_default()
-            .expect("default redactor")
+        let redactor = DeterministicTraceRedactor::bare()
             .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
         let mut report = RedactionReport::default();
         let mut summary = None;
@@ -4895,7 +4908,7 @@ mod tests {
     #[test]
     fn redact_text_strips_broadened_secret_shapes() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // JWT (three base64url segments)
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
         let (out, rep) = r.redact_text(&format!("Authorization: Bearer {jwt}"));
@@ -4911,7 +4924,7 @@ mod tests {
     #[test]
     fn redact_text_removes_entire_pem_block_not_just_header() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
         let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
         assert!(
@@ -4929,7 +4942,7 @@ mod tests {
     #[test]
     fn redact_text_catches_orphan_pem_header_without_end() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
         let (out, _) = r.redact_text(truncated);
         assert!(
@@ -4941,7 +4954,7 @@ mod tests {
     #[test]
     fn contextual_entropy_redacts_unknown_key_after_cue() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // opaque high-entropy token, no known prefix, but preceded by a cue
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let (out, rep) = r.redact_text(&format!("api_key: {secret}"));
@@ -5291,7 +5304,7 @@ mod tests {
     #[test]
     fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // message id after a cue-shaped word must NOT be redacted (allowlisted prefix)
         let (o1, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
         assert!(
@@ -5370,7 +5383,7 @@ mod tests {
     #[test]
     fn contextual_entropy_spares_its_own_report_metric_labels() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         for label in REPORT_METRIC_LABELS {
             let json_like = format!("\"secret:{label}\":1");
             let (out, rep) = r.redact_text(&json_like);
