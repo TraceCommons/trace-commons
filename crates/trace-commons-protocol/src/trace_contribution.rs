@@ -3056,14 +3056,15 @@ pub async fn rescrub_envelope_prose_pii_with(
         && report.pii_labels_present.is_empty()
         && !report.blocked_secret_detected
         && !report.key_finding_detected;
-    let useful_classifier_result = if aggregate_empty {
-        match run_privacy_filter_canary(adapter).await {
-            Ok(canary) => canary.healthy,
-            Err(_) => false,
-        }
-    } else {
-        true
-    };
+    // A healthy canary is a liveness signal, not evidence about arbitrary
+    // content: the canary is three static, public constants, so a classifier
+    // can recognise exactly those and miss everything real. This file's own
+    // `CanaryHealthyButFindsNoRealPii` fixture is that classifier, which is
+    // how we know the bypass is constructible. Findings are the only
+    // evidence: a classifier that found and removed PII demonstrably ran,
+    // which permits High -> Medium; one that returned nothing cannot be
+    // told apart from a broken one, so High stays High.
+    let useful_classifier_result = !aggregate_empty;
 
     // Residual scan (Task 1/4): re-run the deterministic detection-only
     // scan after the classifier's mutations, exactly as the sync server
@@ -5407,6 +5408,67 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::High,
             "a classifier producing no result at all must not downgrade a HIGH prior risk"
+        );
+    }
+
+    /// A classifier that passes the canary but finds nothing in real content
+    /// must NOT downgrade a HIGH prior risk, even with complete coverage and
+    /// no budget overrun. Under the previous rule (healthy canary => trust the
+    /// emptiness) this case downgraded; findings are now the only evidence.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn canary_healthy_but_no_findings_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct CanaryHealthyButFindsNoRealPii;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let canary_values = synthetic_privacy_filter_canary_values();
+                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                    return Ok(None);
+                }
+                let mut redacted = text.to_string();
+                let mut report = RedactionReport::default();
+                for v in &canary_values {
+                    if redacted.contains(v.as_str()) {
+                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                        report.increment("privacy_filter:unknown");
+                        report.add_pii_label("unknown");
+                    }
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: redacted,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canary_values.len() as u32,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        // Ordinary content, well inside every budget, so coverage is
+        // complete: the only thing between this and a downgrade is whether a
+        // zero-finding pass counts as evidence.
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a healthy canary is liveness, not proof the content is clean"
         );
     }
 
