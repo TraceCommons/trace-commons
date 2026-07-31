@@ -27,7 +27,11 @@ use crate::redaction::redact_sensitive_json;
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
-pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v2";
+/// Bumped to v3 when the contextual-entropy pass began re-anchoring after `=`
+/// so a cue glued to its value (`api_key=<secret>`) is seen. Stored envelopes
+/// carry this string, so a v2 stamp means the glued-assignment shape was not
+/// covered when that envelope was redacted.
+pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 
@@ -37,7 +41,9 @@ pub enum PrivacyFilterBackendTag {
     Sidecar,
     NearAi,
 }
-pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v1";
+/// v2 alongside the deterministic pipeline bump above: the server re-scrub
+/// runs the same detector, so its stamp has to move with it.
+pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
 #[cfg(feature = "near-ai-privacy-filter")]
 pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
@@ -2079,6 +2085,152 @@ const ENTROPY_MIN_LEN: usize = 16;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
+/// Size of each window used when measuring entropy over a bounded (`=`-split)
+/// reading of a candidate.
+///
+/// A bounded reading is only taken once the cheap gates in [`is_cued_secret`]
+/// (length, cue, allowlist) have passed, so this is not on the hot path an
+/// attacker controls by stuffing a candidate with `=`; see the ordering note
+/// there. [`entropy_sample_bits`] covers the whole candidate in windows of
+/// this size, so a candidate of any length is measured completely rather than
+/// only at fixed anchors.
+///
+/// Kept close to [`ENTROPY_MIN_LEN`] rather than large: entropy is measured
+/// as an aggregate over the whole window, so a short opaque secret sitting in
+/// a window otherwise full of low-entropy filler is diluted by that filler --
+/// a big window can miss a real secret even when a window does cover it. A
+/// smaller window bounds how much filler can dilute the one window that
+/// contains the secret.
+const ENTROPY_SAMPLE_BYTES: usize = 64;
+
+/// Entropy of `token`, measured as the maximum over a set of windows that
+/// together cover the whole token, on char boundaries.
+///
+/// This only runs once [`is_cued_secret`]'s cheap gates (length, cue,
+/// allowlist) have already passed, so it is on the rare path, not the hot
+/// one -- see the ordering note on [`is_cued_secret`].
+///
+/// A fixed number of windows spread evenly across the token (the previous
+/// approach here) leaves a blind spot on any token long enough that the
+/// spacing between windows exceeds a window: opaque material placed between
+/// two windows, surrounded by low-entropy filler, is never sampled. Instead,
+/// windows advance by half a window each step. Any run of opaque material no
+/// longer than half a window cannot fall entirely in the gap between two
+/// windows -- it always lands wholly inside at least one of them -- so the
+/// whole token is covered with no length-dependent gap. Cost stays linear in
+/// the token's length: the window count grows with the token, but each
+/// window is a fixed [`ENTROPY_SAMPLE_BYTES`]-byte scan.
+fn entropy_sample_bits(token: &str) -> f64 {
+    if token.len() <= ENTROPY_SAMPLE_BYTES {
+        return token_shannon_entropy(token);
+    }
+    let step = (ENTROPY_SAMPLE_BYTES / 2).max(1);
+    let mut best = 0.0f64;
+    let mut start = 0usize;
+    loop {
+        while start < token.len() && !token.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut end = (start + ENTROPY_SAMPLE_BYTES).min(token.len());
+        while end > start && !token.is_char_boundary(end) {
+            end -= 1;
+        }
+        best = best.max(token_shannon_entropy(&token[start..end]));
+        if end >= token.len() {
+            break;
+        }
+        start += step;
+    }
+    best
+}
+
+/// Precomputed windowed-entropy measurements over a whole candidate, built
+/// once and reused across every `=`-split reading attempted on it.
+///
+/// A candidate can contain many `=`, and each one immediately preceded by
+/// what looks like a cue is trivial for an attacker to arrange (just repeat
+/// the cue text), so [`contextual_entropy_secret_ranges`] may need an answer
+/// to "what is the bounded entropy of the reading starting here?" many times
+/// for the SAME candidate. Recomputing [`entropy_sample_bits`] from scratch
+/// on every attempt is linear in the remaining candidate length each time --
+/// summed over many attempts on one long candidate, that is quadratic again,
+/// exactly what the cheap-gate ordering fix on [`is_cued_secret`] was meant
+/// to remove (that fix only removes the cost when there is no cue at all;
+/// this removes it when there is a cue at many positions). Building the
+/// window profile once, in one linear pass over the candidate, and answering
+/// every reading with an O(log windows) suffix-max lookup keeps total
+/// entropy work linear in the candidate's length however many `=` it
+/// contains or how many of them have a cue.
+struct EntropyWindowProfile<'a> {
+    candidate: &'a str,
+    /// Offset of `candidate`'s start within the larger `content` string that
+    /// [`is_cued_secret`] is called against, so callers can pass it an
+    /// absolute byte offset.
+    candidate_start: usize,
+    /// Window start offsets, relative to `candidate`, in ascending order.
+    starts: Vec<usize>,
+    /// `suffix_max[i]` is the largest entropy among `starts[i..]`'s windows.
+    suffix_max: Vec<f64>,
+}
+
+impl<'a> EntropyWindowProfile<'a> {
+    fn build(candidate: &'a str, candidate_start: usize) -> Self {
+        if candidate.len() <= ENTROPY_SAMPLE_BYTES {
+            return Self {
+                candidate,
+                candidate_start,
+                starts: vec![0],
+                suffix_max: vec![token_shannon_entropy(candidate)],
+            };
+        }
+        let step = (ENTROPY_SAMPLE_BYTES / 2).max(1);
+        let mut starts = Vec::new();
+        let mut bits = Vec::new();
+        let mut start = 0usize;
+        loop {
+            while start < candidate.len() && !candidate.is_char_boundary(start) {
+                start += 1;
+            }
+            let mut end = (start + ENTROPY_SAMPLE_BYTES).min(candidate.len());
+            while end > start && !candidate.is_char_boundary(end) {
+                end -= 1;
+            }
+            starts.push(start);
+            bits.push(token_shannon_entropy(&candidate[start..end]));
+            if end >= candidate.len() {
+                break;
+            }
+            start += step;
+        }
+        let mut suffix_max = vec![0.0f64; bits.len()];
+        let mut running = 0.0f64;
+        for i in (0..bits.len()).rev() {
+            running = running.max(bits[i]);
+            suffix_max[i] = running;
+        }
+        Self {
+            candidate,
+            candidate_start,
+            starts,
+            suffix_max,
+        }
+    }
+
+    /// Largest window entropy among windows that start at or after
+    /// `absolute_start` (a byte offset into the original `content`, not into
+    /// `candidate`), matching what a from-scratch [`entropy_sample_bits`]
+    /// call over `content[absolute_start..]` would report. Falls back to
+    /// measuring the exact remaining slice directly when `absolute_start`
+    /// falls after the last precomputed window start; that only happens
+    /// within the last window's span, so the fallback slice is short.
+    fn bits_from(&self, absolute_start: usize) -> f64 {
+        let from = absolute_start.saturating_sub(self.candidate_start);
+        let idx = self.starts.partition_point(|&s| s < from);
+        self.suffix_max.get(idx).copied().unwrap_or_else(|| {
+            token_shannon_entropy(&self.candidate[from.min(self.candidate.len())..])
+        })
+    }
+}
 
 /// Shannon entropy in bits/char over the token's byte distribution.
 fn token_shannon_entropy(s: &str) -> f64 {
@@ -2198,39 +2350,129 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     false
 }
 
-/// Byte ranges of high-entropy tokens that sit within [`CUE_WINDOW`] chars
-/// after a secret cue (authorization/bearer/api_key/secret/password/token/
-/// key=/: ...), excluding allowlisted ID/UUID/hash shapes. Fail-closed: when
-/// unsure whether a token is a structural identifier, it is redacted.
+/// Start of the cue window preceding `start`, snapped to a char boundary.
+fn cue_window_start(content: &str, start: usize) -> usize {
+    let mut window_start = start.saturating_sub(CUE_WINDOW);
+    while window_start > 0 && !content.is_char_boundary(window_start) {
+        window_start -= 1;
+    }
+    window_start
+}
+
+/// True when a secret cue sits within [`CUE_WINDOW`] chars before `start`.
+///
+/// Cheap and highly selective, so it runs before the length-proportional
+/// entropy scan: an ungated entropy pass over real transcripts flags on the
+/// order of 105k structural tokens against ~20 real secrets, and computing
+/// entropy for all of them is both wasted work and, on `=`-dense input where
+/// every suffix is retried, quadratic.
+fn has_secret_cue(content: &str, start: usize) -> bool {
+    secret_cue_regex().is_match(&content[cue_window_start(content, start)..start])
+}
+
+/// True when `content[start..end]` is preceded by a secret cue, long enough,
+/// opaque enough, and not a structural identifier. Fail-closed: when unsure
+/// whether a token is a structural identifier, it is redacted.
 ///
 /// This exists to catch secrets in formats not covered by
-/// [`secret_leak_patterns`] (unknown provider key shapes, ad hoc tokens,
-/// etc). Cue-gating is mandatory, not a nicety: an ungated entropy scan over
-/// real transcripts flags on the order of 105k tokens (message ids, base64
-/// content, UUIDs) against ~20 real secrets, which makes plain entropy
-/// scanning useless in practice.
+/// [`secret_leak_patterns`] (unknown provider key shapes, ad hoc tokens, etc).
+/// `bounded` measures entropy via [`entropy_sample_bits`]'s windowed scan
+/// instead of a single whole-token pass. It is set only for the readings this
+/// pass adds, never for the whole-token reading, so the pre-existing decision
+/// is reproduced exactly and no input that was redacted can stop being
+/// redacted.
+///
+/// The cheap gates (length, cue, allowlist) run FIRST and return early; entropy
+/// is measured only once all three have passed. Every `=` in the input starts
+/// another candidate reading, so on `=`-dense input the entropy scan -- a
+/// windowed pass over [`ENTROPY_SAMPLE_BYTES`]-sized chunks of the whole
+/// candidate -- would otherwise run once per `=` even though
+/// [`has_secret_cue`] rejects nearly all of them. Ordering the cheap checks
+/// first keeps the expensive path off that hot loop.
+///
+/// `profile`, when given, answers a bounded reading from a precomputed
+/// [`EntropyWindowProfile`] instead of rescanning the candidate from
+/// scratch; see that type for why. Pass `None` to measure directly, which
+/// [`contextual_entropy_secret_ranges`] only does before a profile exists to
+/// build.
+fn is_cued_secret(
+    content: &str,
+    start: usize,
+    end: usize,
+    bounded: bool,
+    profile: Option<&EntropyWindowProfile<'_>>,
+) -> bool {
+    let token = &content[start..end];
+    if token.len() < ENTROPY_MIN_LEN {
+        return false;
+    }
+    if !has_secret_cue(content, start) {
+        return false;
+    }
+    if is_allowlisted_entropy_candidate(token) {
+        return false;
+    }
+    let measured_bits = if bounded {
+        match profile {
+            Some(profile) => profile.bits_from(start),
+            None => entropy_sample_bits(token),
+        }
+    } else {
+        token_shannon_entropy(token)
+    };
+    measured_bits >= ENTROPY_BITS_MIN
+}
+
+/// Byte ranges of high-entropy tokens that a secret cue points at.
+///
+/// Scope: only unspaced `=` assignments (`api_key=<value>`) are re-anchored
+/// here. A literal zero-separator glue with no `=` at all (`api_keySECRET`,
+/// `BearerSECRET`) is NOT covered -- there is no `=` to split on, so the cue
+/// word and the value are one token and [`has_secret_cue`]'s window still
+/// never sees a cue word immediately before `start`. That is a separate,
+/// unaddressed gap, not a variant of the one this function fixes.
 fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     for candidate in entropy_candidate_regex().find_iter(content) {
-        let token = candidate.as_str();
-        if token.len() < ENTROPY_MIN_LEN {
-            continue;
+        // The candidate class contains `=`, so an unspaced assignment such as
+        // `api_key=<secret>` arrives as ONE token with the cue glued on. The
+        // cue then sits inside the token being judged instead of in the window
+        // before it, and [`secret_cue_regex`] — anchored to the end of that
+        // window — never sees it, so the value survives. The same secret with a
+        // space is redacted.
+        //
+        // Re-anchoring after each `=` puts the cue back into the window the
+        // existing regex already inspects, which also covers compound names
+        // (`OPENAI_API_KEY=`, `x-api-key=`) because that regex is unanchored on
+        // the left. The whole-token reading is tried FIRST, so this can only
+        // ever add coverage: every range the previous logic produced is still
+        // produced.
+        let candidate_str = candidate.as_str();
+        // Built lazily and at most once per candidate, the first time a
+        // bounded reading needs one -- see `EntropyWindowProfile`. Gating the
+        // build on `has_secret_cue` (not just `bounded`) keeps a candidate
+        // with many `=` but no cue anywhere (the DoS case the ordering fix on
+        // `is_cued_secret` targets) from paying even this one-time cost.
+        let mut profile: Option<EntropyWindowProfile<'_>> = None;
+        let cued_start = std::iter::once((candidate.start(), false))
+            .chain(
+                candidate_str
+                    .match_indices('=')
+                    .map(|(index, _)| (candidate.start() + index + 1, true)),
+            )
+            .find(|&(start, bounded)| {
+                if bounded && profile.is_none() && has_secret_cue(content, start) {
+                    profile = Some(EntropyWindowProfile::build(
+                        candidate_str,
+                        candidate.start(),
+                    ));
+                }
+                is_cued_secret(content, start, candidate.end(), bounded, profile.as_ref())
+            })
+            .map(|(start, _)| start);
+        if let Some(start) = cued_start {
+            ranges.push(start..candidate.end());
         }
-        if is_allowlisted_entropy_candidate(token) {
-            continue;
-        }
-        if token_shannon_entropy(token) < ENTROPY_BITS_MIN {
-            continue;
-        }
-        let mut window_start = candidate.start().saturating_sub(CUE_WINDOW);
-        while window_start > 0 && !content.is_char_boundary(window_start) {
-            window_start -= 1;
-        }
-        let window = &content[window_start..candidate.start()];
-        if !secret_cue_regex().is_match(window) {
-            continue;
-        }
-        ranges.push(candidate.start()..candidate.end());
     }
     ranges
 }
@@ -2447,10 +2689,24 @@ impl DeterministicTraceRedactor {
         // named patterns above. Runs over the already-pattern-redacted text
         // so known secrets stay attributed to their named rule; dedupe
         // against ranges already flagged so a token isn't double-counted.
+        // Only the named-pattern ranges need the overlap check, and a single
+        // forward cursor suffices: both sequences are ordered by start, and two
+        // entropy ranges can never overlap each other because each comes from a
+        // distinct non-overlapping candidate. Comparing every new range against
+        // every range accumulated so far was quadratic, which a contribution
+        // with thousands of glued assignments could reach.
+        let named_range_count = ranges.len();
+        let mut named_cursor = 0usize;
         for entropy_range in contextual_entropy_secret_ranges(&redacted) {
-            let overlaps = ranges.iter().any(|existing| {
-                existing.start < entropy_range.end && entropy_range.start < existing.end
-            });
+            while named_cursor < named_range_count
+                && ranges[named_cursor].end <= entropy_range.start
+            {
+                named_cursor += 1;
+            }
+            let overlaps = ranges[named_cursor..named_range_count]
+                .iter()
+                .take_while(|existing| existing.start < entropy_range.end)
+                .any(|existing| entropy_range.start < existing.end);
             if overlaps {
                 continue;
             }
@@ -4694,6 +4950,345 @@ mod tests {
     }
 
     #[test]
+    fn contextual_entropy_redacts_unspaced_assignment() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        // Same secret and cue as the spaced case above; only the space is gone.
+        // The cue is inside the candidate, so the window check cannot see it.
+        for text in [
+            format!("api_key={secret}"),
+            format!("password={secret}"),
+            // Compound names are the common real shape in an env dump.
+            format!("OPENAI_API_KEY={secret}"),
+            format!("x-api-key={secret}"),
+            format!("TRACE_SERVICE_ACCESS_TOKEN={secret}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(secret), "cue-glued secret survived: {out}");
+            assert!(
+                rep.blocked_secret_detected,
+                "glued secret did not set blocked_secret_detected: {text}"
+            );
+        }
+    }
+
+    // `contextual_entropy_keeps_outer_cue_when_inner_value_is_short` (a
+    // "password: api_key=<12-char value>" case) was removed here: the
+    // whole-token reading that catches it is [`has_secret_cue`]'s pre-existing
+    // cue-window check running against `candidate.start()`, which is
+    // unchanged by this pass's `=`-split addition and already caught this
+    // shape before it. Verified by reverting the split addition in
+    // `contextual_entropy_secret_ranges` back to a single whole-token read and
+    // confirming the case above still redacts. A genuinely split-dependent
+    // case needs the value to be reached ONLY via a split re-anchor, which
+    // `contextual_entropy_redacts_unspaced_assignment` and
+    // `contextual_entropy_still_redacts_credential_named_tokens_when_glued`
+    // already cover (self-cue immediately before the value, invisible to the
+    // whole-token window).
+
+    #[test]
+    fn contextual_entropy_redacts_cue_named_values_consistently_across_spellings() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Opaque cursors carry the `token` cue and are now redacted in the
+        // glued spelling too. That is over-redaction of non-secret content,
+        // which the redaction policy accepts: over-redaction is tolerable,
+        // under-redaction is the defect. It also makes the two spellings
+        // agree, since the spaced form is already redacted today.
+        let cursor = "eyJvZmZzZXQiOjEwMCwic29ydCI6ImFzYyJ9==";
+        for text in [
+            format!("page_token: {cursor}"),
+            format!("page_token={cursor}"),
+        ] {
+            let (out, _) = r.redact_text(&text);
+            assert_ne!(out, text, "cue-named value not redacted: {text}");
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_still_redacts_credential_named_tokens_when_glued() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for name in ["access_token", "refresh_token", "client_secret"] {
+            let (out, rep) = r.redact_text(&format!("{name}={secret}"));
+            assert!(!out.contains(secret), "{name} glued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_split_restores_the_identifier_allowlist() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // None of these has a cue before the whole candidate (the key name is
+        // glued to the value, so the candidate itself starts at the key
+        // name), so `redact_text` alone cannot tell whether the value
+        // survived because a split re-anchor found it and the allowlist
+        // correctly excluded it, or because no cue was ever found for it at
+        // all -- the old, pre-split detector produces the same "untouched"
+        // output for the latter reason, which is why an earlier version of
+        // this test (asserting only on `redact_text`'s output) passed
+        // unchanged on the pre-split code and proved nothing about the split
+        // path. Assert directly on the split position instead: a cue IS
+        // found there, and the allowlist excludes the narrowed value anyway.
+        for text in [
+            "token=550e8400-e29b-41d4-a716-446655440000",
+            "api_key=550e8400-e29b-41d4-a716-446655440000",
+            "secret=0123456789abcdef0123456789abcdef01234567",
+            "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
+        ] {
+            let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
+            assert!(
+                has_secret_cue(text, split),
+                "split position is not reached by a cue: {text}"
+            );
+            assert!(
+                !is_cued_secret(text, split, text.len(), true, None),
+                "split reading did not apply the identifier allowlist to the \
+                 narrowed value: {text}"
+            );
+            // End to end: the identifier must also survive the full pass.
+            let (out, _) = r.redact_text(text);
+            assert_eq!(out, text, "structural identifier was redacted: {out}");
+        }
+    }
+    #[test]
+    fn contextual_entropy_reads_past_junk_assignments_to_reach_the_cue() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Readings are not capped. A cap would let an attacker push the real
+        // cue past it with junk `k0=k1=...` prefixes and keep the secret,
+        // which the fail-closed rule forbids.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for count in [7usize, 8, 20, 64] {
+            let prefix: String = (0..count).map(|i| format!("k{i}=")).collect();
+            let (out, rep) = r.redact_text(&format!("{prefix}api_key={secret}"));
+            assert!(
+                !out.contains(secret),
+                "secret survived behind {count} junk assignments: {out}"
+            );
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_measures_material_beyond_the_sample_window() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // A value whose entropy sits past ENTROPY_SAMPLE_BYTES. The whole-token
+        // reading measures the whole token, so the spaced form keeps the
+        // decision it had before sampling existed; the re-anchored reading
+        // samples from the END, where a glued value lives, so the glued form is
+        // covered too. Sampling from the front instead published both.
+        let opaque: String = (0..4000)
+            .map(|index| {
+                const ALPHABET: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                ALPHABET[(index * 7 + 3) % ALPHABET.len()] as char
+            })
+            .collect();
+        let padding = "a".repeat(ENTROPY_SAMPLE_BYTES);
+        for text in [
+            format!("api_key: {padding}{opaque}"),
+            format!("api_key={padding}{opaque}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(&opaque),
+                "material beyond the sample window was published"
+            );
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_measures_both_ends_of_a_long_value() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // A single sample anchor has a blind spot at the opposite end. These
+        // three arrangements put the opaque material at the start, the end, and
+        // either side of a flat middle; all must be treated as secrets.
+        let opaque: String = (0..4000)
+            .map(|index| {
+                const ALPHABET: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                ALPHABET[(index * 7 + 3) % ALPHABET.len()] as char
+            })
+            .collect();
+        let flat = "a".repeat(ENTROPY_SAMPLE_BYTES);
+        for body in [
+            format!("{opaque}{flat}"),
+            format!("{flat}{opaque}"),
+            format!("{}{}{}", &opaque[..1000], flat, &opaque[1000..]),
+        ] {
+            for text in [format!("api_key: {body}"), format!("api_key={body}")] {
+                let (out, rep) = r.redact_text(&text);
+                assert_ne!(out, text, "long opaque value was published");
+                assert!(rep.blocked_secret_detected);
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_finds_a_secret_between_sample_windows_on_a_long_candidate() {
+        use super::*;
+        // A fixed number of windows spread evenly across a long candidate
+        // leaves a gap between windows that grows with the candidate's
+        // length: at ~500 KB with 16 fixed 512-byte windows the gap is
+        // roughly 33 KB, far wider than any real secret. An opaque value
+        // placed in that gap, surrounded by low-entropy filler, was never
+        // sampled at all. Use the glued (self-cue) form so the reading that
+        // measures this is the bounded, windowed one
+        // (`entropy_sample_bits`), not the whole-token unbounded reading.
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let filler = "a".repeat(250_000);
+        let body = format!("{filler}{secret}{filler}");
+        let text = format!("api_key={body}");
+        let (out, rep) = r.redact_text(&text);
+        assert!(
+            !out.contains(secret),
+            "secret buried in the middle of a long low-entropy candidate survived"
+        );
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Thousands of separate glued assignments, at the sidecar input limit.
+        // Each one contributes a range, and comparing every new range against
+        // every accumulated range was quadratic: a megabyte produced tens of
+        // thousands of ranges and on the order of a billion comparisons.
+        let unit = "api_key=Zx9Qk2Lm7Pv4Rt8Wy1 ";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_ne!(out, payload, "assigned values were published");
+        assert!(rep.blocked_secret_detected);
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "many-assignment input took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_on_equals_dense_input() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // At only 1024 repetitions these payloads are far too small to
+        // distinguish "entropy is bounded per reading" from "entropy is
+        // gated behind the cheap checks": both the sampled-but-ungated and
+        // the gated-and-sampled implementations finish quickly at this
+        // scale, so this only guards the sampling bound added earlier in
+        // this pass's history, not the ordering fixed below.
+        for payload in [
+            "QUJDREVGR0hJSktMTU5PUFFS=".repeat(1024),
+            "api_key=aaaa".repeat(1024),
+        ] {
+            let started = std::time::Instant::now();
+            let _ = r.redact_text(&payload);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "equals-dense input took {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_gates_on_cue_before_entropy_on_equals_dense_input_near_max_size() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Every `=` in the input starts another reading in
+        // `contextual_entropy_secret_ranges`, and the regex class
+        // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
+        // spanning nearly the whole input, so a payload at the sidecar's 1
+        // MiB input limit produces on the order of half a million readings.
+        // There is no cue word anywhere in "x=", so `is_cued_secret` must
+        // reject every one of them on the cheap length/cue/allowlist checks
+        // BEFORE computing entropy: computing entropy first, even a bounded
+        // sample, on every one of half a million readings is the CPU
+        // denial-of-service this test guards against. 1024 repetitions (the
+        // test above) is far too small to show the difference; this uses the
+        // real accepted maximum.
+        let unit = "x=";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        assert_eq!(
+            payload.len(),
+            PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
+        );
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out, payload,
+            "no cue anywhere in the payload, nothing should be redacted"
+        );
+        assert!(!rep.blocked_secret_detected);
+        // A loose tripwire for the ordering regression, not a benchmark:
+        // computing entropy before checking for a cue on this input took far
+        // longer than this bound; gating on the cue first keeps it well
+        // under even in an unoptimised build on slow CI.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "equals-dense input with no cue anywhere took {elapsed:?}; entropy is likely being \
+             computed before the cheap cue/length/allowlist gates"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_when_a_cue_repeats_densely_through_a_long_candidate() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Gating entropy on `has_secret_cue` (the fix above) only removes the
+        // cost when there is no cue at all. An attacker can trivially make a
+        // cue precede nearly every `=` in one long candidate just by
+        // repeating cue text, so the cheap gate alone does not bound cost:
+        // if each of those readings independently rescanned the whole
+        // remaining candidate for entropy, cost would still be quadratic in
+        // the number of repetitions, only gated on "has a cue" instead of
+        // "has an `=`". This candidate has no real secret anywhere (repeated
+        // cue text plus filler is not opaque), so nothing should be flagged,
+        // but the pass must still finish quickly -- it can only do that by
+        // reusing one per-candidate entropy profile across every reading
+        // instead of rebuilding it per `=`.
+        let unit = "api_key=";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out, payload,
+            "no real secret in this payload, nothing should be redacted"
+        );
+        assert!(!rep.blocked_secret_detected);
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "cue-dense candidate with no real secret took {elapsed:?}; entropy is likely being \
+             recomputed from scratch per `=` instead of via a cached per-candidate profile"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_keeps_cue_name_when_redacting_assigned_value() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let (out, _) = r.redact_text(&format!("api_key={secret}"));
+        // The field name is diagnostic, not sensitive: keep it readable.
+        assert!(
+            out.contains("api_key="),
+            "cue name was consumed with the value: {out}"
+        );
+        assert!(!out.contains(secret));
+    }
+
+    #[test]
     fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
@@ -4711,6 +5306,55 @@ mod tests {
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
+    }
+
+    /// This pass's re-anchoring after `=` only covers unspaced *assignment*
+    /// glue (`api_key=<secret>`). It documents that boundary against the
+    /// pre-existing evasions/exclusions rather than leaving it assumed. None
+    /// of the five cases below are things this pass is meant to fix; each
+    /// comment says why. Do not "fix" these here -- they are separate
+    /// decisions with false-positive tradeoffs (see PR discussion for Fix 4).
+    #[test]
+    fn contextual_entropy_documents_the_glued_assignment_boundary() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // 1. Zero-separator glue: no `=` between the cue word and the value,
+        //    so there is nothing for this pass's re-anchoring to split on.
+        //    The cue and the value are one token and the cue-window check
+        //    never sees a cue word immediately before the candidate. NOT
+        //    addressed by this pass.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // 2. UUID-shaped value: intentionally allowlisted as a structural
+        //    identifier (`is_allowlisted_entropy_candidate`'s `uuid_regex`
+        //    check), even when cued.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // 3. Lowercase hex, length >= 32: intentionally treated as a content
+        //    hash (sha256/git blob), not a secret, even when cued.
+        let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
+
+        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
+        //    short to gate reliably, even when cued and opaque.
+        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
+        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+
+        // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
+        //    as not opaque enough, even when cued and long enough.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
 
     /// Regression: the redaction report's own metric-key literals (as
