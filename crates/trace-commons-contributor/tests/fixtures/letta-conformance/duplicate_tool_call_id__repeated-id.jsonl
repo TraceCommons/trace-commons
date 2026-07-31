@@ -1,0 +1,3 @@
+{"role":"meta","source":"claude-code","model":"claude-fable-5","cwd":"/w"}
+{"role":"assistant","tool_calls":[{"id":"c1","name":"exec","args":"{}"}],"timestamp":"2026-07-30T10:00:00Z"}
+{"role":"assistant","tool_calls":[{"id":"c1","name":"exec","args":"{}"}],"timestamp":"2026-07-30T10:00:00Z"}
