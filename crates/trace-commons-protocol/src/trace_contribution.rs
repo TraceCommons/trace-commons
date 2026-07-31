@@ -177,6 +177,25 @@ pub enum ResidualPiiRisk {
     High,
 }
 
+impl ResidualPiiRisk {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidualRiskCause {
+    BlockedSecret,
+    KeyFinding,
+    RedactionFindings,
+    ConsentFlags,
+    NoFindings,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEvent {
     pub event_id: Uuid,
@@ -2932,9 +2951,10 @@ impl TraceRedactor for DeterministicTraceRedactor {
             outcome.human_correction = Some(redacted);
         }
 
-        let residual_pii_risk = residual_risk(&trace.consent, &report);
+        let (residual_pii_risk, residual_risk_cause) =
+            residual_risk_with_cause(&trace.consent, &report);
         let redaction_hash = redaction_hash(&events, &report.counts);
-        let mut warnings = privacy_warnings(residual_pii_risk);
+        let mut warnings = privacy_warnings(residual_pii_risk, residual_risk_cause);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
             redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
@@ -3029,7 +3049,8 @@ pub fn rescrub_trace_envelope_with(
     // before `report` is drained into the envelope below. Previously
     // this was computed from an empty report, so only a blocked secret
     // could raise the classification.
-    let server_pass_risk = residual_risk(&envelope.consent, &report);
+    let (server_pass_risk, server_pass_cause) =
+        residual_risk_with_cause(&envelope.consent, &report);
 
     let prior_risk = envelope.privacy.residual_pii_risk;
     // No classifier runs on this path, so there is no classifier evidence and
@@ -3085,9 +3106,19 @@ pub fn rescrub_trace_envelope_with(
     }
     envelope.trace_card.redaction_pipeline_version =
         envelope.privacy.redaction_pipeline_version.clone();
+    // The merged risk can preserve a stricter prior assessment even when this
+    // local pass found a lower-risk cause. In that case `NoFindings` selects
+    // the least-specific truthful wording instead of misattributing the tier
+    // to evidence from this pass.
+    let warning_cause = resolved_risk_cause(
+        envelope.privacy.residual_pii_risk,
+        server_pass_risk,
+        server_pass_cause,
+        &assessment,
+    );
     merge_privacy_warnings(
         &mut envelope.privacy.warnings,
-        privacy_warnings(envelope.privacy.residual_pii_risk),
+        privacy_warnings(envelope.privacy.residual_pii_risk, warning_cause),
     );
     merge_privacy_warnings(
         &mut envelope.privacy.warnings,
@@ -3383,16 +3414,29 @@ pub async fn rescrub_envelope_prose_pii_with(
     });
 
     let prior_risk = envelope.privacy.residual_pii_risk;
+    let mut warning_cause = ResidualRiskCause::NoFindings;
     envelope.privacy.residual_pii_risk = match residual {
         Ok(residual_findings) => {
-            let backstop_pass_risk = residual_risk(&envelope.consent, &report);
+            let (backstop_pass_risk, backstop_pass_cause) =
+                residual_risk_with_cause(&envelope.consent, &report);
             let assessment = PostScrubAssessment {
                 complete_coverage: structured_complete && !uncovered_prose_present(envelope),
                 useful_classifier_result,
                 findings: report.clone(),
                 residual_findings,
             };
-            resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment)
+            let resolved_risk =
+                resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment);
+            // A merged result may preserve prior risk that the local report
+            // cannot explain. Use generic wording for that case rather than
+            // assigning the prior tier to the local pass's lower-risk cause.
+            warning_cause = resolved_risk_cause(
+                resolved_risk,
+                backstop_pass_risk,
+                backstop_pass_cause,
+                &assessment,
+            );
+            resolved_risk
         }
         Err(_) => {
             // Fail closed: could not verify the envelope is clean after
@@ -3416,7 +3460,7 @@ pub async fn rescrub_envelope_prose_pii_with(
         envelope.privacy.redaction_pipeline_version.clone();
     merge_privacy_warnings(
         &mut envelope.privacy.warnings,
-        privacy_warnings(envelope.privacy.residual_pii_risk),
+        privacy_warnings(envelope.privacy.residual_pii_risk, warning_cause),
     );
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
@@ -3707,9 +3751,38 @@ fn resolve_post_scrub_risk(
     }
 }
 
-fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    if report.blocked_secret_detected || report.key_finding_detected {
-        return ResidualPiiRisk::High;
+fn resolved_risk_cause(
+    resolved_risk: ResidualPiiRisk,
+    derived_risk: ResidualPiiRisk,
+    derived_cause: ResidualRiskCause,
+    assessment: &PostScrubAssessment,
+) -> ResidualRiskCause {
+    if assessment.findings.blocked_secret_detected
+        || assessment.residual_findings.blocked_secret_detected
+    {
+        return ResidualRiskCause::BlockedSecret;
+    }
+    if assessment.findings.key_finding_detected || assessment.residual_findings.key_finding_detected
+    {
+        return ResidualRiskCause::KeyFinding;
+    }
+    if resolved_risk == derived_risk {
+        derived_cause
+    } else {
+        ResidualRiskCause::NoFindings
+    }
+}
+
+pub fn residual_risk_with_cause(
+    consent: &ConsentMetadata,
+    report: &RedactionReport,
+) -> (ResidualPiiRisk, ResidualRiskCause) {
+    if report.blocked_secret_detected {
+        return (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret);
+    }
+
+    if report.key_finding_detected {
+        return (ResidualPiiRisk::High, ResidualRiskCause::KeyFinding);
     }
 
     // PII the pass actually found and removed raises the floor to
@@ -3718,14 +3791,17 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     // storage with a Low classification just because the flags are
     // clean; the pass has direct evidence the flags are wrong.
     if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
-        return ResidualPiiRisk::Medium;
+        return (
+            ResidualPiiRisk::Medium,
+            ResidualRiskCause::RedactionFindings,
+        );
     }
 
     if consent.message_text_included || consent.tool_payloads_included {
-        return ResidualPiiRisk::Medium;
+        return (ResidualPiiRisk::Medium, ResidualRiskCause::ConsentFlags);
     }
 
-    ResidualPiiRisk::Low
+    (ResidualPiiRisk::Low, ResidualRiskCause::NoFindings)
 }
 
 fn max_residual_risk(left: ResidualPiiRisk, right: ResidualPiiRisk) -> ResidualPiiRisk {
@@ -3745,14 +3821,29 @@ fn merge_privacy_warnings(existing: &mut Vec<String>, new_warnings: Vec<String>)
     }
 }
 
-fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
-    match risk {
-        ResidualPiiRisk::Low => Vec::new(),
-        ResidualPiiRisk::Medium => vec![
+fn privacy_warnings(risk: ResidualPiiRisk, cause: ResidualRiskCause) -> Vec<String> {
+    match (risk, cause) {
+        (ResidualPiiRisk::Low, _) => Vec::new(),
+        (ResidualPiiRisk::Medium, ResidualRiskCause::RedactionFindings) => vec![
+            "Local redaction recorded sensitive-data findings; server-side re-scrub is still required."
+                .to_string(),
+        ],
+        (ResidualPiiRisk::Medium, ResidualRiskCause::ConsentFlags) => vec![
             "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
         ],
-        ResidualPiiRisk::High => vec![
+        (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret) => vec![
             "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
+        ],
+        (ResidualPiiRisk::High, ResidualRiskCause::KeyFinding) => vec![
+            "A field name may contain sensitive information; keep this trace quarantined until reviewed."
+                .to_string(),
+        ],
+        (ResidualPiiRisk::Medium, _) => vec![
+            "The trace retains medium privacy risk because this re-scrub could not establish a lower risk."
+                .to_string(),
+        ],
+        (ResidualPiiRisk::High, _) => vec![
+            "The trace has high privacy risk and requires review before corpus storage.".to_string(),
         ],
     }
 }
@@ -4994,6 +5085,154 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
 mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn risk_test_consent(message_text: bool, tool_payloads: bool) -> super::ConsentMetadata {
+        super::ConsentMetadata {
+            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![super::ConsentScope::DebuggingEvaluation],
+            message_text_included: message_text,
+            tool_payloads_included: tool_payloads,
+            revocable: true,
+        }
+    }
+
+    #[test]
+    fn residual_risk_names_match_wire_names() {
+        use super::ResidualPiiRisk;
+
+        assert_eq!(ResidualPiiRisk::Low.as_str(), "low");
+        assert_eq!(ResidualPiiRisk::Medium.as_str(), "medium");
+        assert_eq!(ResidualPiiRisk::High.as_str(), "high");
+        assert_eq!(serde_json::to_value(ResidualPiiRisk::High).unwrap(), "high");
+    }
+
+    #[test]
+    fn redaction_findings_take_precedence_over_consent_flags() {
+        use super::{RedactionReport, ResidualPiiRisk, ResidualRiskCause};
+
+        let consent = risk_test_consent(true, true);
+        let report = RedactionReport {
+            counts: std::collections::BTreeMap::from([("private_email".to_string(), 1)]),
+            pii_labels_present: vec!["private_email".to_string()],
+            ..RedactionReport::default()
+        };
+
+        assert_eq!(
+            super::residual_risk_with_cause(&consent, &report),
+            (
+                ResidualPiiRisk::Medium,
+                ResidualRiskCause::RedactionFindings
+            )
+        );
+    }
+
+    #[test]
+    fn consent_flags_and_no_findings_keep_the_existing_ladder_results() {
+        use super::{RedactionReport, ResidualPiiRisk, ResidualRiskCause};
+
+        let empty_report = RedactionReport::default();
+        let (risk, cause) =
+            super::residual_risk_with_cause(&risk_test_consent(true, false), &empty_report);
+        assert_eq!(
+            (risk, cause),
+            (ResidualPiiRisk::Medium, ResidualRiskCause::ConsentFlags)
+        );
+        assert_eq!(
+            super::privacy_warnings(risk, cause),
+            vec![
+                "Message text or tool payloads were included after local redaction; server-side re-scrub is still required."
+                    .to_string()
+            ]
+        );
+
+        let (risk, cause) =
+            super::residual_risk_with_cause(&risk_test_consent(false, false), &empty_report);
+        assert_eq!(
+            (risk, cause),
+            (ResidualPiiRisk::Low, ResidualRiskCause::NoFindings)
+        );
+        assert!(super::privacy_warnings(risk, cause).is_empty());
+    }
+
+    #[test]
+    fn medium_redaction_findings_get_accurate_warning() {
+        use super::{RedactionReport, ResidualPiiRisk, ResidualRiskCause};
+
+        let consent = risk_test_consent(false, false);
+        let report = RedactionReport {
+            counts: std::collections::BTreeMap::from([("private_email".to_string(), 1)]),
+            pii_labels_present: vec!["private_email".to_string()],
+            ..RedactionReport::default()
+        };
+        let (risk, cause) = super::residual_risk_with_cause(&consent, &report);
+
+        assert_eq!(risk, ResidualPiiRisk::Medium);
+        assert_eq!(cause, ResidualRiskCause::RedactionFindings);
+        // Main attributed this input to included message text or tool payloads
+        // even though both consent flags are false.
+        assert_eq!(
+            super::privacy_warnings(risk, cause),
+            vec![
+                "Local redaction recorded sensitive-data findings; server-side re-scrub is still required."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn near_ai_secret_report_gets_blocked_secret_warning() {
+        use super::{RedactionReport, ResidualPiiRisk, ResidualRiskCause};
+
+        let consent = risk_test_consent(false, false);
+        let report = RedactionReport {
+            counts: std::collections::BTreeMap::from([("privacy_filter:secret".to_string(), 1)]),
+            pii_labels_present: vec!["secret".to_string()],
+            blocked_secret_detected: true,
+            ..RedactionReport::default()
+        };
+        let (risk, cause) = super::residual_risk_with_cause(&consent, &report);
+
+        assert_eq!(risk, ResidualPiiRisk::High);
+        assert_eq!(cause, ResidualRiskCause::BlockedSecret);
+        assert_eq!(
+            super::privacy_warnings(risk, cause),
+            vec![
+                "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn blocked_secret_precedes_key_finding() {
+        use super::{RedactionReport, ResidualPiiRisk, ResidualRiskCause};
+
+        let report = RedactionReport {
+            blocked_secret_detected: true,
+            key_finding_detected: true,
+            ..RedactionReport::default()
+        };
+        assert_eq!(
+            super::residual_risk_with_cause(&risk_test_consent(false, false), &report),
+            (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret)
+        );
+
+        let report = RedactionReport {
+            key_finding_detected: true,
+            ..RedactionReport::default()
+        };
+        assert_eq!(
+            super::residual_risk_with_cause(&risk_test_consent(false, false), &report),
+            (ResidualPiiRisk::High, ResidualRiskCause::KeyFinding)
+        );
+        assert_eq!(
+            super::privacy_warnings(ResidualPiiRisk::High, ResidualRiskCause::KeyFinding),
+            vec![
+                "A field name may contain sensitive information; keep this trace quarantined until reviewed."
+                    .to_string()
+            ]
+        );
+    }
+
     #[test]
     fn read_privacy_env_prefers_canonical_then_legacy() {
         use super::read_privacy_env;
@@ -5915,6 +6154,10 @@ mod tests {
         // The summary itself must still be preserved, disjoint from redaction_counts.
         let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
         assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
+        assert!(env.privacy.warnings.contains(&
+            "Local redaction recorded sensitive-data findings; server-side re-scrub is still required."
+                .to_string()
+        ));
         // Idempotent suffix: running again does not double-append.
         rescrub_envelope_prose_pii_with(&Stub, &mut env)
             .await
@@ -5983,6 +6226,26 @@ mod tests {
             ResidualPiiRisk::High,
             "a residual scan that cannot complete must force High"
         );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[test]
+    fn deterministic_rescrub_adds_its_cause_specific_warning() {
+        use crate::trace_contribution::*;
+
+        let mut env = sample_envelope_with_event_content("email jane@example.com now");
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let redactor = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        assert_eq!(env.privacy.residual_pii_risk, ResidualPiiRisk::Medium);
+        assert!(env.privacy.warnings.contains(&
+            "Local redaction recorded sensitive-data findings; server-side re-scrub is still required."
+                .to_string()
+        ));
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]

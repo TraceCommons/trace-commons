@@ -19,6 +19,7 @@ use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
 use crate::consent::{prompt_consent_answers, scopes_from_answers, validate_scopes};
+use crate::dry_run_report;
 use crate::identity::{
     DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
 };
@@ -450,8 +451,8 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 }
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
-/// local sessions. Prints exactly one outcome line per session; returns an
-/// error (nonzero exit) if any outcome was refused or failed.
+/// local sessions. Prints one outcome line or dry-run block per session;
+/// returns an error (nonzero exit) if any outcome was refused or failed.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
@@ -518,6 +519,17 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
     };
+    if opts.pii_filter.as_deref().or(cfg.pii_filter.as_deref()) == Some("near-ai")
+        && store
+            .ensure_near_ai_notice_shown()
+            .context("recording NEAR AI first-use notice")?
+        && !sel.json
+    {
+        println!(
+            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
+             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
+        );
+    }
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
     if let Some(path) = sel.manifest {
@@ -529,10 +541,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     }
 
     if sel.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&submit::outcomes_to_json(&outcomes))?
-        );
+        println!("{}", render_submit_json(&outcomes)?);
         // Still fail the process on a refusal or failure: an automating
         // caller that ignores the body must not read exit 0 as success.
         let had_failure = outcomes.iter().any(|o| {
@@ -550,6 +559,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let mut had_failure = false;
     for outcome in &outcomes {
         match outcome {
+            SubmitOutcome::DryRun { .. } => {
+                println!(
+                    "{}",
+                    dry_run_report::session(outcome)
+                        .expect("a dry-run outcome must render as a dry-run session")
+                );
+            }
             SubmitOutcome::Submitted {
                 submission_id,
                 status,
@@ -589,10 +605,18 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         }
     }
 
+    if sel.dry_run {
+        println!("{}", dry_run_report::summary(&outcomes));
+    }
+
     if had_failure {
         anyhow::bail!("one or more sessions were refused or failed to submit");
     }
     Ok(())
+}
+
+fn render_submit_json(outcomes: &[SubmitOutcome]) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&submit::outcomes_to_json(outcomes))
 }
 
 /// Render a comma-joined list of wire-name consent scopes for the status
@@ -674,7 +698,35 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+
     use super::*;
+
+    #[test]
+    fn json_renderer_emits_one_document_for_dry_run() {
+        let rendered = render_submit_json(&[SubmitOutcome::DryRun {
+            submission_id: uuid::Uuid::nil(),
+            bytes: 42,
+            risk: ResidualPiiRisk::Medium,
+            warnings: vec!["Canonical warning.".to_string()],
+            redaction_counts: BTreeMap::from([("private_email".to_string(), 1)]),
+            pii_labels_present: vec!["private_email".to_string()],
+        }])
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["results"][0]["outcome"], "dry-run");
+        assert_eq!(parsed["results"][0]["risk"], "medium");
+        assert_eq!(parsed["results"][0]["bytes"], 42);
+        assert_eq!(parsed["results"][0]["warnings"][0], "Canonical warning.");
+        assert_eq!(parsed["results"][0]["redaction_counts"]["private_email"], 1);
+        assert_eq!(
+            parsed["results"][0]["pii_labels_present"][0],
+            "private_email"
+        );
+    }
 
     #[test]
     fn scopes_cell_renders_wire_names() {

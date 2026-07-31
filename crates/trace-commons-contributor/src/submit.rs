@@ -2,7 +2,7 @@
 //! status. Every outcome reason is a fixed label -- never a response body,
 //! trace content, or raw path.
 
-use std::time::Duration as StdDuration;
+use std::{collections::BTreeMap, time::Duration as StdDuration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate,
+    ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
 };
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
@@ -34,6 +34,14 @@ pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
+    DryRun {
+        submission_id: Uuid,
+        bytes: usize,
+        risk: ResidualPiiRisk,
+        warnings: Vec<String>,
+        redaction_counts: BTreeMap<String, u32>,
+        pii_labels_present: Vec<String>,
+    },
     Submitted {
         submission_id: Uuid,
         status: String,
@@ -80,6 +88,7 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
     outcomes
         .iter()
         .filter_map(|o| match o {
+            SubmitOutcome::DryRun { .. } => None,
             SubmitOutcome::Submitted {
                 submission_id,
                 status,
@@ -114,15 +123,10 @@ pub async fn submit_sessions(
     let mut outcomes = Vec::with_capacity(sessions.len());
     let effective_cfg = effective_config(cfg, opts);
 
-    if effective_cfg.pii_filter.as_deref() == Some("near-ai")
-        && store
+    if effective_cfg.pii_filter.as_deref() == Some("near-ai") {
+        store
             .ensure_near_ai_notice_shown()
-            .context("recording NEAR AI first-use notice")?
-    {
-        println!(
-            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
-             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
-        );
+            .context("recording NEAR AI first-use notice")?;
     }
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
@@ -224,13 +228,13 @@ pub async fn submit_sessions(
                 outcomes.push(outcome);
                 continue;
             }
-            println!(
-                "dry-run: submission_id={} bytes={size}",
-                envelope.submission_id
-            );
-            outcomes.push(SubmitOutcome::Submitted {
+            outcomes.push(SubmitOutcome::DryRun {
                 submission_id: envelope.submission_id,
-                status: "dry-run".to_string(),
+                bytes: size,
+                risk: envelope.privacy.residual_pii_risk,
+                warnings: envelope.privacy.warnings,
+                redaction_counts: envelope.privacy.redaction_counts,
+                pii_labels_present: envelope.privacy.pii_labels_present,
             });
             continue;
         }
@@ -958,7 +962,26 @@ mod tests {
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
-        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        let SubmitOutcome::DryRun {
+            bytes,
+            risk,
+            warnings,
+            redaction_counts,
+            pii_labels_present,
+            ..
+        } = &outcomes[0]
+        else {
+            panic!("expected dry-run outcome, got {:?}", outcomes[0]);
+        };
+        assert!(*bytes > 0);
+        assert_eq!(*risk, ResidualPiiRisk::Medium);
+        assert!(warnings.contains(&
+            "Local redaction recorded sensitive-data findings; server-side re-scrub is still required."
+                .to_string()
+        ));
+        assert_eq!(redaction_counts.get("local_path"), Some(&1));
+        assert_eq!(redaction_counts.get("sensitive_field"), Some(&1));
+        assert!(pii_labels_present.iter().any(|label| label == "local_path"));
         assert_eq!(received.lock().unwrap().len(), 0);
         assert!(store.load_receipts().unwrap().is_empty());
     }
@@ -1392,6 +1415,14 @@ mod tests {
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
         let outcomes = vec![
+            SubmitOutcome::DryRun {
+                submission_id: Uuid::new_v4(),
+                bytes: 12,
+                risk: ResidualPiiRisk::Low,
+                warnings: Vec::new(),
+                redaction_counts: BTreeMap::new(),
+                pii_labels_present: Vec::new(),
+            },
             SubmitOutcome::Submitted {
                 submission_id: u1,
                 status: "submitted".to_string(),
@@ -1472,6 +1503,22 @@ pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
     let entries: Vec<serde_json::Value> = outcomes
         .iter()
         .map(|o| match o {
+            SubmitOutcome::DryRun {
+                submission_id,
+                bytes,
+                risk,
+                warnings,
+                redaction_counts,
+                pii_labels_present,
+            } => serde_json::json!({
+                "outcome": "dry-run",
+                "submission_id": submission_id,
+                "bytes": bytes,
+                "risk": risk.as_str(),
+                "warnings": warnings,
+                "redaction_counts": redaction_counts,
+                "pii_labels_present": pii_labels_present,
+            }),
             SubmitOutcome::Submitted {
                 submission_id,
                 status,
@@ -1516,6 +1563,14 @@ mod json_output_tests {
     fn every_outcome_kind_is_represented() {
         let id = Uuid::new_v4();
         let out = outcomes_to_json(&[
+            SubmitOutcome::DryRun {
+                submission_id: id,
+                bytes: 42,
+                risk: ResidualPiiRisk::High,
+                warnings: vec!["Canonical warning.".to_string()],
+                redaction_counts: BTreeMap::from([("secret:api_key".to_string(), 1)]),
+                pii_labels_present: vec!["api_key".to_string()],
+            },
             SubmitOutcome::Submitted {
                 submission_id: id,
                 status: "accepted".to_string(),
@@ -1538,17 +1593,23 @@ mod json_output_tests {
         let results = out["results"].as_array().unwrap();
         // A caller automating submission must be able to see a refusal. The
         // manifest deliberately omits these, so JSON output cannot reuse it.
-        assert_eq!(results.len(), 5, "no outcome may be silently dropped");
-        assert_eq!(results[0]["outcome"], "submitted");
-        assert_eq!(results[1]["outcome"], "already-submitted");
+        assert_eq!(results.len(), 6, "no outcome may be silently dropped");
+        assert_eq!(results[0]["outcome"], "dry-run");
+        assert_eq!(results[0]["risk"], "high");
+        assert_eq!(results[0]["bytes"], 42);
+        assert_eq!(results[0]["warnings"][0], "Canonical warning.");
+        assert_eq!(results[0]["redaction_counts"]["secret:api_key"], 1);
+        assert_eq!(results[0]["pii_labels_present"][0], "api_key");
+        assert_eq!(results[1]["outcome"], "submitted");
+        assert_eq!(results[2]["outcome"], "already-submitted");
         assert_eq!(
-            results[1]["status"], "quarantined",
+            results[2]["status"], "quarantined",
             "the real prior status must survive into JSON"
         );
-        assert_eq!(results[2]["outcome"], "refused");
-        assert_eq!(results[2]["reason"], "secret-leak-detected");
-        assert_eq!(results[3]["outcome"], "failed");
-        assert_eq!(results[4]["outcome"], "skipped");
+        assert_eq!(results[3]["outcome"], "refused");
+        assert_eq!(results[3]["reason"], "secret-leak-detected");
+        assert_eq!(results[4]["outcome"], "failed");
+        assert_eq!(results[5]["outcome"], "skipped");
     }
 
     #[test]

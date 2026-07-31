@@ -47985,11 +47985,7 @@ fn requested_limit_label(requested_limit: Option<usize>) -> String {
 }
 
 fn residual_pii_risk_name(privacy_risk: ResidualPiiRisk) -> &'static str {
-    match privacy_risk {
-        ResidualPiiRisk::Low => "low",
-        ResidualPiiRisk::Medium => "medium",
-        ResidualPiiRisk::High => "high",
-    }
+    privacy_risk.as_str()
 }
 
 fn consent_scope_name(consent_scope: ConsentScope) -> &'static str {
