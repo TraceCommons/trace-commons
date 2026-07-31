@@ -36,7 +36,7 @@ human-readable normative companion.
 |---|---|---|
 | `schema_version` | `ironclaw.trace_contribution.v1` | The on-the-wire envelope schema. A submission whose `schema_version` does not match is treated as invalid (`schema_validity = 0`). |
 | `consent.policy_version` | `2026-04-24` | The consent policy the contributor agreed to. |
-| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v2` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v1`. |
+| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v3` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v2`. |
 
 ## The contract in one paragraph
 
@@ -168,7 +168,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `redaction_pipeline_version` | string | yes | Pipeline that scrubbed the envelope. Server appends `+server-rescrub-v1`. |
+| `redaction_pipeline_version` | string | yes | Pipeline that scrubbed the envelope. Server appends `+server-rescrub-v2`. |
 | `redaction_counts` | map<string,u32> | optional | Per-label redaction counts (counts only, never content). |
 | `privacy_filter_summary` | `SafePrivacyFilterSummary?` | optional | Safe summary of a PII-filter pass. |
 | `pii_labels_present` | [string] | optional | Allow-listed labels that were found and redacted. |
@@ -287,7 +287,7 @@ Human-readable scorecard (`TraceValueScorecard`) with per-axis sub-scores
 
 When an envelope is submitted, the server:
 
-1. **Re-scrubs** the envelope (appends `+server-rescrub-v1` to the pipeline
+1. **Re-scrubs** the envelope (appends `+server-rescrub-v2` to the pipeline
    version, recomputes `redaction_hash` and `residual_pii_risk`, merges
    privacy warnings). Envelope contributor/tenant fields are treated as
    attribution only and normalized to the auth-derived tenant.
@@ -447,7 +447,10 @@ disagree, the crate is correct and this document must be corrected to match.
 
 Every field table, enum, mapping, and behavioral claim in this document was
 checked against `crates/trace-commons-protocol/src/trace_contribution.rs` and
-the server crate (`crates/trace-commons-server/src/`) on 2026-05-29.
+the server crate (`crates/trace-commons-server/src/`) on 2026-05-29. The
+redaction pipeline version constants below were re-checked on 2026-07-29, when
+they moved to `-v3` / `+server-rescrub-v2`; the rest of the audit still dates
+from 2026-05-29.
 
 - **Claim groups checked:** ~60 (covering 18 top-level envelope fields, every
   sub-struct, all enum variant sets, the consent→allowed-use matrix, the
@@ -456,7 +459,7 @@ the server crate (`crates/trace-commons-server/src/`) on 2026-05-29.
 - **Confirmed:** all schema field names, types, optionality, enum variants
   (incl. snake_case wire forms), version constants
   (`ironclaw.trace_contribution.v1`, policy `2026-04-24`,
-  `ironclaw-deterministic-secret-path-v2`, `+server-rescrub-v1`), the
+  `ironclaw-deterministic-secret-path-v3`, `+server-rescrub-v2`), the
   residual-risk derivation (secret→high, text/payloads→medium, else low), and
   the submission-status set (`accepted`/`quarantined`/`rejected`/`revoked`/
   `expired`/`purged`, all present in the server crate).

@@ -4876,7 +4876,12 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     assert_eq!(record.status, TraceCorpusStatus::Quarantined);
     let stored = std::fs::read_to_string(temp.path().join(record.object_key))
         .expect("stored envelope reads");
-    assert!(stored.contains("server-rescrub-v1"));
+    // Reference the constant rather than the literal, so a pipeline-version
+    // bump does not require editing this assertion. What it is checking is
+    // that the server re-scrub stamp is present, not which revision it is.
+    assert!(
+        stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
+    );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
 }
 
