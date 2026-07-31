@@ -3,11 +3,14 @@
 
 Expected CSV schema (header required, one row per scored submission):
 
-    tenant_id,submission_id,decided_at,perplexity_micros,tail_fraction_micros,novelty_score_micros,task_success
+    tenant_id,submission_id,decided_at,credit_quality_micros,perplexity_micros,tail_fraction_micros,novelty_score_micros,task_success
 
 `task_success` must be `success`, `partial`, `failure`, or `unknown`.
 Partial and unknown rows are counted and excluded from both AUC arms. An
-optional final `length` column enables the trace-length covariate. For
+`credit_quality_micros` is optional, nullable on rows predating its backfill,
+and analyzed first as the primary combined graded-credit score. Null values are
+excluded only from that primary analysis. An optional final `length` column
+enables the trace-length covariate. For
 `--label=human_correction`, append a `human_correction` column containing
 `true`, `false`, `partial`, or `unknown`; true is the failure arm.
 
@@ -15,6 +18,11 @@ At least 10 independent tenant clusters are required by default because a
 cluster bootstrap with fewer resampling units cannot support a reliable
 estimate of between-cluster uncertainty. Override with `--min-clusters`
 only when a different threshold is justified before examining outcomes.
+The cluster-bootstrap standard error drives each signal's power verdict. At
+small cluster counts it is biased slightly low (about 0.8x at k=24 in the
+validation simulation), which is a reason to retain the tenant threshold.
+Label ICC, size-weighted mean cluster size, and label design effect are printed
+only as descriptive label-clustering diagnostics; they do not determine power.
 
 PostgreSQL export query for the default schema:
 
@@ -33,8 +41,8 @@ PostgreSQL export query for the default schema:
         WHERE status = 'current' AND task_success IS NOT NULL
         ORDER BY tenant_id, submission_id, updated_at DESC, derived_id DESC
       )
-      SELECT g.tenant_id, g.submission_id, g.decided_at,
-             g.perplexity_micros, g.tail_fraction_micros,
+      SELECT md5(g.tenant_id) AS tenant_id, g.submission_id, g.decided_at,
+             g.credit_quality_micros, g.perplexity_micros, g.tail_fraction_micros,
              g.novelty_score_micros, o.task_success
       FROM latest_gate g
       JOIN latest_outcome o USING (tenant_id, submission_id)
@@ -69,7 +77,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import NormalDist
+from statistics import NormalDist, stdev
 from typing import Optional
 
 
@@ -82,7 +90,11 @@ REQUIRED_COLUMNS = (
     "novelty_score_micros",
     "task_success",
 )
-OPTIONAL_COLUMNS = ("human_correction", "length")
+OPTIONAL_COLUMNS = (
+    "credit_quality_micros",
+    "human_correction",
+    "length",
+)
 SIGNALS = {
     "perplexity": "perplexity_micros",
     "tail_fraction": "tail_fraction_micros",
@@ -110,6 +122,51 @@ class Observation:
     label: int
     decided_at: float
     values: dict[str, float]
+
+
+@dataclass(frozen=True)
+class LoadedObservations:
+    observations: list[Observation]
+    excluded: dict[str, int]
+    has_length: bool
+    has_credit_quality: bool
+    credit_quality_nulls: int
+    total_rows: int
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    lower: Optional[float]
+    upper: Optional[float]
+    standard_error: Optional[float]
+    valid_count: int
+    undefined_count: int
+    iterations: int
+
+    @property
+    def valid_fraction(self) -> float:
+        return self.valid_count / self.iterations
+
+    @property
+    def interval(self) -> tuple[float, float]:
+        if self.lower is None or self.upper is None:
+            raise AnalyzeGateOutcomeError("bootstrap_produced_no_estimates")
+        return self.lower, self.upper
+
+
+@dataclass(frozen=True)
+class SignalAnalysis:
+    name: str
+    role: str
+    included: int
+    null_excluded: int
+    auc: float
+    naive: BootstrapResult
+    clustered: BootstrapResult
+    clustered_standard_error: float
+    mde: float
+    undetectable_band: tuple[float, float]
+    status: str
 
 
 def discrimination_auc(positive: list[float], negative: list[float]) -> float:
@@ -178,9 +235,9 @@ def intraclass_correlation(
         - sum(len(values) ** 2 for values in clusters) / total_count
     ) / (tenant_count - 1)
     denominator = between_ms + (m0 - 1.0) * within_ms
-    if denominator <= 0.0:
+    if denominator == 0.0:
         return 0.0
-    return max(0.0, (between_ms - within_ms) / denominator)
+    return (between_ms - within_ms) / denominator
 
 
 def size_weighted_mean_cluster_size(
@@ -198,45 +255,22 @@ def size_weighted_mean_cluster_size(
 
 
 def design_effect(icc: float, size_weighted_mean: float) -> float:
-    return max(1.0, 1.0 + (size_weighted_mean - 1.0) * icc)
+    return 1.0 + (size_weighted_mean - 1.0) * icc
 
 
 def minimum_detectable_auc(
-    positive_n: float,
-    negative_n: float,
+    clustered_standard_error: float,
     *,
     alpha: float = 0.05,
     power: float = 0.80,
 ) -> float:
-    """Invert the Hanley–McNeil AUC variance for a two-sided 80% test."""
+    """Return the smallest AUC detectable from a clustered bootstrap SE."""
 
-    if positive_n <= 1.0 or negative_n <= 1.0:
-        return 1.0
-
+    if clustered_standard_error < 0.0:
+        raise AnalyzeGateOutcomeError("clustered_se_must_be_non_negative")
     normal = NormalDist()
     target_z = normal.inv_cdf(1.0 - alpha / 2.0) + normal.inv_cdf(power)
-
-    def standardized_effect(auc: float) -> float:
-        q1 = auc / (2.0 - auc)
-        q2 = 2.0 * auc * auc / (1.0 + auc)
-        variance = (
-            auc * (1.0 - auc)
-            + (positive_n - 1.0) * (q1 - auc * auc)
-            + (negative_n - 1.0) * (q2 - auc * auc)
-        ) / (positive_n * negative_n)
-        if variance <= 0.0:
-            return math.inf
-        return (auc - 0.5) / math.sqrt(variance)
-
-    low = 0.5
-    high = 1.0 - 1e-12
-    for _ in range(80):
-        midpoint = (low + high) / 2.0
-        if standardized_effect(midpoint) >= target_z:
-            high = midpoint
-        else:
-            low = midpoint
-    return high
+    return 0.5 + target_z * clustered_standard_error
 
 
 def percentile(values: list[float], probability: float) -> float:
@@ -272,34 +306,47 @@ def bootstrap_auc_interval(
     iterations: int,
     seed: int,
     clustered: bool,
-) -> tuple[float, float]:
-    """Bootstrap rows or whole tenant clusters and return a 95% interval."""
+) -> BootstrapResult:
+    """Bootstrap rows or tenants; reject replicates lacking either class."""
 
     rng = random.Random(seed)
     estimates: list[float] = []
+    undefined_count = 0
 
     if clustered:
         by_tenant: dict[str, list[Observation]] = {}
         for row in observations:
             by_tenant.setdefault(row.tenant_id, []).append(row)
         tenant_ids = sorted(by_tenant)
-        if not tenant_ids:
-            return 0.5, 0.5
         for _ in range(iterations):
             sampled: list[Observation] = []
             for _ in tenant_ids:
                 sampled.extend(by_tenant[rng.choice(tenant_ids)])
             positive, negative = _scores(sampled, signal)
+            if not positive or not negative:
+                undefined_count += 1
+                continue
             estimates.append(discrimination_auc(positive, negative))
     else:
-        if not observations:
-            return 0.5, 0.5
         for _ in range(iterations):
             sampled = [rng.choice(observations) for _ in observations]
             positive, negative = _scores(sampled, signal)
+            if not positive or not negative:
+                undefined_count += 1
+                continue
             estimates.append(discrimination_auc(positive, negative))
 
-    return percentile(estimates, 0.025), percentile(estimates, 0.975)
+    lower = percentile(estimates, 0.025) if estimates else None
+    upper = percentile(estimates, 0.975) if estimates else None
+    standard_error = stdev(estimates) if len(estimates) >= 2 else None
+    return BootstrapResult(
+        lower=lower,
+        upper=upper,
+        standard_error=standard_error,
+        valid_count=len(estimates),
+        undefined_count=undefined_count,
+        iterations=iterations,
+    )
 
 
 def rank_values(values: list[float]) -> list[float]:
@@ -381,7 +428,7 @@ def _parse_label(value: Optional[str], label_name: str) -> Optional[int]:
 def load_observations(
     path: Path,
     label_name: str,
-) -> tuple[list[Observation], dict[str, int], bool, int]:
+) -> LoadedObservations:
     observations: list[Observation] = []
     excluded = {"partial": 0, "unknown": 0}
     seen: set[tuple[str, str]] = set()
@@ -411,7 +458,7 @@ def load_observations(
         ]
         if unknown:
             raise AnalyzeGateOutcomeError(
-                f"input_columns_unknown columns={','.join(unknown)}"
+                f"input_columns_unknown count={len(unknown)}"
             )
         if label_name not in reader.fieldnames:
             raise AnalyzeGateOutcomeError(
@@ -419,6 +466,8 @@ def load_observations(
             )
 
         has_length = "length" in reader.fieldnames
+        has_credit_quality = "credit_quality_micros" in reader.fieldnames
+        credit_quality_nulls = 0
         total_rows = 0
         for row_number, row in enumerate(reader, start=2):
             total_rows += 1
@@ -455,6 +504,16 @@ def load_observations(
                 values["length"] = _parse_number(
                     row.get("length"), "length", row_number
                 )
+            if has_credit_quality:
+                raw_credit_quality = row.get("credit_quality_micros")
+                if raw_credit_quality is None or not raw_credit_quality.strip():
+                    credit_quality_nulls += 1
+                else:
+                    values["credit_quality"] = _parse_number(
+                        raw_credit_quality,
+                        "credit_quality_micros",
+                        row_number,
+                    )
             observations.append(
                 Observation(
                     tenant_id=tenant_id,
@@ -467,7 +526,14 @@ def load_observations(
                 )
             )
 
-    return observations, excluded, has_length, total_rows
+    return LoadedObservations(
+        observations=observations,
+        excluded=excluded,
+        has_length=has_length,
+        has_credit_quality=has_credit_quality,
+        credit_quality_nulls=credit_quality_nulls,
+        total_rows=total_rows,
+    )
 
 
 def _interval_excludes_chance(interval: tuple[float, float]) -> bool:
@@ -476,6 +542,90 @@ def _interval_excludes_chance(interval: tuple[float, float]) -> bool:
 
 def _format_interval(interval: tuple[float, float]) -> str:
     return f"[{interval[0]:.4f},{interval[1]:.4f}]"
+
+
+def _validate_bootstrap_result(
+    result: BootstrapResult,
+    *,
+    signal: str,
+    mode: str,
+    minimum_valid_fraction: float,
+) -> float:
+    if result.valid_fraction < minimum_valid_fraction:
+        raise AnalyzeGateOutcomeError(
+            "bootstrap_valid_fraction_below_min "
+            f"signal={signal} mode={mode} valid={result.valid_count} "
+            f"undefined={result.undefined_count} "
+            f"fraction={result.valid_fraction:.4f} "
+            f"required={minimum_valid_fraction:.4f}"
+        )
+    if result.standard_error is None:
+        raise AnalyzeGateOutcomeError(
+            "bootstrap_valid_estimates_below_two "
+            f"signal={signal} mode={mode} valid={result.valid_count}"
+        )
+    return result.standard_error
+
+
+def analyze_signal(
+    observations: list[Observation],
+    signal: str,
+    role: str,
+    *,
+    null_excluded: int,
+    iterations: int,
+    seed: int,
+    minimum_valid_fraction: float,
+) -> SignalAnalysis:
+    positive, negative = _scores(observations, signal)
+    auc = discrimination_auc(positive, negative)
+    naive = bootstrap_auc_interval(
+        observations,
+        signal,
+        iterations=iterations,
+        seed=seed + 10_000,
+        clustered=False,
+    )
+    clustered = bootstrap_auc_interval(
+        observations,
+        signal,
+        iterations=iterations,
+        seed=seed,
+        clustered=True,
+    )
+    _validate_bootstrap_result(
+        naive,
+        signal=signal,
+        mode="naive",
+        minimum_valid_fraction=minimum_valid_fraction,
+    )
+    clustered_standard_error = _validate_bootstrap_result(
+        clustered,
+        signal=signal,
+        mode="clustered",
+        minimum_valid_fraction=minimum_valid_fraction,
+    )
+    mde = minimum_detectable_auc(clustered_standard_error)
+    undetectable_band = (1.0 - mde, mde)
+    if undetectable_band[0] <= auc <= undetectable_band[1]:
+        status = "UNDERPOWERED"
+    elif _interval_excludes_chance(clustered.interval):
+        status = "ASSOCIATION"
+    else:
+        status = "INCONCLUSIVE"
+    return SignalAnalysis(
+        name=signal,
+        role=role,
+        included=len(observations),
+        null_excluded=null_excluded,
+        auc=auc,
+        naive=naive,
+        clustered=clustered,
+        clustered_standard_error=clustered_standard_error,
+        mde=mde,
+        undetectable_band=undetectable_band,
+        status=status,
+    )
 
 
 def _parser() -> OperatorArgumentParser:
@@ -493,7 +643,7 @@ def _parser() -> OperatorArgumentParser:
         "--min-per-class",
         type=int,
         default=125,
-        help="Minimum effective observations in each class (default: 125).",
+        help="Minimum labeled rows in each class (default: 125).",
     )
     parser.add_argument(
         "--min-clusters",
@@ -506,6 +656,15 @@ def _parser() -> OperatorArgumentParser:
         type=int,
         default=400,
         help="Bootstrap iterations (default: 400).",
+    )
+    parser.add_argument(
+        "--min-bootstrap-valid-fraction",
+        type=float,
+        default=0.80,
+        help=(
+            "Minimum fraction of bootstrap replicates containing both outcome "
+            "classes; lower fractions fail closed (default: 0.80)."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -523,15 +682,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise AnalyzeGateOutcomeError("min_per_class_must_be_positive")
         if args.min_clusters <= 0:
             raise AnalyzeGateOutcomeError("min_clusters_must_be_positive")
-        if args.bootstrap <= 0:
-            raise AnalyzeGateOutcomeError("bootstrap_must_be_positive")
+        if args.bootstrap < 2:
+            raise AnalyzeGateOutcomeError("bootstrap_must_be_at_least_two")
+        if not 0.0 < args.min_bootstrap_valid_fraction <= 1.0:
+            raise AnalyzeGateOutcomeError(
+                "min_bootstrap_valid_fraction_out_of_range"
+            )
 
         input_path = Path(args.input)
         if not input_path.is_file():
             raise AnalyzeGateOutcomeError("input_not_found")
-        observations, excluded, has_length, total_rows = load_observations(
-            input_path, args.label
-        )
+        loaded = load_observations(input_path, args.label)
+        observations = loaded.observations
         if not observations:
             raise AnalyzeGateOutcomeError("no_labeled_rows")
 
@@ -541,100 +703,170 @@ def main(argv: Optional[list[str]] = None) -> int:
         tenant_count = len(labels_by_tenant)
         if tenant_count < args.min_clusters:
             print(
-                "INSUFFICIENT_CLUSTERS "
+                "AnalyzeGateOutcomeFailure: INSUFFICIENT_CLUSTERS "
                 f"count={tenant_count} required={args.min_clusters}",
                 file=sys.stderr,
             )
             return 2
 
-        icc = intraclass_correlation(labels_by_tenant)
+        signal_specs: list[
+            tuple[str, str, list[Observation], int, int]
+        ] = []
+        if loaded.has_credit_quality:
+            primary_observations = [
+                row for row in observations if "credit_quality" in row.values
+            ]
+            signal_specs.append(
+                (
+                    "credit_quality",
+                    "primary_combined_graded_credit_score",
+                    primary_observations,
+                    loaded.credit_quality_nulls,
+                    3,
+                )
+            )
+        for offset, signal in enumerate(SIGNALS):
+            signal_specs.append(
+                (signal, "component", observations, 0, offset)
+            )
+
+        for signal, _, signal_rows, _, _ in signal_specs:
+            signal_tenants = len({row.tenant_id for row in signal_rows})
+            if signal_tenants < args.min_clusters:
+                print(
+                    "AnalyzeGateOutcomeFailure: "
+                    "INSUFFICIENT_SIGNAL_CLUSTERS "
+                    f"signal={signal} count={signal_tenants} "
+                    f"required={args.min_clusters}",
+                    file=sys.stderr,
+                )
+                return 2
+            positive, negative = _scores(signal_rows, signal)
+            if (
+                len(positive) < args.min_per_class
+                or len(negative) < args.min_per_class
+            ):
+                print(
+                    "AnalyzeGateOutcomeFailure: "
+                    "class_count_below_min "
+                    f"signal={signal} failure={len(positive)} "
+                    f"success={len(negative)} "
+                    f"min_per_class={args.min_per_class} "
+                    f"required_raw_per_class={args.min_per_class}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        analyses = [
+            analyze_signal(
+                signal_rows,
+                signal,
+                role,
+                null_excluded=null_excluded,
+                iterations=args.bootstrap,
+                seed=args.seed + offset,
+                minimum_valid_fraction=args.min_bootstrap_valid_fraction,
+            )
+            for signal, role, signal_rows, null_excluded, offset in signal_specs
+        ]
+
+        icc_signed = intraclass_correlation(labels_by_tenant)
+        icc_conservative_floor = max(0.0, icc_signed)
         size_weighted_mean = size_weighted_mean_cluster_size(
             labels_by_tenant
         )
-        effect = design_effect(icc, size_weighted_mean)
+        effect = design_effect(icc_conservative_floor, size_weighted_mean)
 
         failure_count = sum(row.label == FAILURE for row in observations)
         success_count = sum(row.label == SUCCESS for row in observations)
-        effective_failure = failure_count / effect
-        effective_success = success_count / effect
-        effective_total = len(observations) / effect
-        mde = minimum_detectable_auc(effective_failure, effective_success)
-        undetectable_band = (1.0 - mde, mde)
 
-        excluded_total = excluded["partial"] + excluded["unknown"]
+        excluded_total = (
+            loaded.excluded["partial"] + loaded.excluded["unknown"]
+        )
         print(
             "# AnalyzeGateOutcome "
-            f"rows={total_rows} included={len(observations)} "
+            f"rows={loaded.total_rows} included={len(observations)} "
             f"excluded={excluded_total} tenants={tenant_count} "
             f"label={args.label} bootstrap={args.bootstrap} seed={args.seed}"
         )
         print(
+            "INDEPENDENCE unit=tenant "
+            "rows_do_not_replace_independent_tenants "
+            f"min_clusters={args.min_clusters}"
+        )
+        print(
             "LABEL_COUNTS "
             f"failure={failure_count} success={success_count} "
-            f"partial_excluded={excluded['partial']} "
-            f"unknown_excluded={excluded['unknown']}"
+            f"partial_excluded={loaded.excluded['partial']} "
+            f"unknown_excluded={loaded.excluded['unknown']}"
         )
         print(
             "CLUSTERING "
-            f"icc={icc:.4f} mA={size_weighted_mean:.4f} "
+            f"icc_signed={icc_signed:.4f} "
+            f"icc_conservative_floor={icc_conservative_floor:.4f} "
+            f"mA={size_weighted_mean:.4f} "
             f"design_effect={effect:.4f} "
-            f"effective_n={effective_total:.2f} "
-            f"effective_failure={effective_failure:.2f} "
-            f"effective_success={effective_success:.2f}"
-        )
-        print(
-            "POWER "
-            f"minimum_detectable_auc={mde:.4f} "
-            f"undetectable_band={_format_interval(undetectable_band)} "
-            "power=0.80 alpha=0.05"
+            "diagnostic=label_clustering_only power_basis=cluster_bootstrap"
         )
 
-        for offset, signal in enumerate(SIGNALS):
-            positive, negative = _scores(observations, signal)
-            auc = discrimination_auc(positive, negative)
-            naive = bootstrap_auc_interval(
-                observations,
-                signal,
-                iterations=args.bootstrap,
-                seed=args.seed + 10_000 + offset,
-                clustered=False,
-            )
-            clustered = bootstrap_auc_interval(
-                observations,
-                signal,
-                iterations=args.bootstrap,
-                seed=args.seed + offset,
-                clustered=True,
-            )
-            if undetectable_band[0] <= auc <= undetectable_band[1]:
-                status = (
-                    "UNDERPOWERED "
-                    f"band={_format_interval(undetectable_band)}"
-                )
-            elif _interval_excludes_chance(clustered):
-                status = "ASSOCIATION"
-            else:
-                status = "INCONCLUSIVE"
+        if not loaded.has_credit_quality:
             print(
-                f"SIGNAL {signal} auc={auc:.4f} "
-                f"naive_95={_format_interval(naive)} "
-                f"clustered_95={_format_interval(clustered)} "
+                "PRIMARY_SIGNAL credit_quality status=NOT_ANALYZED "
+                "reason=input_column_absent "
+                "component_aucs_do_not_establish_grading_score_predicts_outcome"
+            )
+
+        for analysis in analyses:
+            print(
+                f"BOOTSTRAP signal={analysis.name} "
+                f"naive_valid={analysis.naive.valid_count} "
+                f"naive_undefined={analysis.naive.undefined_count} "
+                f"clustered_valid={analysis.clustered.valid_count} "
+                f"clustered_undefined={analysis.clustered.undefined_count} "
+                f"min_valid_fraction={args.min_bootstrap_valid_fraction:.4f}"
+            )
+            print(
+                f"POWER signal={analysis.name} "
+                f"clustered_se={analysis.clustered_standard_error:.6f} "
+                f"minimum_detectable_auc={analysis.mde:.4f} "
+                "undetectable_band="
+                f"{_format_interval(analysis.undetectable_band)} "
+                "power=0.80 alpha=0.05"
+            )
+            status = analysis.status
+            if status == "UNDERPOWERED":
+                status += (
+                    " band="
+                    f"{_format_interval(analysis.undetectable_band)}"
+                )
+            print(
+                f"SIGNAL {analysis.name} role={analysis.role} "
+                f"included={analysis.included} "
+                f"null_excluded={analysis.null_excluded} "
+                f"auc={analysis.auc:.4f} "
+                f"naive_95={_format_interval(analysis.naive.interval)} "
+                "clustered_95="
+                f"{_format_interval(analysis.clustered.interval)} "
                 f"status={status}"
             )
             if (
-                _interval_excludes_chance(naive)
-                and not _interval_excludes_chance(clustered)
+                _interval_excludes_chance(analysis.naive.interval)
+                and not _interval_excludes_chance(
+                    analysis.clustered.interval
+                )
             ):
                 print(
                     "AnalyzeGateOutcomeWarning: "
-                    f"signal={signal} independence_artifact "
-                    f"naive_95={_format_interval(naive)} "
-                    f"clustered_95={_format_interval(clustered)}",
+                    f"signal={analysis.name} independence_artifact "
+                    "naive_95="
+                    f"{_format_interval(analysis.naive.interval)} "
+                    "clustered_95="
+                    f"{_format_interval(analysis.clustered.interval)}",
                     file=sys.stderr,
                 )
 
         covariates: dict[str, float] = {}
-        if has_length:
+        if loaded.has_length:
             positive, negative = _scores(observations, "length")
             covariates["length"] = discrimination_auc(positive, negative)
             print(f"COVARIATE length auc={covariates['length']:.4f}")
@@ -657,22 +889,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             "COVARIATE decided_at_rank "
             f"auc={covariates['decided_at_rank']:.4f}"
         )
-
-        if (
-            effective_failure < args.min_per_class
-            or effective_success < args.min_per_class
-        ):
-            required_raw = math.ceil(args.min_per_class * effect)
-            print(
-                "AnalyzeGateOutcomeFailure: "
-                "effective_class_count_below_min "
-                f"effective_failure={effective_failure:.2f} "
-                f"effective_success={effective_success:.2f} "
-                f"min_per_class={args.min_per_class} "
-                f"required_raw_per_class={required_raw}",
-                file=sys.stderr,
-            )
-            return 2
 
         print("# AnalyzeGateOutcomeComplete")
         return 0

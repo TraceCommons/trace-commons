@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import math
+import random
 import re
 import subprocess
 import sys
@@ -26,6 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "analyze-gate-outcome.py"
 FIXTURE = HERE / "fixtures" / "gate-outcome" / "sample.csv"
+GITIGNORE = HERE.parent.parent / ".gitignore"
 
 
 def _load_module():
@@ -71,16 +74,52 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "tenant_id",
         "submission_id",
         "decided_at",
-        "perplexity_micros",
-        "tail_fraction_micros",
-        "novelty_score_micros",
-        "task_success",
-        "length",
     ]
+    if any("credit_quality_micros" in row for row in rows):
+        fieldnames.append("credit_quality_micros")
+    fieldnames.extend(
+        [
+            "perplexity_micros",
+            "tail_fraction_micros",
+            "novelty_score_micros",
+            "task_success",
+            "length",
+        ]
+    )
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _balanced_rows(
+    *,
+    include_credit_quality: bool = False,
+    null_credit_sequences: set[int] | None = None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    nulls = null_credit_sequences or set()
+    sequence = 0
+    for tenant_index in range(10):
+        for label in ("failure", "success"):
+            score = 900 if label == "failure" else 100
+            row: dict[str, object] = {
+                "tenant_id": f"tenant-{tenant_index}",
+                "submission_id": f"submission-{sequence}",
+                "decided_at": "2026-07-30T00:00:00Z",
+                "perplexity_micros": score,
+                "tail_fraction_micros": score,
+                "novelty_score_micros": score,
+                "task_success": label,
+                "length": score,
+            }
+            if include_credit_quality:
+                row["credit_quality_micros"] = (
+                    "" if sequence in nulls else score
+                )
+            rows.append(row)
+            sequence += 1
+    return rows
 
 
 def test_auc_matches_hand_computed_ties_and_empty_rule() -> None:
@@ -89,11 +128,11 @@ def test_auc_matches_hand_computed_ties_and_empty_rule() -> None:
     assert M.discrimination_auc([1.0], []) == 0.5
 
 
-def test_icc_independent_label_is_zero() -> None:
+def test_icc_reports_signed_negative_estimate() -> None:
     labels = {f"tenant-{i}": [0, 1, 0, 1] for i in range(8)}
     icc = M.intraclass_correlation(labels)
     size_weighted_mean = M.size_weighted_mean_cluster_size(labels)
-    assert abs(icc) < 1e-12, icc
+    assert abs(icc - (-1.0 / 3.0)) < 1e-12, icc
     assert abs(size_weighted_mean - 4.0) < 1e-12, size_weighted_mean
 
 
@@ -151,9 +190,11 @@ def test_unequal_cluster_m0_and_icc_regression() -> None:
     assert abs(icc - 0.639344) < 1e-6, icc
 
 
-def test_minimum_detectable_auc_is_point_six_at_125_per_class() -> None:
-    mde = M.minimum_detectable_auc(125.0, 125.0)
-    assert abs(mde - 0.60) < 0.001, mde
+def test_minimum_detectable_auc_uses_clustered_standard_error() -> None:
+    clustered_se = 0.04
+    target_z = M.NormalDist().inv_cdf(0.975) + M.NormalDist().inv_cdf(0.80)
+    mde = M.minimum_detectable_auc(clustered_se)
+    assert abs(mde - (0.5 + target_z * clustered_se)) < 1e-12, mde
 
 
 def test_clustered_interval_wider_than_naive_interval() -> None:
@@ -188,8 +229,8 @@ def test_clustered_interval_wider_than_naive_interval() -> None:
         seed=431,
         clustered=True,
     )
-    naive_width = naive[1] - naive[0]
-    clustered_width = clustered[1] - clustered[0]
+    naive_width = naive.upper - naive.lower
+    clustered_width = clustered.upper - clustered.lower
     assert clustered_width > naive_width, (naive, clustered)
 
 
@@ -238,31 +279,52 @@ def test_script_flags_naive_only_independence_artifact() -> None:
     assert result.returncode == 0, result.stderr
     assert "signal=perplexity independence_artifact" in result.stderr
     assert "AnalyzeGateOutcomeWarning:" not in result.stdout
+    power_match = re.search(
+        r"POWER signal=perplexity clustered_se=([0-9.]+) "
+        r"minimum_detectable_auc=([0-9.]+)",
+        result.stdout,
+    )
+    assert power_match is not None, result.stdout
+    clustered_se, printed_mde = (
+        float(value) for value in power_match.groups()
+    )
+    expected_mde = M.minimum_detectable_auc(clustered_se)
+    assert abs(printed_mde - expected_mde) < 0.0002, (
+        printed_mde,
+        expected_mde,
+    )
 
 
-def test_script_exits_nonzero_when_effective_classes_are_underpowered() -> None:
+def test_power_precondition_fails_before_any_signal_output() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "underpowered.csv"
         rows = []
-        for index in range(10):
-            failure = index < 5
-            rows.append(
-                {
-                    "tenant_id": f"tenant-{index}",
-                    "submission_id": f"submission-{index}",
-                    "decided_at": "2026-07-30T00:00:00Z",
-                    "perplexity_micros": 900 if failure else 100,
-                    "tail_fraction_micros": 800 if failure else 200,
-                    "novelty_score_micros": 700 if failure else 300,
-                    "task_success": "failure" if failure else "success",
-                    "length": 100 if failure else 20,
-                }
-            )
+        sequence = 0
+        for tenant_index in range(10):
+            labels = ["failure"] * 13
+            if tenant_index < 5:
+                labels.append("success")
+            for label in labels:
+                failure = label == "failure"
+                rows.append(
+                    {
+                        "tenant_id": f"tenant-{tenant_index}",
+                        "submission_id": f"submission-{sequence}",
+                        "decided_at": "2026-07-30T00:00:00Z",
+                        "perplexity_micros": 900 if failure else 100,
+                        "tail_fraction_micros": 800 if failure else 200,
+                        "novelty_score_micros": 700 if failure else 300,
+                        "task_success": label,
+                        "length": 100 if failure else 20,
+                    }
+                )
+                sequence += 1
         _write_csv(path, rows)
         result = _run([f"--input={path}", "--bootstrap=20"])
     assert result.returncode != 0
     assert "AnalyzeGateOutcomeFailure:" in result.stderr
     assert "required_raw_per_class=125" in result.stderr
+    assert "SIGNAL " not in result.stdout
 
 
 def test_partial_and_unknown_rows_are_excluded() -> None:
@@ -326,18 +388,164 @@ def test_script_rejects_one_tenant_as_insufficient_clusters() -> None:
             ]
         )
     assert result.returncode != 0
+    assert result.stderr.startswith("AnalyzeGateOutcomeFailure:")
     assert "INSUFFICIENT_CLUSTERS count=1 required=10" in result.stderr
     assert "status=ASSOCIATION" not in result.stdout
 
 
-def test_mde_uses_effective_counts_when_design_effect_exceeds_one() -> None:
-    rows = []
+def test_label_design_effect_disagrees_with_cluster_bootstrap_se() -> None:
+    observations = []
+    sequence = 0
+    rng = random.Random(993)
+    labels: dict[str, list[int]] = {}
+    for tenant_index in range(24):
+        label = M.FAILURE if tenant_index < 12 else M.SUCCESS
+        tenant = f"tenant-{tenant_index}"
+        labels[tenant] = []
+        for _ in range(20):
+            labels[tenant].append(label)
+            observations.append(
+                _observation(tenant, label, rng.random(), sequence)
+            )
+            sequence += 1
+
+    icc = M.intraclass_correlation(labels)
+    mean_cluster_size = M.size_weighted_mean_cluster_size(labels)
+    label_design_effect = M.design_effect(max(0.0, icc), mean_cluster_size)
+    naive = M.bootstrap_auc_interval(
+        observations,
+        "signal",
+        iterations=1_200,
+        seed=44,
+        clustered=False,
+    )
+    clustered = M.bootstrap_auc_interval(
+        observations,
+        "signal",
+        iterations=1_200,
+        seed=44,
+        clustered=True,
+    )
+    assert naive.standard_error is not None
+    assert clustered.standard_error is not None
+    analytic_design_effect_se = naive.standard_error * math.sqrt(
+        label_design_effect
+    )
+
+    assert label_design_effect > 19.0, label_design_effect
+    assert analytic_design_effect_se > 3.0 * clustered.standard_error, (
+        analytic_design_effect_se,
+        clustered.standard_error,
+    )
+
+
+def test_primary_combined_score_is_analyzed_first_when_present() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "with-credit-quality.csv"
+        _write_csv(path, _balanced_rows(include_credit_quality=True))
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=40",
+            ]
+        )
+    assert result.returncode == 0, result.stderr
+    signal_lines = [
+        line for line in result.stdout.splitlines() if line.startswith("SIGNAL ")
+    ]
+    assert signal_lines[0].startswith(
+        "SIGNAL credit_quality role=primary_combined_graded_credit_score"
+    ), signal_lines
+    assert "SIGNAL perplexity role=component" in signal_lines[1]
+
+
+def test_absent_combined_score_has_explicit_non_answer_line() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "without-credit-quality.csv"
+        _write_csv(path, _balanced_rows())
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=40",
+            ]
+        )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "PRIMARY_SIGNAL credit_quality status=NOT_ANALYZED "
+        "reason=input_column_absent "
+        "component_aucs_do_not_establish_grading_score_predicts_outcome"
+    ) in result.stdout
+
+
+def test_primary_nulls_do_not_shrink_component_analyses() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "nullable-credit-quality.csv"
+        rows = _balanced_rows(
+            include_credit_quality=True,
+            null_credit_sequences={0, 3},
+        )
+        _write_csv(path, rows)
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=40",
+            ]
+        )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "SIGNAL credit_quality role=primary_combined_graded_credit_score "
+        "included=18 null_excluded=2"
+    ) in result.stdout
+    assert (
+        "SIGNAL perplexity role=component included=20 null_excluded=0"
+    ) in result.stdout
+
+
+def test_unknown_header_text_is_never_echoed() -> None:
+    unsafe_header = "<script>operator_secret()</script>"
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "unsafe-header.csv"
+        fieldnames = [*M.REQUIRED_COLUMNS, unsafe_header]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+        result = _run([f"--input={path}"])
+    assert result.returncode == 2
+    assert "input_columns_unknown count=1" in result.stderr
+    assert unsafe_header not in result.stdout
+    assert unsafe_header not in result.stderr
+
+
+def test_signed_icc_and_conservative_floor_are_reported_separately() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "negative-icc.csv"
+        _write_csv(path, _balanced_rows())
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=40",
+            ]
+        )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "icc_signed=-1.0000 icc_conservative_floor=0.0000"
+    ) in result.stdout
+    assert "diagnostic=label_clustering_only" in result.stdout
+    assert "power_basis=cluster_bootstrap" in result.stdout
+    assert "effective_n=" not in result.stdout
+
+
+def test_undefined_bootstrap_replicates_are_rejected_and_counted() -> None:
+    rows: list[dict[str, object]] = []
     sequence = 0
     for tenant_index in range(10):
-        failure = tenant_index < 5
-        label = "failure" if failure else "success"
-        score = 900 if failure else 100
-        for _ in range(40):
+        label = "failure" if tenant_index < 7 else "success"
+        for row_index in range(5):
+            score = 100 * tenant_index + row_index
             rows.append(
                 {
                     "tenant_id": f"tenant-{tenant_index}",
@@ -347,39 +555,85 @@ def test_mde_uses_effective_counts_when_design_effect_exceeds_one() -> None:
                     "tail_fraction_micros": score,
                     "novelty_score_micros": score,
                     "task_success": label,
-                    "length": score,
+                    "length": score + 1,
                 }
             )
             sequence += 1
-
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "effective-mde.csv"
+        path = Path(directory) / "some-undefined.csv"
         _write_csv(path, rows)
         result = _run(
             [
                 f"--input={path}",
                 "--min-per-class=1",
-                "--bootstrap=20",
-                "--seed=19",
+                "--bootstrap=400",
+                "--seed=17",
             ]
         )
     assert result.returncode == 0, result.stderr
-
-    effect_match = re.search(r"design_effect=([0-9.]+)", result.stdout)
-    mde_match = re.search(r"minimum_detectable_auc=([0-9.]+)", result.stdout)
-    assert effect_match is not None, result.stdout
-    assert mde_match is not None, result.stdout
-    effect = float(effect_match.group(1))
-    printed_mde = float(mde_match.group(1))
-    effective_mde = M.minimum_detectable_auc(200.0 / effect, 200.0 / effect)
-    raw_mde = M.minimum_detectable_auc(200.0, 200.0)
-
-    assert effect > 1.0, effect
-    assert abs(printed_mde - effective_mde) < 0.0001, (
-        printed_mde,
-        effective_mde,
+    match = re.search(
+        r"BOOTSTRAP signal=perplexity .*clustered_valid=(\d+) "
+        r"clustered_undefined=(\d+)",
+        result.stdout,
     )
-    assert abs(printed_mde - raw_mde) > 0.05, (printed_mde, raw_mde)
+    assert match is not None, result.stdout
+    valid, undefined = (int(value) for value in match.groups())
+    assert undefined > 0, (valid, undefined)
+    assert valid + undefined == 400, (valid, undefined)
+
+
+def test_bootstrap_valid_fraction_fails_closed() -> None:
+    rows: list[dict[str, object]] = []
+    sequence = 0
+    for tenant_index in range(10):
+        failure = tenant_index < 9
+        row_count = 10 if failure else 90
+        for row_index in range(row_count):
+            score = 100 * tenant_index + row_index
+            rows.append(
+                {
+                    "tenant_id": f"tenant-{tenant_index}",
+                    "submission_id": f"submission-{sequence}",
+                    "decided_at": "2026-07-30T00:00:00Z",
+                    "perplexity_micros": score,
+                    "tail_fraction_micros": score,
+                    "novelty_score_micros": score,
+                    "task_success": "failure" if failure else "success",
+                    "length": score + 1,
+                }
+            )
+            sequence += 1
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "too-many-undefined.csv"
+        _write_csv(path, rows)
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=400",
+                "--seed=23",
+            ]
+        )
+    assert result.returncode == 2
+    assert "bootstrap_valid_fraction_below_min" in result.stderr
+    assert "mode=clustered" in result.stderr
+    assert "undefined=" in result.stderr
+    assert "SIGNAL " not in result.stdout
+
+
+def test_help_documents_bootstrap_valid_fraction_threshold() -> None:
+    result = _run(["--help"])
+    assert result.returncode == 0, result.stderr
+    assert "--min-bootstrap-valid-fraction" in result.stdout
+    assert "both outcome classes" in result.stdout
+    assert "fail closed" in result.stdout
+
+
+def test_export_docstring_and_gitignore_protect_operator_data() -> None:
+    assert "md5(g.tenant_id) AS tenant_id" in M.__doc__
+    assert "g.credit_quality_micros" in M.__doc__
+    assert "nullable on rows predating its backfill" in M.__doc__
+    assert "scripts/operator/*.csv" in GITIGNORE.read_text(encoding="utf-8")
 
 
 def test_label_parser_accepts_only_documented_values() -> None:
@@ -410,12 +664,13 @@ def test_label_parser_accepts_only_documented_values() -> None:
 
 
 def test_fixture_has_enough_clusters_and_real_associations() -> None:
-    result = _run(
-        [
-            f"--input={FIXTURE}",
-        ]
-    )
+    args = [f"--input={FIXTURE}"]
+    result = _run(args)
+    repeated = _run(args)
     assert result.returncode == 0, result.stderr
+    assert repeated.returncode == 0, repeated.stderr
+    assert result.stdout == repeated.stdout
+    assert result.stderr == repeated.stderr
     assert "tenants=10" in result.stdout
     assert result.stdout.count("status=ASSOCIATION") == 2, result.stdout
     assert "status=UNDERPOWERED band=" in result.stdout

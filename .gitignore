@@ -9,3 +9,6 @@
 # Local Cloudflare/Wrangler state
 community/.wrangler/
 .superpowers/
+
+# Operator exports can contain submission-level analysis data
+scripts/operator/*.csv
