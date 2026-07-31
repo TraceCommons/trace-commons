@@ -2963,6 +2963,54 @@ fn classify_structured_payload_node<'a>(
 /// classifier's result was evidence-backed (see the zero-finding canary
 /// check below), and a fresh residual scan came back clean. Any gap in that
 /// chain preserves the prior risk instead - see [`resolve_post_scrub_risk`].
+/// Free-text fields that carry contributor- or model-authored prose but that
+/// [`rescrub_envelope_prose_pii_with`] never submits to the classifier. The
+/// scrub pass covers only `events[*].redacted_content`,
+/// `events[*].structured_payload`, and `outcome.human_correction`; everything
+/// listed here is untouched by it, and the deterministic residual scan that
+/// follows only matches patterned secrets, not prose PII such as names or
+/// addresses.
+///
+/// So when any of these carries text, the reassessment did NOT see the whole
+/// envelope and must not claim complete coverage - a High prior risk stays
+/// High. Envelopes that leave these empty (the common case) are unaffected.
+///
+/// Only user-derived prose counts. Identifier-shaped strings are excluded
+/// (versions, enum tags, retention policies, revocation handles, tool
+/// categories, pseudonymous contributor refs), and so is system-authored
+/// text: `value.explanation`, `value_card.limitations`, and
+/// `value_card.user_visible_explanation` are written by the scorer, not by
+/// the contributor. `TraceValueCard::default()` in particular ships a fixed
+/// boilerplate `limitations` entry on every envelope, so counting it would
+/// block every downgrade and make the reassessment dead code. If the scorer
+/// ever begins quoting trace content into those fields, they belong here.
+///
+/// This list is explicit rather than derived, so a newly added prose field
+/// will not be accounted for until it is added here or covered by the scrub.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
+    fn has_text(values: &[String]) -> bool {
+        values.iter().any(|v| !v.trim().is_empty())
+    }
+
+    if has_text(&envelope.replay.replay_notes) {
+        return true;
+    }
+
+    if let Some(hindsight) = envelope.hindsight.as_ref() {
+        if hindsight
+            .original_goal_summary
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+            || has_text(&hindsight.achieved_subgoals)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(feature = "near-ai-privacy-filter")]
 pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
@@ -3083,7 +3131,7 @@ pub async fn rescrub_envelope_prose_pii_with(
         Ok(residual_findings) => {
             let backstop_pass_risk = residual_risk(&envelope.consent, &report);
             let assessment = PostScrubAssessment {
-                complete_coverage: structured_complete,
+                complete_coverage: structured_complete && !uncovered_prose_present(envelope),
                 useful_classifier_result,
                 findings: report.clone(),
                 residual_findings,
@@ -5540,6 +5588,83 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::High,
             "a structured-payload budget overrun must preserve, not lower, the prior risk"
+        );
+    }
+
+    /// Prose fields the scrub pass never submits to the classifier
+    /// (`replay.replay_notes` here) must block a downgrade when they carry
+    /// text. The classifier below DOES find real PII, so
+    /// `useful_classifier_result` is true and the structured budget is
+    /// untouched - coverage is the only thing standing between this envelope
+    /// and a downgrade.
+    ///
+    /// The note's PII is prose ("their mother Mary in Baltimore"), not a
+    /// patterned secret, so the deterministic residual scan cannot see it
+    /// either. Without the coverage gate it would ride through untouched
+    /// under a lowered risk label.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn uncovered_prose_field_blocks_downgrade() {
+        use crate::trace_contribution::*;
+        struct FindsRealEmail;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for FindsRealEmail {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if !text.contains("ada@example.com") {
+                    return Ok(None);
+                }
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:private_email");
+                report.add_pii_label("private_email");
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("ada@example.com", "[REDACTED:private_email]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let build = || {
+            let mut env = sample_envelope_with_event_content("mail ada@example.com");
+            env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+            env.consent.message_text_included = false;
+            env.consent.tool_payloads_included = false;
+            env
+        };
+
+        // Control: identical envelope with no uncovered prose. This must
+        // downgrade, which is what makes the assertion below non-vacuous -
+        // the only difference between the two cases is the note.
+        let mut clean = build();
+        clean.replay.replay_notes.clear();
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean)
+            .await
+            .unwrap();
+        assert_ne!(
+            clean.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "control: with full coverage and real findings this envelope downgrades"
+        );
+
+        let mut gapped = build();
+        gapped.replay.replay_notes =
+            vec!["they asked about their mother Mary in Baltimore".to_string()];
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped)
+            .await
+            .unwrap();
+        assert_eq!(
+            gapped.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "prose in a field the classifier never saw must block the downgrade"
         );
     }
 
