@@ -165,43 +165,46 @@ fn bake_off_subcommand_writes_mock_report() {
         report.get("mock_scorer").and_then(|v| v.as_bool()),
         Some(true)
     );
-    // Rule version 2 added the discrimination floor ahead of the throughput
-    // floor. Pinned so a rule change cannot land without updating the reports
-    // that consumers key off.
+    // Rule version 3 adds the baseline-dominance floor ahead of throughput.
+    // Pinned so a rule change cannot land without updating report consumers.
     assert_eq!(
         report.get("decision_rule_version").and_then(|v| v.as_u64()),
-        Some(2)
+        Some(3)
     );
     let cands = report
         .get("candidates")
         .and_then(|v| v.as_array())
         .expect("candidates array");
     assert_eq!(cands.len(), 2);
-    // The mock scorer derives AUC from a hash, so it does not discriminate
-    // in any real sense. Under decision rule v2 that means it usually fails
-    // the discrimination floor and the run has no winner, which is the
-    // honest outcome for a scorer whose own report carries a
-    // NOT-VALID-FOR-PRODUCTION banner. This smoke test covers report
-    // emission, not winner selection -- the decision rule itself is tested
-    // directly in `bakeoff_report::tests` against the archived A2.6 numbers.
-    // So: a winner is optional here, but if one is present it must be a
-    // manifest candidate that cleared the floor.
-    if let Some(winner) = report.get("winner_id").and_then(|v| v.as_str()) {
-        assert!(
-            winner == "qwen-2.5-7b" || winner == "llama-3.1-8b-instruct",
-            "winner must be one of the manifest candidates, got {winner}"
-        );
-        let winner_auc = cands
-            .iter()
-            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(winner))
-            .and_then(|c| c.get("discrimination_auc"))
-            .and_then(|v| v.as_f64())
-            .expect("winner appears in candidates with an auc");
-        assert!(
-            winner_auc > 0.5,
-            "a recorded winner must clear the discrimination floor, got {winner_auc}"
-        );
-    }
+    let baselines = report.get("baselines").expect("baselines object");
+    assert_eq!(
+        baselines.get("strongest_name").and_then(|v| v.as_str()),
+        Some("utf8_byte_count")
+    );
+    assert_eq!(
+        baselines
+            .get("required_discrimination_auc")
+            .and_then(|v| v.as_f64()),
+        Some(1.05)
+    );
+    assert_eq!(
+        baselines
+            .get("measures")
+            .and_then(|v| v.as_array())
+            .map(Vec::len),
+        Some(4)
+    );
+    assert!(cands.iter().all(|candidate| {
+        candidate
+            .get("passed_baseline_dominance")
+            .and_then(|v| v.as_bool())
+            == Some(false)
+    }));
+    assert!(
+        report
+            .get("winner_id")
+            .is_some_and(serde_json::Value::is_null)
+    );
 
     // Companion markdown must include the loud mock banner.
     let md_bytes = fs::read(report_json.with_extension("md")).expect("markdown companion exists");
@@ -211,6 +214,9 @@ fn bake_off_subcommand_writes_mock_report() {
         "markdown report must carry the mock banner, got: {md}"
     );
     assert!(md.contains("Winner: "));
+    assert!(md.contains("Strongest baseline: utf8_byte_count (1.000000)"));
+    assert!(md.contains("Required discrimination AUC: 1.050000"));
+    assert!(md.contains("passed_baseline_dominance"));
 }
 
 // The third real-scorer-path test that would exercise the

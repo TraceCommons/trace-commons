@@ -1,7 +1,30 @@
+// These source modules expose helpers for their own integration targets; this
+// target intentionally uses only corpus loading and discrimination AUC.
+#[allow(dead_code)]
+#[path = "../src/bin/gate_calibrate/bakeoff_corpus.rs"]
+mod bakeoff_corpus;
+#[allow(dead_code)]
+#[path = "../src/bin/gate_calibrate/bakeoff_metrics.rs"]
+mod bakeoff_metrics;
 #[path = "../src/bin/gate_calibrate/bakeoff_report.rs"]
 mod bakeoff_report;
 
-use bakeoff_report::{CandidateResult, DETERMINISM_GATE, License, pick_winner, weighted_score};
+use bakeoff_report::{
+    BASELINE_DOMINANCE_MARGIN, BaselineResults, CandidateResult, DETERMINISM_GATE, License,
+    NoModelBaseline, pick_winner, weighted_score,
+};
+
+fn baselines(strongest_auc: f64) -> BaselineResults {
+    BaselineResults {
+        measures: vec![NoModelBaseline {
+            name: "test_baseline".into(),
+            discrimination_auc: strongest_auc,
+        }],
+        strongest_name: Some("test_baseline".into()),
+        strongest_auc,
+        required_discrimination_auc: strongest_auc + BASELINE_DOMINANCE_MARGIN,
+    }
+}
 
 fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -> CandidateResult {
     CandidateResult {
@@ -15,6 +38,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         license: License::Apache2,
         params_b: 8,
         passed_determinism_gate: det < DETERMINISM_GATE,
+        passed_baseline_dominance: false,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: None,
@@ -37,7 +61,7 @@ fn determinism_failure_disqualifies() {
     // Stable candidate is slower and weaker but passes the gate.
     let stable = result("stable", 0.7, 0.2, 0.4, 600.0, 1e-7);
     let cands = [flaky, stable];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "stable");
 }
 
@@ -47,7 +71,7 @@ fn throughput_penalty_applied() {
     let fast = result("fast", 0.7, 0.2, 0.3, 1000.0, 1e-7);
     let slow_but_strong = result("slow", 0.95, 0.05, 0.5, 400.0, 1e-7);
     let cands = [fast, slow_but_strong];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "fast");
 }
 
@@ -58,7 +82,7 @@ fn ties_broken_by_license_then_size() {
     a.license = License::LlamaCommunity;
     b.license = License::Apache2;
     let cands = [a, b];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "b");
 }
 
@@ -67,7 +91,7 @@ fn no_winner_if_all_fail_determinism() {
     let a = result("a", 0.9, 0.1, 0.5, 1000.0, 1e-3);
     let b = result("b", 0.95, 0.1, 0.5, 1000.0, 1e-3);
     let cands = [a, b];
-    assert!(pick_winner(&cands).is_none());
+    assert!(pick_winner(&cands, &baselines(0.6)).is_none());
 }
 
 #[test]
@@ -79,7 +103,7 @@ fn tolerance_band_lets_better_license_win_over_marginal_score_lead() {
     a.license = License::LlamaCommunity;
     b.license = License::Apache2;
     let cands = [a, b];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "b");
 }
 
@@ -92,7 +116,7 @@ fn tolerance_band_does_not_engulf_clearly_better_score() {
     a.license = License::LlamaCommunity;
     b.license = License::Apache2;
     let cands = [a, b];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "a");
 }
 
@@ -104,7 +128,7 @@ fn recency_breaks_tie_after_license_and_size_tied() {
     a.release_date_unix = 1_700_000_000;
     b.release_date_unix = 1_800_000_000;
     let cands = [a, b];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "b");
 }
 
@@ -119,17 +143,24 @@ fn fixture_report() -> bakeoff_report::Report {
         mock_scorer: false,
         ctx_max_tokens: 4096,
         determinism_gate_value: 1e-5,
+        baselines: baselines(0.8),
         partial: false,
     }
 }
 
 #[test]
 fn report_json_round_trips() {
-    let r = fixture_report();
+    let mut r = fixture_report();
+    r.candidates[0].passed_baseline_dominance = true;
     let json = serde_json::to_string(&r).expect("serialize");
     let back: bakeoff_report::Report = serde_json::from_str(&json).expect("parse");
     assert_eq!(back.winner_id.as_deref(), Some("x"));
     assert_eq!(back.ctx_max_tokens, 4096);
+    assert_eq!(
+        back.baselines.strongest_name.as_deref(),
+        Some("test_baseline")
+    );
+    assert!(back.candidates[0].passed_baseline_dominance);
 }
 
 #[test]
@@ -139,6 +170,66 @@ fn report_markdown_includes_winner_and_table() {
     assert!(
         md.contains("| candidate | auc |"),
         "missing table header: {md}"
+    );
+    assert!(
+        md.contains("Strongest baseline: test_baseline (0.800000)"),
+        "missing strongest baseline: {md}"
+    );
+    assert!(
+        md.contains("Required discrimination AUC: 0.850000"),
+        "missing required floor: {md}"
+    );
+    assert!(
+        md.contains("passed_baseline_dominance"),
+        "missing candidate baseline result: {md}"
+    );
+}
+
+#[test]
+fn committed_a26_fixture_matches_preregistered_structural_baselines() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/operator/fixtures/corpus-a26.tar.zst");
+    let corpus = bakeoff_corpus::load_corpus(&fixture).expect("load committed A2.6 corpus");
+    let baselines = BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    let expected = [
+        ("utf8_byte_count", 0.991117),
+        ("whitespace_word_count", 0.985883),
+        ("line_count", 0.998244),
+        ("paragraph_count", 1.0),
+    ];
+
+    assert_eq!(baselines.measures.len(), expected.len());
+    for (name, expected_auc) in expected {
+        let actual = baselines
+            .measures
+            .iter()
+            .find(|baseline| baseline.name == name)
+            .unwrap_or_else(|| panic!("missing baseline {name}"))
+            .discrimination_auc;
+        assert!(
+            (actual - expected_auc).abs() < 0.0000005,
+            "{name}: expected {expected_auc:.6}, got {actual:.9}"
+        );
+    }
+    assert_eq!(baselines.strongest_name.as_deref(), Some("paragraph_count"));
+    assert_eq!(baselines.strongest_auc, 1.0);
+    assert_eq!(baselines.required_discrimination_auc, 1.05);
+}
+
+#[test]
+fn committed_a26_v1_report_deserializes_unchanged() {
+    let archived =
+        include_str!("../../../docs/superpowers/reports/2026-05-14-model-bakeoff-result-a26.json");
+    let report: bakeoff_report::Report = serde_json::from_str(archived).expect("parse A2.6 JSON");
+    assert_eq!(report.decision_rule_version, 1);
+    assert_eq!(report.candidates.len(), 4);
+    assert_eq!(report.winner_id.as_deref(), Some("llama-3.1-8b-instruct"));
+    assert!(report.baselines.measures.is_empty());
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.passed_baseline_dominance)
     );
 }
 
@@ -157,12 +248,12 @@ fn failed_candidate_with_load_error_is_excluded_from_winner() {
     );
     assert!(failed.load_or_eval_error.is_some());
     assert!(!failed.passed_determinism_gate);
-    assert!(pick_winner(std::slice::from_ref(&failed)).is_none());
+    assert!(pick_winner(std::slice::from_ref(&failed), &baselines(0.6)).is_none());
 
     // With a healthy candidate alongside, the healthy one wins.
     let healthy = result("healthy", 0.8, 0.1, 0.5, 1000.0, 1e-7);
     let cands = [failed, healthy];
-    let winner = pick_winner(&cands).expect("a winner");
+    let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "healthy");
 }
 
@@ -319,6 +410,7 @@ fn rarity_block_round_trips_through_json() {
         license: License::Apache2,
         params_b: 8,
         passed_determinism_gate: true,
+        passed_baseline_dominance: true,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: Some(bakeoff_report::CandidateMetrics {

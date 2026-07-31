@@ -10,6 +10,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::bakeoff_metrics::discrimination_auc;
+
 /// Maximum acceptable stddev across determinism replays before a candidate is
 /// disqualified outright. 1e-5 is tighter than any production-relevant drift
 /// we have observed; bump only if a hardware change forces it and document
@@ -30,16 +32,29 @@ pub const DETERMINISM_GATE: f64 = 1e-5;
 /// increment.
 pub const DISCRIMINATION_FLOOR: f64 = 0.5;
 
+/// Minimum AUC improvement over the strongest preregistered no-model
+/// baseline required for a candidate to remain eligible.
+///
+/// This is the repository's existing materiality threshold for replacing
+/// one scorer with another: `docs/operator/a5a-rarity-preflight.md:130-148`
+/// requires `(rarity AUC - A2.6 perplexity AUC) >= 0.05`.
+#[allow(dead_code)] // consumed by baseline computation in the gate-calibrate binary; test targets re-import modules independently
+pub const BASELINE_DOMINANCE_MARGIN: f64 = 0.05;
+
 /// Version of the decision rule below. Stamped onto every report so a
 /// recorded winner can be traced to the rule that chose it.
 ///
-/// v2 adds [`DISCRIMINATION_FLOOR`] ahead of the throughput floor. Under v1
+/// v3 adds the baseline-dominance floor after [`DISCRIMINATION_FLOOR`] and
+/// ahead of throughput. A candidate must beat the strongest preregistered
+/// no-model structural baseline by [`BASELINE_DOMINANCE_MARGIN`].
+///
+/// v2 added [`DISCRIMINATION_FLOOR`] ahead of the throughput floor. Under v1
 /// the A2.6 run recorded `llama-3.1-8b-instruct` (AUC 0.3425) as winner while
 /// `qwen3.6-27b-dense` (AUC 0.9363) was dropped for running at 119.49 tps
 /// against a floor of 145.88; the operator applied the runbook's
 /// worst-of-passing-AUC rule by hand, so production was unaffected.
 #[allow(dead_code)] // stamped by the gate-calibrate binary; test target re-imports module for other unit tests
-pub const DECISION_RULE_VERSION: u32 = 2;
+pub const DECISION_RULE_VERSION: u32 = 3;
 
 /// Candidates with throughput below this fraction of the fastest in-gate
 /// candidate are dropped before scoring. 0.5 is the spec's compromise between
@@ -53,6 +68,104 @@ pub const THROUGHPUT_FLOOR_RATIO: f64 = 0.5;
 /// spec; it absorbs noise without engulfing meaningful score gaps.
 #[allow(dead_code)] // consumed by `pick_winner` in the gate-calibrate binary; test target re-imports module for other unit tests
 pub const TIE_TOLERANCE: f64 = 0.02;
+
+/// A preregistered structural measure evaluated on the same novel and
+/// duplicate slices as every model candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoModelBaseline {
+    pub name: String,
+    pub discrimination_auc: f64,
+}
+
+/// Corpus-level no-model baseline evidence used by decision-rule v3.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BaselineResults {
+    pub measures: Vec<NoModelBaseline>,
+    pub strongest_name: Option<String>,
+    pub strongest_auc: f64,
+    pub required_discrimination_auc: f64,
+}
+
+impl BaselineResults {
+    /// Compute the four structural measures fixed before model evaluation.
+    ///
+    /// Keep this list closed: adding distinct-word count, mean word length,
+    /// or any other measure after observing its result would turn the
+    /// baseline control into the same post-hoc selection error it prevents.
+    #[allow(dead_code)] // called by the gate-calibrate binary; integration tests also exercise the committed corpus
+    pub fn from_corpus(novel: &[String], duplicate: &[String]) -> Self {
+        let measures = [
+            (
+                "utf8_byte_count",
+                structural_auc(novel, duplicate, |s| s.len()),
+            ),
+            (
+                "whitespace_word_count",
+                structural_auc(novel, duplicate, |s| s.split_whitespace().count()),
+            ),
+            (
+                "line_count",
+                structural_auc(novel, duplicate, |s| s.lines().count()),
+            ),
+            (
+                "paragraph_count",
+                structural_auc(novel, duplicate, paragraph_count),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, discrimination_auc)| NoModelBaseline {
+            name: name.to_string(),
+            discrimination_auc,
+        })
+        .collect::<Vec<_>>();
+
+        let strongest = measures.iter().max_by(|a, b| {
+            a.discrimination_auc
+                .partial_cmp(&b.discrimination_auc)
+                .unwrap_or(Ordering::Equal)
+        });
+        let strongest_auc = strongest.map_or(0.0, |baseline| baseline.discrimination_auc);
+        Self {
+            strongest_name: strongest.map(|baseline| baseline.name.clone()),
+            strongest_auc,
+            // Deliberately not clamped to 1.0. A floor above 1.0 records that
+            // the corpus offers no remaining discrimination for a model.
+            required_discrimination_auc: strongest_auc + BASELINE_DOMINANCE_MARGIN,
+            measures,
+        }
+    }
+
+    #[allow(dead_code)] // called by the decision rule and report assembly in the gate-calibrate binary
+    pub fn clears(&self, candidate_auc: f64) -> bool {
+        candidate_auc >= self.required_discrimination_auc
+    }
+}
+
+fn structural_auc(novel: &[String], duplicate: &[String], measure: impl Fn(&str) -> usize) -> f64 {
+    let novel_scores = novel
+        .iter()
+        .map(|text| measure(text) as f64)
+        .collect::<Vec<_>>();
+    let duplicate_scores = duplicate
+        .iter()
+        .map(|text| measure(text) as f64)
+        .collect::<Vec<_>>();
+    discrimination_auc(&novel_scores, &duplicate_scores)
+}
+
+fn paragraph_count(text: &str) -> usize {
+    let mut paragraphs = 0;
+    let mut inside_paragraph = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            inside_paragraph = false;
+        } else if !inside_paragraph {
+            paragraphs += 1;
+            inside_paragraph = true;
+        }
+    }
+    paragraphs
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum License {
@@ -91,6 +204,11 @@ pub struct CandidateResult {
     pub license: License,
     pub params_b: u32,
     pub passed_determinism_gate: bool,
+    /// Whether this candidate exceeded the corpus's strongest no-model
+    /// baseline by [`BASELINE_DOMINANCE_MARGIN`]. Persisted explicitly so
+    /// report consumers do not have to reconstruct decision-rule v3.
+    #[serde(default)]
+    pub passed_baseline_dominance: bool,
     /// Release date of the underlying model weights, unix seconds.
     /// Sourced from the manifest. Third tiebreaker (newer wins).
     pub release_date_unix: i64,
@@ -207,6 +325,7 @@ impl CandidateResult {
             license,
             params_b,
             passed_determinism_gate: false,
+            passed_baseline_dominance: false,
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
             metrics: None,
@@ -233,14 +352,19 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 ///
 /// 1. Drop candidates that failed the determinism gate.
 /// 2. Drop candidates at or below `DISCRIMINATION_FLOOR` AUC.
-/// 3. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
+/// 3. Drop candidates that do not beat the strongest no-model baseline by
+///    [`BASELINE_DOMINANCE_MARGIN`].
+/// 4. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
 ///    measured over the discriminating set.
-/// 4. Compute weighted scores using `max(tail_fraction_range)` over the
+/// 5. Compute weighted scores using `max(tail_fraction_range)` over the
 ///    in-budget set as the normalizer.
-/// 5. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
-/// 6. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
+/// 6. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
+/// 7. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
 #[allow(dead_code)] // called by the gate-calibrate binary; not reached from the test target
-pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
+pub fn pick_winner<'a>(
+    results: &'a [CandidateResult],
+    baselines: &BaselineResults,
+) -> Option<&'a CandidateResult> {
     // Step 1: determinism gate.
     let gated: Vec<&CandidateResult> = results
         .iter()
@@ -263,13 +387,24 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         return None;
     }
 
-    // Step 3: throughput floor.
-    let fastest = discriminating
+    // Step 3: baseline-dominance floor. This precedes throughput so speed,
+    // licensing, model size, and recency cannot rescue a candidate that adds
+    // no material discrimination over a cheap structural measure.
+    let baseline_dominating: Vec<&CandidateResult> = discriminating
+        .into_iter()
+        .filter(|r| baselines.clears(r.discrimination_auc))
+        .collect();
+    if baseline_dominating.is_empty() {
+        return None;
+    }
+
+    // Step 4: throughput floor.
+    let fastest = baseline_dominating
         .iter()
         .map(|r| r.throughput_tps)
         .fold(f64::NEG_INFINITY, f64::max);
     let floor = THROUGHPUT_FLOOR_RATIO * fastest;
-    let in_budget: Vec<&CandidateResult> = discriminating
+    let in_budget: Vec<&CandidateResult> = baseline_dominating
         .into_iter()
         .filter(|r| r.throughput_tps >= floor)
         .collect();
@@ -277,7 +412,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         return None;
     }
 
-    // Step 4: normalize tail term using in-budget max.
+    // Step 5: normalize tail term using in-budget max.
     let tail_norm_max = in_budget
         .iter()
         .map(|r| r.tail_fraction_range)
@@ -288,7 +423,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         .map(|r| (*r, weighted_score(r, tail_norm_max)))
         .collect();
 
-    // Step 5: contenders within tolerance band of top score.
+    // Step 6: contenders within tolerance band of top score.
     let top_score = scored
         .iter()
         .map(|(_, s)| *s)
@@ -297,7 +432,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     let mut contenders: Vec<&(&CandidateResult, f64)> =
         scored.iter().filter(|(_, s)| *s >= threshold).collect();
 
-    // Step 6: sort by license DESC, params_b ASC, release_date DESC.
+    // Step 7: sort by license DESC, params_b ASC, release_date DESC.
     contenders.sort_by(|a, b| {
         let lp_a = a.0.license.permissiveness();
         let lp_b = b.0.license.permissiveness();
@@ -326,6 +461,10 @@ pub struct Report {
     pub mock_scorer: bool,
     pub ctx_max_tokens: u32,
     pub determinism_gate_value: f64,
+    /// Structural no-model baselines and the resulting decision-rule-v3
+    /// requirement. Empty on archived v1/v2 reports.
+    #[serde(default)]
+    pub baselines: BaselineResults,
     /// Mid-run incremental snapshot marker. `true` when the report was
     /// written between candidates while the loop was still running (no
     /// `winner_id` is computed yet). The final write at the end of the loop
@@ -358,14 +497,30 @@ pub fn render_markdown(report: &Report) -> String {
         report.determinism_gate_value
     ));
 
+    out.push_str("## No-model structural baselines\n\n");
+    out.push_str("| baseline | auc | strongest |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for baseline in &report.baselines.measures {
+        let strongest = report.baselines.strongest_name.as_deref() == Some(&baseline.name);
+        out.push_str(&format!(
+            "| {} | {:.6} | {} |\n",
+            baseline.name, baseline.discrimination_auc, strongest
+        ));
+    }
+    let strongest = report.baselines.strongest_name.as_deref().unwrap_or("none");
+    out.push_str(&format!(
+        "\nStrongest baseline: {} ({:.6})\n\nRequired discrimination AUC: {:.6}\n\n",
+        strongest, report.baselines.strongest_auc, report.baselines.required_discrimination_auc
+    ));
+
     let winner = report.winner_id.as_deref().unwrap_or("none");
     out.push_str(&format!("Winner: {}\n\n", winner));
 
-    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_gate |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_determinism | passed_baseline_dominance |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for c in &report.candidates {
         out.push_str(&format!(
-            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} |\n",
+            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} |\n",
             c.id,
             c.discrimination_auc,
             c.paraphrase_delta,
@@ -375,6 +530,7 @@ pub fn render_markdown(report: &Report) -> String {
             c.license,
             c.params_b,
             c.passed_determinism_gate,
+            c.passed_baseline_dominance,
         ));
     }
 
@@ -481,6 +637,7 @@ mod tests {
             license: License::Apache2,
             params_b: 8,
             passed_determinism_gate: true,
+            passed_baseline_dominance: false,
             release_date_unix: 0,
             load_or_eval_error: None,
             metrics: None,
@@ -527,26 +684,35 @@ mod tests {
         ]
     }
 
-    /// The regression this gate exists for. Under v1 the recorded winner was
-    /// `llama-3.1-8b-instruct` at AUC 0.3425 -- below chance -- because the
-    /// only discriminating candidate was eliminated by a throughput floor set
-    /// by that same sub-chance candidate.
-    #[test]
-    fn a26_picks_the_only_discriminating_candidate() {
-        let results = a26_candidates();
-        let winner = pick_winner(&results).expect("a discriminating candidate exists");
-        assert_eq!(
-            winner.id, "qwen3.6-27b-dense",
-            "winner must be the candidate that clears the discrimination floor"
-        );
+    fn baselines(strongest_auc: f64) -> BaselineResults {
+        BaselineResults {
+            measures: vec![NoModelBaseline {
+                name: "test_baseline".to_string(),
+                discrimination_auc: strongest_auc,
+            }],
+            strongest_name: Some("test_baseline".to_string()),
+            strongest_auc,
+            required_discrimination_auc: strongest_auc + BASELINE_DOMINANCE_MARGIN,
+        }
+    }
 
-        // The floor that eliminated it under v1 was set by the sub-chance
-        // candidate; with that candidate gone the floor no longer excludes it.
-        let v1_floor = THROUGHPUT_FLOOR_RATIO * 291.7555607226632;
-        assert!(
-            119.49181844340372 < v1_floor,
-            "precondition: the v1 throughput floor did exclude the winner"
-        );
+    /// Under v2, qwen3.6 was the only candidate that reached the throughput
+    /// stage and therefore won. Decision-rule v3 rejects the same archived
+    /// candidate set because paragraph count already has AUC 1.0.
+    #[test]
+    fn a26_v3_has_no_winner_while_v2_selected_qwen36() {
+        let results = a26_candidates();
+        let v2_eligible = results
+            .iter()
+            .filter(|r| r.passed_determinism_gate)
+            .filter(|r| r.discrimination_auc > DISCRIMINATION_FLOOR)
+            .collect::<Vec<_>>();
+        assert_eq!(v2_eligible.len(), 1);
+        assert_eq!(v2_eligible[0].id, "qwen3.6-27b-dense");
+        let v2_winner = pick_winner(&results, &baselines(0.5))
+            .expect("a nonbinding baseline reproduces the v2 result");
+        assert_eq!(v2_winner.id, "qwen3.6-27b-dense");
+        assert!(pick_winner(&results, &baselines(1.0)).is_none());
     }
 
     #[test]
@@ -568,7 +734,7 @@ mod tests {
             .filter(|r| r.id != "qwen3.6-27b-dense")
             .collect();
         assert!(
-            pick_winner(&results).is_none(),
+            pick_winner(&results, &baselines(0.0)).is_none(),
             "a run where nothing beats chance has no winner, not a fast loser"
         );
     }
@@ -577,7 +743,7 @@ mod tests {
     #[test]
     fn exactly_chance_is_not_discriminating() {
         let results = vec![candidate("coin-flip", 0.5, 1000.0)];
-        assert!(pick_winner(&results).is_none());
+        assert!(pick_winner(&results, &baselines(0.0)).is_none());
     }
 
     /// Throughput still decides among candidates that all discriminate.
@@ -593,10 +759,53 @@ mod tests {
                 ..candidate("slow-better", 0.95, 100.0)
             },
         ];
-        let winner = pick_winner(&results).expect("both discriminate");
+        let winner = pick_winner(&results, &baselines(0.6)).expect("both discriminate");
         assert_eq!(
             winner.id, "fast-good",
             "within the discriminating set the throughput floor is unchanged"
         );
+    }
+
+    #[test]
+    fn candidate_at_the_baseline_margin_wins_normally() {
+        let baselines = baselines(0.75);
+        let results = vec![candidate(
+            "boundary",
+            baselines.required_discrimination_auc,
+            100.0,
+        )];
+        let winner = pick_winner(&results, &baselines).expect("margin is inclusive");
+        assert_eq!(winner.id, "boundary");
+    }
+
+    #[test]
+    fn later_stage_advantages_cannot_rescue_a_baseline_failure() {
+        let baselines = baselines(0.8);
+        let mut failing = candidate("fast-permissive-small-new", 0.84, 1000.0);
+        failing.license = License::Apache2;
+        failing.params_b = 1;
+        failing.release_date_unix = i64::MAX;
+        failing.paraphrase_delta = 0.0;
+        failing.tail_fraction_range = 1.0;
+
+        let mut passing = candidate("slow-passing", baselines.required_discrimination_auc, 100.0);
+        passing.license = License::LlamaCommunity;
+        passing.params_b = u32::MAX;
+        passing.release_date_unix = 0;
+        passing.paraphrase_delta = 1.0;
+        passing.tail_fraction_range = 0.0;
+
+        let results = [failing, passing];
+        let winner =
+            pick_winner(&results, &baselines).expect("baseline filter must run before throughput");
+        assert_eq!(winner.id, "slow-passing");
+    }
+
+    #[test]
+    fn required_floor_above_one_is_not_clamped_and_has_no_winner() {
+        let baselines = baselines(1.0);
+        assert_eq!(baselines.required_discrimination_auc, 1.05);
+        let results = vec![candidate("perfect-model", 1.0, 100.0)];
+        assert!(pick_winner(&results, &baselines).is_none());
     }
 }

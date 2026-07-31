@@ -637,6 +637,9 @@ pub async fn run_candidate_eval(
         license: map_license(&candidate.license),
         params_b,
         passed_determinism_gate: passed_det_gate,
+        // Filled by run_bakeoff after comparison with the corpus-level
+        // structural baselines. Candidate evaluation has no baseline input.
+        passed_baseline_dominance: false,
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

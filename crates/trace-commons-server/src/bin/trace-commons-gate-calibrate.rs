@@ -546,6 +546,9 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         tracing::warn!(warning = %w, "bakeoff_manifest_warning");
     }
     let corpus = bakeoff_corpus::load_corpus(&args.corpus)?;
+    // Compute the preregistered no-model controls once, before any scorer or
+    // candidate is loaded. They depend only on the already-resident corpus.
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     let manifest_sha = sha256_of_file(&args.candidates)?;
     let corpus_sha = sha256_of_file(&args.corpus)?;
 
@@ -687,6 +690,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             mock_scorer: args.mock_scorer,
             ctx_max_tokens: 4096,
             determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+            baselines: baselines.clone(),
             partial: true,
         }
     };
@@ -941,7 +945,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             }
         };
 
-        let candidate_result = match result {
+        let mut candidate_result = match result {
             Ok(r) => r,
             Err((class, e)) => {
                 tracing::warn!(
@@ -959,6 +963,8 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 )
             }
         };
+        candidate_result.passed_baseline_dominance =
+            baselines.clears(candidate_result.discrimination_auc);
 
         results.push(candidate_result);
 
@@ -979,7 +985,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
     // already excludes any candidate with `passed_determinism_gate = false`,
     // which covers every failed-load row (they're constructed with that
     // flag false), so failed candidates never win.
-    let winner_id = bakeoff_report::pick_winner(&results).map(|w| w.id.clone());
+    let winner_id = bakeoff_report::pick_winner(&results, &baselines).map(|w| w.id.clone());
     let report = bakeoff_report::Report {
         generated_at: chrono::Utc::now().to_rfc3339(),
         corpus_sha256: corpus_sha,
@@ -990,6 +996,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         mock_scorer: args.mock_scorer,
         ctx_max_tokens: 4096,
         determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+        baselines,
         partial: false,
     };
 
