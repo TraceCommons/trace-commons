@@ -16,6 +16,31 @@ use serde::{Deserialize, Serialize};
 /// the reason alongside the decision-rule version bump.
 pub const DETERMINISM_GATE: f64 = 1e-5;
 
+/// Minimum discrimination AUC a candidate must clear to be eligible at all.
+///
+/// AUC is the probability the metric ranks a novel trace above a duplicate
+/// one. 0.5 is chance. At or below it the candidate carries no usable signal
+/// — at 0.34 it is reliably *anti*-correlated — and no amount of throughput
+/// makes an unusable metric usable, which is why this gate runs before the
+/// throughput floor rather than being folded into the weighted score.
+///
+/// `weighted_score` still contributes `0.6 * auc`, so without this gate a
+/// sub-chance candidate keeps a positive score and can out-rank a
+/// discriminating but slower one. Bump only with a decision-rule-version
+/// increment.
+pub const DISCRIMINATION_FLOOR: f64 = 0.5;
+
+/// Version of the decision rule below. Stamped onto every report so a
+/// recorded winner can be traced to the rule that chose it.
+///
+/// v2 adds [`DISCRIMINATION_FLOOR`] ahead of the throughput floor. Under v1
+/// the A2.6 run recorded `llama-3.1-8b-instruct` (AUC 0.3425) as winner while
+/// `qwen3.6-27b-dense` (AUC 0.9363) was dropped for running at 119.49 tps
+/// against a floor of 145.88; the operator applied the runbook's
+/// worst-of-passing-AUC rule by hand, so production was unaffected.
+#[allow(dead_code)] // stamped by the gate-calibrate binary; test target re-imports module for other unit tests
+pub const DECISION_RULE_VERSION: u32 = 2;
+
 /// Candidates with throughput below this fraction of the fastest in-gate
 /// candidate are dropped before scoring. 0.5 is the spec's compromise between
 /// "ignore tiny throughput differences" and "reject obviously unviable runs."
@@ -207,11 +232,13 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 /// Apply the full decision rule and return the winner, if any.
 ///
 /// 1. Drop candidates that failed the determinism gate.
-/// 2. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`.
-/// 3. Compute weighted scores using `max(tail_fraction_range)` over the
+/// 2. Drop candidates at or below `DISCRIMINATION_FLOOR` AUC.
+/// 3. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
+///    measured over the discriminating set.
+/// 4. Compute weighted scores using `max(tail_fraction_range)` over the
 ///    in-budget set as the normalizer.
-/// 4. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
-/// 5. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
+/// 5. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
+/// 6. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
 #[allow(dead_code)] // called by the gate-calibrate binary; not reached from the test target
 pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     // Step 1: determinism gate.
@@ -223,13 +250,26 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         return None;
     }
 
-    // Step 2: throughput floor.
-    let fastest = gated
+    // Step 2: discrimination floor. A metric at or below chance is unusable
+    // regardless of speed, and must not be allowed to displace a candidate
+    // that actually discriminates. Runs before the throughput floor so a fast
+    // sub-chance candidate cannot set the floor that eliminates a slower
+    // discriminating one.
+    let discriminating: Vec<&CandidateResult> = gated
+        .into_iter()
+        .filter(|r| r.discrimination_auc > DISCRIMINATION_FLOOR)
+        .collect();
+    if discriminating.is_empty() {
+        return None;
+    }
+
+    // Step 3: throughput floor.
+    let fastest = discriminating
         .iter()
         .map(|r| r.throughput_tps)
         .fold(f64::NEG_INFINITY, f64::max);
     let floor = THROUGHPUT_FLOOR_RATIO * fastest;
-    let in_budget: Vec<&CandidateResult> = gated
+    let in_budget: Vec<&CandidateResult> = discriminating
         .into_iter()
         .filter(|r| r.throughput_tps >= floor)
         .collect();
@@ -237,7 +277,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         return None;
     }
 
-    // Step 3: normalize tail term using in-budget max.
+    // Step 4: normalize tail term using in-budget max.
     let tail_norm_max = in_budget
         .iter()
         .map(|r| r.tail_fraction_range)
@@ -248,7 +288,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
         .map(|r| (*r, weighted_score(r, tail_norm_max)))
         .collect();
 
-    // Step 4: contenders within tolerance band of top score.
+    // Step 5: contenders within tolerance band of top score.
     let top_score = scored
         .iter()
         .map(|(_, s)| *s)
@@ -257,7 +297,7 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     let mut contenders: Vec<&(&CandidateResult, f64)> =
         scored.iter().filter(|(_, s)| *s >= threshold).collect();
 
-    // Step 5: sort by license DESC, params_b ASC, release_date DESC.
+    // Step 6: sort by license DESC, params_b ASC, release_date DESC.
     contenders.sort_by(|a, b| {
         let lp_a = a.0.license.permissiveness();
         let lp_b = b.0.license.permissiveness();
@@ -421,4 +461,142 @@ pub fn write_report_atomic(report: &Report, dest: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A candidate with everything the decision rule ignores zeroed out.
+    /// Callers set only the fields their case is about.
+    fn candidate(id: &str, discrimination_auc: f64, throughput_tps: f64) -> CandidateResult {
+        CandidateResult {
+            id: id.to_string(),
+            discrimination_auc,
+            paraphrase_delta: 0.0,
+            tail_fraction_range: 0.0,
+            determinism_stddev: 0.0,
+            throughput_tps,
+            peak_vram_mib: 0,
+            license: License::Apache2,
+            params_b: 8,
+            passed_determinism_gate: true,
+            release_date_unix: 0,
+            load_or_eval_error: None,
+            metrics: None,
+            per_trace_scores: None,
+        }
+    }
+
+    /// The four candidates of the A2.6 run, verbatim from
+    /// `docs/superpowers/reports/2026-05-14-model-bakeoff-result-a26.json`.
+    fn a26_candidates() -> Vec<CandidateResult> {
+        vec![
+            CandidateResult {
+                paraphrase_delta: 0.8291336223450885,
+                tail_fraction_range: 0.015259500000000002,
+                license: License::LlamaCommunity,
+                release_date_unix: 1721692800,
+                ..candidate(
+                    "llama-3.1-8b-instruct",
+                    0.34253333333333336,
+                    291.7555607226632,
+                )
+            },
+            CandidateResult {
+                paraphrase_delta: 0.8233920956679962,
+                tail_fraction_range: 0.007072000000000002,
+                release_date_unix: 1745884800,
+                ..candidate("qwen3-8b-base", 0.2431111111111111, 248.4598989824905)
+            },
+            CandidateResult {
+                paraphrase_delta: 0.5980157409848676,
+                tail_fraction_range: 0.09649600000000001,
+                params_b: 27,
+                release_date_unix: 1776470400,
+                ..candidate("qwen3.6-27b-dense", 0.9362666666666667, 119.49181844340372)
+            },
+            CandidateResult {
+                paraphrase_delta: 1.5228894106767636,
+                tail_fraction_range: 0.011243999999999997,
+                params_b: 31,
+                passed_determinism_gate: false,
+                release_date_unix: 1774742400,
+                ..candidate("gemma-4-31b", 0.09660649819494585, 208.67786910267276)
+            },
+        ]
+    }
+
+    /// The regression this gate exists for. Under v1 the recorded winner was
+    /// `llama-3.1-8b-instruct` at AUC 0.3425 -- below chance -- because the
+    /// only discriminating candidate was eliminated by a throughput floor set
+    /// by that same sub-chance candidate.
+    #[test]
+    fn a26_picks_the_only_discriminating_candidate() {
+        let results = a26_candidates();
+        let winner = pick_winner(&results).expect("a discriminating candidate exists");
+        assert_eq!(
+            winner.id, "qwen3.6-27b-dense",
+            "winner must be the candidate that clears the discrimination floor"
+        );
+
+        // The floor that eliminated it under v1 was set by the sub-chance
+        // candidate; with that candidate gone the floor no longer excludes it.
+        let v1_floor = THROUGHPUT_FLOOR_RATIO * 291.7555607226632;
+        assert!(
+            119.49181844340372 < v1_floor,
+            "precondition: the v1 throughput floor did exclude the winner"
+        );
+    }
+
+    #[test]
+    fn sub_chance_candidates_are_dropped_before_the_throughput_floor() {
+        let results = a26_candidates();
+        let survivors: Vec<&str> = results
+            .iter()
+            .filter(|r| r.passed_determinism_gate)
+            .filter(|r| r.discrimination_auc > DISCRIMINATION_FLOOR)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(survivors, vec!["qwen3.6-27b-dense"]);
+    }
+
+    #[test]
+    fn no_winner_when_nothing_discriminates() {
+        let results: Vec<CandidateResult> = a26_candidates()
+            .into_iter()
+            .filter(|r| r.id != "qwen3.6-27b-dense")
+            .collect();
+        assert!(
+            pick_winner(&results).is_none(),
+            "a run where nothing beats chance has no winner, not a fast loser"
+        );
+    }
+
+    /// A candidate exactly at chance carries no signal and must not win.
+    #[test]
+    fn exactly_chance_is_not_discriminating() {
+        let results = vec![candidate("coin-flip", 0.5, 1000.0)];
+        assert!(pick_winner(&results).is_none());
+    }
+
+    /// Throughput still decides among candidates that all discriminate.
+    #[test]
+    fn throughput_floor_still_applies_within_the_discriminating_set() {
+        let results = vec![
+            CandidateResult {
+                tail_fraction_range: 0.05,
+                ..candidate("fast-good", 0.90, 300.0)
+            },
+            CandidateResult {
+                tail_fraction_range: 0.05,
+                ..candidate("slow-better", 0.95, 100.0)
+            },
+        ];
+        let winner = pick_winner(&results).expect("both discriminate");
+        assert_eq!(
+            winner.id, "fast-good",
+            "within the discriminating set the throughput floor is unchanged"
+        );
+    }
 }
