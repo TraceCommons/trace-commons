@@ -298,6 +298,11 @@ impl PgBackend {
     }
 
     #[doc(hidden)]
+    pub fn trace_pool_for_test(&self) -> Pool {
+        self.pool.clone()
+    }
+
+    #[doc(hidden)]
     pub fn raw_pool_for_tests_and_diagnostics(&self) -> Pool {
         self.pool.clone()
     }
@@ -1271,6 +1276,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&41_i32, &"trace_contributor_cap"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&42_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V42__onboarding_invite_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&42_i32, &"onboarding_invite_grants"],
                 )
                 .await?;
         }
