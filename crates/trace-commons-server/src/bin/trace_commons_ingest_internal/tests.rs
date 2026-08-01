@@ -4088,6 +4088,41 @@ fn auth_headers(token: &str) -> HeaderMap {
     headers
 }
 
+const SUBMIT_RATE_LIMIT_TOKEN_A: &str = "submit-rate-limit-token-a";
+const SUBMIT_RATE_LIMIT_TOKEN_B: &str = "submit-rate-limit-token-b";
+
+fn submit_rate_limit_test_state(root: PathBuf) -> Arc<AppState> {
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_A,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_B,
+        TokenRole::Contributor,
+    );
+    test_state_with_tokens(root, tokens)
+}
+
+fn submit_rate_limit_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn configure_production_submit_limits_for_test(token: &str) -> String {
+    let key = submit_principal_rate_limit_key(&principal_storage_ref(token));
+    configure_submit_rate_limits_for_test(
+        &key,
+        SUBMIT_PER_PRINCIPAL_LIMIT,
+        SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    );
+    key
+}
+
 fn append_legacy_calibration_dataset_manifest_conflict(
     root: &Path,
     tenant_id: &str,
@@ -4680,6 +4715,10 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
+    envelope.schema_version = "invalid.test.schema".to_string();
+}
+
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
     for event in &mut envelope.events {
         if event.event_type
@@ -4850,6 +4889,192 @@ async fn server_rescrub_redacts_free_text_side_channels() {
             "{leaked} survived the server re-scrub"
         );
     }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_is_per_authenticated_principal() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_B);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("invalid envelope reaches validation while under the rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal over the submission rate limit is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
+        Json(invalid),
+    )
+    .await
+    .expect_err("a different principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_caps_in_flight_requests() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key,
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let mut in_flight = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        let state = state.clone();
+        let envelope = invalid.clone();
+        in_flight.push(tokio::spawn(async move {
+            submit_trace_handler(
+                State(state),
+                auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+                Json(envelope),
+            )
+            .await
+        }));
+    }
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("in-flight submission reaches the test pause")
+            .expect("test pause sender remains open");
+    }
+
+    let (status, Json(error)) = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        ),
+    )
+    .await
+    .expect("request beyond the concurrency cap returns without entering the pause")
+    .expect_err("request beyond the concurrency cap is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(SUBMIT_PER_PRINCIPAL_CONCURRENCY as usize);
+    for task in in_flight {
+        let (status, _) = task
+            .await
+            .expect("in-flight submission task joins")
+            .expect_err("released invalid envelope reaches validation");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_releases_guard_when_request_completes() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let _occupied_slot = ACCOUNT_RATE_LIMITER
+        .acquire(&key, SUBMIT_PER_PRINCIPAL_CONCURRENCY)
+        .expect("test reserves one submission slot");
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..2 {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("completed request releases its submission slot");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn submit_authentication_precedes_rate_limit_accounting() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let principal_ref = principal_storage_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("unauthenticated submission is rejected");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(submit_rate_limit_count_for_test(&principal_ref), 0);
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("authenticated request reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(submit_rate_limit_count_for_test(&principal_ref), 1);
+}
+
+#[tokio::test]
+async fn submit_under_rate_limits_succeeds_end_to_end() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    configure_production_submit_limits_for_test(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let envelope = sample_envelope().await;
+
+    let Json(receipt) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission under both limits succeeds");
+
+    assert_eq!(receipt.status, "quarantined");
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .expect("submission record reads")
+            .is_some()
+    );
 }
 
 #[tokio::test]
