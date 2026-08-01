@@ -573,6 +573,7 @@ impl TraceUploadClaimIssuerState {
             source: self.allowlist_source.clone(),
             denial_counter: Arc::clone(&self.denial_counter),
             max_stale_seconds: self.allowlist_max_stale.as_secs(),
+            invite_admin: None,
         }
     }
 }
