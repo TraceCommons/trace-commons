@@ -124,6 +124,8 @@ async fn main() -> std::process::ExitCode {
             // In --json mode a caller parses stdout. Emitting a bare
             // "Error: ..." line there would force it to special-case
             // failure, which is exactly when it most needs structure.
+            // This one-document guarantee begins only after `Cli::parse()`
+            // succeeds; clap owns parse failures and writes them to stderr.
             if json && !commands::json_submit_result_was_rendered(&error) {
                 let out = serde_json::json!({
                     "schema_version": "trace_commons.cli_error.v1",

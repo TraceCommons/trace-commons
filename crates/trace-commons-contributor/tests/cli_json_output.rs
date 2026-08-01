@@ -116,3 +116,39 @@ fn json_error_before_results_keeps_cli_error_document() {
     let document = parse_single_document(&output);
     assert_eq!(document["schema_version"], "trace_commons.cli_error.v1");
 }
+
+#[test]
+fn json_manifest_stdout_destinations_are_refused_before_submission() {
+    for destination in ["/dev/stdout", "-"] {
+        let state = tempfile::tempdir().expect("state dir");
+        let working_dir = tempfile::tempdir().expect("working dir");
+        let trajectory = working_dir.path().join("bad.jsonl");
+        std::fs::write(&trajectory, "not json\n").expect("trajectory fixture writes");
+        save_config(state.path());
+
+        let output = contributor_command(state.path())
+            .current_dir(working_dir.path())
+            .args(["submit", "--all", "--source", "trajectory", "--trajectory"])
+            .arg(&trajectory)
+            .args(["--manifest", destination])
+            .output()
+            .expect("CLI runs");
+
+        assert!(
+            !output.status.success(),
+            "manifest destination {destination:?} must be refused"
+        );
+        let document = parse_single_document(&output);
+        assert_eq!(document["schema_version"], "trace_commons.cli_error.v1");
+        assert!(
+            document["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("standard output")),
+            "unexpected error for {destination:?}: {document}"
+        );
+        assert!(
+            !working_dir.path().join("-").exists(),
+            "the conventional stdout spelling must not become a file"
+        );
+    }
+}

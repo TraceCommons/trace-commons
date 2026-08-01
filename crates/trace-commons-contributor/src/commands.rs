@@ -465,6 +465,11 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 /// local sessions. Prints one outcome line or dry-run block per session;
 /// returns an error (nonzero exit) if any outcome was refused or failed.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
+    if sel.json && sel.manifest.is_some_and(manifest_destination_is_stdout) {
+        anyhow::bail!(
+            "--manifest cannot target standard output in --json mode: stdout is reserved for the single JSON result document"
+        );
+    }
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
     // ids that can never be scored. Refuse up front, before any work.
@@ -636,6 +641,35 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         anyhow::bail!("one or more sessions were refused or failed to submit");
     }
     Ok(())
+}
+
+fn manifest_destination_is_stdout(path: &Path) -> bool {
+    if path == Path::new("-") || path == Path::new("/dev/stdout") {
+        return true;
+    }
+
+    if std::fs::canonicalize(path)
+        .ok()
+        .zip(std::fs::canonicalize("/dev/stdout").ok())
+        .is_some_and(|(path, stdout)| path == stdout)
+    {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if std::fs::metadata(path)
+            .ok()
+            .zip(std::fs::metadata("/dev/stdout").ok())
+            .is_some_and(|(path, stdout)| path.dev() == stdout.dev() && path.ino() == stdout.ino())
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn render_submit_json(outcomes: &[SubmitOutcome]) -> serde_json::Result<String> {

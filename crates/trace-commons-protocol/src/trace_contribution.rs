@@ -2567,6 +2567,8 @@ pub struct DeterministicTraceRedactor {
     known_path_prefixes: Vec<String>,
     privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>,
     privacy_filter_backend: PrivacyFilterBackendTag,
+    #[cfg(test)]
+    current_pass_warning_for_tests: Option<String>,
 }
 
 impl Default for DeterministicTraceRedactor {
@@ -2592,6 +2594,8 @@ impl DeterministicTraceRedactor {
             known_path_prefixes: Vec::new(),
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
+            #[cfg(test)]
+            current_pass_warning_for_tests: None,
         }
     }
 
@@ -2613,6 +2617,8 @@ impl DeterministicTraceRedactor {
             known_path_prefixes,
             privacy_filter,
             privacy_filter_backend,
+            #[cfg(test)]
+            current_pass_warning_for_tests: None,
         })
     }
 
@@ -2634,6 +2640,12 @@ impl DeterministicTraceRedactor {
     ) -> Self {
         self.privacy_filter = Some(adapter);
         self.privacy_filter_backend = backend;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_current_pass_warning_for_test(mut self, warning: impl Into<String>) -> Self {
+        self.current_pass_warning_for_tests = Some(warning.into());
         self
     }
 
@@ -2707,6 +2719,10 @@ impl DeterministicTraceRedactor {
         state: &mut RedactionState,
     ) -> (String, RedactionReport) {
         let mut report = RedactionReport::default();
+        #[cfg(test)]
+        if let Some(warning) = &self.current_pass_warning_for_tests {
+            report.add_warning(warning.clone());
+        }
         let mut redacted = self.redact_private_emails(input, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
@@ -3855,17 +3871,19 @@ const GENERIC_HIGH_WARNING: &str =
     "The trace has high privacy risk and requires review before corpus storage.";
 
 fn is_tier_privacy_warning(warning: &str) -> bool {
-    matches!(
-        warning,
-        CONTRIBUTOR_REDACTION_FINDINGS_WARNING
-            | CONTRIBUTOR_CONSENT_FLAGS_WARNING
-            | SERVER_REDACTION_FINDINGS_WARNING
-            | SERVER_CONSENT_FLAGS_WARNING
-            | BLOCKED_SECRET_WARNING
-            | KEY_FINDING_WARNING
-            | GENERIC_MEDIUM_WARNING
-            | GENERIC_HIGH_WARNING
-    )
+    let normalized = warning.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
+        CONTRIBUTOR_REDACTION_FINDINGS_WARNING,
+        CONTRIBUTOR_CONSENT_FLAGS_WARNING,
+        SERVER_REDACTION_FINDINGS_WARNING,
+        SERVER_CONSENT_FLAGS_WARNING,
+        BLOCKED_SECRET_WARNING,
+        KEY_FINDING_WARNING,
+        GENERIC_MEDIUM_WARNING,
+        GENERIC_HIGH_WARNING,
+    ]
+    .iter()
+    .any(|known| normalized.eq_ignore_ascii_case(known))
 }
 
 fn replace_tier_privacy_warnings(existing: &mut Vec<String>, new_warnings: Vec<String>) {
@@ -3879,7 +3897,7 @@ fn privacy_warnings(
     context: PrivacyWarningContext,
 ) -> Vec<String> {
     let warning = match (risk, cause, context) {
-        (ResidualPiiRisk::Low, _, _) => return Vec::new(),
+        (ResidualPiiRisk::Low, ResidualRiskCause::NoFindings, _) => return Vec::new(),
         (
             ResidualPiiRisk::Medium,
             ResidualRiskCause::RedactionFindings,
@@ -3902,8 +3920,17 @@ fn privacy_warnings(
         ) => SERVER_CONSENT_FLAGS_WARNING,
         (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret, _) => BLOCKED_SECRET_WARNING,
         (ResidualPiiRisk::High, ResidualRiskCause::KeyFinding, _) => KEY_FINDING_WARNING,
-        (ResidualPiiRisk::Medium, _, _) => GENERIC_MEDIUM_WARNING,
-        (ResidualPiiRisk::High, _, _) => GENERIC_HIGH_WARNING,
+        (
+            ResidualPiiRisk::Medium,
+            ResidualRiskCause::NoFindings,
+            PrivacyWarningContext::ServerRescrub,
+        ) => GENERIC_MEDIUM_WARNING,
+        (
+            ResidualPiiRisk::High,
+            ResidualRiskCause::NoFindings,
+            PrivacyWarningContext::ServerRescrub,
+        ) => GENERIC_HIGH_WARNING,
+        combination => unreachable!("invalid privacy warning state: {combination:?}"),
     };
     vec![warning.to_string()]
 }
@@ -5357,6 +5384,81 @@ mod tests {
     }
 
     #[test]
+    fn tier_warning_matching_ignores_case_and_incidental_whitespace() {
+        let varied = format!(
+            "  {}  ",
+            super::BLOCKED_SECRET_WARNING
+                .to_ascii_uppercase()
+                .replace(" CONTENT", "\tCONTENT")
+        );
+
+        assert!(super::is_tier_privacy_warning(&varied));
+    }
+
+    #[test]
+    fn privacy_warnings_rejects_all_eighteen_unreachable_state_triples() {
+        use super::{PrivacyWarningContext, ResidualPiiRisk, ResidualRiskCause};
+
+        let risks = [
+            ResidualPiiRisk::Low,
+            ResidualPiiRisk::Medium,
+            ResidualPiiRisk::High,
+        ];
+        let causes = [
+            ResidualRiskCause::NoFindings,
+            ResidualRiskCause::RedactionFindings,
+            ResidualRiskCause::ConsentFlags,
+            ResidualRiskCause::BlockedSecret,
+            ResidualRiskCause::KeyFinding,
+        ];
+        let contexts = [
+            PrivacyWarningContext::ContributorRedaction,
+            PrivacyWarningContext::ServerRescrub,
+        ];
+        let mut reachable = 0;
+        let mut unreachable = 0;
+
+        for risk in risks {
+            for cause in causes {
+                for context in contexts {
+                    let expected_reachable = matches!(
+                        (risk, cause, context),
+                        (ResidualPiiRisk::Low, ResidualRiskCause::NoFindings, _)
+                            | (
+                                ResidualPiiRisk::Medium,
+                                ResidualRiskCause::RedactionFindings,
+                                _
+                            )
+                            | (ResidualPiiRisk::Medium, ResidualRiskCause::ConsentFlags, _)
+                            | (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret, _)
+                            | (ResidualPiiRisk::High, ResidualRiskCause::KeyFinding, _)
+                            | (
+                                ResidualPiiRisk::Medium | ResidualPiiRisk::High,
+                                ResidualRiskCause::NoFindings,
+                                PrivacyWarningContext::ServerRescrub
+                            )
+                    );
+                    let rendered =
+                        std::panic::catch_unwind(|| super::privacy_warnings(risk, cause, context));
+                    assert_eq!(
+                        rendered.is_ok(),
+                        expected_reachable,
+                        "unexpected reachability for ({risk:?}, {cause:?}, {context:?})"
+                    );
+                    if rendered.is_ok() {
+                        reachable += 1;
+                    } else {
+                        unreachable += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(reachable, 12);
+        assert_eq!(unreachable, 18);
+    }
+
+    #[test]
     fn read_privacy_env_prefers_canonical_then_legacy() {
         use super::read_privacy_env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -6355,14 +6457,17 @@ mod tests {
 
     #[cfg(feature = "near-ai-privacy-filter")]
     #[test]
-    fn deterministic_rescrub_adds_its_cause_specific_warning() {
+    fn deterministic_rescrub_preserves_warning_produced_by_current_pass() {
         use crate::trace_contribution::*;
 
         let mut env = sample_envelope_with_event_content("email jane@example.com now");
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-        let redactor = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let pass_warning = "deterministic pass warning";
+        let redactor = DeterministicTraceRedactor::new(vec![])
+            .unwrap()
+            .with_current_pass_warning_for_test(pass_warning);
 
         rescrub_trace_envelope_with(&redactor, &mut env);
 
@@ -6373,6 +6478,7 @@ mod tests {
             &"Server-side re-scrub recorded sensitive-data findings; review the final privacy state before corpus use."
                 .to_string()
         ));
+        assert!(env.privacy.warnings.contains(&pass_warning.to_string()));
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]
@@ -6702,7 +6808,7 @@ mod tests {
 
     #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
-    async fn proven_downgrade_replaces_high_warning_and_preserves_pass_warning() {
+    async fn proven_downgrade_removes_whitespace_varied_high_warning_and_restores_eligibility() {
         use crate::trace_contribution::*;
 
         struct FindsRealEmail;
@@ -6742,18 +6848,7 @@ mod tests {
         let mut env = sample_envelope_with_event_content("mail ada@example.com");
         env.consent = consent;
         env.privacy.residual_pii_risk = initial_risk;
-        env.privacy.warnings = privacy_warnings(
-            initial_risk,
-            initial_cause,
-            PrivacyWarningContext::ContributorRedaction,
-        );
-        let mut unsupported_label_report = RedactionReport::default();
-        safe_privacy_filter_label(
-            Some("future_private_category"),
-            &mut unsupported_label_report,
-        );
-        let pass_warning = unsupported_label_report.warnings[0].clone();
-        merge_privacy_warnings(&mut env.privacy.warnings, unsupported_label_report.warnings);
+        env.privacy.warnings = vec![format!("{BLOCKED_SECRET_WARNING} ")];
 
         rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut env)
             .await
@@ -6765,14 +6860,65 @@ mod tests {
                 .warnings
                 .contains(&SERVER_REDACTION_FINDINGS_WARNING.to_string())
         );
-        assert!(env.privacy.warnings.contains(&pass_warning));
         assert!(
             env.privacy
                 .warnings
                 .iter()
-                .all(|warning| !warning.contains("quarantined")),
+                .all(|warning| !warning.to_ascii_lowercase().contains("quarantined")),
             "the final Medium envelope must not retain a High-tier quarantine instruction"
         );
+        let eligibility = trace_dataset_eligibility(&env, TraceAllowedUse::Debugging, false);
+        assert!(
+            eligibility.eligible,
+            "the stale quarantine warning must not keep a downgraded envelope ineligible: {:?}",
+            eligibility.reasons
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn async_rescrub_preserves_warning_produced_by_current_pass() {
+        use crate::trace_contribution::*;
+
+        struct FindsEmailAndWarns;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for FindsEmailAndWarns {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if !text.contains("ada@example.com") {
+                    return Ok(None);
+                }
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:private_email");
+                report.add_pii_label("private_email");
+                safe_privacy_filter_label(Some("future_private_category"), &mut report);
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("ada@example.com", "[REDACTED:private_email]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let mut env = sample_envelope_with_event_content("mail ada@example.com");
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+        let pass_warning =
+            "Privacy Filter sidecar emitted unsupported span label; mapped to unknown.";
+
+        rescrub_envelope_prose_pii_with(&FindsEmailAndWarns, &mut env)
+            .await
+            .unwrap();
+
+        assert!(env.privacy.warnings.contains(&pass_warning.to_string()));
     }
 
     /// Test 6 (required test list): string leaves AND object keys inside
