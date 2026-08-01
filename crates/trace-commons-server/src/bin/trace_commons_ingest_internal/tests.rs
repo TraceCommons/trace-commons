@@ -75438,6 +75438,8 @@ async fn mint_login_link_account_for_subject(
         onboarding_profile_url: None,
         onboarding_leaderboard_url: None,
         admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
     };
 
     // Build the claim request; include the per-user subject when provided.
@@ -76438,6 +76440,8 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         onboarding_profile_url: None,
         onboarding_leaderboard_url: None,
         admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
     };
 
     async fn post_device_claim(

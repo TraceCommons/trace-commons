@@ -23,9 +23,11 @@ use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
 use crate::db::Database;
+use crate::db::postgres::PgBackend;
 use crate::trace_corpus_storage::{
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
 };
+use crate::trace_invite_registry::DbInviteRegistry;
 use crate::trace_upload_claim_allowlist::{
     AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
     hash_invite_code,
@@ -204,6 +206,16 @@ pub struct TraceUploadClaimIssuerConfig {
     /// Must be a loopback address unless
     /// `TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC=1` is set.
     pub admin_bind: Option<SocketAddr>,
+    /// Narrow-pool backend for the admin invite routes, populated by
+    /// [`configure_invite_admin_from_env`]. `None` keeps
+    /// `/v1/admin/invites*` unmounted — fail-closed, matching every other
+    /// optional narrow-pool feature in this config.
+    pub invite_admin_backend: Option<Arc<PgBackend>>,
+    /// Cache/invalidation layer over `invite_admin_backend`, sharing the
+    /// SAME registry instance the admin routes and (in a later task) the
+    /// redemption path both read: two independent caches over one table
+    /// would diverge.
+    pub invite_admin_registry: Option<Arc<DbInviteRegistry>>,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -255,6 +267,14 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
                 &self.onboarding_leaderboard_url,
             )
             .field("admin_bind", &self.admin_bind)
+            .field(
+                "invite_admin_backend",
+                &self.invite_admin_backend.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "invite_admin_registry",
+                &self.invite_admin_registry.as_ref().map(|_| "<configured>"),
+            )
             .finish()
     }
 }
@@ -371,6 +391,8 @@ impl TraceUploadClaimIssuerConfig {
             onboarding_leaderboard_url: optional_env(TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV)?
                 .and_then(|value| trim_optional(Some(value))),
             admin_bind,
+            invite_admin_backend: None,
+            invite_admin_registry: None,
         })
     }
 
@@ -481,6 +503,8 @@ impl TraceUploadClaimIssuerConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(60),
+            invite_admin_backend: self.invite_admin_backend.clone(),
+            invite_admin_registry: self.invite_admin_registry.clone(),
         }))
     }
 }
@@ -524,6 +548,60 @@ pub async fn configure_onboarding_device_key_registry_from_env(
     Ok(())
 }
 
+/// Wire the admin invite routes to a live database-backed registry when
+/// `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is configured. Absent that,
+/// leaves `config.invite_admin_backend`/`invite_admin_registry` at `None`,
+/// which keeps `/v1/admin/invites*` unmounted (fail-closed) exactly like
+/// today, rather than the previous state where nothing could ever mount
+/// them.
+///
+/// Builds exactly one `DbInviteRegistry`/`PgBackend` pair and stores the
+/// `Arc<DbInviteRegistry>` on the config (and, via `build_state`, on
+/// `TraceUploadClaimIssuerState`). A later redemption-path task MUST reuse
+/// this same `Arc` — obtained from `TraceUploadClaimIssuerState` — rather
+/// than constructing a second `DbInviteRegistry` over the same table, or the
+/// two caches would diverge and a code minted through the admin API would
+/// not be visible to redemption.
+pub async fn configure_invite_admin_from_env(
+    config: &mut TraceUploadClaimIssuerConfig,
+) -> anyhow::Result<()> {
+    if DatabaseConfig::invite_registry_url_from_env().is_none() {
+        return Ok(());
+    }
+    let url = std::env::var("DATABASE_URL")
+        .context("Trace upload-claim issuer admin invite routes require DATABASE_URL")?;
+    let pool_size = std::env::var("DATABASE_POOL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5);
+    let db_config = DatabaseConfig::from_postgres_url(&url, pool_size);
+    let backend = Arc::new(
+        PgBackend::new(&db_config)
+            .await
+            .context("failed to connect Trace upload-claim issuer invite-registry DB")?,
+    );
+    backend
+        .run_migrations()
+        .await
+        .context("failed to run migrations for Trace upload-claim issuer invite-registry DB")?;
+    // Warms the cache before returning; a failed warm must fail issuer
+    // startup rather than come up believing it has a usable registry.
+    let registry = Arc::new(
+        DbInviteRegistry::new(
+            backend.clone(),
+            StdDuration::from_secs(DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS),
+            StdDuration::from_secs(DEFAULT_ALLOWLIST_MAX_STALE_SECONDS),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to warm invite registry cache: {e}"))?,
+    );
+    registry.clone().spawn_refresh_task();
+    tracing::info!("Trace upload-claim issuer admin invite registry enabled");
+    config.invite_admin_backend = Some(backend);
+    config.invite_admin_registry = Some(registry);
+    Ok(())
+}
+
 async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Database>> {
     let url = std::env::var("DATABASE_URL")
         .context("Trace upload-claim issuer DB-backed features require DATABASE_URL")?;
@@ -563,17 +641,43 @@ struct TraceUploadClaimIssuerState {
     instance_replay_cache: Arc<crate::instance_enroll_guard::ReplayCache>,
     instance_rate_limiter: Arc<crate::instance_enroll_guard::InstanceRateLimiter>,
     instance_enroll_default_rate_per_min: u32,
+    invite_admin_backend: Option<Arc<PgBackend>>,
+    invite_admin_registry: Option<Arc<DbInviteRegistry>>,
 }
 
 impl TraceUploadClaimIssuerState {
     /// Build the AdminState the admin router consumes. Lives here so the
     /// admin module never needs visibility into the private state fields.
+    ///
+    /// `invite_admin` is `Some` only when both a backend and a registry were
+    /// configured (see `configure_invite_admin_from_env`); otherwise the
+    /// invite routes stay unmounted, matching the fail-closed posture of
+    /// every other narrow-pool feature. The admin-token decoding key reuses
+    /// this issuer's own signing public key (already validated at startup),
+    /// and `expected_iss`/`expected_aud` reuse the same issuer/audience
+    /// strings this issuer already stamps on the upload-claim tokens it
+    /// mints, rather than inventing a second identity pair.
     pub(crate) fn build_admin_state(&self) -> crate::trace_upload_claim_issuer_admin::AdminState {
+        let invite_admin = match (&self.invite_admin_backend, &self.invite_admin_registry) {
+            (Some(backend), Some(registry)) => {
+                let decoding_key = DecodingKey::from_ed_pem(self.signing_public_key_pem.as_bytes())
+                    .expect("signing_public_key_pem validated in build_state");
+                Some(crate::trace_invite_admin::InviteAdminState {
+                    backend: backend.clone(),
+                    registry: registry.clone(),
+                    decoding_key: Arc::new(decoding_key),
+                    expected_iss: self.issuer.clone(),
+                    expected_aud: self.audience.clone(),
+                    default_policy_label: self.issuer.clone(),
+                })
+            }
+            _ => None,
+        };
         crate::trace_upload_claim_issuer_admin::AdminState {
             source: self.allowlist_source.clone(),
             denial_counter: Arc::clone(&self.denial_counter),
             max_stale_seconds: self.allowlist_max_stale.as_secs(),
-            invite_admin: None,
+            invite_admin,
         }
     }
 }
@@ -3028,6 +3132,8 @@ mod tests {
             onboarding_profile_url: Some("https://tracecommons.ai/profile".to_string()),
             onboarding_leaderboard_url: Some("https://tracecommons.ai/leaderboard".to_string()),
             admin_bind: None,
+            invite_admin_backend: None,
+            invite_admin_registry: None,
         }
     }
 
@@ -3779,6 +3885,8 @@ mod tests {
                 instance_replay_cache: Arc::clone(&self.instance_replay_cache),
                 instance_rate_limiter: Arc::clone(&self.instance_rate_limiter),
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
+                invite_admin_backend: self.invite_admin_backend.clone(),
+                invite_admin_registry: self.invite_admin_registry.clone(),
             }
         }
     }

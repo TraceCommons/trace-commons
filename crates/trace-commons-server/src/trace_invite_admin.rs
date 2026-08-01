@@ -136,6 +136,11 @@ fn default_issuance_source() -> String {
     "operator".to_string()
 }
 
+/// Upper bound on `expires_in_days`. Ten years is far beyond any real invite
+/// lifetime; anything past this is treated as malformed input rather than
+/// risked against date-arithmetic overflow.
+const MAX_INVITE_EXPIRY_DAYS: i64 = 3650;
+
 pub fn invite_admin_router(state: InviteAdminState) -> Router {
     Router::new()
         .route(
@@ -226,9 +231,35 @@ async fn create_invite_handler(
         }
     }
 
-    let expires_at: Option<DateTime<Utc>> = request
-        .expires_in_days
-        .map(|d| Utc::now() + ChronoDuration::days(d));
+    // Bounded and overflow-checked: `Utc::now() + ChronoDuration::days(d)`
+    // panics on overflow, and an admin caller supplying a huge value would
+    // crash the handler. Reject non-positive and absurd values with 400
+    // instead, and use checked arithmetic throughout so no value of `d` can
+    // panic.
+    let expires_at: Option<DateTime<Utc>> = match request.expires_in_days {
+        None => None,
+        Some(days) => {
+            if !(1..=MAX_INVITE_EXPIRY_DAYS).contains(&days) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "InviteExpiryMalformed" })),
+                );
+            }
+            let Some(delta) = ChronoDuration::try_days(days) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "InviteExpiryMalformed" })),
+                );
+            };
+            let Some(at) = Utc::now().checked_add_signed(delta) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "InviteExpiryMalformed" })),
+                );
+            };
+            Some(at)
+        }
+    };
 
     // The raw code exists here and in exactly one response body. It is never
     // stored, logged, or retrievable afterward.
@@ -710,6 +741,165 @@ mod tests {
         );
     }
 
+    /// One entry per admin invite route. `body` is `Some` only for routes
+    /// that require a JSON body to reach `authorize()` at all — the create
+    /// route's `Json<CreateInviteRequest>` extractor runs before the handler
+    /// body, so a malformed/missing body would 422 before ever reaching the
+    /// auth check, which would give the auth tests below a false pass. The
+    /// revoke route's path segment is any placeholder string: hash-shape
+    /// validation happens inside the handler, after `authorize()`.
+    fn invite_route_cases() -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+        vec![
+            (
+                "POST",
+                "/v1/admin/invites",
+                Some(r#"{"tenant_mode":"derived","tenant_template_id":"tmpl-1"}"#),
+            ),
+            ("GET", "/v1/admin/invites", None),
+            ("POST", "/v1/admin/invites/placeholder-hash/revoke", None),
+            ("GET", "/v1/admin/invite-registry-status", None),
+        ]
+    }
+
+    fn route_request(
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        builder
+            .body(
+                body.map(|b| Body::from(b.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_invite_route_refuses_a_missing_token() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let app = invite_admin_router(state.inner);
+        for (method, uri, body) in invite_route_cases() {
+            let response = app
+                .clone()
+                .oneshot(route_request(method, uri, body, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} without a token must be 401"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_invite_route_refuses_a_non_admin_role_token() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let token = state.test_non_admin_token();
+        let app = invite_admin_router(state.inner);
+        for (method, uri, body) in invite_route_cases() {
+            let response = app
+                .clone()
+                .oneshot(route_request(method, uri, body, Some(&token)))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} with a non-admin token must be 403"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_status_reports_live_count_and_staleness() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let token = state.test_admin_token();
+        let max_stale_seconds = state.max_stale_seconds();
+        let app = invite_admin_router(state.inner);
+
+        let response = app
+            .oneshot(route_request(
+                "GET",
+                "/v1/admin/invite-registry-status",
+                None,
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["live"].is_u64(), "live count field: {json}");
+        assert!(
+            json["cache_age_seconds"].is_u64(),
+            "cache age field: {json}"
+        );
+        assert_eq!(json["stale"], serde_json::json!(false));
+        assert_eq!(
+            json["max_stale_seconds"],
+            serde_json::json!(max_stale_seconds)
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_an_invite_with_a_non_positive_or_absurd_expiry_is_rejected() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let token = state.test_admin_token();
+        let app = invite_admin_router(state.inner);
+
+        for expires_in_days in [0i64, -1, i64::MAX, MAX_INVITE_EXPIRY_DAYS + 1] {
+            let body = serde_json::json!({
+                "tenant_mode": "derived",
+                "tenant_template_id": "tmpl-1",
+                "expires_in_days": expires_in_days,
+            })
+            .to_string();
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(&body),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "expires_in_days={expires_in_days} must be rejected, not panic"
+            );
+            let response_body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+            assert_eq!(json["error"], serde_json::json!("InviteExpiryMalformed"));
+        }
+    }
+
     /// Builds real state against the test database. Returns None when no test
     /// database is configured.
     async fn test_invite_admin_state() -> Option<TestInviteAdminState> {
@@ -770,10 +960,22 @@ mod tests {
                 .expect("encoding key");
             sign(&enc, "admin", 300)
         }
+        /// A well-formed, correctly-signed token that fails only the role
+        /// check. Distinguishes "the auth gate is missing" from "the auth
+        /// gate is present but rejects everything" in the route-level auth
+        /// tests.
+        fn test_non_admin_token(&self) -> String {
+            let enc = jsonwebtoken::EncodingKey::from_ed_pem(self.signing_pem.as_bytes())
+                .expect("encoding key");
+            sign(&enc, "reviewer", 300)
+        }
         fn registry_handle(
             &self,
         ) -> std::sync::Arc<crate::trace_invite_registry::DbInviteRegistry> {
             self.inner.registry.clone()
+        }
+        fn max_stale_seconds(&self) -> u64 {
+            self.inner.registry.status().max_stale_seconds
         }
     }
 }
