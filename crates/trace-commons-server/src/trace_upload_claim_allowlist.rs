@@ -465,10 +465,25 @@ pub struct FileAllowlistSource {
 
 impl FileAllowlistSource {
     pub fn new(path: PathBuf, refresh_interval: Duration) -> Self {
-        let source_label = format!("file:{}", path.display());
         let reject_invite_entries = crate::trace_upload_claim_issuer::env_truthy(
             crate::trace_upload_claim_issuer::TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV,
         );
+        Self::new_with_invite_policy(path, refresh_interval, reject_invite_entries)
+    }
+
+    /// Same as [`Self::new`], with an explicit `reject_invite_entries`
+    /// switch instead of reading it from the environment. Exists so tests
+    /// can exercise the real `warm()`/`snapshot()` rejection path without
+    /// mutating process-global environment state (which is unsafe across
+    /// Rust's parallel test runner). `new()` is the only caller that reads
+    /// the env var, so there is exactly one place that decision is made in
+    /// a real deployment.
+    pub fn new_with_invite_policy(
+        path: PathBuf,
+        refresh_interval: Duration,
+        reject_invite_entries: bool,
+    ) -> Self {
+        let source_label = format!("file:{}", path.display());
         Self {
             path,
             refresh_interval,
@@ -924,6 +939,78 @@ mod tests {
         write_file(&path, "this is not json");
         let after_corrupt = source.snapshot().expect("cached survives corrupt");
         assert_eq!(after_corrupt.policy_label, "p1");
+    }
+
+    #[test]
+    fn file_source_warm_fails_and_snapshot_stays_unloaded_when_invites_are_rejected() {
+        // Exercises the real wiring end to end (constructor -> warm() ->
+        // snapshot()), not just the parsing function directly, since this is
+        // the exact control that stops a stale file resurrecting a revoked
+        // invite once the registry is authoritative.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        let h = hash_invite_code("INV-1");
+        write_file(
+            &path,
+            &format!(
+                r#"{{
+                    "version": 1,
+                    "generated_at": "2026-05-17T00:00:00Z",
+                    "policy_label": "p1",
+                    "entries": [{{"subject_hash": "{h}", "tenant_id": "t"}}]
+                }}"#
+            ),
+        );
+        let source =
+            FileAllowlistSource::new_with_invite_policy(path, Duration::from_millis(50), true);
+
+        let err = source.warm().expect_err("invite entry must fail warm load");
+        assert!(
+            matches!(&err, AllowlistError::Malformed(msg) if msg.contains("invite")),
+            "expected a Malformed error naming the offending kind, got {err:?}"
+        );
+
+        // warm() never populated the cache, so snapshot() has nothing to
+        // fall back to either: it re-attempts the load, hits the same
+        // rejection, and surfaces it directly rather than NoSnapshotYet
+        // (which is reserved for a source that has never been readable at
+        // all, e.g. a missing file).
+        let snapshot_err = source.snapshot().unwrap_err();
+        assert!(
+            matches!(&snapshot_err, AllowlistError::Malformed(msg) if msg.contains("invite")),
+            "expected the same rejection from snapshot(), got {snapshot_err:?}"
+        );
+    }
+
+    #[test]
+    fn file_source_still_loads_instance_entries_when_invites_are_rejected() {
+        // Confirms rejection is targeted at kind="invite", not a blanket
+        // refusal of the whole file, through the same real wiring.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_file(
+            &path,
+            r#"{
+                "version": 1,
+                "generated_at": "2026-05-17T00:00:00Z",
+                "policy_label": "p1",
+                "entries": [{"kind":"instance","instance_id":"inst-1",
+                "instance_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "max_enrollments":5,
+                "policy_template":{"policy_version":"v1",
+                "allowed_consent_scopes":[],"allowed_uses":[]}}]
+            }"#,
+        );
+        let source =
+            FileAllowlistSource::new_with_invite_policy(path, Duration::from_millis(50), true);
+
+        source
+            .warm()
+            .expect("instance-only file must still warm-load");
+        let snapshot = source
+            .snapshot()
+            .expect("instance-only snapshot must serve");
+        assert_eq!(snapshot.subject_hashes.len(), 0);
     }
 
     #[test]

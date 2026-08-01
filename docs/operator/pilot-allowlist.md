@@ -156,36 +156,40 @@ authoritative — see "Cutover" below. Mint through `--mint-invites` or
 
 ## Cutover
 
-Making PostgreSQL authoritative for invites is a four-step rollout, so a
-mid-flight operator error never strands contributors on either side of the
-switch:
+This release ships redemption authority and file-rejection together, both
+driven by the single `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` flag.
+`FileAllowlistSource` reads that exact same env var, so the moment it is
+set, a leftover `kind: "invite"` entry in the allowlist file is not merely
+ignored — it fails the issuer's startup `warm()` load outright. There is no
+staged rollout where the flag is on and file entries can safely remain:
+**stripping invite entries from the file is mandatory in the same step as
+setting the flag, not optional and not deferrable.** An operator who sets
+the flag and leaves the entries in place, expecting a grace period, takes a
+full issuer outage — the process will not start.
 
-1. **Ship with the file still authoritative.** The database-backed
-   redemption path and the admin routes exist and can be exercised, but
-   `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` is unset, so `/v1/onboard`
-   keeps redeeming against the allowlist file exactly as before.
-2. **Run `--import-file-invites`.** One-time migration of the file's
+The rollout is two steps:
+
+1. **Run `--import-file-invites`.** One-time migration of the file's
    existing `kind: "invite"` entries into the database. Idempotent on the
    invite hash, so a partial or repeated run is safe. Instance entries stay
-   in the file and are counted, not imported.
-3. **Set the authoritative flag and strip invite entries from the file.**
-   Set `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true` and remove every
-   `kind: "invite"` entry from the allowlist JSON (instance entries stay).
-   At this point the file entries are inert either way — the database
-   decides — but leaving them in is a rollback safety net (next point).
-4. **The following release makes invite entries a parse error.** As of this
-   release, once operators have confirmed step 3 is clean, invite entries
-   left in the allowlist file are a hard `PilotAllowlistMalformed`
-   startup/reload failure rather than a silent no-op. This is deliberate:
-   once the database is authoritative, a stale file entry could otherwise
-   re-authorize an invite that was revoked in the database.
+   in the file and are counted, not imported. Do this before the next step
+   — there is no window where an existing contributor's invite becomes
+   unredeemable, because the file is still authoritative for redemption
+   until the flag flips.
+2. **In the same deploy: set the flag AND strip invite entries from the
+   file.** Remove every `kind: "invite"` entry from the allowlist JSON
+   (instance entries stay) and set
+   `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true`, then restart the
+   issuer. Verify the restart succeeds before considering the cutover done
+   — a successful startup is your confirmation the file no longer carries
+   any invite entries.
 
-Rollback between steps 3 and 4 is just unsetting
-`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` — the file's invite entries
-are still present (you have not reached step 4 yet) and `--import-file-invites`
-is idempotent, so nothing needs to be replayed. There is no rollback once
-step 4 has shipped except re-adding entries to the file and deploying an
-older issuer build; this release refuses them outright.
+Rollback is unsetting `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` and
+restarting. `--import-file-invites` is idempotent, so nothing needs to be
+replayed. Re-adding entries to the allowlist file is only relevant if you
+are also rolling back to an issuer build from before this release — on a
+current build, file entries and the flag cannot coexist regardless of
+which way the flag is set.
 
 ## Running the issuer with the allowlist enabled
 
