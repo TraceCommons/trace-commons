@@ -73,8 +73,10 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Four jobs gate every PR:
+Five jobs gate every PR:
 
+- `cargo fmt --all -- --check` — formatting check. Run `cargo fmt --all`
+  before committing.
 - `cargo check` (with `RUSTFLAGS=-D warnings`).
 - `cargo test --no-run` (with `RUSTFLAGS=-D warnings`).
 - `cargo clippy` with the allow-list above (`-A clippy::type_complexity
@@ -103,6 +105,11 @@ those versions unless intentionally upgrading.
   go through `trace_current_tenant_id()`; the raw pool is restricted.
 - **No emojis in commits, PRs, code, or reports.** Match the existing commit
   style (short imperative subjects without `feat:` / `fix:` prefixes).
+- **Gate contracts live in `trace-commons-gate-api`.** Traits, result types, and
+  decision types belong there; scoring implementations do not. Code that holds a
+  scorer, embedder, or vector index must hold it as a trait object, never as a
+  concrete type — a proprietary backend substitutes at that seam. See
+  `docs/superpowers/specs/2026-08-01-scoring-private-split-design.md`.
 
 ## Working with this codebase
 
