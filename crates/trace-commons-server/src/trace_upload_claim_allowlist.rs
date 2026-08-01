@@ -224,6 +224,20 @@ impl AllowlistSnapshot {
         source_label: String,
         loaded_at: Instant,
     ) -> Result<Self, AllowlistError> {
+        Self::from_file_with_invite_policy(file, source_label, loaded_at, false)
+    }
+
+    /// Same as [`Self::from_file`], with an explicit `reject_invite_entries`
+    /// switch. When the invite registry is authoritative (PostgreSQL owns
+    /// invite state), a `kind: "invite"` entry left in the allowlist file
+    /// could re-authorize an invite that was revoked in the database, so
+    /// this is a hard parse error rather than a silent skip in that mode.
+    pub fn from_file_with_invite_policy(
+        file: AllowlistFile,
+        source_label: String,
+        loaded_at: Instant,
+        reject_invite_entries: bool,
+    ) -> Result<Self, AllowlistError> {
         if file.version != 1 {
             return Err(AllowlistError::Malformed(format!(
                 "unsupported version {} (expected 1)",
@@ -235,6 +249,16 @@ impl AllowlistSnapshot {
         let mut instances_by_hash: HashMap<String, InstanceSnapshotEntry> = HashMap::new();
 
         for entry in &file.entries {
+            if entry.kind == "invite" && reject_invite_entries {
+                // The database is authoritative for invites. A file entry here would be
+                // able to resurrect an invite that was revoked in the database, so this
+                // is a hard error rather than a silent skip.
+                return Err(AllowlistError::Malformed(
+                    "invite entries are not permitted once the invite registry is authoritative; \
+                     remove kind=\"invite\" entries from the allowlist file"
+                        .to_string(),
+                ));
+            }
             if entry.kind == "instance" {
                 // --- Instance entry ---
                 let instance_id = entry.instance_id.as_deref().map(str::trim).unwrap_or("");
@@ -431,16 +455,26 @@ pub struct FileAllowlistSource {
     refresh_interval: Duration,
     cached: Mutex<Option<AllowlistSnapshot>>,
     source_label: String,
+    /// Mirrors the issuer's own read of
+    /// `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE`
+    /// ([`crate::trace_upload_claim_issuer::TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV`])
+    /// so the file loader and the redemption path can never disagree about
+    /// whether the database owns invite state.
+    reject_invite_entries: bool,
 }
 
 impl FileAllowlistSource {
     pub fn new(path: PathBuf, refresh_interval: Duration) -> Self {
         let source_label = format!("file:{}", path.display());
+        let reject_invite_entries = crate::trace_upload_claim_issuer::env_truthy(
+            crate::trace_upload_claim_issuer::TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV,
+        );
         Self {
             path,
             refresh_interval,
             cached: Mutex::new(None),
             source_label,
+            reject_invite_entries,
         }
     }
 
@@ -449,7 +483,12 @@ impl FileAllowlistSource {
     /// `build_state` so a bad source aborts startup instead of waiting for
     /// the first request.
     pub fn warm(&self) -> Result<(), AllowlistError> {
-        let snapshot = load_file(&self.path, &self.source_label, Instant::now())?;
+        let snapshot = load_file(
+            &self.path,
+            &self.source_label,
+            Instant::now(),
+            self.reject_invite_entries,
+        )?;
         *self
             .cached
             .lock()
@@ -469,7 +508,12 @@ impl AllowlistSource for FileAllowlistSource {
             Some(snap) => snap.loaded_at.elapsed() >= self.refresh_interval,
         };
         if needs_refresh {
-            match load_file(&self.path, &self.source_label, Instant::now()) {
+            match load_file(
+                &self.path,
+                &self.source_label,
+                Instant::now(),
+                self.reject_invite_entries,
+            ) {
                 Ok(snapshot) => {
                     *cached = Some(snapshot);
                 }
@@ -504,12 +548,18 @@ fn load_file(
     path: &Path,
     source_label: &str,
     loaded_at: Instant,
+    reject_invite_entries: bool,
 ) -> Result<AllowlistSnapshot, AllowlistError> {
     let bytes = std::fs::read(path)
         .map_err(|e| AllowlistError::SourceMissing(format!("read {}: {e}", path.display())))?;
     let file: AllowlistFile = serde_json::from_slice(&bytes)
         .map_err(|e| AllowlistError::Malformed(format!("parse {}: {e}", path.display())))?;
-    AllowlistSnapshot::from_file(file, source_label.to_string(), loaded_at)
+    AllowlistSnapshot::from_file_with_invite_policy(
+        file,
+        source_label.to_string(),
+        loaded_at,
+        reject_invite_entries,
+    )
 }
 
 /// Sliding-window denial counter for `/v1/admin/allowlist-status`. Process-
@@ -561,6 +611,57 @@ fn evict_expired(samples: &mut VecDeque<Instant>, now: Instant, window: Duration
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn invite_entries_are_refused_once_the_registry_is_authoritative() {
+        // A stale file must never be able to re-authorize an invite that was
+        // revoked in the database, so once the DB is authoritative an invite
+        // entry in the file is a hard parse error rather than a silent skip.
+        let file: AllowlistFile = serde_json::from_str(
+            r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"p",
+                "entries":[{"subject_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "tenant_id":"tenant-a"}]}"#,
+        )
+        .expect("parse");
+
+        let result = AllowlistSnapshot::from_file_with_invite_policy(
+            file,
+            "test".to_string(),
+            std::time::Instant::now(),
+            true,
+        );
+        match result {
+            Err(AllowlistError::Malformed(msg)) => {
+                assert!(
+                    msg.contains("invite"),
+                    "error must name the offending kind: {msg}"
+                );
+            }
+            other => panic!("invite entries must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_entries_still_load_when_invites_are_refused() {
+        let file: AllowlistFile = serde_json::from_str(
+            r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"p",
+                "entries":[{"kind":"instance","instance_id":"inst-1",
+                "instance_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "max_enrollments":5,
+                "policy_template":{"policy_version":"v1",
+                "allowed_consent_scopes":[],"allowed_uses":[]}}]}"#,
+        )
+        .expect("parse");
+
+        let snapshot = AllowlistSnapshot::from_file_with_invite_policy(
+            file,
+            "test".to_string(),
+            std::time::Instant::now(),
+            true,
+        )
+        .expect("instance entries must still load");
+        assert_eq!(snapshot.subject_hashes.len(), 0);
+    }
 
     #[test]
     fn hash_invite_code_is_stable_and_namespaced() {

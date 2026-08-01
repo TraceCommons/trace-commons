@@ -3039,7 +3039,7 @@ pub(crate) fn optional_env(name: &'static str) -> anyhow::Result<Option<String>>
     }
 }
 
-fn env_truthy(name: &'static str) -> bool {
+pub(crate) fn env_truthy(name: &'static str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| parse_truthy_env_value(&value))
