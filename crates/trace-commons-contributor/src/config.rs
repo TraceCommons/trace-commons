@@ -35,6 +35,21 @@ pub struct ContributorConfig {
     pub consent_scopes: Vec<String>,
     pub pii_filter: Option<String>,
     pub allowed_hosts: Option<String>,
+    #[serde(default = "default_include_message_text")]
+    pub include_message_text: bool,
+    #[serde(default = "default_include_tool_payloads")]
+    pub include_tool_payloads: bool,
+}
+
+// Preserve the contributor CLI's existing on-disk behavior. Whether a future
+// config schema should default either consent setting to false is a maintainer
+// decision and is deliberately outside this compatibility fix.
+fn default_include_message_text() -> bool {
+    true
+}
+
+fn default_include_tool_payloads() -> bool {
+    true
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -323,6 +338,8 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            include_message_text: true,
+            include_tool_payloads: true,
         }
     }
 
@@ -338,6 +355,27 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn legacy_config_defaults_content_consent_to_included() {
+        let legacy = serde_json::json!({
+            "schema_version": CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "trace-commons-upload",
+            "tenant_id": "tenant-abc",
+            "instance_id": "instance-1",
+            "user_subject": "user-1",
+            "device_key_id": "sha256:00",
+            "consent_scopes": ["debugging_evaluation"],
+            "pii_filter": null,
+            "allowed_hosts": null
+        });
+
+        let config: ContributorConfig = serde_json::from_value(legacy).unwrap();
+        assert!(config.include_message_text);
+        assert!(config.include_tool_payloads);
     }
 
     #[test]

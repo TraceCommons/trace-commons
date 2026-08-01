@@ -79,6 +79,12 @@ enum Command {
         /// Exclude model reasoning from this submission (reasoning is included by default)
         #[arg(long)]
         no_reasoning: bool,
+        /// Exclude user, assistant, and reasoning message text from this submission
+        #[arg(long)]
+        no_message_text: bool,
+        /// Exclude tool-call/result content and every structured payload from this submission
+        #[arg(long)]
+        no_tool_payloads: bool,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -172,6 +178,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             manifest,
             trajectory,
             no_reasoning,
+            no_message_text,
+            no_tool_payloads,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -185,6 +193,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 trajectory: trajectory.as_deref(),
                 json: cli.json,
                 no_reasoning,
+                no_message_text,
+                no_tool_payloads,
             };
             commands::submit(&store, &sel).await
         }

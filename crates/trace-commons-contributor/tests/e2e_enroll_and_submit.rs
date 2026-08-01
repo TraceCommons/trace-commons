@@ -909,6 +909,8 @@ async fn enroll_mint_submit_round_trip() {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         },
     )
     .await

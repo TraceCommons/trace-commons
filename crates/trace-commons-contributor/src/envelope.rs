@@ -276,7 +276,11 @@ pub fn build_raw_contribution(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    let events = t
+        .events
+        .iter()
+        .map(|e| raw_event_for(e, now, cfg.include_message_text, cfg.include_tool_payloads))
+        .collect();
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
@@ -302,8 +306,8 @@ pub fn build_raw_contribution(
                     parsed
                 }
             },
-            message_text_included: true,
-            tool_payloads_included: true,
+            message_text_included: cfg.include_message_text,
+            tool_payloads_included: cfg.include_tool_payloads,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -365,6 +369,9 @@ pub fn apply_granted_scopes(
     granted_scopes: &[ConsentScope],
     granted_uses: &[TraceAllowedUse],
 ) {
+    // Upload claims grant consent scopes and allowed uses only. They carry no
+    // message-text or tool-payload permission signal, so stamping a grant must
+    // leave the contributor's effective content choices unchanged.
     envelope.consent.scopes = granted_scopes.to_vec();
     envelope.trace_card.allowed_uses = granted_uses.to_vec();
     envelope.trace_card.consent_scope = granted_scopes
@@ -374,42 +381,44 @@ pub fn apply_granted_scopes(
         .unwrap_or(ConsentScope::DebuggingEvaluation);
 }
 
-fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
-    let (event_type, content, structured_payload) = match e.kind {
-        SessionEventKind::User => (
-            TraceContributionEventType::UserMessage,
-            e.content.clone(),
-            e.structured.clone(),
-        ),
-        SessionEventKind::Assistant => (
-            TraceContributionEventType::AssistantMessage,
-            e.content.clone(),
-            e.structured.clone(),
-        ),
-        SessionEventKind::Reasoning => (
-            TraceContributionEventType::Reasoning,
-            e.content.clone(),
-            e.structured.clone(),
-        ),
-        SessionEventKind::ToolCall => (
-            TraceContributionEventType::ToolCall,
-            e.content.clone(),
-            e.structured.clone(),
-        ),
-        SessionEventKind::ToolResult => (
-            TraceContributionEventType::ToolResult,
-            e.content.clone(),
-            e.structured.clone(),
-        ),
+fn raw_event_for(
+    e: &SessionEvent,
+    now: DateTime<Utc>,
+    include_message_text: bool,
+    include_tool_payloads: bool,
+) -> RawTraceContributionEvent {
+    let event_type = match e.kind {
+        SessionEventKind::User => TraceContributionEventType::UserMessage,
+        SessionEventKind::Assistant => TraceContributionEventType::AssistantMessage,
+        SessionEventKind::Reasoning => TraceContributionEventType::Reasoning,
+        SessionEventKind::ToolCall => TraceContributionEventType::ToolCall,
+        SessionEventKind::ToolResult => TraceContributionEventType::ToolResult,
         // There is no generic/opaque event type in the v1 schema; map to
         // ToolResult with no content. The `structured_payload`'s
         // `{"record_type": ...}` marker (set by the source adapter)
         // preserves provenance without carrying any record content.
-        SessionEventKind::Opaque => (
-            TraceContributionEventType::ToolResult,
-            None,
-            e.structured.clone(),
-        ),
+        SessionEventKind::Opaque => TraceContributionEventType::ToolResult,
+    };
+
+    // User, assistant, and reasoning content is message text. Tool-call and
+    // tool-result content is tool payload. Every structured_payload, including
+    // opaque provenance markers, is also tool payload.
+    let include_content = match e.kind {
+        SessionEventKind::User | SessionEventKind::Assistant | SessionEventKind::Reasoning => {
+            include_message_text
+        }
+        SessionEventKind::ToolCall | SessionEventKind::ToolResult => include_tool_payloads,
+        SessionEventKind::Opaque => false,
+    };
+    let content = if include_content {
+        e.content.clone()
+    } else {
+        None
+    };
+    let structured_payload = if include_tool_payloads {
+        e.structured.clone()
+    } else {
+        serde_json::Value::Null
     };
 
     RawTraceContributionEvent {
@@ -456,6 +465,8 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            include_message_text: true,
+            include_tool_payloads: true,
         }
     }
 
@@ -635,7 +646,9 @@ mod tests {
     #[tokio::test]
     async fn granted_scopes_overwrite_consent_and_trace_card() {
         let t = fixture_transcript();
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.include_message_text = false;
+        cfg.include_tool_payloads = false;
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         let redactor =
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
@@ -655,6 +668,27 @@ mod tests {
         assert_eq!(
             envelope.trace_card.consent_scope,
             ConsentScope::DebuggingEvaluation
+        );
+        assert!(!envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+    }
+
+    #[tokio::test]
+    async fn disabled_content_with_no_findings_has_low_residual_risk() {
+        let t = fixture_transcript();
+        let mut cfg = test_config();
+        cfg.include_message_text = false;
+        cfg.include_tool_payloads = false;
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        assert!(envelope.privacy.redaction_counts.is_empty());
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            trace_commons_protocol::trace_contribution::ResidualPiiRisk::Low
         );
     }
 
@@ -707,7 +741,7 @@ mod tests {
             tool_name: None,
             token_counts: None,
         };
-        let raw = super::raw_event_for(&event, chrono::Utc::now());
+        let raw = super::raw_event_for(&event, chrono::Utc::now(), true, true);
         assert_eq!(
             raw.event_type,
             trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning

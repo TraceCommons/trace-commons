@@ -732,6 +732,8 @@ fn audit_cfg() -> ContributorConfig {
         consent_scopes: vec!["debugging_evaluation".into()],
         pii_filter: None,
         allowed_hosts: None,
+        include_message_text: true,
+        include_tool_payloads: true,
     }
 }
 

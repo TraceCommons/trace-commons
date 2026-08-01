@@ -88,6 +88,8 @@ pub async fn login(
         consent_scopes: consent_scopes.clone(),
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
+        include_message_text: true,
+        include_tool_payloads: true,
     };
     store
         .save_config(&cfg)
@@ -440,6 +442,10 @@ pub struct SubmitSelection<'a> {
     pub json: bool,
     /// Drop model reasoning from this run. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Drop user, assistant, and reasoning message text from this run.
+    pub no_message_text: bool,
+    /// Drop tool-call/result content and every structured payload from this run.
+    pub no_tool_payloads: bool,
 }
 
 /// Drop reasoning events before envelope construction. Reasoning is captured
@@ -517,6 +523,8 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
+        no_message_text: sel.no_message_text,
+        no_tool_payloads: sel.no_tool_payloads,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -842,6 +850,8 @@ mod project_filter_tests {
             trajectory: None,
             json: false,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");
@@ -1018,6 +1028,8 @@ async fn login_with_invite(
         consent_scopes,
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
+        include_message_text: true,
+        include_tool_payloads: true,
     };
     store
         .save_config(&cfg)

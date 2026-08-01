@@ -63,6 +63,10 @@ pub struct SubmitOptions {
     /// Drop model reasoning from every session in this run before envelope
     /// construction. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Override config to exclude user, assistant, and reasoning message text.
+    pub no_message_text: bool,
+    /// Override config to exclude tool-call/result content and structured payloads.
+    pub no_tool_payloads: bool,
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -413,11 +417,17 @@ fn residual_secret_refusal(
     Ok(None)
 }
 
-/// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
+/// `cfg` with each explicit submit flag overriding its persisted counterpart.
 fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> ContributorConfig {
     let mut c = cfg.clone();
     if opts.pii_filter.is_some() {
         c.pii_filter = opts.pii_filter.clone();
+    }
+    if opts.no_message_text {
+        c.include_message_text = false;
+    }
+    if opts.no_tool_payloads {
+        c.include_tool_payloads = false;
     }
     c
 }
@@ -686,7 +696,54 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
+            include_message_text: true,
+            include_tool_payloads: true,
         }
+    }
+
+    async fn submit_fixture_with_content_controls(
+        include_message_text: bool,
+        include_tool_payloads: bool,
+        no_message_text: bool,
+        no_tool_payloads: bool,
+    ) -> serde_json::Value {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.include_message_text = include_message_text;
+        cfg.include_tool_payloads = include_tool_payloads;
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            no_message_text,
+            no_tool_payloads,
+        };
+
+        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        let guard = received.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        guard[0].clone()
+    }
+
+    fn message_event(event: &serde_json::Value) -> bool {
+        matches!(
+            event["event_type"].as_str(),
+            Some("user_message" | "assistant_message" | "reasoning")
+        )
+    }
+
+    fn tool_event(event: &serde_json::Value) -> bool {
+        matches!(
+            event["event_type"].as_str(),
+            Some("tool_call" | "tool_result")
+        )
     }
 
     /// Drives the real submit path twice and inspects what actually reached
@@ -732,6 +789,8 @@ mod tests {
                 dry_run: false,
                 pii_filter: None,
                 no_reasoning,
+                no_message_text: false,
+                no_tool_payloads: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
                 .await
@@ -771,6 +830,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_message_text_controls_what_reaches_the_wire() {
+        let sent = submit_fixture_with_content_controls(true, true, true, false).await;
+        assert_eq!(sent["consent"]["message_text_included"], false);
+        assert_eq!(sent["consent"]["tool_payloads_included"], true);
+
+        let events = sent["events"].as_array().unwrap();
+        assert!(events.iter().any(message_event));
+        assert!(
+            events
+                .iter()
+                .filter(|event| message_event(event))
+                .all(|event| event["redacted_content"].is_null()),
+            "--no-message-text must remove all message text from the uploaded envelope"
+        );
+        assert!(
+            events.iter().any(|event| {
+                tool_event(event)
+                    && (!event["redacted_content"].is_null()
+                        || !event["structured_payload"].is_null())
+            }),
+            "message opt-out must not disable tool payloads"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_tool_payloads_controls_what_reaches_the_wire() {
+        let sent = submit_fixture_with_content_controls(true, true, false, true).await;
+        assert_eq!(sent["consent"]["message_text_included"], true);
+        assert_eq!(sent["consent"]["tool_payloads_included"], false);
+
+        let events = sent["events"].as_array().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| message_event(event) && !event["redacted_content"].is_null()),
+            "tool opt-out must not disable message text"
+        );
+        assert!(events.iter().any(tool_event));
+        assert!(
+            events
+                .iter()
+                .filter(|event| tool_event(event))
+                .all(|event| event["redacted_content"].is_null()),
+            "--no-tool-payloads must remove tool-call and tool-result content"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["structured_payload"].is_null()),
+            "--no-tool-payloads must remove every structured payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_content_behavior_remains_included_on_the_wire() {
+        let sent = submit_fixture_with_content_controls(true, true, false, false).await;
+        assert_eq!(sent["consent"]["message_text_included"], true);
+        assert_eq!(sent["consent"]["tool_payloads_included"], true);
+
+        let events = sent["events"].as_array().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| message_event(event) && !event["redacted_content"].is_null())
+        );
+        assert!(events.iter().any(|event| {
+            tool_event(event)
+                && (!event["redacted_content"].is_null() || !event["structured_payload"].is_null())
+        }));
+    }
+
+    #[tokio::test]
+    async fn content_flags_override_config_and_config_works_without_flags() {
+        let from_config = submit_fixture_with_content_controls(false, false, false, false).await;
+        assert_eq!(from_config["consent"]["message_text_included"], false);
+        assert_eq!(from_config["consent"]["tool_payloads_included"], false);
+        assert!(
+            from_config["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|event| {
+                    event["redacted_content"].is_null() && event["structured_payload"].is_null()
+                })
+        );
+
+        let from_flags = submit_fixture_with_content_controls(true, true, true, true).await;
+        assert_eq!(from_flags["consent"]["message_text_included"], false);
+        assert_eq!(from_flags["consent"]["tool_payloads_included"], false);
+        assert!(
+            from_flags["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|event| {
+                    event["redacted_content"].is_null() && event["structured_payload"].is_null()
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn submits_fixture_session_and_is_idempotent_on_rerun() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer()).await;
@@ -783,6 +943,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -891,6 +1053,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -954,6 +1118,8 @@ mod tests {
             dry_run: true,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -982,6 +1148,8 @@ mod tests {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -1024,6 +1192,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1077,6 +1247,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1105,6 +1277,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1133,6 +1307,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1235,6 +1411,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1372,6 +1550,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1436,6 +1616,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            no_message_text: false,
+            no_tool_payloads: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
