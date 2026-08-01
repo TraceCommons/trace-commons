@@ -9,8 +9,8 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use rand::rngs::OsRng;
 use rand::Rng;
+use rand::rngs::OsRng;
 
 /// Unambiguous invite-code alphabet. Matches the operator runbook's
 /// `tr -dc 'A-Z2-9'`: no 0/O, no 1/I/L.
@@ -86,7 +86,7 @@ pub struct InviteRegistryStatus {
 
 pub trait InviteRegistry: Send + Sync {
     fn lookup(&self, invite_subject_hash: &str)
-        -> Result<Option<InviteEntry>, InviteRegistryError>;
+    -> Result<Option<InviteEntry>, InviteRegistryError>;
     fn note_write(&self, entry: InviteEntry);
     fn note_revoke(&self, invite_subject_hash: &str);
     fn status(&self) -> InviteRegistryStatus;
@@ -186,6 +186,89 @@ pub fn generate_invite_code() -> String {
             INVITE_CODE_ALPHABET[idx] as char
         })
         .collect()
+}
+
+use std::sync::Arc;
+
+use crate::db::postgres::PgBackend;
+
+/// DB-backed invite registry. The cache is refreshed on a timer from the
+/// narrow registry pool and invalidated synchronously by the admin write
+/// path, so a minted code is redeemable in the same instant.
+pub struct DbInviteRegistry {
+    backend: Arc<PgBackend>,
+    cache: InviteCache,
+    refresh_interval: Duration,
+}
+
+impl DbInviteRegistry {
+    /// Warms the cache once before returning. A failed warm is an error: the
+    /// issuer must not come up believing it has a usable registry.
+    pub async fn new(
+        backend: Arc<PgBackend>,
+        refresh_interval: Duration,
+        max_stale: Duration,
+    ) -> Result<Self, InviteRegistryError> {
+        let registry = Self {
+            backend,
+            cache: InviteCache::new(max_stale),
+            refresh_interval,
+        };
+        registry.refresh_once().await?;
+        Ok(registry)
+    }
+
+    /// Reload every live invite. Returns the count loaded.
+    pub async fn refresh_once(&self) -> Result<usize, InviteRegistryError> {
+        let entries = self
+            .backend
+            .list_invite_grants()
+            .await
+            // Label only. Never let a connection string or row content reach
+            // this string; it surfaces in operator-visible status output.
+            .map_err(|_| {
+                InviteRegistryError::Backend("invite-registry-query-failed".to_string())
+            })?;
+        let count = entries.len();
+        self.cache.replace_all(entries, Instant::now());
+        Ok(count)
+    }
+
+    /// Background refresh. A failed refresh leaves the previous snapshot in
+    /// place and lets it age into staleness, which then fails closed —
+    /// matching FileAllowlistSource's posture exactly.
+    pub fn spawn_refresh_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let interval = self.refresh_interval;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                let _ = self.refresh_once().await;
+            }
+        })
+    }
+}
+
+impl InviteRegistry for DbInviteRegistry {
+    fn lookup(
+        &self,
+        invite_subject_hash: &str,
+    ) -> Result<Option<InviteEntry>, InviteRegistryError> {
+        self.cache.lookup(invite_subject_hash)
+    }
+
+    fn note_write(&self, entry: InviteEntry) {
+        self.cache.note_write(entry);
+    }
+
+    fn note_revoke(&self, invite_subject_hash: &str) {
+        self.cache.note_revoke(invite_subject_hash);
+    }
+
+    fn status(&self) -> InviteRegistryStatus {
+        self.cache.status()
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +388,17 @@ mod tests {
         let a = generate_invite_code();
         let b = generate_invite_code();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_never_refreshed_registry_fails_closed() {
+        // A cache that has never loaded must be treated as maximally stale,
+        // so a registry whose first refresh failed cannot silently authorize
+        // nothing-is-valid as everything-is-invalid-but-fresh.
+        let cache = InviteCache::new(Duration::from_secs(60));
+        match cache.lookup("sha256:aa") {
+            Err(InviteRegistryError::Stale { .. }) => {}
+            other => panic!("unloaded cache must be stale, got {other:?}"),
+        }
     }
 }
