@@ -11695,13 +11695,14 @@ async fn submit_trace_handler(
 
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
-    // submission-record read. Length-prefixing the authenticated tenant and
-    // principal components makes the bucket boundary unambiguous even when a
-    // signed claim contains `:`. Static-token configuration has no stable caller
-    // identity beyond the credential, so that path is necessarily per credential;
-    // overlapping rotation credentials receive separate budgets.
+    // submission-record read. Length-prefixing the authenticated tenant, method,
+    // and principal components makes every authentication boundary unambiguous.
+    // Static-token configuration has no stable caller identity beyond the
+    // credential, so that path is necessarily per credential; overlapping
+    // rotation credentials receive separate budgets.
     let submit_key = submit_principal_rate_limit_key(
         authenticated_tenant.tenant_id(),
+        authenticated_tenant.safe_auth_method(),
         authenticated_tenant.principal_ref(),
     );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
@@ -13887,40 +13888,46 @@ const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
 
-fn submit_principal_rate_limit_key(tenant_id: &str, principal_ref: &str) -> String {
+fn submit_principal_rate_limit_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    let auth_method = auth_method.storage_name();
     format!(
-        "submit-principal:{}:{tenant_id}:{}:{principal_ref}",
+        "submit-principal:{}:{tenant_id}:{}:{auth_method}:{}:{principal_ref}",
         tenant_id.len(),
+        auth_method.len(),
         principal_ref.len()
     )
 }
 
-fn production_submit_rate_limits() -> (u32, u32) {
-    (SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY)
-}
-
 // Most ingest unit tests share fixture principals while running in parallel.
-// Keep their unrelated submissions unbounded; focused rate-limit tests opt a
-// unique principal key into the production limits below.
+// Their state builders explicitly make those shared keys unbounded; focused
+// rate-limit tests leave their unique keys unset and therefore exercise these
+// production constants through the handler.
 #[cfg(test)]
 static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn submit_rate_limits(key: &str) -> (u32, u32) {
+    let production_limits = (SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
     #[cfg(test)]
     {
-        SUBMIT_RATE_LIMIT_TEST_LIMITS
-            .lock()
-            .ok()
-            .and_then(|limits| limits.get(key).copied())
-            .unwrap_or((u32::MAX, u32::MAX))
+        let configured = match SUBMIT_RATE_LIMIT_TEST_LIMITS.lock() {
+            Ok(limits) => limits.get(key).copied(),
+            Err(poisoned) => poisoned.into_inner().get(key).copied(),
+        };
+        if let Some(configured) = configured {
+            return configured;
+        }
     }
     #[cfg(not(test))]
     {
         let _ = key;
-        production_submit_rate_limits()
     }
+    production_limits
 }
 
 #[cfg(test)]
@@ -14060,8 +14067,16 @@ pub fn reset_account_rate_limiter_for_test() {
 }
 
 #[cfg(test)]
-fn submit_rate_limit_count_for_test(tenant_id: &str, principal_ref: &str) -> u32 {
-    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(tenant_id, principal_ref))
+fn submit_rate_limit_count_for_test(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> u32 {
+    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(
+        tenant_id,
+        auth_method,
+        principal_ref,
+    ))
 }
 
 #[cfg(test)]
