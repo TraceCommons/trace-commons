@@ -191,9 +191,11 @@ pub fn generate_invite_code() -> String {
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use crate::db::postgres::PgBackend;
 use crate::db::{InviteGrantInsertOutcome, InviteGrantWrite};
-use crate::trace_upload_claim_allowlist::AllowlistFile;
+use crate::trace_upload_claim_allowlist::{AllowlistFile, validate_subject_hash};
 
 #[derive(Debug, Clone, Default)]
 pub struct ImportSummary {
@@ -202,18 +204,49 @@ pub struct ImportSummary {
     pub skipped_non_invite: usize,
 }
 
+impl std::fmt::Display for ImportSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "imported={} already_present={} skipped_non_invite={}",
+            self.imported, self.already_present, self.skipped_non_invite
+        )
+    }
+}
+
+/// Build the error for a mid-import failure so the operator sees what
+/// already landed, not just the failure -- re-running is idempotent (a
+/// second pass skips everything already inserted as `already_present`), but
+/// only if the operator knows to re-run rather than assume nothing
+/// happened. `entry_number` is 1-based (the Nth entry in the file), matching
+/// how an operator would count lines while triaging a bad file. Never
+/// includes the offending hash or any file content beyond the entry
+/// position -- hash-only in spirit.
+fn import_failure(
+    summary: &ImportSummary,
+    entry_number: usize,
+    reason: impl std::fmt::Display,
+) -> anyhow::Error {
+    anyhow::anyhow!("{summary} before failing at entry {entry_number}: {reason}")
+}
+
 /// One-time migration of file invite entries into the database. Idempotent on
 /// `invite_subject_hash`, so re-running after a partial failure is safe.
 /// Instance entries stay in the file and are counted, not imported.
 ///
-/// Reports counts only: no raw codes, tenant secrets, or note text.
+/// Reports counts only: no raw codes, tenant secrets, or note text. A
+/// mid-loop failure still returns `Err`, but the error message carries the
+/// counts accumulated before the failing entry (see `import_failure`), so an
+/// operator is never left guessing what already landed.
 pub async fn import_file_invites(
     backend: &PgBackend,
     path: &Path,
     policy_label: &str,
 ) -> anyhow::Result<ImportSummary> {
-    let raw = std::fs::read_to_string(path)?;
-    let file: AllowlistFile = serde_json::from_str(&raw)?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading allowlist file {}", path.display()))?;
+    let file: AllowlistFile = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing allowlist file {}", path.display()))?;
     if file.version != 1 {
         anyhow::bail!(
             "PilotAllowlistMalformed: unsupported version {} (expected 1)",
@@ -222,21 +255,52 @@ pub async fn import_file_invites(
     }
 
     let mut summary = ImportSummary::default();
-    for entry in file.entries {
+    for (index, entry) in file.entries.into_iter().enumerate() {
+        let entry_number = index + 1;
         if entry.kind != "invite" {
             summary.skipped_non_invite += 1;
             continue;
         }
-        let (Some(subject_hash), Some(tenant_id)) = (entry.subject_hash, entry.tenant_id) else {
-            anyhow::bail!(
-                "PilotAllowlistMalformed: invite entry missing subject_hash or tenant_id"
-            );
+        let Some(subject_hash) = entry
+            .subject_hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Err(import_failure(
+                &summary,
+                entry_number,
+                "PilotAllowlistMalformed: invite entry missing subject_hash",
+            ));
+        };
+        if validate_subject_hash(subject_hash).is_err() {
+            // Deliberately does not include the underlying AllowlistError
+            // text: it echoes the raw (malformed) hash value via `{s:?}`,
+            // which would break the hash-only convention. Naming the entry
+            // position is enough for an operator to find the bad row.
+            return Err(import_failure(
+                &summary,
+                entry_number,
+                "PilotAllowlistMalformed: invite entry has a subject_hash that is not canonical sha256:<64 lowercase hex>",
+            ));
+        }
+        let Some(tenant_id) = entry
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Err(import_failure(
+                &summary,
+                entry_number,
+                "PilotAllowlistMalformed: invite entry missing tenant_id",
+            ));
         };
         let write = InviteGrantWrite {
-            invite_subject_hash: subject_hash,
+            invite_subject_hash: subject_hash.to_string(),
             policy_label: policy_label.to_string(),
             tenant_mode: InviteTenantMode::Fixed,
-            fixed_tenant_id: Some(tenant_id),
+            fixed_tenant_id: Some(tenant_id.to_string()),
             tenant_template_id: None,
             policy_version: "v1".to_string(),
             // Deliberately empty: the file format never carried per-invite
@@ -253,11 +317,18 @@ pub async fn import_file_invites(
             credential_binding_hash: None,
             note_label: entry.note_label,
         };
-        match backend.insert_invite_grant(write).await? {
-            InviteGrantInsertOutcome::Inserted => summary.imported += 1,
-            InviteGrantInsertOutcome::AlreadyExists => summary.already_present += 1,
-            InviteGrantInsertOutcome::CredentialAlreadyBound => {
-                anyhow::bail!("unexpected credential binding conflict during file import");
+        match backend.insert_invite_grant(write).await {
+            Ok(InviteGrantInsertOutcome::Inserted) => summary.imported += 1,
+            Ok(InviteGrantInsertOutcome::AlreadyExists) => summary.already_present += 1,
+            Ok(InviteGrantInsertOutcome::CredentialAlreadyBound) => {
+                return Err(import_failure(
+                    &summary,
+                    entry_number,
+                    "unexpected credential binding conflict during file import",
+                ));
+            }
+            Err(db_error) => {
+                return Err(import_failure(&summary, entry_number, db_error));
             }
         }
     }

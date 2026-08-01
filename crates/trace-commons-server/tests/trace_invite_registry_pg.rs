@@ -647,6 +647,246 @@ async fn imported_invites_are_fixed_mode_and_keep_their_tenant() {
 }
 
 #[tokio::test]
+async fn import_fails_when_the_file_does_not_exist() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("does-not-exist.json");
+
+    let err = import_file_invites(&backend, &missing, "import-test")
+        .await
+        .expect_err("missing file must fail");
+    assert!(
+        err.to_string().contains("does-not-exist.json"),
+        "error should name the file path: {err}"
+    );
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(
+        !all.iter().any(|e| e.policy_label == "import-test"),
+        "a failure before any read must leave zero rows behind"
+    );
+}
+
+#[tokio::test]
+async fn import_fails_on_invalid_json() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(&path, "this is not json").expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("invalid JSON must fail");
+    assert!(
+        err.to_string().contains("allowlist.json"),
+        "error should name the file path: {err}"
+    );
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(
+        !all.iter().any(|e| e.policy_label == "import-test"),
+        "a failure before any write must leave zero rows behind"
+    );
+}
+
+#[tokio::test]
+async fn import_fails_on_unsupported_version() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{"version":2,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test","entries":[]}"#,
+    )
+    .expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("unsupported version must fail");
+    assert!(err.to_string().contains("PilotAllowlistMalformed"));
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+}
+
+#[tokio::test]
+async fn import_fails_when_an_invite_entry_is_missing_subject_hash() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
+            "entries":[{"tenant_id":"tenant-zaki-pilot","note_label":"batch-1","max_uses":3}]}"#,
+    )
+    .expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("missing subject_hash must fail");
+    assert!(err.to_string().contains("missing subject_hash"), "{err}");
+    assert!(err.to_string().contains("entry 1"), "{err}");
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+}
+
+#[tokio::test]
+async fn import_fails_when_an_invite_entry_is_missing_tenant_id() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
+            "entries":[{"subject_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "note_label":"batch-1","max_uses":3}]}"#,
+    )
+    .expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("missing tenant_id must fail");
+    assert!(err.to_string().contains("missing tenant_id"), "{err}");
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+}
+
+#[tokio::test]
+async fn import_fails_on_a_malformed_subject_hash_shape() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
+            "entries":[{"subject_hash":"not-a-sha256","tenant_id":"tenant-zaki-pilot","max_uses":3}]}"#,
+    )
+    .expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("malformed subject_hash must fail");
+    // Must name the entry position, never echo the offending hash value.
+    assert!(err.to_string().contains("entry 1"), "{err}");
+    assert!(
+        !err.to_string().contains("not-a-sha256"),
+        "error must not echo the malformed hash value: {err}"
+    );
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(!all.iter().any(|e| e.policy_label == "import-test"));
+}
+
+#[tokio::test]
+async fn a_mid_import_failure_reports_the_partial_summary() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    // Two good invites, one instance entry, then a bad invite at entry 4:
+    // the good entries must land before the failure and be reflected in the
+    // error message's counts.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "version": 1,
+            "generated_at": "2026-05-17T18:00:00Z",
+            "policy_label": "import-test",
+            "entries": [
+                {"subject_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                 "tenant_id": "tenant-zaki-pilot", "max_uses": 3},
+                {"subject_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "tenant_id": "tenant-zaki-pilot", "max_uses": 3},
+                {"kind": "instance", "instance_id": "inst-1",
+                 "instance_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                 "max_enrollments": 5,
+                 "policy_template": {"policy_version": "v1",
+                                     "allowed_consent_scopes": [], "allowed_uses": []}},
+                {"subject_hash": "not-a-sha256", "tenant_id": "tenant-zaki-pilot", "max_uses": 3}
+            ]
+        }"#,
+    )
+    .expect("write file");
+
+    let err = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect_err("the fourth entry is malformed and must fail the whole import");
+    let message = err.to_string();
+    assert!(
+        message.contains("imported=2"),
+        "must report the two invites already committed: {message}"
+    );
+    assert!(message.contains("already_present=0"), "message: {message}");
+    assert!(
+        message.contains("skipped_non_invite=1"),
+        "must report the instance entry counted before the failure: {message}"
+    );
+    assert!(message.contains("entry 4"), "message: {message}");
+
+    // The two good entries must actually be in the database -- the error
+    // return must not roll them back, since re-running is what recovers.
+    let all = backend.list_invite_grants().await.expect("list");
+    let count = all
+        .iter()
+        .filter(|e| e.policy_label == "import-test")
+        .count();
+    assert_eq!(
+        count, 2,
+        "the two valid entries committed before the failure must persist"
+    );
+}
+
+#[tokio::test]
 async fn an_expired_invite_cannot_be_redeemed() {
     let Some(config) = registry_test_config() else {
         eprintln!("skipping: no test database configured");

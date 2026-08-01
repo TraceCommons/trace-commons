@@ -367,7 +367,11 @@ impl AllowlistSnapshot {
     }
 }
 
-fn validate_subject_hash(s: &str) -> Result<(), AllowlistError> {
+/// Canonical `sha256:<64 lowercase hex>` shape check, shared by the file
+/// allowlist snapshot loader and the operator's one-time DB import
+/// (`import_file_invites`) so both surfaces reject a malformed hash the same
+/// way instead of one of them falling through to a raw database error.
+pub(crate) fn validate_subject_hash(s: &str) -> Result<(), AllowlistError> {
     let Some(hex) = s.strip_prefix("sha256:") else {
         return Err(AllowlistError::Malformed(format!(
             "subject_hash must start with sha256: (got {s:?})"
