@@ -536,6 +536,116 @@ async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
     );
 }
 
+use trace_commons_server::trace_invite_registry::import_file_invites;
+
+#[tokio::test]
+async fn importing_the_same_file_twice_is_idempotent() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+    let pool = backend.trace_pool_for_test();
+    let client = pool.get().await.expect("client");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "version": 1,
+            "generated_at": "2026-05-17T18:00:00Z",
+            "policy_label": "import-test",
+            "entries": [
+                {"subject_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                 "tenant_id": "tenant-zaki-pilot", "note_label": "batch-1", "max_uses": 3},
+                {"kind": "instance", "instance_id": "inst-1",
+                 "instance_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                 "max_enrollments": 5,
+                 "policy_template": {"policy_version": "v1",
+                                     "allowed_consent_scopes": [], "allowed_uses": []}}
+            ]
+        }"#,
+    )
+    .expect("write file");
+
+    let first = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect("first import");
+    assert_eq!(first.imported, 1);
+    assert_eq!(first.already_present, 0);
+    assert_eq!(
+        first.skipped_non_invite, 1,
+        "instance entries stay in the file and must not be imported"
+    );
+
+    let created_at: chrono::DateTime<chrono::Utc> = client
+        .query_one(
+            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
+            &[],
+        )
+        .await
+        .expect("row")
+        .get(0);
+
+    let second = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect("second import");
+    assert_eq!(second.imported, 0);
+    assert_eq!(second.already_present, 1);
+
+    let created_at_after: chrono::DateTime<chrono::Utc> = client
+        .query_one(
+            "SELECT created_at FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
+            &[],
+        )
+        .await
+        .expect("row")
+        .get(0);
+    assert_eq!(
+        created_at, created_at_after,
+        "re-import must not rewrite the row"
+    );
+}
+
+#[tokio::test]
+async fn imported_invites_are_fixed_mode_and_keep_their_tenant() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"generated_at":"2026-05-17T18:00:00Z","policy_label":"import-test",
+            "entries":[{"subject_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "tenant_id":"tenant-zaki-pilot","note_label":"batch-1","max_uses":3}]}"#,
+    )
+    .expect("write file");
+
+    let _ = import_file_invites(&backend, &path, "import-test")
+        .await
+        .expect("import");
+
+    let all = backend.list_invite_grants().await.expect("list");
+    let found = all
+        .iter()
+        .find(|e| e.policy_label == "import-test")
+        .expect("imported invite present");
+    assert_eq!(found.tenant_mode, InviteTenantMode::Fixed);
+    assert_eq!(found.fixed_tenant_id.as_deref(), Some("tenant-zaki-pilot"));
+    assert_eq!(found.max_uses, 3);
+    assert_eq!(found.note_label.as_deref(), Some("batch-1"));
+    assert_eq!(found.issuance_source, "import:file");
+}
+
 #[tokio::test]
 async fn an_expired_invite_cannot_be_redeemed() {
     let Some(config) = registry_test_config() else {

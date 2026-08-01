@@ -188,9 +188,81 @@ pub fn generate_invite_code() -> String {
         .collect()
 }
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::db::postgres::PgBackend;
+use crate::db::{InviteGrantInsertOutcome, InviteGrantWrite};
+use crate::trace_upload_claim_allowlist::AllowlistFile;
+
+#[derive(Debug, Clone, Default)]
+pub struct ImportSummary {
+    pub imported: usize,
+    pub already_present: usize,
+    pub skipped_non_invite: usize,
+}
+
+/// One-time migration of file invite entries into the database. Idempotent on
+/// `invite_subject_hash`, so re-running after a partial failure is safe.
+/// Instance entries stay in the file and are counted, not imported.
+///
+/// Reports counts only: no raw codes, tenant secrets, or note text.
+pub async fn import_file_invites(
+    backend: &PgBackend,
+    path: &Path,
+    policy_label: &str,
+) -> anyhow::Result<ImportSummary> {
+    let raw = std::fs::read_to_string(path)?;
+    let file: AllowlistFile = serde_json::from_str(&raw)?;
+    if file.version != 1 {
+        anyhow::bail!(
+            "PilotAllowlistMalformed: unsupported version {} (expected 1)",
+            file.version
+        );
+    }
+
+    let mut summary = ImportSummary::default();
+    for entry in file.entries {
+        if entry.kind != "invite" {
+            summary.skipped_non_invite += 1;
+            continue;
+        }
+        let (Some(subject_hash), Some(tenant_id)) = (entry.subject_hash, entry.tenant_id) else {
+            anyhow::bail!(
+                "PilotAllowlistMalformed: invite entry missing subject_hash or tenant_id"
+            );
+        };
+        let write = InviteGrantWrite {
+            invite_subject_hash: subject_hash,
+            policy_label: policy_label.to_string(),
+            tenant_mode: InviteTenantMode::Fixed,
+            fixed_tenant_id: Some(tenant_id),
+            tenant_template_id: None,
+            policy_version: "v1".to_string(),
+            // Deliberately empty: the file format never carried per-invite
+            // grant fields, so imported invites fall back to the
+            // process-wide onboarding defaults (see
+            // resolve_onboarding_scope_override in db/postgres.rs), which
+            // preserves today's behavior exactly.
+            allowed_consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            max_uses: entry.max_uses,
+            expires_at: None,
+            issuance_source: "import:file".to_string(),
+            issued_by_label: None,
+            credential_binding_hash: None,
+            note_label: entry.note_label,
+        };
+        match backend.insert_invite_grant(write).await? {
+            InviteGrantInsertOutcome::Inserted => summary.imported += 1,
+            InviteGrantInsertOutcome::AlreadyExists => summary.already_present += 1,
+            InviteGrantInsertOutcome::CredentialAlreadyBound => {
+                anyhow::bail!("unexpected credential binding conflict during file import");
+            }
+        }
+    }
+    Ok(summary)
+}
 
 /// DB-backed invite registry. The cache is refreshed on a timer from the
 /// narrow registry pool and invalidated synchronously by the admin write
