@@ -39,6 +39,7 @@ import sys
 
 
 SUPPORTED_DECISION_RULE_VERSIONS = frozenset((1, 2, 3))
+U64_MAX = (1 << 64) - 1
 
 
 def auc_from_scores(novel, duplicate):
@@ -130,13 +131,22 @@ def pick_calibration_candidate(report):
         if not novel or any(v is None for v in novel):
             continue
         if version == 3:
-            if not c.get("passed_baseline_dominance"):
+            passed_baseline_dominance = c.get("passed_baseline_dominance")
+            dropped_rows = (
+                c.get("dropped_novel_rows"),
+                c.get("dropped_duplicate_rows"),
+                c.get("dropped_paraphrase_rows"),
+            )
+            if type(passed_baseline_dominance) is not bool:
                 continue
-            if c.get("dropped_novel_rows") != 0:
+            if any(
+                type(value) is not int or value < 0 or value > U64_MAX
+                for value in dropped_rows
+            ):
                 continue
-            if c.get("dropped_duplicate_rows") != 0:
+            if not passed_baseline_dominance:
                 continue
-            if c.get("dropped_paraphrase_rows") != 0:
+            if any(value != 0 for value in dropped_rows):
                 continue
         eligible.append(c)
     if not eligible:

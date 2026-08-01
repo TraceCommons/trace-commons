@@ -126,6 +126,41 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         )
         self.assertNotIn("Traceback", completed.stderr)
 
+    def test_cli_rejects_coerced_v3_eligibility_evidence(self):
+        report = {
+            "decision_rule_version": 3,
+            "winner_id": "coerced",
+            "candidates": [{
+                "id": "coerced",
+                "discrimination_auc": 0.9,
+                "passed_determinism_gate": True,
+                "passed_baseline_dominance": "false",
+                "dropped_novel_rows": False,
+                "dropped_duplicate_rows": 0.0,
+                "dropped_paraphrase_rows": 0.0,
+                "per_trace_scores": {
+                    "novel": [2.0, 3.0],
+                    "duplicate": [1.0, 1.0],
+                },
+            }],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as report_file:
+            json.dump(report, report_file)
+            report_file.flush()
+            completed = subprocess.run(
+                [sys.executable, calibration.__file__, report_file.name],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("error: no eligible calibration candidate", completed.stderr)
+        self.assertNotIn(
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=", completed.stdout
+        )
+        self.assertNotIn("Traceback", completed.stderr)
+
     def test_v1_and_v2_keep_archived_eligibility_behavior(self):
         legacy = candidate(
             passed_baseline_dominance=False,
