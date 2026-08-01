@@ -101,7 +101,12 @@ def _balanced_rows(
     nulls = null_credit_sequences or set()
     sequence = 0
     for tenant_index in range(10):
-        for label in ("failure", "success"):
+        labels = (
+            ("failure", "success")
+            if tenant_index % 2 == 0
+            else ("success", "failure")
+        )
+        for label in labels:
             score = 900 if label == "failure" else 100
             row: dict[str, object] = {
                 "tenant_id": f"tenant-{tenant_index}",
@@ -273,6 +278,9 @@ def test_cluster_label_permutation_detects_effect_and_rejects_null() -> None:
         iterations=400,
         seed=91,
     )
+    assert effect.p_value is not None
+    assert inverse_effect.p_value is not None
+    assert null.p_value is not None
     assert effect.p_value < 0.05, effect
     assert inverse_effect.p_value < 0.05, inverse_effect
     assert null.p_value >= 0.05, null
@@ -320,8 +328,11 @@ def test_cluster_label_permutation_is_deterministic_under_seed() -> None:
 def test_permutation_rejects_undefined_draws_from_p_value_denominator() -> None:
     observations = [
         _observation("short", M.SUCCESS, 0.1, 0),
-        _observation("long", M.SUCCESS, 0.2, 1),
-        _observation("long", M.FAILURE, 0.9, 2),
+        _observation("medium", M.SUCCESS, 0.2, 1),
+        _observation("medium", M.FAILURE, 0.9, 2),
+        _observation("long", M.SUCCESS, 0.3, 3),
+        _observation("long", M.SUCCESS, 0.4, 4),
+        _observation("long", M.FAILURE, 0.8, 5),
     ]
     result = M.cluster_label_permutation_test(
         observations,
@@ -331,9 +342,53 @@ def test_permutation_rejects_undefined_draws_from_p_value_denominator() -> None:
     )
     assert result.undefined_count > 0, result
     assert result.valid_count + result.undefined_count == 200, result
+    assert result.p_value is not None
     assert result.p_value == (result.extreme_count + 1) / (
         result.valid_count + 1
     )
+
+
+def test_degenerate_permutation_fails_closed_without_p_value() -> None:
+    rows: list[dict[str, object]] = []
+    sequence = 0
+    for tenant_index in range(10):
+        for label in ("failure", "success"):
+            failure = label == "failure"
+            rows.append(
+                {
+                    "tenant_id": f"tenant-{tenant_index}",
+                    "submission_id": f"submission-{sequence}",
+                    "decided_at": "2026-07-30T00:00:00Z",
+                    "perplexity_micros": 900 if failure else 100,
+                    "tail_fraction_micros": 800 if failure else 200,
+                    "novelty_score_micros": 700 if failure else 300,
+                    "task_success": label,
+                    "length": sequence + 1,
+                }
+            )
+            sequence += 1
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "degenerate.csv"
+        _write_csv(path, rows)
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=20",
+                "--permutations=80",
+            ]
+        )
+    assert result.returncode == 2, result.stderr
+    assert result.stderr.startswith("AnalyzeGateOutcomeFailure:")
+    assert "status=PERMUTATION_DEGENERATE" in result.stderr
+    assert "cause=identical_cluster_label_vectors" in result.stderr
+    assert "distinct_permuted_statistics=1 minimum=2" in result.stderr
+    assert "permuted_statistic_differed=false" in result.stderr
+    assert "permutation_p=" not in result.stdout
+    assert "permutation_p=" not in result.stderr
+    assert "status=ASSOCIATION" not in result.stdout
+    assert "status=ASSOCIATION" not in result.stderr
 
 
 def test_clustered_interval_wider_than_naive_interval() -> None:
@@ -457,7 +512,16 @@ def test_power_precondition_fails_before_any_signal_output() -> None:
 def test_partial_and_unknown_rows_are_excluded() -> None:
     rows = []
     for sequence, label in enumerate(
-        ("failure", "success", "failure", "success", "partial", "unknown")
+        (
+            "failure",
+            "success",
+            "success",
+            "failure",
+            "failure",
+            "failure",
+            "partial",
+            "unknown",
+        )
     ):
         rows.append(
             {
@@ -479,12 +543,12 @@ def test_partial_and_unknown_rows_are_excluded() -> None:
             [
                 f"--input={path}",
                 "--min-per-class=1",
-                "--min-clusters=2",
+                "--min-clusters=3",
                 "--bootstrap=20",
             ]
         )
     assert result.returncode == 0, result.stderr
-    assert "rows=6 included=4 excluded=2" in result.stdout
+    assert "rows=8 included=6 excluded=2" in result.stdout
     assert "partial_excluded=1 unknown_excluded=1" in result.stdout
 
 
@@ -607,6 +671,7 @@ def test_clustered_label_design_effect_disagrees_with_permutation_verdict() -> N
 
     assert label_design_effect == 20.0
     assert analytic_z < M.NormalDist().inv_cdf(0.975), analytic_z
+    assert permutation.p_value is not None
     assert permutation.p_value < 0.05, permutation
 
 
@@ -887,6 +952,9 @@ def test_help_documents_resampling_and_threshold_flags() -> None:
     assert "--alpha" in result.stdout
     assert "--alternative-auc" in result.stdout
     assert "omit to make no power claim" in result.stdout
+    assert M.MIN_DISTINCT_PERMUTATION_STATISTICS == 2
+    assert "at least 2 distinct" in result.stdout
+    assert "fail" in result.stdout
 
 
 def test_export_docstring_and_gitignore_protect_operator_data() -> None:
@@ -923,7 +991,17 @@ def test_label_parser_accepts_only_documented_values() -> None:
             raise AssertionError((value, label_name))
 
 
-def test_fixture_has_enough_clusters_and_is_deterministic() -> None:
+def test_fixture_has_varied_clusters_and_real_associations() -> None:
+    loaded = M.load_observations(FIXTURE, "task_success")
+    labels_by_tenant: dict[str, list[int]] = {}
+    for row in loaded.observations:
+        labels_by_tenant.setdefault(row.tenant_id, []).append(row.label)
+    cluster_sizes = {len(labels) for labels in labels_by_tenant.values()}
+    label_compositions = {
+        (sum(labels), len(labels) - sum(labels))
+        for labels in labels_by_tenant.values()
+    }
+
     args = [f"--input={FIXTURE}"]
     result = _run(args)
     repeated = _run(args)
@@ -932,10 +1010,14 @@ def test_fixture_has_enough_clusters_and_is_deterministic() -> None:
     assert result.stdout == repeated.stdout
     assert result.stderr == repeated.stderr
     assert "tenants=10" in result.stdout
-    # Every fixture tenant has the same ordered label vector, so reassigning
-    # complete vectors leaves all three score-label associations unchanged.
-    assert result.stdout.count("status=INCONCLUSIVE") == 3, result.stdout
-    assert result.stdout.count("permutation_p=1.000000") == 3, result.stdout
+    assert len(cluster_sizes) > 1, cluster_sizes
+    assert len(label_compositions) > 1, label_compositions
+    assert result.stdout.count("status=ASSOCIATION") == 2, result.stdout
+    assert result.stdout.count("status=INCONCLUSIVE") == 1, result.stdout
+    assert result.stdout.count("permutation_p=") == 3, result.stdout
+    assert result.stdout.count("permutation_distinct_statistics=") == 3
+    assert "PERMUTATION_DEGENERATE" not in result.stdout
+    assert "PERMUTATION_DEGENERATE" not in result.stderr
     assert "minimum_detectable_auc" not in result.stdout
     assert "UNDERPOWERED" not in result.stdout
     assert "# AnalyzeGateOutcomeComplete" in result.stdout

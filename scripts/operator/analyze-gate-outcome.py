@@ -22,6 +22,9 @@ The detection verdict comes from a cluster-level label permutation test. Each
 permutation moves a tenant's complete label vector to another tenant while
 leaving scores fixed. Short donor vectors wrap to fill longer receiving
 clusters. This preserves within-tenant label clustering under the null. The
+permutation distribution must contain at least two distinct valid statistics.
+If every valid permutation reproduces the observed statistic, the script emits
+`PERMUTATION_DEGENERATE` and exits non-zero without reporting a p-value.
 cluster-bootstrap interval remains an interval at the observed effect. Label
 ICC, size-weighted mean cluster size, and label design effect are descriptive
 label-clustering diagnostics only.
@@ -113,6 +116,7 @@ SIGNALS = {
 }
 FAILURE = 1
 SUCCESS = 0
+MIN_DISTINCT_PERMUTATION_STATISTICS = 2
 
 
 class AnalyzeGateOutcomeError(Exception):
@@ -167,11 +171,14 @@ class BootstrapResult:
 
 @dataclass(frozen=True)
 class PermutationResult:
-    p_value: float
+    p_value: Optional[float]
     extreme_count: int
     valid_count: int
     undefined_count: int
     iterations: int
+    distinct_statistic_count: int
+    permuted_statistic_differed: bool
+    identity_reassignment: bool
 
 
 @dataclass(frozen=True)
@@ -441,6 +448,8 @@ def cluster_label_permutation_test(
     extreme_count = 0
     valid_count = 0
     undefined_count = 0
+    permuted_statistics: set[float] = set()
+    permuted_statistic_differed = False
     for _ in range(iterations):
         donor_vectors = list(label_vectors)
         rng.shuffle(donor_vectors)
@@ -450,17 +459,36 @@ def cluster_label_permutation_test(
             undefined_count += 1
             continue
         valid_count += 1
-        if abs(permuted_auc - 0.5) >= observed_statistic:
+        permuted_statistic = abs(permuted_auc - 0.5)
+        permuted_statistics.add(permuted_statistic)
+        if permuted_statistic != observed_statistic:
+            permuted_statistic_differed = True
+        if permuted_statistic >= observed_statistic:
             extreme_count += 1
 
     if valid_count == 0:
         raise AnalyzeGateOutcomeError("permutation_produced_no_estimates")
+    distinct_statistic_count = len(permuted_statistics)
+    identity_reassignment = False
+    if distinct_statistic_count < MIN_DISTINCT_PERMUTATION_STATISTICS:
+        identity_reassignment = all(
+            [donor[index % len(donor)] for index in range(len(receiving))]
+            == [row.label for row in receiving]
+            for receiving in clusters
+            for donor in label_vectors
+        )
+    p_value = None
+    if distinct_statistic_count >= MIN_DISTINCT_PERMUTATION_STATISTICS:
+        p_value = (extreme_count + 1) / (valid_count + 1)
     return PermutationResult(
-        p_value=(extreme_count + 1) / (valid_count + 1),
+        p_value=p_value,
         extreme_count=extreme_count,
         valid_count=valid_count,
         undefined_count=undefined_count,
         iterations=iterations,
+        distinct_statistic_count=distinct_statistic_count,
+        permuted_statistic_differed=permuted_statistic_differed,
+        identity_reassignment=identity_reassignment,
     )
 
 
@@ -508,6 +536,9 @@ def simulate_power_at_alternative(
             iterations=permutations,
             seed=rng.randrange(0, 2**63),
         )
+        if permutation.p_value is None:
+            undefined_count += 1
+            continue
         valid_count += 1
         if permutation.p_value < alpha:
             rejection_count += 1
@@ -770,6 +801,30 @@ def analyze_signal(
         iterations=permutations,
         seed=seed + 20_000,
     )
+    if permutation.p_value is None:
+        if permutation.identity_reassignment:
+            cause = "identical_cluster_label_vectors"
+            detail = (
+                "every_cluster_carries_an_identical_label_vector_"
+                "so_reassignment_is_the_identity"
+            )
+        else:
+            cause = "constant_permuted_statistic"
+            if permutation.permuted_statistic_differed:
+                detail = "fewer_than_minimum_distinct_permuted_statistics"
+            else:
+                detail = (
+                    "every_valid_permutation_reproduces_the_observed_statistic"
+                )
+        raise AnalyzeGateOutcomeError(
+            "status=PERMUTATION_DEGENERATE "
+            f"signal={signal} cause={cause} detail={detail} "
+            "distinct_permuted_statistics="
+            f"{permutation.distinct_statistic_count} "
+            f"minimum={MIN_DISTINCT_PERMUTATION_STATISTICS} "
+            "permuted_statistic_differed="
+            f"{str(permutation.permuted_statistic_differed).lower()}"
+        )
     power = None
     if alternative_auc is not None:
         power = simulate_power_at_alternative(
@@ -829,7 +884,11 @@ def _parser() -> OperatorArgumentParser:
         "--permutations",
         type=int,
         default=400,
-        help="Cluster-level label permutations (default: 400).",
+        help=(
+            "Cluster-level label permutations; at least 2 distinct valid "
+            "permuted statistics are required or the analysis fails closed "
+            "(default: 400)."
+        ),
     )
     parser.add_argument(
         "--alpha",
@@ -1059,6 +1118,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"permutation_valid={analysis.permutation.valid_count} "
                 "permutation_undefined="
                 f"{analysis.permutation.undefined_count} "
+                "permutation_distinct_statistics="
+                f"{analysis.permutation.distinct_statistic_count} "
                 f"status={analysis.status}"
             )
             if (
