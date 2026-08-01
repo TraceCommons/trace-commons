@@ -251,6 +251,40 @@ fn derived_write(hash: &str) -> InviteGrantWrite {
     }
 }
 
+/// Fixture for `insert_then_list_round_trips_every_field`. Every string field
+/// gets a distinct, recognizable value (never sharing a value with another
+/// field, e.g. two fields both set to "v1") so a transposition bug -- say,
+/// `policy_version` and `issuance_source` swapped in the INSERT column list
+/// or the row mapper -- would fail the round-trip instead of passing
+/// silently. `expires_at` and `credential_binding_hash` are set to non-None
+/// values so both are actually exercised by the assertions.
+fn round_trip_fixture(hash: &str) -> InviteGrantWrite {
+    InviteGrantWrite {
+        invite_subject_hash: hash.to_string(),
+        policy_label: "test-pool".to_string(),
+        tenant_mode: InviteTenantMode::Derived,
+        fixed_tenant_id: None,
+        tenant_template_id: Some("tmpl-round-trip".to_string()),
+        policy_version: "policy-version-round-trip".to_string(),
+        allowed_consent_scopes: vec!["model_training".to_string()],
+        allowed_uses: vec!["research".to_string()],
+        max_uses: 3,
+        // A fixed, whole-second timestamp (not `Utc::now()`): `timestamptz`
+        // truncates to microsecond precision, and `Utc::now()` carries
+        // nanoseconds, which would make the round-trip equality assertion
+        // below flaky.
+        expires_at: Some(
+            chrono::DateTime::parse_from_rfc3339("2026-12-01T00:00:00Z")
+                .expect("parse fixture expires_at")
+                .with_timezone(&chrono::Utc),
+        ),
+        issuance_source: "issuance-source-round-trip".to_string(),
+        issued_by_label: Some("issued-by-round-trip".to_string()),
+        credential_binding_hash: Some(TEST_CRED.to_string()),
+        note_label: Some("note-label-round-trip".to_string()),
+    }
+}
+
 #[tokio::test]
 async fn insert_then_list_round_trips_every_field() {
     let Some(config) = registry_test_config() else {
@@ -261,10 +295,9 @@ async fn insert_then_list_round_trips_every_field() {
     backend.run_migrations().await.expect("migrations");
     cleanup_test_invites(&backend, "test-pool").await;
 
-    let outcome = backend
-        .insert_invite_grant(derived_write(TEST_HASH_C))
-        .await
-        .expect("insert");
+    let fixture = round_trip_fixture(TEST_HASH_C);
+    let expected_expires_at = fixture.expires_at.expect("fixture sets expires_at");
+    let outcome = backend.insert_invite_grant(fixture).await.expect("insert");
     assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
 
     let all = backend.list_invite_grants().await.expect("list");
@@ -272,12 +305,23 @@ async fn insert_then_list_round_trips_every_field() {
         .iter()
         .find(|e| e.invite_subject_hash == TEST_HASH_C)
         .expect("inserted invite present in listing");
+    assert_eq!(found.invite_subject_hash, TEST_HASH_C);
+    assert_eq!(found.policy_label, "test-pool");
     assert_eq!(found.tenant_mode, InviteTenantMode::Derived);
-    assert_eq!(found.tenant_template_id.as_deref(), Some("tmpl-1"));
+    assert_eq!(found.tenant_template_id.as_deref(), Some("tmpl-round-trip"));
     assert_eq!(found.fixed_tenant_id, None);
+    assert_eq!(found.policy_version, "policy-version-round-trip");
     assert_eq!(found.allowed_consent_scopes, vec!["model_training"]);
     assert_eq!(found.allowed_uses, vec!["research"]);
     assert_eq!(found.max_uses, 3);
+    assert_eq!(found.expires_at, Some(expected_expires_at));
+    assert_eq!(found.issuance_source, "issuance-source-round-trip");
+    assert_eq!(
+        found.issued_by_label.as_deref(),
+        Some("issued-by-round-trip")
+    );
+    assert_eq!(found.credential_binding_hash.as_deref(), Some(TEST_CRED));
+    assert_eq!(found.note_label.as_deref(), Some("note-label-round-trip"));
     assert!(found.revoked_at.is_none());
 }
 
@@ -366,5 +410,40 @@ async fn listing_excludes_revoked_invites() {
     assert!(
         !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
         "cache refresh must not load revoked invites"
+    );
+}
+
+/// Mirrors `listing_excludes_revoked_invites`, but for expiry: `list_invite_grants`
+/// feeds a cache of LIVE invites only, so a row whose `expires_at` is already in
+/// the past must never appear, exactly like a revoked row. Dropping the
+/// `expires_at` predicate from the query would let an expired invite into the
+/// cache and offer it as redeemable, so this must be covered independently
+/// of the revoked-row test above.
+#[tokio::test]
+async fn listing_excludes_expired_invites() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let mut expired = derived_write(TEST_HASH_C);
+    expired.expires_at = Some(
+        chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .expect("parse fixture expires_at")
+            .with_timezone(&chrono::Utc),
+    );
+    let outcome = backend
+        .insert_invite_grant(expired)
+        .await
+        .expect("insert expired invite");
+    assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(
+        !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
+        "cache refresh must not load expired invites"
     );
 }
