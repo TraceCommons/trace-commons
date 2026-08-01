@@ -746,6 +746,111 @@ mod tests {
         )
     }
 
+    fn normalize_projected_events(events: &serde_json::Value) -> serde_json::Value {
+        let mut normalized = events.as_array().unwrap().clone();
+        for event in &mut normalized {
+            let fields = event.as_object_mut().unwrap();
+            fields.remove("event_id");
+            fields.remove("timestamp");
+        }
+        serde_json::Value::Array(normalized)
+    }
+
+    async fn parent_compatible_ungated_wire_events() -> serde_json::Value {
+        use crate::source::{SessionEventKind, TraceSource};
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceContributionEvent, TokenCounts, TraceContributionEventType,
+        };
+
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let src = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let session_ref = src.discover().unwrap().remove(0);
+        let transcript = src.load(&session_ref).unwrap();
+        let cfg = cfg_for(
+            "https://issuer.example",
+            "https://ingest.example",
+            "sha256:00",
+        );
+        let now = Utc::now();
+        let mut raw = crate::envelope::build_raw_contribution(&transcript, &cfg, now);
+
+        let mut covered = [false; 6];
+        raw.events = transcript
+            .events
+            .iter()
+            .zip(raw.events.iter())
+            .map(|(source, generated)| {
+                let (event_type, content, structured_payload, coverage_index) = match source.kind {
+                    SessionEventKind::User => (
+                        TraceContributionEventType::UserMessage,
+                        source.content.clone(),
+                        source.structured.clone(),
+                        0,
+                    ),
+                    SessionEventKind::Assistant => (
+                        TraceContributionEventType::AssistantMessage,
+                        source.content.clone(),
+                        source.structured.clone(),
+                        1,
+                    ),
+                    SessionEventKind::Reasoning => (
+                        TraceContributionEventType::Reasoning,
+                        source.content.clone(),
+                        source.structured.clone(),
+                        2,
+                    ),
+                    SessionEventKind::ToolCall => (
+                        TraceContributionEventType::ToolCall,
+                        source.content.clone(),
+                        source.structured.clone(),
+                        3,
+                    ),
+                    SessionEventKind::ToolResult => (
+                        TraceContributionEventType::ToolResult,
+                        source.content.clone(),
+                        source.structured.clone(),
+                        4,
+                    ),
+                    SessionEventKind::Opaque => (
+                        TraceContributionEventType::ToolResult,
+                        None,
+                        source.structured.clone(),
+                        5,
+                    ),
+                };
+                covered[coverage_index] = true;
+                RawTraceContributionEvent {
+                    event_id: generated.event_id,
+                    event_type,
+                    timestamp: source.timestamp.unwrap_or(now),
+                    content,
+                    structured_payload,
+                    tool_name: source.tool_name.clone(),
+                    latency_ms: None,
+                    token_counts: source.token_counts.map(|(input_tokens, output_tokens)| {
+                        TokenCounts {
+                            input_tokens,
+                            output_tokens,
+                        }
+                    }),
+                    cost_usd: None,
+                }
+            })
+            .collect();
+        assert!(
+            covered.into_iter().all(|present| present),
+            "default-parity fixture must cover every contributor event kind"
+        );
+
+        let redactor =
+            crate::envelope::build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let envelope = crate::envelope::redact_to_envelope(&redactor, raw)
+            .await
+            .unwrap();
+        normalize_projected_events(&serde_json::to_value(envelope.events).unwrap())
+    }
+
     /// Drives the real submit path twice and inspects what actually reached
     /// the wire.
     ///
@@ -881,24 +986,37 @@ mod tests {
                 .all(|event| event["structured_payload"].is_null()),
             "--no-tool-payloads must remove every structured payload"
         );
+        assert!(
+            events.iter().all(|event| event["tool_name"].is_null()),
+            "--no-tool-payloads must remove every tool name"
+        );
+        assert!(
+            events.iter().all(|event| event["tool_category"].is_null()),
+            "tool categories must not be derived after tool names are removed"
+        );
+        assert!(
+            events.iter().all(|event| {
+                event["side_effect"]
+                    == if event["event_type"] == "tool_call" {
+                        "unknown"
+                    } else {
+                        "none"
+                    }
+            }),
+            "side effects must fall back after tool names are removed"
+        );
     }
 
     #[tokio::test]
-    async fn default_content_behavior_remains_included_on_the_wire() {
+    async fn default_content_behavior_matches_ungated_projection_field_by_field() {
         let sent = submit_fixture_with_content_controls(true, true, false, false).await;
         assert_eq!(sent["consent"]["message_text_included"], true);
         assert_eq!(sent["consent"]["tool_payloads_included"], true);
 
-        let events = sent["events"].as_array().unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| message_event(event) && !event["redacted_content"].is_null())
+        assert_eq!(
+            normalize_projected_events(&sent["events"]),
+            parent_compatible_ungated_wire_events().await
         );
-        assert!(events.iter().any(|event| {
-            tool_event(event)
-                && (!event["redacted_content"].is_null() || !event["structured_payload"].is_null())
-        }));
     }
 
     #[tokio::test]

@@ -892,6 +892,8 @@ async fn enroll_mint_submit_round_trip() {
     );
     // The issuer normalizes a bare origin to the submit endpoint.
     assert_eq!(cfg.ingest_url, format!("{ingest_url}/v1/traces"));
+    assert!(cfg.include_message_text);
+    assert!(cfg.include_tool_payloads);
 
     // Submit the Claude Code fixture through the real claim path.
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");

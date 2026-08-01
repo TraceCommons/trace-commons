@@ -791,6 +791,50 @@ mod tests {
         assert!(store.load_config().unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn invite_enrollment_saves_content_defaults_enabled() {
+        use axum::{Json, Router, routing::post};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_issuer_url = issuer_url.clone();
+        let router = Router::new().route(
+            "/v1/onboard",
+            post(move || {
+                let issuer_url = response_issuer_url.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "schema_version": trace_commons_protocol::onboarding::TRACE_ONBOARD_RESPONSE_SCHEMA_VERSION,
+                        "tenant_id": "tenant-invite",
+                        "ingest_url": "https://ingest.example/v1/traces",
+                        "issuer_url": issuer_url,
+                        "audience": "trace-commons-upload",
+                        "device_key_id": "sha256:invite-device",
+                        "contributor_label": "invite-user"
+                    }))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let invite = format!("{issuer_url}/onboard#INVITE-CODE");
+        login(
+            &store,
+            None,
+            Some(&invite),
+            Some("127.0.0.1"),
+            Some("debugging_evaluation"),
+        )
+        .await
+        .unwrap();
+
+        let cfg = store.load_config().unwrap().unwrap();
+        assert!(cfg.include_message_text);
+        assert!(cfg.include_tool_payloads);
+    }
+
     #[test]
     fn strip_reasoning_removes_only_reasoning_events() {
         use crate::source::{SessionEvent, SessionEventKind};

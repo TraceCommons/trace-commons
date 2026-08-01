@@ -276,11 +276,27 @@ pub fn build_raw_contribution(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events = t
+    let events: Vec<RawTraceContributionEvent> = t
         .events
         .iter()
         .map(|e| raw_event_for(e, now, cfg.include_message_text, cfg.include_tool_payloads))
         .collect();
+    let message_text_included = events.iter().any(|event| {
+        matches!(
+            event.event_type,
+            TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+        ) && event.content.is_some()
+    });
+    let tool_payloads_included = events.iter().any(|event| {
+        event.tool_name.is_some()
+            || !event.structured_payload.is_null()
+            || (matches!(
+                event.event_type,
+                TraceContributionEventType::ToolCall | TraceContributionEventType::ToolResult
+            ) && event.content.is_some())
+    });
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
@@ -306,8 +322,8 @@ pub fn build_raw_contribution(
                     parsed
                 }
             },
-            message_text_included: cfg.include_message_text,
-            tool_payloads_included: cfg.include_tool_payloads,
+            message_text_included,
+            tool_payloads_included,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -427,7 +443,11 @@ fn raw_event_for(
         timestamp: e.timestamp.unwrap_or(now),
         content,
         structured_payload,
-        tool_name: e.tool_name.clone(),
+        tool_name: if include_tool_payloads {
+            e.tool_name.clone()
+        } else {
+            None
+        },
         latency_ms: None,
         token_counts: e
             .token_counts
@@ -468,6 +488,98 @@ mod tests {
             include_message_text: true,
             include_tool_payloads: true,
         }
+    }
+
+    fn transcript_with(
+        events: Vec<crate::source::SessionEvent>,
+    ) -> crate::source::SessionTranscript {
+        crate::source::SessionTranscript {
+            source: std::borrow::Cow::Borrowed("openhands"),
+            agent_version: None,
+            model: None,
+            project: None,
+            cwd: None,
+            started_at: None,
+            session_hash: crate::source::session_hash(b"content-presence-test"),
+            events,
+        }
+    }
+
+    fn event(
+        kind: crate::source::SessionEventKind,
+        content: Option<&str>,
+        structured: serde_json::Value,
+        tool_name: Option<&str>,
+    ) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            kind,
+            timestamp: None,
+            content: content.map(str::to_string),
+            structured,
+            tool_name: tool_name.map(str::to_string),
+            token_counts: None,
+        }
+    }
+
+    #[test]
+    fn meta_only_trace_declares_both_content_classes_absent() {
+        let raw = build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+
+        assert!(!raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn message_only_trace_declares_only_message_text_present() {
+        let transcript = transcript_with(vec![event(
+            crate::source::SessionEventKind::User,
+            Some("hello"),
+            serde_json::Value::Null,
+            None,
+        )]);
+        let raw = build_raw_contribution(&transcript, &test_config(), Utc::now());
+
+        assert!(raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn tool_only_trace_declares_only_tool_payloads_present() {
+        let transcript = transcript_with(vec![event(
+            crate::source::SessionEventKind::ToolCall,
+            None,
+            serde_json::json!({"path": "src/lib.rs"}),
+            Some("read_file"),
+        )]);
+        let raw = build_raw_contribution(&transcript, &test_config(), Utc::now());
+
+        assert!(!raw.consent.message_text_included);
+        assert!(raw.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn disabled_content_is_declared_absent_after_gating() {
+        let transcript = transcript_with(vec![
+            event(
+                crate::source::SessionEventKind::Assistant,
+                Some("message"),
+                serde_json::Value::Null,
+                None,
+            ),
+            event(
+                crate::source::SessionEventKind::ToolResult,
+                Some("tool output"),
+                serde_json::json!({"result": "tool output"}),
+                Some("private-tool-name"),
+            ),
+        ]);
+        let mut cfg = test_config();
+        cfg.include_message_text = false;
+        cfg.include_tool_payloads = false;
+        let raw = build_raw_contribution(&transcript, &cfg, Utc::now());
+
+        assert!(!raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
     }
 
     #[tokio::test]
@@ -674,12 +786,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_content_with_no_findings_has_low_residual_risk() {
-        let t = fixture_transcript();
-        let mut cfg = test_config();
-        cfg.include_message_text = false;
-        cfg.include_tool_payloads = false;
-        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+    async fn content_free_trace_has_low_residual_risk() {
+        let raw = build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
         let redactor =
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
                 .unwrap();
