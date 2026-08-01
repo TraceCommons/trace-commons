@@ -75440,6 +75440,7 @@ async fn mint_login_link_account_for_subject(
         admin_bind: None,
         invite_admin_backend: None,
         invite_admin_registry: None,
+        invite_registry_authoritative: false,
     };
 
     // Build the claim request; include the per-user subject when provided.
@@ -76442,6 +76443,7 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         admin_bind: None,
         invite_admin_backend: None,
         invite_admin_registry: None,
+        invite_registry_authoritative: false,
     };
 
     async fn post_device_claim(

@@ -601,6 +601,65 @@ impl PgBackend {
             .map_err(DatabaseError::Postgres)?;
         row.map(Self::invite_entry_from_row).transpose()
     }
+
+    /// Authoritative redemption resolve. Runs on the RUNTIME pool under the
+    /// V42 GUC policy, re-checks revocation and expiry inside the transaction,
+    /// and holds FOR SHARE so a concurrent revoke serializes behind it.
+    ///
+    /// This does NOT increment the V29 counter; the caller does that in the
+    /// same transaction via the existing onboard_device_key path.
+    /// `Ok(None)` means the invite is not redeemable -- absent, revoked, or
+    /// expired, deliberately indistinguishable to the caller. `Err` is
+    /// reserved for genuine database failures, so a backend outage is never
+    /// reported to a contributor as an invalid invite.
+    pub async fn redeem_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+        user_subject: &str,
+    ) -> Result<Option<InviteRedemption>, DatabaseError> {
+        let pool = self.trace_pool();
+        let mut client = pool.get().await.map_err(DatabaseError::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(entry) = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash).await? else {
+            return Ok(None);
+        };
+
+        let tenant_id = match entry.tenant_mode {
+            crate::trace_invite_registry::InviteTenantMode::Fixed => {
+                entry.fixed_tenant_id.clone().ok_or_else(|| {
+                    DatabaseError::Serialization("invite fixed_tenant_id missing".to_string())
+                })?
+            }
+            crate::trace_invite_registry::InviteTenantMode::Derived => {
+                let template = entry.tenant_template_id.as_deref().ok_or_else(|| {
+                    DatabaseError::Serialization("invite tenant_template_id missing".to_string())
+                })?;
+                trace_commons_protocol::onboarding::derive_user_tenant_id(template, user_subject)
+            }
+        };
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(InviteRedemption {
+            tenant_id,
+            policy_version: entry.policy_version,
+            allowed_consent_scopes: entry.allowed_consent_scopes,
+            allowed_uses: entry.allowed_uses,
+            max_uses: entry.max_uses,
+        }))
+    }
+}
+
+/// Resolved grant for a redeemed invite.
+#[derive(Debug, Clone)]
+pub struct InviteRedemption {
+    pub tenant_id: String,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub max_uses: u32,
 }
 
 const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mode,
@@ -2114,6 +2173,12 @@ impl Database for PgBackend {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        let resolved_allowed_consent_scopes = resolve_onboarding_scope_override(
+            &device_key.allowed_consent_scopes,
+            &default_allowed_consent_scopes,
+        );
+        let resolved_allowed_uses =
+            resolve_onboarding_scope_override(&device_key.allowed_uses, &default_allowed_uses);
         self.ensure_trace_tenant(&device_key.tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
@@ -2138,8 +2203,8 @@ impl Database for PgBackend {
                     &tx,
                     &device_key.tenant_id,
                     &device_key.device_key_id,
-                    &default_allowed_consent_scopes,
-                    &default_allowed_uses,
+                    &resolved_allowed_consent_scopes,
+                    &resolved_allowed_uses,
                 )
                 .await?;
                 tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2213,8 +2278,8 @@ impl Database for PgBackend {
                         &tx,
                         &device_key.tenant_id,
                         &device_key.device_key_id,
-                        &default_allowed_consent_scopes,
-                        &default_allowed_uses,
+                        &resolved_allowed_consent_scopes,
+                        &resolved_allowed_uses,
                     )
                     .await?;
                     tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2249,8 +2314,8 @@ impl Database for PgBackend {
             &tx,
             &device_key.tenant_id,
             &device_key.device_key_id,
-            &default_allowed_consent_scopes,
-            &default_allowed_uses,
+            &resolved_allowed_consent_scopes,
+            &resolved_allowed_uses,
         )
         .await?;
 
@@ -4345,6 +4410,22 @@ fn normalize_provision_scope_values(value: &serde_json::Value, defaults: &[&str]
     normalized
 }
 
+/// Resolve the scopes to grant on `/v1/onboard`: an invite-supplied override
+/// when present and non-empty, otherwise the process-wide default. Empty is
+/// deliberately treated the same as absent -- invites imported from the file
+/// allowlist carry empty scope vectors (the file format never had a scopes
+/// column), and provisioning them with zero consent scopes would silently
+/// strip permissions the pilot already grants those invites.
+fn resolve_onboarding_scope_override(
+    override_scopes: &Option<Vec<String>>,
+    default: &[String],
+) -> Vec<String> {
+    match override_scopes {
+        Some(scopes) if !scopes.is_empty() => scopes.clone(),
+        _ => default.to_vec(),
+    }
+}
+
 async fn upsert_onboarding_device_tenant_access_grant(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
@@ -4505,6 +4586,32 @@ mod tests {
             normalize_provision_scope_values(&json!([1, "x"]), &d),
             d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn onboarding_scope_override_wins_when_non_empty() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        let overridden =
+            resolve_onboarding_scope_override(&Some(vec!["model_training".to_string()]), &default);
+        assert_eq!(overridden, vec!["model_training".to_string()]);
+    }
+
+    #[test]
+    fn onboarding_scope_override_falls_back_on_empty_or_absent() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        // Imported file invites carry `Some(vec![])`, not `None` -- both
+        // must resolve to the default, not to "grant nothing".
+        assert_eq!(
+            resolve_onboarding_scope_override(&Some(vec![]), &default),
+            default
+        );
+        assert_eq!(resolve_onboarding_scope_override(&None, &default), default);
     }
 
     #[test]

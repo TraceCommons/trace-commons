@@ -27,7 +27,7 @@ use crate::db::postgres::PgBackend;
 use crate::trace_corpus_storage::{
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
 };
-use crate::trace_invite_registry::DbInviteRegistry;
+use crate::trace_invite_registry::{DbInviteRegistry, InviteRegistry, InviteRegistryError};
 use crate::trace_upload_claim_allowlist::{
     AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
     hash_invite_code,
@@ -170,6 +170,12 @@ pub const TRACE_COMMONS_ONBOARDING_COMMUNITY_URL_ENV: &str =
 pub const TRACE_COMMONS_ONBOARDING_PROFILE_URL_ENV: &str = "TRACE_COMMONS_ONBOARDING_PROFILE_URL";
 pub const TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV: &str =
     "TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL";
+/// Cutover flag: when true, `/v1/onboard` redeems invites through the
+/// database registry instead of the file allowlist. Defaults to false (the
+/// file allowlist stays authoritative) so every pre-existing onboarding
+/// deployment and test is unaffected until an operator opts in.
+pub const TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV: &str =
+    "TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE";
 const TRACE_DEVICE_KEY_ID_HEADER: &str = "x-trace-device-key-id";
 const TRACE_DEVICE_SIGNATURE_HEADER: &str = "x-trace-device-signature";
 
@@ -216,6 +222,9 @@ pub struct TraceUploadClaimIssuerConfig {
     /// redemption path both read: two independent caches over one table
     /// would diverge.
     pub invite_admin_registry: Option<Arc<DbInviteRegistry>>,
+    /// Cutover flag from [`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV`].
+    /// `false` keeps `/v1/onboard` on the unchanged file-allowlist path.
+    pub invite_registry_authoritative: bool,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -274,6 +283,10 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
             .field(
                 "invite_admin_registry",
                 &self.invite_admin_registry.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "invite_registry_authoritative",
+                &self.invite_registry_authoritative,
             )
             .finish()
     }
@@ -393,6 +406,7 @@ impl TraceUploadClaimIssuerConfig {
             admin_bind,
             invite_admin_backend: None,
             invite_admin_registry: None,
+            invite_registry_authoritative: false,
         })
     }
 
@@ -505,6 +519,7 @@ impl TraceUploadClaimIssuerConfig {
             .unwrap_or(60),
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
+            invite_registry_authoritative: self.invite_registry_authoritative,
         }))
     }
 }
@@ -643,6 +658,7 @@ struct TraceUploadClaimIssuerState {
     instance_enroll_default_rate_per_min: u32,
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
+    invite_registry_authoritative: bool,
 }
 
 impl TraceUploadClaimIssuerState {
@@ -1932,6 +1948,86 @@ impl TraceUploadClaimIssuerState {
         }
 
         let subject_hash = hash_invite_code(invite_code);
+
+        if self.invite_registry_authoritative {
+            // Authoritative mode with no registry configured must refuse,
+            // NEVER fall back to the file allowlist -- a revoked invite
+            // could otherwise be resurrected by a stale file.
+            let registry = self.invite_admin_registry.as_ref().ok_or_else(|| {
+                IssuerError::onboard_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    TraceOnboardErrorCode::InviteRegistryNotConfigured,
+                )
+            })?;
+            let backend = self.invite_admin_backend.as_ref().ok_or_else(|| {
+                IssuerError::onboard_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    TraceOnboardErrorCode::InviteRegistryNotConfigured,
+                )
+            })?;
+            // The cache answers first for latency; only used to short-circuit
+            // an obviously-unknown code before paying for the database
+            // round trip below.
+            match registry.lookup(&subject_hash) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::FORBIDDEN,
+                        TraceOnboardErrorCode::InviteNotValid,
+                    ));
+                }
+                Err(InviteRegistryError::Stale { .. }) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        TraceOnboardErrorCode::InviteRegistryStale,
+                    ));
+                }
+                Err(InviteRegistryError::Backend(_)) => return Err(IssuerError::internal()),
+            }
+
+            // The database decides. Expiry, revocation, and the tenant all
+            // come from the in-transaction re-check under FOR SHARE, so a
+            // concurrent revoke serializes behind an in-flight redemption.
+            // A device key is stable per device, so it doubles as the
+            // per-user subject a derived tenant is keyed on.
+            let user_subject = device_key_id_from_public_key_bytes(&public_key_bytes);
+            let redemption = match backend
+                .redeem_invite_grant(&subject_hash, &user_subject)
+                .await
+            {
+                Ok(Some(redemption)) => redemption,
+                // Absent, revoked, or expired -- one label, so a caller
+                // cannot distinguish "never existed" from "revoked".
+                Ok(None) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::FORBIDDEN,
+                        TraceOnboardErrorCode::InviteNotValid,
+                    ));
+                }
+                // A backend outage must never be reported as an invalid
+                // invite.
+                Err(_) => return Err(IssuerError::internal()),
+            };
+            let max_uses = i32::try_from(redemption.max_uses).map_err(|_| {
+                IssuerError::onboard_error(
+                    StatusCode::BAD_REQUEST,
+                    TraceOnboardErrorCode::InviteMalformed,
+                )
+            })?;
+            return self
+                .complete_onboard_with_redemption(
+                    &request,
+                    &public_key_bytes,
+                    subject_hash,
+                    redemption.tenant_id,
+                    None,
+                    max_uses,
+                    Some(redemption.allowed_consent_scopes),
+                    Some(redemption.allowed_uses),
+                )
+                .await;
+        }
+
         let snapshot = self.onboard_allowlist_snapshot()?;
         let Some(entry) = snapshot.entry(&subject_hash) else {
             self.denial_counter.record();
@@ -1948,6 +2044,37 @@ impl TraceUploadClaimIssuerState {
                 TraceOnboardErrorCode::InviteMalformed,
             )
         })?;
+
+        self.complete_onboard_with_redemption(
+            &request,
+            &public_key_bytes,
+            subject_hash,
+            tenant_id,
+            contributor_label,
+            max_uses,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Shared tail of both onboarding paths: provisions the device key and
+    /// builds the response. `allowed_consent_scopes`/`allowed_uses` are
+    /// `None` on the file-allowlist path (today's hardcoded process-wide
+    /// defaults apply) and `Some(...)` from the invite when redeeming
+    /// through the DB-authoritative registry.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_onboard_with_redemption(
+        &self,
+        request: &TraceOnboardRequest,
+        public_key_bytes: &[u8],
+        subject_hash: String,
+        tenant_id: String,
+        contributor_label: Option<String>,
+        max_uses: i32,
+        allowed_consent_scopes: Option<Vec<String>>,
+        allowed_uses: Option<Vec<String>>,
+    ) -> Result<TraceOnboardResponse, IssuerError> {
         let db = self
             .onboarding_device_key_db
             .as_ref()
@@ -1956,7 +2083,7 @@ impl TraceUploadClaimIssuerState {
             .onboarding_ingest_url
             .clone()
             .ok_or_else(IssuerError::onboard_tenant_config_missing)?;
-        let device_key_id = device_key_id_from_public_key_bytes(&public_key_bytes);
+        let device_key_id = device_key_id_from_public_key_bytes(public_key_bytes);
         let client_info = serde_json::to_value(&request.client_info).map_err(|_| {
             IssuerError::onboard_error(
                 StatusCode::BAD_REQUEST,
@@ -1967,10 +2094,12 @@ impl TraceUploadClaimIssuerState {
             .onboard_device_key(
                 crate::db::DeviceKeyWrite {
                     device_key_id: device_key_id.clone(),
-                    tenant_id: tenant_id.clone(),
+                    tenant_id,
                     public_key: request.device_public_key.trim().to_string(),
                     invite_subject_hash: subject_hash,
                     client_info,
+                    allowed_consent_scopes,
+                    allowed_uses,
                 },
                 max_uses,
             )
@@ -3134,6 +3263,7 @@ mod tests {
             admin_bind: None,
             invite_admin_backend: None,
             invite_admin_registry: None,
+            invite_registry_authoritative: false,
         }
     }
 
@@ -3887,6 +4017,7 @@ mod tests {
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
+                invite_registry_authoritative: self.invite_registry_authoritative,
             }
         }
     }
@@ -4057,6 +4188,23 @@ mod tests {
         assert_eq!(
             body.get("error").and_then(|v| v.as_str()),
             Some("InviteNotValid")
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_fails_closed_when_authoritative_with_no_registry() {
+        // Authoritative mode with no registry must refuse, NOT fall back to
+        // the file allowlist. Silent fallback would let a revoked invite
+        // redeem again after a config mistake.
+        let config = TraceUploadClaimIssuerConfig {
+            invite_registry_authoritative: true,
+            ..test_config()
+        };
+        let (status, body) = post_onboard(config, onboard_request("INVOK001INVOK001")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InviteRegistryNotConfigured")
         );
     }
 

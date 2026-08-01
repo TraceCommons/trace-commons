@@ -5,7 +5,7 @@
 
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{postgres::PgBackend, Database};
+use trace_commons_server::db::{Database, postgres::PgBackend};
 
 // DatabaseConfig has no Default impl and secrecy 0.10 uses From, not new.
 // This mirrors postgres_test_config() in tests/trace_corpus_pg_store.rs
@@ -446,4 +446,113 @@ async fn listing_excludes_expired_invites() {
         !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
         "cache refresh must not load expired invites"
     );
+}
+
+use trace_commons_protocol::onboarding::derive_user_tenant_id;
+
+#[tokio::test]
+async fn a_derived_mode_invite_provisions_the_derived_tenant() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let _ = backend
+        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .await
+        .expect("insert");
+
+    let outcome = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("no database error")
+        .expect("invite is redeemable");
+
+    assert_eq!(
+        outcome.tenant_id,
+        derive_user_tenant_id("tmpl-1", "user-subject-1"),
+        "derived mode must resolve the tenant from template + user subject"
+    );
+    assert_eq!(outcome.allowed_consent_scopes, vec!["model_training"]);
+    assert_eq!(outcome.allowed_uses, vec!["research"]);
+    assert_eq!(outcome.policy_version, "v1");
+}
+
+#[tokio::test]
+async fn a_fixed_mode_invite_uses_its_tenant_verbatim() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let mut write = derived_write(TEST_HASH_C);
+    write.tenant_mode = InviteTenantMode::Fixed;
+    write.tenant_template_id = None;
+    write.fixed_tenant_id = Some("tenant-zaki-pilot".to_string());
+    let _ = backend.insert_invite_grant(write).await.expect("insert");
+
+    let outcome = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("no database error")
+        .expect("invite is redeemable");
+    assert_eq!(outcome.tenant_id, "tenant-zaki-pilot");
+}
+
+#[tokio::test]
+async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let _ = backend
+        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .await
+        .expect("insert");
+    let _ = backend
+        .revoke_invite_grant(TEST_HASH_C)
+        .await
+        .expect("revoke");
+
+    // The cache is deliberately bypassed here: this asserts the database, not
+    // the cache, is what refuses a revoked invite.
+    let result = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("a revoked invite is not a database error");
+    assert!(
+        result.is_none(),
+        "the in-transaction re-check must refuse a revoked invite"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_invite_cannot_be_redeemed() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let mut write = derived_write(TEST_HASH_C);
+    write.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    let _ = backend.insert_invite_grant(write).await.expect("insert");
+
+    let result = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("an expired invite is not a database error");
+    assert!(result.is_none(), "an expired invite must not redeem");
 }

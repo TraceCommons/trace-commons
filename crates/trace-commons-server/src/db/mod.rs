@@ -14,6 +14,8 @@ pub mod postgres;
 mod trace_corpus_common;
 mod trace_corpus_pg;
 
+pub use postgres::InviteRedemption;
+
 /// Insert payload for an invite grant. Mirrors `InviteEntry` minus
 /// `revoked_at`, which is only ever set by `revoke_invite_grant`.
 #[derive(Debug, Clone)]
@@ -1357,6 +1359,18 @@ pub struct DeviceKeyWrite {
     pub public_key: String,
     pub invite_subject_hash: String,
     pub client_info: serde_json::Value,
+    /// Grant-scope override from the invite, when redemption goes through
+    /// the DB-authoritative registry. `None` (every pre-existing call site)
+    /// preserves today's behavior byte-for-byte: the hardcoded
+    /// `DEFAULT_ONBOARDING_CONSENT_SCOPES`. An empty `Some(vec![])` -- as
+    /// carried by invites imported from the file allowlist, which never had
+    /// a scopes column -- is treated the same as `None`, not as "grant
+    /// nothing": provisioning an imported invite with zero consent scopes
+    /// would silently strip permissions the pilot already granted it.
+    pub allowed_consent_scopes: Option<Vec<String>>,
+    /// Same override/empty-fallback behavior as `allowed_consent_scopes`,
+    /// against `DEFAULT_ONBOARDING_ALLOWED_USES`.
+    pub allowed_uses: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
