@@ -4,6 +4,8 @@
 //! `issuer_client`. They never print raw `user_subject` (only its hash) and
 //! never echo issuer response bodies on error.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -558,8 +560,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     if let Some(path) = sel.manifest {
         let entries = submit::build_manifest(&outcomes);
         let json = serde_json::to_string_pretty(&entries).context("serializing manifest")?;
-        std::fs::write(path, json)
-            .with_context(|| format!("writing manifest to {}", path.display()))?;
+        write_manifest(path, json.as_bytes(), sel.json)?;
         if !sel.json {
             println!("wrote {} envelope id(s) to manifest", entries.len());
         }
@@ -644,7 +645,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
 }
 
 fn manifest_destination_is_stdout(path: &Path) -> bool {
-    if path == Path::new("-") || path == Path::new("/dev/stdout") {
+    if path == Path::new("/dev/stdout") {
         return true;
     }
 
@@ -670,6 +671,46 @@ fn manifest_destination_is_stdout(path: &Path) -> bool {
     }
 
     false
+}
+
+fn write_manifest(path: &Path, contents: &[u8], json_output: bool) -> Result<()> {
+    // Do not truncate until the opened destination has passed the stdout
+    // identity check. A later path replacement cannot redirect this handle.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("opening manifest at {}", path.display()))?;
+
+    if json_output
+        && manifest_handle_is_stdout(&file).context("checking open manifest destination")?
+    {
+        anyhow::bail!(
+            "--manifest cannot target standard output in --json mode: stdout is reserved for the single JSON result document"
+        );
+    }
+
+    file.set_len(0)
+        .with_context(|| format!("truncating manifest at {}", path.display()))?;
+    file.write_all(contents)
+        .with_context(|| format!("writing manifest to {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+fn manifest_handle_is_stdout(file: &File) -> std::io::Result<bool> {
+    let manifest = same_file::Handle::from_file(file.try_clone()?)?;
+    let stdout = same_file::Handle::stdout()?;
+    Ok(manifest == stdout)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn manifest_handle_is_stdout(_file: &File) -> std::io::Result<bool> {
+    // This target has no supported handle-identity implementation. The
+    // upfront lexical/canonical check rejects known /dev/stdout spellings,
+    // but cannot close a path-replacement race on this target.
+    Ok(false)
 }
 
 fn render_submit_json(outcomes: &[SubmitOutcome]) -> serde_json::Result<String> {
@@ -760,6 +801,18 @@ mod tests {
     use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_stdout_handle_is_detected_directly() {
+        use std::os::fd::AsFd;
+
+        // Duplicating fd 1 pins the identity property without relying on
+        // timing a symlink swap between the fast path and the open.
+        let stdout = std::io::stdout();
+        let file = File::from(stdout.as_fd().try_clone_to_owned().unwrap());
+        assert!(manifest_handle_is_stdout(&file).unwrap());
+    }
 
     #[test]
     fn json_renderer_emits_one_document_for_dry_run() {

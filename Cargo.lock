@@ -7136,6 +7136,7 @@ dependencies = [
  "hex",
  "reqwest 0.12.28",
  "ring",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",
