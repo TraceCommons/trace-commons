@@ -21,9 +21,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         login_resolver_url: DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: DatabaseConfig::gate_driver_url_from_env(),
         pii_backstop_driver_url: DatabaseConfig::pii_backstop_driver_url_from_env(),
-        // Task 3 adds `invite_registry_url` to DatabaseConfig. This literal is
-        // exhaustive, so Task 3 Step 1 must add the field here too or this
-        // file stops compiling. That is expected and is called out there.
+        invite_registry_url: DatabaseConfig::invite_registry_url_from_env(),
     })
 }
 
@@ -195,4 +193,178 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
         )
         .await;
     assert!(err.is_err(), "derived mode must not carry fixed_tenant_id");
+}
+
+use trace_commons_server::db::{InviteGrantInsertOutcome, InviteGrantWrite};
+use trace_commons_server::trace_invite_registry::InviteTenantMode;
+
+const TEST_HASH_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const TEST_HASH_D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const TEST_CRED: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+fn registry_test_config() -> Option<DatabaseConfig> {
+    let mut config = postgres_test_config()?;
+    // The registry pool is required for these tests. Fall back to the same
+    // URL when no dedicated registry URL is configured locally; the RLS tests
+    // above are what prove the roles are distinct in production.
+    let registry_url = std::env::var("TRACE_COMMONS_INVITE_REGISTRY_TEST_DATABASE_URL")
+        .ok()
+        .or_else(|| std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok())
+        .or_else(|| std::env::var("DATABASE_URL").ok())?;
+    config.invite_registry_url = Some(SecretString::from(registry_url));
+    Some(config)
+}
+
+/// Teardown only. Runs as the test connection's own user, which must own the
+/// table or be a superuser -- FORCE RLS gives the runtime role no DELETE policy
+/// and production deliberately has no DELETE grant (revocation is a soft
+/// UPDATE). Never use this to set up an assertion; seed through the
+/// trace_invite_registry role for that.
+async fn cleanup_test_invites(backend: &PgBackend, policy_label: &str) {
+    let pool = backend.trace_pool_for_test();
+    let client = pool.get().await.expect("client");
+    client
+        .execute(
+            "DELETE FROM onboarding_invite_grants WHERE policy_label = $1",
+            &[&policy_label],
+        )
+        .await
+        .expect("cleanup");
+}
+
+fn derived_write(hash: &str) -> InviteGrantWrite {
+    InviteGrantWrite {
+        invite_subject_hash: hash.to_string(),
+        policy_label: "test-pool".to_string(),
+        tenant_mode: InviteTenantMode::Derived,
+        fixed_tenant_id: None,
+        tenant_template_id: Some("tmpl-1".to_string()),
+        policy_version: "v1".to_string(),
+        allowed_consent_scopes: vec!["model_training".to_string()],
+        allowed_uses: vec!["research".to_string()],
+        max_uses: 3,
+        expires_at: None,
+        issuance_source: "operator".to_string(),
+        issued_by_label: None,
+        credential_binding_hash: None,
+        note_label: None,
+    }
+}
+
+#[tokio::test]
+async fn insert_then_list_round_trips_every_field() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let outcome = backend
+        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .await
+        .expect("insert");
+    assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
+
+    let all = backend.list_invite_grants().await.expect("list");
+    let found = all
+        .iter()
+        .find(|e| e.invite_subject_hash == TEST_HASH_C)
+        .expect("inserted invite present in listing");
+    assert_eq!(found.tenant_mode, InviteTenantMode::Derived);
+    assert_eq!(found.tenant_template_id.as_deref(), Some("tmpl-1"));
+    assert_eq!(found.fixed_tenant_id, None);
+    assert_eq!(found.allowed_consent_scopes, vec!["model_training"]);
+    assert_eq!(found.allowed_uses, vec!["research"]);
+    assert_eq!(found.max_uses, 3);
+    assert!(found.revoked_at.is_none());
+}
+
+#[tokio::test]
+async fn a_second_live_invite_for_one_credential_is_refused() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let mut first = derived_write(TEST_HASH_C);
+    first.credential_binding_hash = Some(TEST_CRED.to_string());
+    let _ = backend
+        .insert_invite_grant(first)
+        .await
+        .expect("first insert");
+
+    let mut second = derived_write(TEST_HASH_D);
+    second.credential_binding_hash = Some(TEST_CRED.to_string());
+    let outcome = backend
+        .insert_invite_grant(second)
+        .await
+        .expect("second insert must not error");
+    assert!(
+        matches!(outcome, InviteGrantInsertOutcome::CredentialAlreadyBound),
+        "one credential must not mint two live invites"
+    );
+}
+
+#[tokio::test]
+async fn revoking_frees_the_credential_binding_for_reissue() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let mut first = derived_write(TEST_HASH_C);
+    first.credential_binding_hash = Some(TEST_CRED.to_string());
+    let _ = backend.insert_invite_grant(first).await.expect("insert");
+
+    let revoked = backend
+        .revoke_invite_grant(TEST_HASH_C)
+        .await
+        .expect("revoke");
+    assert!(revoked, "revoking a live invite reports true");
+
+    let mut second = derived_write(TEST_HASH_D);
+    second.credential_binding_hash = Some(TEST_CRED.to_string());
+    let outcome = backend.insert_invite_grant(second).await.expect("reissue");
+    assert!(matches!(outcome, InviteGrantInsertOutcome::Inserted));
+
+    // Revoking an already-revoked invite is a no-op, not an error.
+    let again = backend
+        .revoke_invite_grant(TEST_HASH_C)
+        .await
+        .expect("second revoke");
+    assert!(!again);
+}
+
+#[tokio::test]
+async fn listing_excludes_revoked_invites() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "test-pool").await;
+
+    let _ = backend
+        .insert_invite_grant(derived_write(TEST_HASH_C))
+        .await
+        .expect("insert");
+    let _ = backend
+        .revoke_invite_grant(TEST_HASH_C)
+        .await
+        .expect("revoke");
+
+    let all = backend.list_invite_grants().await.expect("list");
+    assert!(
+        !all.iter().any(|e| e.invite_subject_hash == TEST_HASH_C),
+        "cache refresh must not load revoked invites"
+    );
 }

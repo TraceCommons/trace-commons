@@ -7,11 +7,43 @@ use async_trait::async_trait;
 use crate::config::DatabaseConfig;
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::TraceCorpusStore;
+use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
+
+/// Insert payload for an invite grant. Mirrors `InviteEntry` minus
+/// `revoked_at`, which is only ever set by `revoke_invite_grant`.
+#[derive(Debug, Clone)]
+pub struct InviteGrantWrite {
+    pub invite_subject_hash: String,
+    pub policy_label: String,
+    pub tenant_mode: InviteTenantMode,
+    pub fixed_tenant_id: Option<String>,
+    pub tenant_template_id: Option<String>,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub max_uses: u32,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub issuance_source: String,
+    pub issued_by_label: Option<String>,
+    pub credential_binding_hash: Option<String>,
+    pub note_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteGrantInsertOutcome {
+    Inserted,
+    /// The partial unique index refused the write: this credential already has
+    /// a live invite in this pool.
+    CredentialAlreadyBound,
+    /// An invite with this hash already exists. Makes the file import
+    /// idempotent.
+    AlreadyExists,
+}
 
 /// Safe structural diagnostics for PostgreSQL TraceCommons RLS readiness.
 #[derive(Debug, Clone, PartialEq, Eq)]

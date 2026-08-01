@@ -4241,6 +4241,7 @@ mod tests {
             login_resolver_url: None,
             gate_driver_url: None,
             pii_backstop_driver_url: None,
+            invite_registry_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
@@ -4560,6 +4561,7 @@ mod tests {
             login_resolver_url: None,
             gate_driver_url: None,
             pii_backstop_driver_url: None,
+            invite_registry_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
