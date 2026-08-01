@@ -1,22 +1,7 @@
 //! Embedding trait + deterministic mock.
 
 use sha2::{Digest, Sha256};
-
-/// Dimensionality of the mock embedding. Fixed so the orchestrator and the
-/// vector index agree on layout without needing to negotiate at runtime.
-pub const MOCK_EMBEDDING_DIM: usize = 256;
-
-/// Project a plaintext trace into an embedding vector. Real implementations
-/// invoke a pinned embedder model inside the enclave; the mock here derives
-/// a stable unit vector from a hash of the plaintext.
-///
-/// `embed` returns `anyhow::Result` so an inference failure refuses the gate
-/// evaluation rather than silently returning a zero vector that the
-/// orchestrator's `1 - max_similarity` novelty math would otherwise interpret
-/// as "maximally novel". Callers MUST propagate the error.
-pub trait Embedder: Send + Sync {
-    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>>;
-}
+pub use trace_commons_gate_api::{Embedder, MOCK_EMBEDDING_DIM};
 
 /// Sub-window size for chunk embeddings, in tokens. Matches the fastembed
 /// model family's ~512-token context; anything longer is silently truncated
