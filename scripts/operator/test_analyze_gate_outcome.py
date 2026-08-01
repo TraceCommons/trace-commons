@@ -122,6 +122,38 @@ def _balanced_rows(
     return rows
 
 
+def _clustered_rows_with_varied_label_vectors(
+    *,
+    associated: bool,
+    seed: int,
+) -> list[dict[str, object]]:
+    rng = random.Random(seed)
+    rows: list[dict[str, object]] = []
+    sequence = 0
+    for tenant_index in range(12):
+        labels = ["failure"] * 6 + ["success"] * 6
+        rng.shuffle(labels)
+        for label in labels:
+            if associated:
+                score = 900 + rng.random() if label == "failure" else rng.random()
+            else:
+                score = rng.random()
+            rows.append(
+                {
+                    "tenant_id": f"tenant-{tenant_index}",
+                    "submission_id": f"submission-{sequence}",
+                    "decided_at": "2026-07-30T00:00:00Z",
+                    "perplexity_micros": score,
+                    "tail_fraction_micros": score,
+                    "novelty_score_micros": score,
+                    "task_success": label,
+                    "length": sequence + 1,
+                }
+            )
+            sequence += 1
+    return rows
+
+
 def test_auc_matches_hand_computed_ties_and_empty_rule() -> None:
     assert M.discrimination_auc([2.0, 2.0], [1.0, 2.0]) == 0.75
     assert M.discrimination_auc([], [1.0]) == 0.5
@@ -190,11 +222,118 @@ def test_unequal_cluster_m0_and_icc_regression() -> None:
     assert abs(icc - 0.639344) < 1e-6, icc
 
 
-def test_minimum_detectable_auc_uses_clustered_standard_error() -> None:
-    clustered_se = 0.04
-    target_z = M.NormalDist().inv_cdf(0.975) + M.NormalDist().inv_cdf(0.80)
-    mde = M.minimum_detectable_auc(clustered_se)
-    assert abs(mde - (0.5 + target_z * clustered_se)) < 1e-12, mde
+def test_short_permutation_donor_vector_wraps() -> None:
+    receiving = [
+        [_observation("receiver", M.SUCCESS, 0.0, index) for index in range(5)]
+    ]
+    labels = M._reassign_label_vectors(receiving, [[M.FAILURE, M.SUCCESS]])
+    assert labels == [M.FAILURE, M.SUCCESS, M.FAILURE, M.SUCCESS, M.FAILURE]
+
+
+def test_cluster_label_permutation_detects_effect_and_rejects_null() -> None:
+    def observations(associated: bool, seed: int) -> list[object]:
+        rows = _clustered_rows_with_varied_label_vectors(
+            associated=associated,
+            seed=seed,
+        )
+        return [
+            _observation(
+                str(row["tenant_id"]),
+                M.FAILURE if row["task_success"] == "failure" else M.SUCCESS,
+                float(row["perplexity_micros"]),
+                sequence,
+            )
+            for sequence, row in enumerate(rows)
+        ]
+
+    effect = M.cluster_label_permutation_test(
+        observations(True, 17),
+        "signal",
+        iterations=400,
+        seed=91,
+    )
+    inverse_observations = [
+        _observation(
+            row.tenant_id,
+            row.label,
+            -row.values["signal"],
+            sequence,
+        )
+        for sequence, row in enumerate(observations(True, 17))
+    ]
+    inverse_effect = M.cluster_label_permutation_test(
+        inverse_observations,
+        "signal",
+        iterations=400,
+        seed=91,
+    )
+    null = M.cluster_label_permutation_test(
+        observations(False, 29),
+        "signal",
+        iterations=400,
+        seed=91,
+    )
+    assert effect.p_value < 0.05, effect
+    assert inverse_effect.p_value < 0.05, inverse_effect
+    assert null.p_value >= 0.05, null
+    assert effect.p_value == (effect.extreme_count + 1) / (
+        effect.valid_count + 1
+    )
+
+
+def test_cluster_label_permutation_is_deterministic_under_seed() -> None:
+    rows = _clustered_rows_with_varied_label_vectors(
+        associated=False,
+        seed=37,
+    )
+    observations = [
+        _observation(
+            str(row["tenant_id"]),
+            M.FAILURE if row["task_success"] == "failure" else M.SUCCESS,
+            float(row["perplexity_micros"]),
+            sequence,
+        )
+        for sequence, row in enumerate(rows)
+    ]
+    first = M.cluster_label_permutation_test(
+        observations,
+        "signal",
+        iterations=200,
+        seed=103,
+    )
+    second = M.cluster_label_permutation_test(
+        observations,
+        "signal",
+        iterations=200,
+        seed=103,
+    )
+    different_seed = M.cluster_label_permutation_test(
+        observations,
+        "signal",
+        iterations=200,
+        seed=104,
+    )
+    assert first == second
+    assert first != different_seed
+
+
+def test_permutation_rejects_undefined_draws_from_p_value_denominator() -> None:
+    observations = [
+        _observation("short", M.SUCCESS, 0.1, 0),
+        _observation("long", M.SUCCESS, 0.2, 1),
+        _observation("long", M.FAILURE, 0.9, 2),
+    ]
+    result = M.cluster_label_permutation_test(
+        observations,
+        "signal",
+        iterations=200,
+        seed=41,
+    )
+    assert result.undefined_count > 0, result
+    assert result.valid_count + result.undefined_count == 200, result
+    assert result.p_value == (result.extreme_count + 1) / (
+        result.valid_count + 1
+    )
 
 
 def test_clustered_interval_wider_than_naive_interval() -> None:
@@ -279,20 +418,8 @@ def test_script_flags_naive_only_independence_artifact() -> None:
     assert result.returncode == 0, result.stderr
     assert "signal=perplexity independence_artifact" in result.stderr
     assert "AnalyzeGateOutcomeWarning:" not in result.stdout
-    power_match = re.search(
-        r"POWER signal=perplexity clustered_se=([0-9.]+) "
-        r"minimum_detectable_auc=([0-9.]+)",
-        result.stdout,
-    )
-    assert power_match is not None, result.stdout
-    clustered_se, printed_mde = (
-        float(value) for value in power_match.groups()
-    )
-    expected_mde = M.minimum_detectable_auc(clustered_se)
-    assert abs(printed_mde - expected_mde) < 0.0002, (
-        printed_mde,
-        expected_mde,
-    )
+    assert "POWER basis=not_claimed" in result.stdout
+    assert "minimum_detectable_auc" not in result.stdout
 
 
 def test_power_precondition_fails_before_any_signal_output() -> None:
@@ -439,6 +566,50 @@ def test_label_design_effect_disagrees_with_cluster_bootstrap_se() -> None:
     )
 
 
+def test_clustered_label_design_effect_disagrees_with_permutation_verdict() -> None:
+    observations = []
+    labels: dict[str, list[int]] = {}
+    rng = random.Random(1)
+    sequence = 0
+    for tenant_index in range(24):
+        label = M.FAILURE if tenant_index < 12 else M.SUCCESS
+        tenant = f"tenant-{tenant_index}"
+        labels[tenant] = []
+        for _ in range(20):
+            score = rng.gauss(0.25 if label == M.FAILURE else 0.0, 1.0)
+            labels[tenant].append(label)
+            observations.append(_observation(tenant, label, score, sequence))
+            sequence += 1
+
+    positive, negative = M._scores(observations, "signal")
+    auc = M.discrimination_auc(positive, negative)
+    naive = M.bootstrap_auc_interval(
+        observations,
+        "signal",
+        iterations=300,
+        seed=55,
+        clustered=False,
+    )
+    assert naive.standard_error is not None
+    label_design_effect = M.design_effect(
+        max(0.0, M.intraclass_correlation(labels)),
+        M.size_weighted_mean_cluster_size(labels),
+    )
+    analytic_z = abs(auc - 0.5) / (
+        naive.standard_error * math.sqrt(label_design_effect)
+    )
+    permutation = M.cluster_label_permutation_test(
+        observations,
+        "signal",
+        iterations=400,
+        seed=71,
+    )
+
+    assert label_design_effect == 20.0
+    assert analytic_z < M.NormalDist().inv_cdf(0.975), analytic_z
+    assert permutation.p_value < 0.05, permutation
+
+
 def test_primary_combined_score_is_analyzed_first_when_present() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "with-credit-quality.csv"
@@ -535,8 +706,93 @@ def test_signed_icc_and_conservative_floor_are_reported_separately() -> None:
         "icc_signed=-1.0000 icc_conservative_floor=0.0000"
     ) in result.stdout
     assert "diagnostic=label_clustering_only" in result.stdout
-    assert "power_basis=cluster_bootstrap" in result.stdout
+    assert "POWER basis=not_claimed" in result.stdout
     assert "effective_n=" not in result.stdout
+
+
+def test_default_omits_mde_underpowered_and_achieved_power() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "default-power.csv"
+        _write_csv(
+            path,
+            _clustered_rows_with_varied_label_vectors(
+                associated=True,
+                seed=17,
+            ),
+        )
+        result = _run(
+            [
+                f"--input={path}",
+                "--min-per-class=1",
+                "--bootstrap=40",
+                "--permutations=80",
+                "--seed=13",
+            ]
+        )
+    assert result.returncode == 0, result.stderr
+    assert "POWER basis=not_claimed" in result.stdout
+    assert "minimum_detectable_auc" not in result.stdout
+    assert "undetectable_band" not in result.stdout
+    assert "UNDERPOWERED" not in result.stdout
+    assert "achieved_power=" not in result.stdout
+    assert "permutation_p=" in result.stdout
+    assert "permutations=80" in result.stdout
+
+
+def test_alpha_flag_controls_permutation_verdict() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "alpha.csv"
+        _write_csv(
+            path,
+            _clustered_rows_with_varied_label_vectors(
+                associated=True,
+                seed=17,
+            ),
+        )
+        common = [
+            f"--input={path}",
+            "--min-per-class=1",
+            "--bootstrap=20",
+            "--permutations=80",
+            "--seed=13",
+        ]
+        strict = _run([*common, "--alpha=0.01"])
+        conventional = _run([*common, "--alpha=0.05"])
+    assert strict.returncode == 0, strict.stderr
+    assert conventional.returncode == 0, conventional.stderr
+    assert strict.stdout.count("status=INCONCLUSIVE") == 3, strict.stdout
+    assert conventional.stdout.count("status=ASSOCIATION") == 3, (
+        conventional.stdout
+    )
+
+
+def test_alternative_auc_emits_simulated_power_only_when_supplied() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "alternative-power.csv"
+        _write_csv(
+            path,
+            _clustered_rows_with_varied_label_vectors(
+                associated=True,
+                seed=17,
+            ),
+        )
+        args = [
+            f"--input={path}",
+            "--min-per-class=1",
+            "--bootstrap=12",
+            "--permutations=40",
+            "--alternative-auc=0.75",
+            "--seed=13",
+        ]
+        result = _run(args)
+        repeated = _run(args)
+    assert result.returncode == 0, result.stderr
+    assert repeated.returncode == 0, repeated.stderr
+    assert result.stdout == repeated.stdout
+    assert "POWER basis=cluster_resampling" in result.stdout
+    assert "alternative_auc=0.7500" in result.stdout
+    assert "achieved_power=" in result.stdout
+    assert "POWER basis=not_claimed" not in result.stdout
 
 
 def test_undefined_bootstrap_replicates_are_rejected_and_counted() -> None:
@@ -621,12 +877,16 @@ def test_bootstrap_valid_fraction_fails_closed() -> None:
     assert "SIGNAL " not in result.stdout
 
 
-def test_help_documents_bootstrap_valid_fraction_threshold() -> None:
+def test_help_documents_resampling_and_threshold_flags() -> None:
     result = _run(["--help"])
     assert result.returncode == 0, result.stderr
     assert "--min-bootstrap-valid-fraction" in result.stdout
     assert "both outcome classes" in result.stdout
     assert "fail closed" in result.stdout
+    assert "--permutations" in result.stdout
+    assert "--alpha" in result.stdout
+    assert "--alternative-auc" in result.stdout
+    assert "omit to make no power claim" in result.stdout
 
 
 def test_export_docstring_and_gitignore_protect_operator_data() -> None:
@@ -663,7 +923,7 @@ def test_label_parser_accepts_only_documented_values() -> None:
             raise AssertionError((value, label_name))
 
 
-def test_fixture_has_enough_clusters_and_real_associations() -> None:
+def test_fixture_has_enough_clusters_and_is_deterministic() -> None:
     args = [f"--input={FIXTURE}"]
     result = _run(args)
     repeated = _run(args)
@@ -672,8 +932,12 @@ def test_fixture_has_enough_clusters_and_real_associations() -> None:
     assert result.stdout == repeated.stdout
     assert result.stderr == repeated.stderr
     assert "tenants=10" in result.stdout
-    assert result.stdout.count("status=ASSOCIATION") == 2, result.stdout
-    assert "status=UNDERPOWERED band=" in result.stdout
+    # Every fixture tenant has the same ordered label vector, so reassigning
+    # complete vectors leaves all three score-label associations unchanged.
+    assert result.stdout.count("status=INCONCLUSIVE") == 3, result.stdout
+    assert result.stdout.count("permutation_p=1.000000") == 3, result.stdout
+    assert "minimum_detectable_auc" not in result.stdout
+    assert "UNDERPOWERED" not in result.stdout
     assert "# AnalyzeGateOutcomeComplete" in result.stdout
     assert "# AnalyzeGateOutcomeOK" not in result.stdout
 

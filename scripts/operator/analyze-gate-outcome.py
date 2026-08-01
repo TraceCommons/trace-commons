@@ -6,7 +6,7 @@ Expected CSV schema (header required, one row per scored submission):
     tenant_id,submission_id,decided_at,credit_quality_micros,perplexity_micros,tail_fraction_micros,novelty_score_micros,task_success
 
 `task_success` must be `success`, `partial`, `failure`, or `unknown`.
-Partial and unknown rows are counted and excluded from both AUC arms. An
+Partial and unknown rows are counted and excluded from both AUC arms.
 `credit_quality_micros` is optional, nullable on rows predating its backfill,
 and analyzed first as the primary combined graded-credit score. Null values are
 excluded only from that primary analysis. An optional final `length` column
@@ -18,11 +18,20 @@ At least 10 independent tenant clusters are required by default because a
 cluster bootstrap with fewer resampling units cannot support a reliable
 estimate of between-cluster uncertainty. Override with `--min-clusters`
 only when a different threshold is justified before examining outcomes.
-The cluster-bootstrap standard error drives each signal's power verdict. At
-small cluster counts it is biased slightly low (about 0.8x at k=24 in the
-validation simulation), which is a reason to retain the tenant threshold.
-Label ICC, size-weighted mean cluster size, and label design effect are printed
-only as descriptive label-clustering diagnostics; they do not determine power.
+The detection verdict comes from a cluster-level label permutation test. Each
+permutation moves a tenant's complete label vector to another tenant while
+leaving scores fixed. Short donor vectors wrap to fill longer receiving
+clusters. This preserves within-tenant label clustering under the null. The
+cluster-bootstrap interval remains an interval at the observed effect. Label
+ICC, size-weighted mean cluster size, and label design effect are descriptive
+label-clustering diagnostics only.
+
+No minimum detectable effect or achieved power is claimed by default. Supplying
+`--alternative-auc` runs a Monte Carlo power simulation: tenant clusters are
+resampled whole, labels retain their cluster composition, and independent
+Gaussian scores are shifted by the amount whose population AUC equals the
+prespecified alternative. Each simulated sample is evaluated by the same
+cluster-level label permutation test.
 
 PostgreSQL export query for the default schema:
 
@@ -62,6 +71,8 @@ Usage:
         --min-clusters=10 \
         --min-per-class=125 \
         --bootstrap=400 \
+        --permutations=400 \
+        --alpha=0.05 \
         --seed=12345
 
 Pure-stdlib (argparse + csv + datetime + math + random + statistics).
@@ -155,6 +166,24 @@ class BootstrapResult:
 
 
 @dataclass(frozen=True)
+class PermutationResult:
+    p_value: float
+    extreme_count: int
+    valid_count: int
+    undefined_count: int
+    iterations: int
+
+
+@dataclass(frozen=True)
+class PowerResult:
+    achieved_power: float
+    rejection_count: int
+    valid_count: int
+    undefined_count: int
+    iterations: int
+
+
+@dataclass(frozen=True)
 class SignalAnalysis:
     name: str
     role: str
@@ -163,9 +192,8 @@ class SignalAnalysis:
     auc: float
     naive: BootstrapResult
     clustered: BootstrapResult
-    clustered_standard_error: float
-    mde: float
-    undetectable_band: tuple[float, float]
+    permutation: PermutationResult
+    power: Optional[PowerResult]
     status: str
 
 
@@ -256,21 +284,6 @@ def size_weighted_mean_cluster_size(
 
 def design_effect(icc: float, size_weighted_mean: float) -> float:
     return 1.0 + (size_weighted_mean - 1.0) * icc
-
-
-def minimum_detectable_auc(
-    clustered_standard_error: float,
-    *,
-    alpha: float = 0.05,
-    power: float = 0.80,
-) -> float:
-    """Return the smallest AUC detectable from a clustered bootstrap SE."""
-
-    if clustered_standard_error < 0.0:
-        raise AnalyzeGateOutcomeError("clustered_se_must_be_non_negative")
-    normal = NormalDist()
-    target_z = normal.inv_cdf(1.0 - alpha / 2.0) + normal.inv_cdf(power)
-    return 0.5 + target_z * clustered_standard_error
 
 
 def percentile(values: list[float], probability: float) -> float:
@@ -365,6 +378,149 @@ def rank_values(values: list[float]) -> list[float]:
             ranks[original_index] = average_rank
         index = end
     return ranks
+
+
+def _group_by_tenant(
+    observations: list[Observation],
+) -> list[list[Observation]]:
+    by_tenant: dict[str, list[Observation]] = {}
+    for row in observations:
+        by_tenant.setdefault(row.tenant_id, []).append(row)
+    return [by_tenant[tenant_id] for tenant_id in sorted(by_tenant)]
+
+
+def _reassign_label_vectors(
+    receiving_clusters: list[list[Observation]],
+    donor_vectors: list[list[int]],
+) -> list[int]:
+    labels: list[int] = []
+    for receiving, donor in zip(receiving_clusters, donor_vectors):
+        if not donor:
+            raise AnalyzeGateOutcomeError("permutation_donor_vector_empty")
+        labels.extend(
+            donor[index % len(donor)] for index in range(len(receiving))
+        )
+    return labels
+
+
+def _auc_from_ranks_and_labels(
+    ranks: list[float],
+    labels: list[int],
+) -> Optional[float]:
+    positive_count = sum(labels)
+    negative_count = len(labels) - positive_count
+    if positive_count == 0 or negative_count == 0:
+        return None
+    positive_rank_sum = sum(
+        rank for rank, label in zip(ranks, labels) if label == FAILURE
+    )
+    wins = positive_rank_sum - positive_count * (positive_count + 1) / 2.0
+    return wins / (positive_count * negative_count)
+
+
+def cluster_label_permutation_test(
+    observations: list[Observation],
+    signal: str,
+    *,
+    iterations: int,
+    seed: int,
+) -> PermutationResult:
+    """Permute whole tenant label vectors and test |AUC - 0.5|."""
+
+    clusters = _group_by_tenant(observations)
+    scores = [row.values[signal] for cluster in clusters for row in cluster]
+    labels = [row.label for cluster in clusters for row in cluster]
+    ranks = rank_values(scores)
+    observed_auc = _auc_from_ranks_and_labels(ranks, labels)
+    if observed_auc is None:
+        raise AnalyzeGateOutcomeError("permutation_observed_auc_undefined")
+    observed_statistic = abs(observed_auc - 0.5)
+    label_vectors = [[row.label for row in cluster] for cluster in clusters]
+
+    rng = random.Random(seed)
+    extreme_count = 0
+    valid_count = 0
+    undefined_count = 0
+    for _ in range(iterations):
+        donor_vectors = list(label_vectors)
+        rng.shuffle(donor_vectors)
+        permuted_labels = _reassign_label_vectors(clusters, donor_vectors)
+        permuted_auc = _auc_from_ranks_and_labels(ranks, permuted_labels)
+        if permuted_auc is None:
+            undefined_count += 1
+            continue
+        valid_count += 1
+        if abs(permuted_auc - 0.5) >= observed_statistic:
+            extreme_count += 1
+
+    if valid_count == 0:
+        raise AnalyzeGateOutcomeError("permutation_produced_no_estimates")
+    return PermutationResult(
+        p_value=(extreme_count + 1) / (valid_count + 1),
+        extreme_count=extreme_count,
+        valid_count=valid_count,
+        undefined_count=undefined_count,
+        iterations=iterations,
+    )
+
+
+def simulate_power_at_alternative(
+    observations: list[Observation],
+    signal: str,
+    *,
+    alternative_auc: float,
+    simulations: int,
+    permutations: int,
+    alpha: float,
+    seed: int,
+) -> PowerResult:
+    """Estimate power after whole-cluster resampling at a specified AUC."""
+
+    source_clusters = _group_by_tenant(observations)
+    shift = math.sqrt(2.0) * NormalDist().inv_cdf(alternative_auc)
+    rng = random.Random(seed)
+    rejection_count = 0
+    valid_count = 0
+    undefined_count = 0
+
+    for simulation in range(simulations):
+        simulated: list[Observation] = []
+        for slot in range(len(source_clusters)):
+            source = rng.choice(source_clusters)
+            for row_index, row in enumerate(source):
+                score = rng.gauss(shift if row.label == FAILURE else 0.0, 1.0)
+                simulated.append(
+                    Observation(
+                        tenant_id=f"simulation-{simulation}-cluster-{slot}",
+                        submission_id=f"row-{row_index}",
+                        label=row.label,
+                        decided_at=0.0,
+                        values={signal: score},
+                    )
+                )
+        positive, negative = _scores(simulated, signal)
+        if not positive or not negative:
+            undefined_count += 1
+            continue
+        permutation = cluster_label_permutation_test(
+            simulated,
+            signal,
+            iterations=permutations,
+            seed=rng.randrange(0, 2**63),
+        )
+        valid_count += 1
+        if permutation.p_value < alpha:
+            rejection_count += 1
+
+    if valid_count == 0:
+        raise AnalyzeGateOutcomeError("power_simulation_produced_no_estimates")
+    return PowerResult(
+        achieved_power=rejection_count / valid_count,
+        rejection_count=rejection_count,
+        valid_count=valid_count,
+        undefined_count=undefined_count,
+        iterations=simulations,
+    )
 
 
 def _parse_timestamp(value: str, row_number: int) -> float:
@@ -574,7 +730,10 @@ def analyze_signal(
     *,
     null_excluded: int,
     iterations: int,
+    permutations: int,
     seed: int,
+    alpha: float,
+    alternative_auc: Optional[float],
     minimum_valid_fraction: float,
 ) -> SignalAnalysis:
     positive, negative = _scores(observations, signal)
@@ -599,20 +758,30 @@ def analyze_signal(
         mode="naive",
         minimum_valid_fraction=minimum_valid_fraction,
     )
-    clustered_standard_error = _validate_bootstrap_result(
+    _validate_bootstrap_result(
         clustered,
         signal=signal,
         mode="clustered",
         minimum_valid_fraction=minimum_valid_fraction,
     )
-    mde = minimum_detectable_auc(clustered_standard_error)
-    undetectable_band = (1.0 - mde, mde)
-    if undetectable_band[0] <= auc <= undetectable_band[1]:
-        status = "UNDERPOWERED"
-    elif _interval_excludes_chance(clustered.interval):
-        status = "ASSOCIATION"
-    else:
-        status = "INCONCLUSIVE"
+    permutation = cluster_label_permutation_test(
+        observations,
+        signal,
+        iterations=permutations,
+        seed=seed + 20_000,
+    )
+    power = None
+    if alternative_auc is not None:
+        power = simulate_power_at_alternative(
+            observations,
+            signal,
+            alternative_auc=alternative_auc,
+            simulations=iterations,
+            permutations=permutations,
+            alpha=alpha,
+            seed=seed + 30_000,
+        )
+    status = "ASSOCIATION" if permutation.p_value < alpha else "INCONCLUSIVE"
     return SignalAnalysis(
         name=signal,
         role=role,
@@ -621,9 +790,8 @@ def analyze_signal(
         auc=auc,
         naive=naive,
         clustered=clustered,
-        clustered_standard_error=clustered_standard_error,
-        mde=mde,
-        undetectable_band=undetectable_band,
+        permutation=permutation,
+        power=power,
         status=status,
     )
 
@@ -658,6 +826,26 @@ def _parser() -> OperatorArgumentParser:
         help="Bootstrap iterations (default: 400).",
     )
     parser.add_argument(
+        "--permutations",
+        type=int,
+        default=400,
+        help="Cluster-level label permutations (default: 400).",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="Permutation-test significance threshold (default: 0.05).",
+    )
+    parser.add_argument(
+        "--alternative-auc",
+        type=float,
+        help=(
+            "Prespecified AUC for optional cluster-resampled power simulation; "
+            "omit to make no power claim."
+        ),
+    )
+    parser.add_argument(
         "--min-bootstrap-valid-fraction",
         type=float,
         default=0.80,
@@ -684,6 +872,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise AnalyzeGateOutcomeError("min_clusters_must_be_positive")
         if args.bootstrap < 2:
             raise AnalyzeGateOutcomeError("bootstrap_must_be_at_least_two")
+        if args.permutations <= 0:
+            raise AnalyzeGateOutcomeError("permutations_must_be_positive")
+        if not 0.0 < args.alpha < 1.0:
+            raise AnalyzeGateOutcomeError("alpha_out_of_range")
+        if args.alternative_auc is not None and (
+            not 0.0 < args.alternative_auc < 1.0
+            or args.alternative_auc == 0.5
+        ):
+            raise AnalyzeGateOutcomeError("alternative_auc_must_differ_from_chance")
         if not 0.0 < args.min_bootstrap_valid_fraction <= 1.0:
             raise AnalyzeGateOutcomeError(
                 "min_bootstrap_valid_fraction_out_of_range"
@@ -764,7 +961,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 role,
                 null_excluded=null_excluded,
                 iterations=args.bootstrap,
+                permutations=args.permutations,
                 seed=args.seed + offset,
+                alpha=args.alpha,
+                alternative_auc=args.alternative_auc,
                 minimum_valid_fraction=args.min_bootstrap_valid_fraction,
             )
             for signal, role, signal_rows, null_excluded, offset in signal_specs
@@ -787,7 +987,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "# AnalyzeGateOutcome "
             f"rows={loaded.total_rows} included={len(observations)} "
             f"excluded={excluded_total} tenants={tenant_count} "
-            f"label={args.label} bootstrap={args.bootstrap} seed={args.seed}"
+            f"label={args.label} bootstrap={args.bootstrap} "
+            f"permutations={args.permutations} alpha={args.alpha:.4f} "
+            f"seed={args.seed}"
         )
         print(
             "INDEPENDENCE unit=tenant "
@@ -806,8 +1008,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"icc_conservative_floor={icc_conservative_floor:.4f} "
             f"mA={size_weighted_mean:.4f} "
             f"design_effect={effect:.4f} "
-            "diagnostic=label_clustering_only power_basis=cluster_bootstrap"
+            "diagnostic=label_clustering_only"
         )
+
+        if args.alternative_auc is None:
+            print(
+                "POWER basis=not_claimed "
+                "minimum_detectable_effect_requires_prespecified_alternative "
+                "flag=--alternative-auc"
+            )
 
         if not loaded.has_credit_quality:
             print(
@@ -825,19 +1034,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"clustered_undefined={analysis.clustered.undefined_count} "
                 f"min_valid_fraction={args.min_bootstrap_valid_fraction:.4f}"
             )
-            print(
-                f"POWER signal={analysis.name} "
-                f"clustered_se={analysis.clustered_standard_error:.6f} "
-                f"minimum_detectable_auc={analysis.mde:.4f} "
-                "undetectable_band="
-                f"{_format_interval(analysis.undetectable_band)} "
-                "power=0.80 alpha=0.05"
-            )
-            status = analysis.status
-            if status == "UNDERPOWERED":
-                status += (
-                    " band="
-                    f"{_format_interval(analysis.undetectable_band)}"
+            if analysis.power is not None:
+                print(
+                    "POWER basis=cluster_resampling "
+                    f"signal={analysis.name} "
+                    f"alternative_auc={args.alternative_auc:.4f} "
+                    f"achieved_power={analysis.power.achieved_power:.4f} "
+                    f"rejections={analysis.power.rejection_count} "
+                    f"valid={analysis.power.valid_count} "
+                    f"undefined={analysis.power.undefined_count} "
+                    f"simulations={analysis.power.iterations} "
+                    f"alpha={args.alpha:.4f}"
                 )
             print(
                 f"SIGNAL {analysis.name} role={analysis.role} "
@@ -847,7 +1054,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"naive_95={_format_interval(analysis.naive.interval)} "
                 "clustered_95="
                 f"{_format_interval(analysis.clustered.interval)} "
-                f"status={status}"
+                f"permutation_p={analysis.permutation.p_value:.6f} "
+                f"permutations={analysis.permutation.iterations} "
+                f"permutation_valid={analysis.permutation.valid_count} "
+                "permutation_undefined="
+                f"{analysis.permutation.undefined_count} "
+                f"status={analysis.status}"
             )
             if (
                 _interval_excludes_chance(analysis.naive.interval)
