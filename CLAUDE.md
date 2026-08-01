@@ -115,8 +115,11 @@ those versions unless intentionally upgrading.
 - **Gate contracts live in `trace-commons-gate-api`.** Traits, result types, and
   decision types belong there; scoring implementations do not. Code that holds a
   scorer, embedder, or vector index must hold it as a trait object, never as a
-  concrete type — a proprietary backend substitutes at that seam. See
-  `docs/superpowers/specs/2026-08-01-scoring-private-split-design.md`.
+  concrete type — a proprietary backend substitutes at that seam, and a concrete
+  type cannot participate in one. The `Reference*` implementations in that crate
+  are real but deliberately simple and uncalibrated; the `Mock*` types in
+  `trace-commons-gate-enclave` are hash-derived test doubles and must never gate
+  anything. See `crates/trace-commons-gate-api/README.md`.
 
 ## Working with this codebase
 
