@@ -251,9 +251,16 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
     let pool = backend.trace_pool_for_test();
     let mut client = pool.get().await.expect("client");
 
-    // Seed as the owner, outside any policy-constrained role.
+    // Seed through the registry role. Do NOT seed as the connection's own
+    // user: local dev users are frequently superusers, which bypasses RLS
+    // outright and would make this test pass for the wrong reason. The
+    // runtime role has a SELECT-only policy and cannot insert at all.
+    let seed = client.transaction().await.expect("seed tx");
+    seed.batch_execute("SET LOCAL ROLE trace_invite_registry")
+        .await
+        .expect("set role");
     for hash in [TEST_HASH_A, TEST_HASH_B] {
-        client
+        seed
             .execute(
                 "INSERT INTO onboarding_invite_grants (
                      invite_subject_hash, policy_label, tenant_mode,
@@ -265,6 +272,7 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
             .await
             .expect("seed");
     }
+    seed.commit().await.expect("seed commit");
 
     let tx = client.transaction().await.expect("tx");
     // A NOBYPASSRLS role: policies actually apply. Superuser would not.
@@ -313,8 +321,13 @@ async fn registry_role_sees_all_invites() {
 
     let pool = backend.trace_pool_for_test();
     let mut client = pool.get().await.expect("client");
+    // Seed through the registry role, not the connection's own user.
+    let seed = client.transaction().await.expect("seed tx");
+    seed.batch_execute("SET LOCAL ROLE trace_invite_registry")
+        .await
+        .expect("set role");
     for hash in [TEST_HASH_A, TEST_HASH_B] {
-        client
+        seed
             .execute(
                 "INSERT INTO onboarding_invite_grants (
                      invite_subject_hash, policy_label, tenant_mode,
@@ -326,6 +339,7 @@ async fn registry_role_sees_all_invites() {
             .await
             .expect("seed");
     }
+    seed.commit().await.expect("seed commit");
 
     let tx = client.transaction().await.expect("tx");
     tx.batch_execute("SET LOCAL ROLE trace_invite_registry")
@@ -353,7 +367,12 @@ async fn tenant_mode_pairing_constraint_rejects_mismatches() {
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
     let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
+    let mut client = pool.get().await.expect("client");
+    let client = client.transaction().await.expect("tx");
+    client
+        .batch_execute("SET LOCAL ROLE trace_invite_registry")
+        .await
+        .expect("set role");
 
     // fixed mode with no fixed_tenant_id
     let err = client
@@ -946,6 +965,23 @@ fn registry_test_config() -> Option<DatabaseConfig> {
     Some(config)
 }
 
+/// Teardown only. Runs as the test connection's own user, which must own the
+/// table or be a superuser -- FORCE RLS gives the runtime role no DELETE policy
+/// and production deliberately has no DELETE grant (revocation is a soft
+/// UPDATE). Never use this to set up an assertion; seed through the
+/// trace_invite_registry role for that.
+async fn cleanup_test_invites(backend: &PgBackend, policy_label: &str) {
+    let pool = backend.trace_pool_for_test();
+    let client = pool.get().await.expect("client");
+    client
+        .execute(
+            "DELETE FROM onboarding_invite_grants WHERE policy_label = $1",
+            &[&policy_label],
+        )
+        .await
+        .expect("cleanup");
+}
+
 fn derived_write(hash: &str) -> InviteGrantWrite {
     InviteGrantWrite {
         invite_subject_hash: hash.to_string(),
@@ -1077,15 +1113,7 @@ async fn listing_excludes_revoked_invites() {
 Each test writes the same fixed hashes, so add a cleanup at the top of every one of these four tests, immediately after `run_migrations`:
 
 ```rust
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'test-pool'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "test-pool").await;
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
@@ -2411,7 +2439,7 @@ report only whether a credential binding exists."
 
 **Interfaces:**
 - Consumes: `InviteRegistry`, `InviteEntry`, `InviteTenantMode`, `InviteRegistryError` (Tasks 2 and 4); `PgBackend::lookup_invite_grant_in_tx` (Task 3); existing `derive_user_tenant_id`, `hash_invite_code`, `onboard_device_key`.
-- Produces: three new `TraceOnboardErrorCode` variants; `InviteRegistry` handle on the issuer state; `PgBackend::redeem_invite_grant(...)`.
+- Produces: three new `TraceOnboardErrorCode` variants; `InviteRegistry` handle on the issuer state; `PgBackend::redeem_invite_grant(&self, invite_subject_hash: &str, user_subject: &str) -> Result<Option<InviteRedemption>, DatabaseError>`.
 
 - [ ] **Step 1: Add the error codes**
 
@@ -2446,15 +2474,7 @@ async fn a_derived_mode_invite_provisions_the_derived_tenant() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'test-pool'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "test-pool").await;
 
     let _ = backend
         .insert_invite_grant(derived_write(TEST_HASH_C))
@@ -2464,7 +2484,8 @@ async fn a_derived_mode_invite_provisions_the_derived_tenant() {
     let outcome = backend
         .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
         .await
-        .expect("redeem");
+        .expect("no database error")
+        .expect("invite is redeemable");
 
     assert_eq!(
         outcome.tenant_id,
@@ -2484,15 +2505,7 @@ async fn a_fixed_mode_invite_uses_its_tenant_verbatim() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'test-pool'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "test-pool").await;
 
     let mut write = derived_write(TEST_HASH_C);
     write.tenant_mode = InviteTenantMode::Fixed;
@@ -2503,7 +2516,8 @@ async fn a_fixed_mode_invite_uses_its_tenant_verbatim() {
     let outcome = backend
         .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
         .await
-        .expect("redeem");
+        .expect("no database error")
+        .expect("invite is redeemable");
     assert_eq!(outcome.tenant_id, "tenant-zaki-pilot");
 }
 
@@ -2515,15 +2529,7 @@ async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'test-pool'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "test-pool").await;
 
     let _ = backend
         .insert_invite_grant(derived_write(TEST_HASH_C))
@@ -2533,9 +2539,12 @@ async fn a_revoked_invite_cannot_be_redeemed_even_from_a_warm_cache() {
 
     // The cache is deliberately bypassed here: this asserts the database, not
     // the cache, is what refuses a revoked invite.
-    let result = backend.redeem_invite_grant(TEST_HASH_C, "user-subject-1").await;
+    let result = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("a revoked invite is not a database error");
     assert!(
-        result.is_err(),
+        result.is_none(),
         "the in-transaction re-check must refuse a revoked invite"
     );
 }
@@ -2548,22 +2557,17 @@ async fn an_expired_invite_cannot_be_redeemed() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'test-pool'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "test-pool").await;
 
     let mut write = derived_write(TEST_HASH_C);
     write.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     let _ = backend.insert_invite_grant(write).await.expect("insert");
 
-    let result = backend.redeem_invite_grant(TEST_HASH_C, "user-subject-1").await;
-    assert!(result.is_err(), "an expired invite must not redeem");
+    let result = backend
+        .redeem_invite_grant(TEST_HASH_C, "user-subject-1")
+        .await
+        .expect("an expired invite is not a database error");
+    assert!(result.is_none(), "an expired invite must not redeem");
 }
 ```
 
@@ -2599,21 +2603,21 @@ impl PgBackend {
     ///
     /// This does NOT increment the V29 counter; the caller does that in the
     /// same transaction via the existing onboard_device_key path.
+    /// `Ok(None)` means the invite is not redeemable -- absent, revoked, or
+    /// expired, deliberately indistinguishable to the caller. `Err` is
+    /// reserved for genuine database failures, so a backend outage is never
+    /// reported to a contributor as an invalid invite.
     pub async fn redeem_invite_grant(
         &self,
         invite_subject_hash: &str,
         user_subject: &str,
-    ) -> Result<InviteRedemption, DatabaseError> {
+    ) -> Result<Option<InviteRedemption>, DatabaseError> {
         let pool = self.trace_pool();
         let mut client = pool.get().await?;
         let tx = client.transaction().await.map_err(DatabaseError::Postgres)?;
-        let entry = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash)
-            .await?
-            .ok_or_else(|| {
-                // One label for absent, revoked, and expired: a caller must not
-                // be able to distinguish "never existed" from "revoked".
-                DatabaseError::Serialization("InviteNotValid".to_string())
-            })?;
+        let Some(entry) = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash).await? else {
+            return Ok(None);
+        };
 
         let tenant_id = match entry.tenant_mode {
             InviteTenantMode::Fixed => entry.fixed_tenant_id.clone().ok_or_else(|| {
@@ -2628,13 +2632,13 @@ impl PgBackend {
         };
 
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(InviteRedemption {
+        Ok(Some(InviteRedemption {
             tenant_id,
             policy_version: entry.policy_version,
             allowed_consent_scopes: entry.allowed_consent_scopes,
             allowed_uses: entry.allowed_uses,
             max_uses: entry.max_uses,
-        })
+        }))
     }
 }
 ```
@@ -2697,15 +2701,22 @@ if self.invite_registry_authoritative {
 
     // The cache said yes; the database decides. Expiry, revocation, and the
     // tenant all come from the in-transaction re-check.
-    let redemption = db
+    let redemption = match db
         .redeem_invite_grant(&invite_subject_hash, &user_subject)
         .await
-        .map_err(|_| {
-            IssuerError::onboard_error(
+    {
+        Ok(Some(redemption)) => redemption,
+        // Absent, revoked, or expired -- one label, so a caller cannot
+        // distinguish "never existed" from "revoked".
+        Ok(None) => {
+            return Err(IssuerError::onboard_error(
                 StatusCode::FORBIDDEN,
                 TraceOnboardErrorCode::InviteNotValid,
-            )
-        })?;
+            ));
+        }
+        // A backend outage must never be reported as an invalid invite.
+        Err(_) => return Err(IssuerError::internal()),
+    };
 
     return self
         .complete_onboard_with_redemption(request, redemption, invite_subject_hash)
@@ -2828,15 +2839,9 @@ async fn importing_the_same_file_twice_is_idempotent() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
+    cleanup_test_invites(&backend, "import-test").await;
     let pool = backend.trace_pool_for_test();
     let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
@@ -2903,15 +2908,7 @@ async fn imported_invites_are_fixed_mode_and_keep_their_tenant() {
     };
     let backend = PgBackend::new(&config).await.expect("backend");
     backend.run_migrations().await.expect("migrations");
-    let pool = backend.trace_pool_for_test();
-    let client = pool.get().await.expect("client");
-    client
-        .execute(
-            "DELETE FROM onboarding_invite_grants WHERE policy_label = 'import-test'",
-            &[],
-        )
-        .await
-        .expect("cleanup");
+    cleanup_test_invites(&backend, "import-test").await;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allowlist.json");
@@ -3133,6 +3130,7 @@ process that enforces the invite."
 **Files:**
 - Modify: `crates/trace-commons-server/src/trace_upload_claim_allowlist.rs`
 - Modify: `docs/operator/pilot-allowlist.md`
+- Modify: `docs/upload-claim-issuer.md` (line 70 references the retired script)
 - Delete: `scripts/operator/generate-pilot-invites.py`
 
 **Interfaces:**
@@ -3311,10 +3309,23 @@ Add a "Cutover" section documenting the four staged steps from the spec, and a r
 
 ```bash
 git rm scripts/operator/generate-pilot-invites.py
-grep -rn "generate-pilot-invites" --exclude-dir=target --exclude-dir=.git .
+grep -rn "generate-pilot-invites" --exclude-dir=target --exclude-dir=.git \
+  --exclude-dir=.superpowers --exclude-dir=docs/superpowers .
 ```
 
-Expected: the grep returns nothing after the runbook rewrite. If `scripts/operator/pilot-bootstrap-smoke.sh` or any CI workflow references it, fix that reference — the smoke job gates every PR and must not break.
+Two references are known to exist and must both be updated:
+
+- `docs/operator/pilot-allowlist.md` — handled by the Step 5 rewrite.
+- `docs/upload-claim-issuer.md:70` — the `--hash-invite-code` row says "Prefer
+  `scripts/operator/generate-pilot-invites.py` for normal batch operations".
+  Change it to point at `--mint-invites`.
+
+Historical plan and spec files under `docs/superpowers/` are a record of past
+decisions and must NOT be rewritten; that is why they are excluded above.
+
+Expected: after both edits the grep returns nothing. If
+`scripts/operator/pilot-bootstrap-smoke.sh` or any CI workflow references it,
+fix that too — the smoke job gates every PR and must not break.
 
 - [ ] **Step 7: Full verification**
 
