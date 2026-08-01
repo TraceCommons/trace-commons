@@ -7134,6 +7134,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "libc",
  "reqwest 0.12.28",
  "ring",
  "same-file",

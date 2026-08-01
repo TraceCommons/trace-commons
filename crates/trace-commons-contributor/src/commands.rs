@@ -691,8 +691,15 @@ fn write_manifest(path: &Path, contents: &[u8], json_output: bool) -> Result<()>
         );
     }
 
-    file.set_len(0)
-        .with_context(|| format!("truncating manifest at {}", path.display()))?;
+    if file
+        .metadata()
+        .with_context(|| format!("reading manifest metadata at {}", path.display()))?
+        .file_type()
+        .is_file()
+    {
+        file.set_len(0)
+            .with_context(|| format!("truncating manifest at {}", path.display()))?;
+    }
     file.write_all(contents)
         .with_context(|| format!("writing manifest to {}", path.display()))?;
     Ok(())
@@ -804,14 +811,63 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opened_stdout_handle_is_detected_directly() {
+    fn non_regular_opened_stdout_handle_is_detected_directly() {
         use std::os::fd::AsFd;
 
         // Duplicating fd 1 pins the identity property without relying on
         // timing a symlink swap between the fast path and the open.
         let stdout = std::io::stdout();
         let file = File::from(stdout.as_fd().try_clone_to_owned().unwrap());
+        assert!(!file.metadata().unwrap().file_type().is_file());
         assert!(manifest_handle_is_stdout(&file).unwrap());
+    }
+
+    #[test]
+    fn regular_manifest_destination_is_truncated_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, b"stale manifest suffix").unwrap();
+
+        write_manifest(&path, b"[]", false).unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), b"[]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_manifest_destination_succeeds_and_receives_bytes() {
+        use std::ffi::CString;
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.pipe");
+        let fifo_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_path is a valid, NUL-terminated path that remains
+        // alive for the duration of the call.
+        let result = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
+        assert_eq!(
+            result,
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(std::fs::metadata(&path).unwrap().file_type().is_fifo());
+
+        // Opening both ends keeps the FIFO ready while write_manifest opens
+        // its write-only handle. Read the exact payload because this handle
+        // also owns a write end and therefore cannot observe EOF.
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        write_manifest(&path, b"[]", true).unwrap();
+        let mut received = [0_u8; 2];
+        reader.read_exact(&mut received).unwrap();
+
+        assert_eq!(&received, b"[]");
     }
 
     #[test]
