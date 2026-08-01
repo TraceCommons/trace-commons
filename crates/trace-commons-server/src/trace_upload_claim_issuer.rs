@@ -580,6 +580,13 @@ pub async fn configure_onboarding_device_key_registry_from_env(
 pub async fn configure_invite_admin_from_env(
     config: &mut TraceUploadClaimIssuerConfig,
 ) -> anyhow::Result<()> {
+    // Read unconditionally, even if the registry URL below is absent: an
+    // operator who sets AUTHORITATIVE=true without also configuring the
+    // registry must get the fail-closed 503
+    // (InviteRegistryNotConfigured) at request time, not a silent
+    // reversion to the file allowlist.
+    config.invite_registry_authoritative =
+        env_truthy(TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV);
     if DatabaseConfig::invite_registry_url_from_env().is_none() {
         return Ok(());
     }
