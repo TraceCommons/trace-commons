@@ -161,6 +161,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_wrong_algorithm_token_is_refused() {
+        // Classic algorithm-confusion forgery: sign with HS256 using the
+        // Ed25519 public key PEM bytes as the HMAC secret, which is key
+        // material an attacker who only has the public key already holds.
+        let (_private_pem, public_pem) = generate_test_ed25519_pem();
+        let dec = DecodingKey::from_ed_pem(public_pem.as_bytes()).expect("decoding key");
+        let hs_key = EncodingKey::from_secret(public_pem.as_bytes());
+        let exp = (chrono::Utc::now().timestamp() + 300) as usize;
+        let claims = AdminClaims {
+            sub: "operator-1".to_string(),
+            role: "admin".to_string(),
+            iss: ISS.to_string(),
+            aud: AUD.to_string(),
+            jti: "jti-1".to_string(),
+            exp,
+        };
+        let token = encode(&Header::new(Algorithm::HS256), &claims, &hs_key).expect("sign hs256");
+        assert!(matches!(
+            verify_admin_token(&token, &dec, ISS, AUD),
+            Err(AdminAuthError::WrongAlgorithm)
+        ));
+    }
+
+    #[test]
+    fn a_token_signed_by_a_different_key_is_refused() {
+        // Well-formed admin claims, correct iss/aud/exp, but signed by an
+        // independent keypair. Proves the role check cannot substitute for
+        // signature verification.
+        let (_enc1, dec1) = test_keys();
+        let (enc2, _dec2) = test_keys();
+        let token = sign(&enc2, "admin", 300);
+        assert!(matches!(
+            verify_admin_token(&token, &dec1, ISS, AUD),
+            Err(AdminAuthError::Invalid)
+        ));
+    }
+
     /// Ring generates PKCS#8 v2 Ed25519 keys, which is what the issuer's own
     /// key loading requires.
     fn generate_test_ed25519_pem() -> (String, String) {
