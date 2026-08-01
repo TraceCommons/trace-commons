@@ -5,10 +5,14 @@
 //! beyond the deliberately-simple reference implementations. Proprietary
 //! backends live outside this repository and depend on this crate.
 
+pub mod decision;
 pub mod embedder;
 pub mod perplexity;
 pub mod vector_index;
 
+pub use decision::{
+    EnclaveGateOrchestratorConfig, InsertedChunkEntry, OrchestrationDecision, PerplexityOnlyOutcome,
+};
 pub use embedder::{Embedder, MOCK_EMBEDDING_DIM};
 pub use perplexity::{
     ChunkPerplexity, PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
