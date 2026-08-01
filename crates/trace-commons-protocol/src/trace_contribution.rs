@@ -3984,7 +3984,7 @@ fn channel_label(channel: TraceChannel) -> &'static str {
     }
 }
 
-fn tool_category_for(tool_name: &str) -> String {
+pub fn tool_category_for(tool_name: &str) -> String {
     let lower = tool_name.to_ascii_lowercase();
     if lower.contains("http") || lower.contains("browser") || lower.contains("web") {
         "network".to_string()
@@ -4004,7 +4004,7 @@ fn tool_category_for(tool_name: &str) -> String {
     }
 }
 
-fn side_effect_for(
+pub fn side_effect_for(
     event_type: TraceContributionEventType,
     tool_name: Option<&str>,
 ) -> SideEffectLevel {

@@ -990,20 +990,24 @@ mod tests {
             events.iter().all(|event| event["tool_name"].is_null()),
             "--no-tool-payloads must remove every tool name"
         );
+        let tool_call = events
+            .iter()
+            .find(|event| event["event_type"] == "tool_call")
+            .unwrap();
+        assert_eq!(tool_call["tool_category"], "other");
+        assert_eq!(tool_call["side_effect"], "read_only");
         assert!(
-            events.iter().all(|event| event["tool_category"].is_null()),
-            "tool categories must not be derived after tool names are removed"
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "tool_result")
+                .all(|event| {
+                    event["tool_category"].is_null() && event["side_effect"] == "none"
+                }),
+            "tool results without source names must keep the protocol fallback"
         );
-        assert!(
-            events.iter().all(|event| {
-                event["side_effect"]
-                    == if event["event_type"] == "tool_call" {
-                        "unknown"
-                    } else {
-                        "none"
-                    }
-            }),
-            "side effects must fall back after tool names are removed"
+        assert_eq!(
+            sent["trace_card"]["tool_categories"],
+            serde_json::json!(["other"])
         );
     }
 

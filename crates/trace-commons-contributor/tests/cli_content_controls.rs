@@ -135,15 +135,18 @@ async fn compiled_cli_content_flags_reach_wire_envelope() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|event| {
-                event["tool_name"].is_null()
-                    && event["tool_category"].is_null()
-                    && event["side_effect"]
-                        == if event["event_type"] == "tool_call" {
-                            "unknown"
-                        } else {
-                            "none"
-                        }
-            })
+            .all(|event| event["tool_name"].is_null())
+    );
+    let tool_call = tool_opt_out["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "tool_call")
+        .unwrap();
+    assert_eq!(tool_call["tool_category"], "other");
+    assert_eq!(tool_call["side_effect"], "local_write");
+    assert_eq!(
+        tool_opt_out["trace_card"]["tool_categories"],
+        serde_json::json!(["other"])
     );
 }

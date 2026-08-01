@@ -10,12 +10,14 @@
 //! backend name), this module refuses to build a redactor rather than
 //! silently falling back to deterministic-only redaction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use trace_commons_protocol::onboarding::user_subject_hash;
@@ -23,10 +25,11 @@ use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
-    RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TokenCounts,
-    TraceAllowedUse, TraceChannel, TraceContributionEnvelope, TraceContributionEventType,
-    TraceRedactor, ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
-    synthetic_privacy_filter_canary_values,
+    RawTraceContributionEvent, ReplayMetadata, SideEffectLevel, TRACE_CONTRIBUTION_POLICY_VERSION,
+    TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope,
+    TraceContributionEventType, TraceFailureMode, TraceRedactor, ValueMetadata,
+    run_privacy_filter_canary, side_effect_for, synthetic_privacy_filter_canary_text,
+    synthetic_privacy_filter_canary_values, tool_category_for,
 };
 
 use crate::config::ContributorConfig;
@@ -37,6 +40,54 @@ use crate::source::{
 /// Envelopes larger than this are refused before submission (label-only
 /// refusal; the oversized content itself is never logged).
 pub const MAX_ENVELOPE_BYTES: usize = 1_500_000;
+
+const SYSTEM_REPLAY_NOTE: &str = "imported transcript; not replayable";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OmittedToolMetadata {
+    event_id: Uuid,
+    tool_category: String,
+    side_effect: SideEffectLevel,
+}
+
+/// A raw contribution plus local-only structural metadata derived before
+/// contributor-controlled tool names are discarded. Dereferencing exposes the
+/// raw protocol DTO so callers can still enrich outcome/replay fields before
+/// redaction.
+#[derive(Debug, Clone)]
+pub struct ContributorRawContribution {
+    raw: RawTraceContribution,
+    omitted_tool_metadata: Vec<OmittedToolMetadata>,
+}
+
+impl Deref for ContributorRawContribution {
+    type Target = RawTraceContribution;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl DerefMut for ContributorRawContribution {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.raw
+    }
+}
+
+impl serde::Serialize for ContributorRawContribution {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&self.raw, serializer)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ContentPresence {
+    message_text: bool,
+    tool_payloads: bool,
+}
 
 /// NEAR AI privacy-filter backend settings. Constructed from env by
 /// `near_ai_settings_from_env`, or injected directly by callers/tests so
@@ -194,12 +245,146 @@ pub async fn canary_self_test_async(redactor: &DeterministicTraceRedactor) -> Re
 /// (never trace content).
 pub async fn redact_to_envelope(
     redactor: &DeterministicTraceRedactor,
-    raw: RawTraceContribution,
+    contribution: ContributorRawContribution,
 ) -> Result<TraceContributionEnvelope> {
-    redactor
+    let ContributorRawContribution {
+        mut raw,
+        omitted_tool_metadata,
+    } = contribution;
+    stamp_content_presence(&mut raw);
+
+    let mut envelope = redactor
         .redact_trace(raw)
         .await
-        .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))
+        .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))?;
+    restore_omitted_tool_metadata(&mut envelope, omitted_tool_metadata)?;
+    Ok(envelope)
+}
+
+fn restore_omitted_tool_metadata(
+    envelope: &mut TraceContributionEnvelope,
+    omitted: Vec<OmittedToolMetadata>,
+) -> Result<()> {
+    for metadata in omitted {
+        let event = envelope
+            .events
+            .iter_mut()
+            .find(|event| event.event_id == metadata.event_id)
+            .ok_or_else(|| anyhow::anyhow!("tool-metadata-event-missing"))?;
+        event.tool_category = Some(metadata.tool_category);
+        event.side_effect = metadata.side_effect;
+    }
+
+    envelope.trace_card.tool_categories = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.tool_category.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    envelope.privacy.redaction_hash = final_event_redaction_hash(envelope);
+    Ok(())
+}
+
+fn final_event_redaction_hash(envelope: &TraceContributionEnvelope) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&envelope.events).unwrap_or_default());
+    hasher.update(serde_json::to_vec(&envelope.privacy.redaction_counts).unwrap_or_default());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn stamp_content_presence(raw: &mut RawTraceContribution) {
+    let presence = derive_content_presence(raw);
+    raw.consent.message_text_included = presence.message_text;
+    raw.consent.tool_payloads_included = presence.tool_payloads;
+}
+
+fn derive_content_presence(raw: &RawTraceContribution) -> ContentPresence {
+    // Keep this destructure exhaustive. A new raw-envelope field must be
+    // classified here or explicitly documented as structural metadata.
+    let RawTraceContribution {
+        trace_id: _,
+        submission_id: _,
+        created_at: _,
+        ironclaw: _,
+        consent: _,
+        contributor: _,
+        events,
+        outcome,
+        replay,
+        embedding_analysis: _,
+        value: _,
+    } = raw;
+    let mut presence = ContentPresence::default();
+
+    for event in events {
+        // Keep this destructure and event-type match exhaustive for the same
+        // reason: new schema surfaces cannot silently produce false consent
+        // declarations.
+        let RawTraceContributionEvent {
+            event_id: _,
+            event_type,
+            timestamp: _,
+            content,
+            structured_payload,
+            tool_name,
+            latency_ms: _,
+            token_counts: _,
+            cost_usd: _,
+        } = event;
+        if content.is_some() {
+            match event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => presence.message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
+            }
+        }
+        if !structured_payload.is_null() || tool_name.is_some() {
+            presence.tool_payloads = true;
+        }
+    }
+
+    let OutcomeMetadata {
+        user_feedback: _,
+        task_success: _,
+        error_taxonomy,
+        failure_modes,
+        human_correction,
+    } = outcome;
+    if human_correction.is_some()
+        || !error_taxonomy.is_empty()
+        || failure_modes
+            .iter()
+            .any(|mode| matches!(mode, TraceFailureMode::Other(_)))
+    {
+        presence.message_text = true;
+    }
+
+    let ReplayMetadata {
+        replayable: _,
+        required_tools,
+        tool_manifest_hashes,
+        expected_assertions,
+        replay_notes,
+    } = replay;
+    if !required_tools.is_empty()
+        || !tool_manifest_hashes.is_empty()
+        || !expected_assertions.is_empty()
+    {
+        presence.tool_payloads = true;
+    }
+    // The contributor writes this exact constant; it contains no contributor
+    // content. Any other replay note is free-form text and must be declared.
+    if replay_notes.iter().any(|note| note != SYSTEM_REPLAY_NOTE) {
+        presence.message_text = true;
+    }
+
+    presence
 }
 
 /// Re-scan the *finished* envelope with the secret detector and report
@@ -255,7 +440,7 @@ pub fn build_raw_contribution(
     t: &SessionTranscript,
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
-) -> RawTraceContribution {
+) -> ContributorRawContribution {
     let mut feature_flags = BTreeMap::new();
     feature_flags.insert("agent".to_string(), t.source.to_string());
     feature_flags.insert(
@@ -276,29 +461,18 @@ pub fn build_raw_contribution(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events: Vec<RawTraceContributionEvent> = t
+    let projected: Vec<(RawTraceContributionEvent, Option<OmittedToolMetadata>)> = t
         .events
         .iter()
         .map(|e| raw_event_for(e, now, cfg.include_message_text, cfg.include_tool_payloads))
         .collect();
-    let message_text_included = events.iter().any(|event| {
-        matches!(
-            event.event_type,
-            TraceContributionEventType::UserMessage
-                | TraceContributionEventType::AssistantMessage
-                | TraceContributionEventType::Reasoning
-        ) && event.content.is_some()
-    });
-    let tool_payloads_included = events.iter().any(|event| {
-        event.tool_name.is_some()
-            || !event.structured_payload.is_null()
-            || (matches!(
-                event.event_type,
-                TraceContributionEventType::ToolCall | TraceContributionEventType::ToolResult
-            ) && event.content.is_some())
-    });
+    let events = projected.iter().map(|(event, _)| event.clone()).collect();
+    let omitted_tool_metadata = projected
+        .into_iter()
+        .filter_map(|(_, metadata)| metadata)
+        .collect();
 
-    RawTraceContribution {
+    let mut raw = RawTraceContribution {
         trace_id: Uuid::new_v4(),
         submission_id: submission_id_for(&t.session_hash),
         created_at: now,
@@ -322,8 +496,8 @@ pub fn build_raw_contribution(
                     parsed
                 }
             },
-            message_text_included,
-            tool_payloads_included,
+            message_text_included: false,
+            tool_payloads_included: false,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -339,10 +513,15 @@ pub fn build_raw_contribution(
             required_tools: vec![],
             tool_manifest_hashes: BTreeMap::new(),
             expected_assertions: vec![],
-            replay_notes: vec!["imported transcript; not replayable".to_string()],
+            replay_notes: vec![SYSTEM_REPLAY_NOTE.to_string()],
         },
         embedding_analysis: None,
         value: ValueMetadata::default(),
+    };
+    stamp_content_presence(&mut raw);
+    ContributorRawContribution {
+        raw,
+        omitted_tool_metadata,
     }
 }
 
@@ -402,7 +581,7 @@ fn raw_event_for(
     now: DateTime<Utc>,
     include_message_text: bool,
     include_tool_payloads: bool,
-) -> RawTraceContributionEvent {
+) -> (RawTraceContributionEvent, Option<OmittedToolMetadata>) {
     let event_type = match e.kind {
         SessionEventKind::User => TraceContributionEventType::UserMessage,
         SessionEventKind::Assistant => TraceContributionEventType::AssistantMessage,
@@ -437,26 +616,40 @@ fn raw_event_for(
         serde_json::Value::Null
     };
 
-    RawTraceContributionEvent {
-        event_id: Uuid::new_v4(),
-        event_type,
-        timestamp: e.timestamp.unwrap_or(now),
-        content,
-        structured_payload,
-        tool_name: if include_tool_payloads {
-            e.tool_name.clone()
-        } else {
-            None
+    let event_id = Uuid::new_v4();
+    let omitted_tool_metadata = if include_tool_payloads {
+        None
+    } else {
+        e.tool_name.as_deref().map(|tool_name| OmittedToolMetadata {
+            event_id,
+            tool_category: tool_category_for(tool_name),
+            side_effect: side_effect_for(event_type, Some(tool_name)),
+        })
+    };
+
+    (
+        RawTraceContributionEvent {
+            event_id,
+            event_type,
+            timestamp: e.timestamp.unwrap_or(now),
+            content,
+            structured_payload,
+            tool_name: if include_tool_payloads {
+                e.tool_name.clone()
+            } else {
+                None
+            },
+            latency_ms: None,
+            token_counts: e
+                .token_counts
+                .map(|(input_tokens, output_tokens)| TokenCounts {
+                    input_tokens,
+                    output_tokens,
+                }),
+            cost_usd: None,
         },
-        latency_ms: None,
-        token_counts: e
-            .token_counts
-            .map(|(input_tokens, output_tokens)| TokenCounts {
-                input_tokens,
-                output_tokens,
-            }),
-        cost_usd: None,
-    }
+        omitted_tool_metadata,
+    )
 }
 
 #[cfg(test)]
@@ -521,6 +714,25 @@ mod tests {
         }
     }
 
+    fn raw_event(
+        event_type: TraceContributionEventType,
+        content: Option<&str>,
+        structured_payload: serde_json::Value,
+        tool_name: Option<&str>,
+    ) -> RawTraceContributionEvent {
+        RawTraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            event_type,
+            timestamp: Utc::now(),
+            content: content.map(str::to_string),
+            structured_payload,
+            tool_name: tool_name.map(str::to_string),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+        }
+    }
+
     #[test]
     fn meta_only_trace_declares_both_content_classes_absent() {
         let raw = build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
@@ -580,6 +792,227 @@ mod tests {
 
         assert!(!raw.consent.message_text_included);
         assert!(!raw.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn presence_scan_classifies_every_event_type_and_payload_surface() {
+        let cases = [
+            (TraceContributionEventType::UserMessage, true, false),
+            (TraceContributionEventType::AssistantMessage, true, false),
+            (TraceContributionEventType::Reasoning, true, false),
+            (TraceContributionEventType::RoutingDecision, true, false),
+            (TraceContributionEventType::Feedback, true, false),
+            (TraceContributionEventType::ToolCall, false, true),
+            (TraceContributionEventType::ToolResult, false, true),
+            (TraceContributionEventType::HttpExchange, false, true),
+        ];
+
+        for (event_type, message_text, tool_payloads) in cases {
+            let mut raw =
+                build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+            raw.events.push(raw_event(
+                event_type,
+                Some("content"),
+                serde_json::Value::Null,
+                None,
+            ));
+            assert_eq!(
+                derive_content_presence(&raw),
+                ContentPresence {
+                    message_text,
+                    tool_payloads,
+                },
+                "event type {event_type:?}"
+            );
+        }
+
+        let mut structured =
+            build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+        structured.events.push(raw_event(
+            TraceContributionEventType::Feedback,
+            None,
+            serde_json::json!({"assertion": "present"}),
+            None,
+        ));
+        assert_eq!(
+            derive_content_presence(&structured),
+            ContentPresence {
+                message_text: false,
+                tool_payloads: true,
+            }
+        );
+
+        let mut named =
+            build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+        named.events.push(raw_event(
+            TraceContributionEventType::RoutingDecision,
+            None,
+            serde_json::Value::Null,
+            Some("router"),
+        ));
+        assert_eq!(
+            derive_content_presence(&named),
+            ContentPresence {
+                message_text: false,
+                tool_payloads: true,
+            }
+        );
+    }
+
+    #[test]
+    fn presence_scan_covers_outcome_and_replay_content_fields() {
+        let base = build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+        assert_eq!(derive_content_presence(&base), ContentPresence::default());
+
+        let mut error_taxonomy = base.clone();
+        error_taxonomy
+            .outcome
+            .error_taxonomy
+            .push("free form".into());
+        assert!(derive_content_presence(&error_taxonomy).message_text);
+
+        let mut other_failure = base.clone();
+        other_failure
+            .outcome
+            .failure_modes
+            .push(TraceFailureMode::Other("free form".into()));
+        assert!(derive_content_presence(&other_failure).message_text);
+
+        let mut typed_failure = base.clone();
+        typed_failure
+            .outcome
+            .failure_modes
+            .push(TraceFailureMode::MissingVerification);
+        assert_eq!(
+            derive_content_presence(&typed_failure),
+            ContentPresence::default()
+        );
+
+        let mut required_tool = base.clone();
+        required_tool.replay.required_tools.push("browser".into());
+        assert!(derive_content_presence(&required_tool).tool_payloads);
+
+        let mut tool_manifest = base.clone();
+        tool_manifest
+            .replay
+            .tool_manifest_hashes
+            .insert("browser".into(), "sha256:00".into());
+        assert!(derive_content_presence(&tool_manifest).tool_payloads);
+
+        let mut assertion = base.clone();
+        assertion
+            .replay
+            .expected_assertions
+            .push(serde_json::json!({"status": 200}));
+        assert!(derive_content_presence(&assertion).tool_payloads);
+
+        let mut replay_note = base;
+        replay_note.replay.replay_notes.push("free form".into());
+        assert!(derive_content_presence(&replay_note).message_text);
+    }
+
+    #[tokio::test]
+    async fn human_correction_sets_message_presence_at_redaction_boundary() {
+        let mut raw = build_raw_contribution(&transcript_with(vec![]), &test_config(), Utc::now());
+        assert!(!raw.consent.message_text_included);
+        raw.outcome.human_correction = Some("Project Vega closes Friday".into());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        assert!(envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some("Project Vega closes Friday")
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_opt_out_preserves_allowlisted_structure_without_names() {
+        let cases = [
+            (
+                SessionEventKind::ToolCall,
+                Some("http_get"),
+                Some("network"),
+                SideEffectLevel::ReadOnly,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                Some("write_file"),
+                Some("workspace"),
+                SideEffectLevel::LocalWrite,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                Some("search_memory"),
+                Some("retrieval"),
+                SideEffectLevel::ReadOnly,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                Some("send_email"),
+                Some("external_app"),
+                SideEffectLevel::ExternalWrite,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                Some("custom_tool"),
+                Some("other"),
+                SideEffectLevel::ReadOnly,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                Some("auth_token"),
+                Some("other"),
+                SideEffectLevel::CredentialUse,
+            ),
+            (
+                SessionEventKind::ToolCall,
+                None,
+                None,
+                SideEffectLevel::Unknown,
+            ),
+            (
+                SessionEventKind::ToolResult,
+                Some("send_email"),
+                Some("external_app"),
+                SideEffectLevel::None,
+            ),
+        ];
+        let transcript = transcript_with(
+            cases
+                .iter()
+                .map(|(kind, tool_name, _, _)| {
+                    event(kind.clone(), None, serde_json::Value::Null, *tool_name)
+                })
+                .collect(),
+        );
+        let mut cfg = test_config();
+        cfg.include_tool_payloads = false;
+        let raw = build_raw_contribution(&transcript, &cfg, Utc::now());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        assert!(!envelope.consent.tool_payloads_included);
+        for (event, (_, _, category, side_effect)) in envelope.events.iter().zip(cases) {
+            assert!(event.tool_name.is_none());
+            assert_eq!(event.tool_category.as_deref(), category);
+            assert_eq!(event.side_effect, side_effect);
+        }
+        assert_eq!(
+            envelope.trace_card.tool_categories,
+            ["external_app", "network", "other", "retrieval", "workspace"]
+        );
+        assert_eq!(
+            envelope.privacy.redaction_hash,
+            final_event_redaction_hash(&envelope)
+        );
     }
 
     #[tokio::test]
@@ -849,7 +1282,9 @@ mod tests {
             tool_name: None,
             token_counts: None,
         };
-        let raw = super::raw_event_for(&event, chrono::Utc::now(), true, true);
+        let (raw, omitted_tool_metadata) =
+            super::raw_event_for(&event, chrono::Utc::now(), true, true);
+        assert!(omitted_tool_metadata.is_none());
         assert_eq!(
             raw.event_type,
             trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning
