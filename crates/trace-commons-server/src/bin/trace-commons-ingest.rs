@@ -11691,17 +11691,19 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authorize_tenant_access_grant_ctx(
-        state.as_ref(),
-        authenticate_ctx(state.as_ref(), &headers)?,
-    )
-    .await?;
+    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
 
     // Submission work includes the server re-scrub and gate preparation, so
-    // bound it before envelope validation or any submission-record read. The
-    // auth-derived principal ref is already a canonical hash-backed storage ref;
-    // keying on it keeps sibling principals in one tenant in separate buckets.
-    let submit_key = submit_principal_rate_limit_key(tenant.principal_ref());
+    // bound it before the tenant-access-grant query, envelope validation, or any
+    // submission-record read. Length-prefixing the authenticated tenant and
+    // principal components makes the bucket boundary unambiguous even when a
+    // signed claim contains `:`. Static-token configuration has no stable caller
+    // identity beyond the credential, so that path is necessarily per credential;
+    // overlapping rotation credentials receive separate budgets.
+    let submit_key = submit_principal_rate_limit_key(
+        authenticated_tenant.tenant_id(),
+        authenticated_tenant.principal_ref(),
+    );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
     if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
@@ -11712,6 +11714,7 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
+    let tenant = authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?;
     validate_envelope(&envelope)?;
 
     if let Some(existing) = tenant
@@ -13884,12 +13887,15 @@ const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
 
-fn submit_principal_rate_limit_key(principal_ref: &str) -> String {
-    format!("submit-principal:{principal_ref}")
+fn submit_principal_rate_limit_key(tenant_id: &str, principal_ref: &str) -> String {
+    format!(
+        "submit-principal:{}:{tenant_id}:{}:{principal_ref}",
+        tenant_id.len(),
+        principal_ref.len()
+    )
 }
 
-#[cfg(not(test))]
-fn submit_rate_limits(_key: &str) -> (u32, u32) {
+fn production_submit_rate_limits() -> (u32, u32) {
     (SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY)
 }
 
@@ -13901,13 +13907,20 @@ static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-#[cfg(test)]
 fn submit_rate_limits(key: &str) -> (u32, u32) {
-    SUBMIT_RATE_LIMIT_TEST_LIMITS
-        .lock()
-        .ok()
-        .and_then(|limits| limits.get(key).copied())
-        .unwrap_or((u32::MAX, u32::MAX))
+    #[cfg(test)]
+    {
+        SUBMIT_RATE_LIMIT_TEST_LIMITS
+            .lock()
+            .ok()
+            .and_then(|limits| limits.get(key).copied())
+            .unwrap_or((u32::MAX, u32::MAX))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = key;
+        production_submit_rate_limits()
+    }
 }
 
 #[cfg(test)]
@@ -14047,8 +14060,8 @@ pub fn reset_account_rate_limiter_for_test() {
 }
 
 #[cfg(test)]
-fn submit_rate_limit_count_for_test(principal_ref: &str) -> u32 {
-    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(principal_ref))
+fn submit_rate_limit_count_for_test(tenant_id: &str, principal_ref: &str) -> u32 {
+    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(tenant_id, principal_ref))
 }
 
 #[cfg(test)]
