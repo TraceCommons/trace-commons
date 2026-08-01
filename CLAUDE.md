@@ -73,18 +73,25 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Five jobs gate every PR:
+Eight jobs gate every PR (see `.github/workflows/ci.yml`):
 
-- `cargo fmt --all -- --check` — formatting check. Run `cargo fmt --all`
+- `cargo fmt --check` — runs `cargo fmt --all -- --check`. Run `cargo fmt --all`
   before committing.
-- `cargo check` (with `RUSTFLAGS=-D warnings`).
-- `cargo test --no-run` (with `RUSTFLAGS=-D warnings`).
 - `cargo clippy` with the allow-list above (`-A clippy::type_complexity
   -A clippy::collapsible_if -A clippy::manual_option_as_slice
   -A clippy::useless_vec -A clippy::redundant_pattern_matching`). Do not
   widen the allow-list without explicit approval.
-- `scripts/operator/pilot-bootstrap-smoke.sh` — pilot-bootstrap smoke job
-  exercising the JSONL loader path on every PR. Do not break it.
+- `cargo check (default features)` (with `RUSTFLAGS=-D warnings`).
+- `cargo check (local-gpu-models, non-CUDA)` (with `RUSTFLAGS=-D warnings`).
+  Note this feature IS checked in CI even though it cannot link locally without
+  a CUDA toolchain — a change that only compiles under default features will
+  fail here.
+- `cargo check (near-ai-scorer)` (with `RUSTFLAGS=-D warnings`). This is the
+  configuration the pilot builds.
+- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
+- `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
+  exercising the JSONL loader path. Do not break it.
+- `operator-binaries smoke`.
 
 GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
