@@ -28,6 +28,35 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
+const UNENROLLED_PREVIEW_NOTICE: &str =
+    "unenrolled preview: identity fields are placeholders; nothing was submitted";
+
+// These explicit placeholders exist only so an unenrolled preview can build
+// the same local envelope shape without claiming a real contributor identity.
+const PREVIEW_ISSUER_URL: &str = "https://unenrolled-preview.invalid";
+const PREVIEW_INGEST_URL: &str = "https://unenrolled-preview.invalid";
+const PREVIEW_AUDIENCE: &str = "unenrolled-preview-placeholder";
+const PREVIEW_TENANT_ID: &str = "unenrolled-preview-placeholder";
+const PREVIEW_INSTANCE_ID: &str = "unenrolled-preview-placeholder";
+const PREVIEW_USER_SUBJECT: &str = "unenrolled-preview-placeholder";
+const PREVIEW_DEVICE_KEY_ID: &str = "unenrolled-preview-placeholder";
+
+pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
+    ContributorConfig {
+        schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+        issuer_url: PREVIEW_ISSUER_URL.to_string(),
+        ingest_url: PREVIEW_INGEST_URL.to_string(),
+        audience: PREVIEW_AUDIENCE.to_string(),
+        tenant_id: PREVIEW_TENANT_ID.to_string(),
+        instance_id: PREVIEW_INSTANCE_ID.to_string(),
+        user_subject: PREVIEW_USER_SUBJECT.to_string(),
+        device_key_id: PREVIEW_DEVICE_KEY_ID.to_string(),
+        consent_scopes: vec!["debugging_evaluation".to_string()],
+        pii_filter: None,
+        allowed_hosts: None,
+    }
+}
+
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
 ///
@@ -451,7 +480,7 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
-/// error (nonzero exit) if any outcome was refused or failed.
+/// error (nonzero exit) if a real submission is refused or any run fails.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
@@ -462,10 +491,15 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
              so its envelope ids would never exist server-side"
         );
     }
-    let cfg = store
-        .load_config()
-        .context("loading contributor config")?
-        .context("not logged in; run `login` first")?;
+    let saved_cfg = store.load_config().context("loading contributor config")?;
+    let (cfg, unenrolled_preview) = match saved_cfg {
+        Some(cfg) => (cfg, false),
+        None if sel.dry_run => (unenrolled_preview_config(), true),
+        None => anyhow::bail!("not logged in; run `login` first"),
+    };
+    if unenrolled_preview && !sel.json {
+        println!("{UNENROLLED_PREVIEW_NOTICE}");
+    }
 
     let since = sel.since.map(picker::parse_since).transpose()?;
     let mut refs = discover_filtered(sel.source, sel.project, since, sel.trajectory)?;
@@ -517,6 +551,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
+        machine_readable: sel.json,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -529,25 +564,14 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     }
 
     if sel.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&submit::outcomes_to_json(&outcomes))?
-        );
-        // Still fail the process on a refusal or failure: an automating
-        // caller that ignores the body must not read exit 0 as success.
-        let had_failure = outcomes.iter().any(|o| {
-            matches!(
-                o,
-                SubmitOutcome::Refused { .. } | SubmitOutcome::Failed { .. }
-            )
-        });
-        if had_failure {
+        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview);
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
             anyhow::bail!("one or more sessions were refused or failed");
         }
         return Ok(());
     }
 
-    let mut had_failure = false;
     for outcome in &outcomes {
         match outcome {
             SubmitOutcome::Submitted {
@@ -578,18 +602,27 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             SubmitOutcome::SkippedParseFailure { reason_label } => {
                 println!("skipped ({reason_label})");
             }
-            SubmitOutcome::Refused { reason_label } => {
-                println!("refused ({reason_label})");
-                had_failure = true;
+            SubmitOutcome::Refused {
+                reason_label,
+                session_ref,
+                size_bytes,
+                limit_bytes,
+            } => {
+                if let (Some(size), Some(limit)) = (size_bytes, limit_bytes) {
+                    println!(
+                        "refused ({reason_label}) session={session_ref} size={size} limit={limit}"
+                    );
+                } else {
+                    println!("refused ({reason_label}) session={session_ref}");
+                }
             }
             SubmitOutcome::Failed { reason_label } => {
                 println!("failed ({reason_label})");
-                had_failure = true;
             }
         }
     }
 
-    if had_failure {
+    if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
         anyhow::bail!("one or more sessions were refused or failed to submit");
     }
     Ok(())

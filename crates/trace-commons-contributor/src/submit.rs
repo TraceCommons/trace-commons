@@ -17,9 +17,10 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
-    envelope_has_residual_secret, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
-    parse_use_names, raw_contribution_size_ok, redact_to_envelope,
+    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_raw_contribution, build_redactor_with,
+    canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
+    near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
+    raw_contribution_size_ok, redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -51,6 +52,11 @@ pub enum SubmitOutcome {
     },
     Refused {
         reason_label: String,
+        /// Opaque content hash identifying the local session without
+        /// exposing its path or trace contents.
+        session_ref: String,
+        size_bytes: Option<usize>,
+        limit_bytes: Option<usize>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -63,6 +69,37 @@ pub struct SubmitOptions {
     /// Drop model reasoning from every session in this run before envelope
     /// construction. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Suppress progress prose so stdout remains one machine-readable JSON
+    /// document. Outcome data is still returned to the command renderer.
+    pub machine_readable: bool,
+}
+
+fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: reason_label.to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: None,
+        limit_bytes: None,
+    }
+}
+
+fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: "session-too-large".to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: Some(size_bytes),
+        limit_bytes: Some(MAX_ENVELOPE_BYTES),
+    }
+}
+
+/// Whether a submit result must make the command exit non-zero. A refusal is
+/// a preview finding during dry-run, while a delivery failure remains fatal.
+pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
+    outcomes.iter().any(|outcome| match outcome {
+        SubmitOutcome::Failed { .. } => true,
+        SubmitOutcome::Refused { .. } => !dry_run,
+        _ => false,
+    })
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -173,9 +210,7 @@ pub async fn submit_sessions(
         ) {
             Ok(r) => r,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "pii-filter-unavailable".to_string(),
-                });
+                outcomes.push(refused("pii-filter-unavailable", &transcript.session_hash));
                 continue;
             }
         };
@@ -194,17 +229,14 @@ pub async fn submit_sessions(
         // size after redaction anyway (envelope_size_ok below is the
         // authoritative check).
         if raw_contribution_size_ok(&raw).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
+            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            outcomes.push(refused_for_size(&transcript.session_hash, size));
             continue;
         }
         let mut envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "redaction-failed".to_string(),
-                });
+                outcomes.push(refused("redaction-failed", &transcript.session_hash));
                 continue;
             }
         };
@@ -212,22 +244,25 @@ pub async fn submit_sessions(
         let size = match envelope_size_ok(&envelope) {
             Ok(s) => s,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "session-too-large".to_string(),
-                });
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                outcomes.push(refused_for_size(&transcript.session_hash, size));
                 continue;
             }
         };
 
         if opts.dry_run {
-            if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
+            if let Some(outcome) =
+                residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+            {
                 outcomes.push(outcome);
                 continue;
             }
-            println!(
-                "dry-run: submission_id={} bytes={size}",
-                envelope.submission_id
-            );
+            if !opts.machine_readable {
+                println!(
+                    "dry-run: submission_id={} bytes={size}",
+                    envelope.submission_id
+                );
+            }
             outcomes.push(SubmitOutcome::Submitted {
                 submission_id: envelope.submission_id,
                 status: "dry-run".to_string(),
@@ -244,9 +279,7 @@ pub async fn submit_sessions(
                         || msg.contains("allowed uses not permitted")
                     {
                         println!("hint: re-run login --scopes with a narrower selection");
-                        outcomes.push(SubmitOutcome::Refused {
-                            reason_label: "scopes-not-permitted".to_string(),
-                        });
+                        outcomes.push(refused("scopes-not-permitted", &transcript.session_hash));
                     } else {
                         outcomes.push(SubmitOutcome::Failed {
                             reason_label: "claim-mint-failed".to_string(),
@@ -263,15 +296,16 @@ pub async fn submit_sessions(
             .clone();
         stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
 
-        if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
+        if let Some(outcome) =
+            residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+        {
             outcomes.push(outcome);
             continue;
         }
 
         if envelope_size_ok(&envelope).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
+            let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            outcomes.push(refused_for_size(&transcript.session_hash, size));
             continue;
         }
 
@@ -403,12 +437,11 @@ pub async fn fetch_score_attestation(
 fn residual_secret_refusal(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    session_ref: &str,
 ) -> Result<Option<SubmitOutcome>> {
     if envelope_has_residual_secret(redactor, envelope)? {
         tracing::warn!("refusing session: secret survived redaction");
-        return Ok(Some(SubmitOutcome::Refused {
-            reason_label: "secret-leak-detected".to_string(),
-        }));
+        return Ok(Some(refused("secret-leak-detected", session_ref)));
     }
     Ok(None)
 }
@@ -689,6 +722,79 @@ mod tests {
         }
     }
 
+    async fn privacy_for_fixture(
+        cfg: &crate::config::ContributorConfig,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionEnvelope {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let source = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution(&transcript, cfg, Utc::now());
+        redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn unenrolled_and_enrolled_previews_have_identical_privacy_findings() {
+        let preview_cfg = crate::commands::unenrolled_preview_config();
+        let mut enrolled_cfg = cfg_for(
+            "https://issuer.example",
+            "https://ingest.example",
+            "sha256:enrolled",
+        );
+        enrolled_cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
+
+        let preview = privacy_for_fixture(&preview_cfg).await;
+        let enrolled = privacy_for_fixture(&enrolled_cfg).await;
+
+        assert_eq!(
+            preview.privacy.residual_pii_risk, enrolled.privacy.residual_pii_risk,
+            "placeholder identity must not change predicted risk"
+        );
+        assert_eq!(
+            preview.privacy.redaction_counts, enrolled.privacy.redaction_counts,
+            "placeholder identity must not change redaction counts"
+        );
+        assert_eq!(
+            preview.privacy.pii_labels_present, enrolled.privacy.pii_labels_present,
+            "placeholder identity must not change PII labels"
+        );
+        let residual_scanner =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        assert_eq!(
+            envelope_has_residual_secret(&residual_scanner, &preview).unwrap(),
+            envelope_has_residual_secret(&residual_scanner, &enrolled).unwrap(),
+            "placeholder identity must not change the residual-secret result"
+        );
+        assert_eq!(
+            preview.consent.scopes,
+            vec![trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation]
+        );
+    }
+
+    #[test]
+    fn dry_run_refusal_is_a_finding_but_failed_is_always_fatal() {
+        let refusal = refused("session-too-large", "sha256:test");
+        let failed = SubmitOutcome::Failed {
+            reason_label: "transport".to_string(),
+        };
+
+        assert!(!outcomes_have_failure(&[refusal], true));
+        assert!(outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            false
+        ));
+        assert!(outcomes_have_failure(&[failed], true));
+        assert!(outcomes_have_failure(
+            &[SubmitOutcome::Failed {
+                reason_label: "transport".to_string(),
+            }],
+            false
+        ));
+    }
+
     /// Drives the real submit path twice and inspects what actually reached
     /// the wire.
     ///
@@ -732,6 +838,7 @@ mod tests {
                 dry_run: false,
                 pii_filter: None,
                 no_reasoning,
+                machine_readable: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
                 .await
@@ -783,6 +890,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -891,6 +999,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -928,7 +1037,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "secret-leak-detected");
             }
             other => panic!("expected Refused(secret-leak-detected), got {other:?}"),
@@ -954,6 +1063,7 @@ mod tests {
             dry_run: true,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -982,6 +1092,7 @@ mod tests {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
             no_reasoning: false,
+            machine_readable: false,
         };
         submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -1024,6 +1135,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1077,6 +1189,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1105,13 +1218,14 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1133,13 +1247,14 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1235,6 +1350,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1372,6 +1488,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1400,9 +1517,7 @@ mod tests {
                 submission_id: u2,
                 prior_status: "quarantined".to_string(),
             },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
+            refused("secret-leak-detected", "sha256:test"),
             SubmitOutcome::Failed {
                 reason_label: "claim-mint-failed".to_string(),
             },
@@ -1436,6 +1551,7 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1468,7 +1584,7 @@ mod tests {
 /// Every outcome is represented, including the ones `build_manifest` drops:
 /// a caller automating submission needs to know a session was refused and
 /// why, not merely that it is absent from the manifest.
-pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
+pub fn outcomes_to_json(outcomes: &[SubmitOutcome], unenrolled_preview: bool) -> serde_json::Value {
     let entries: Vec<serde_json::Value> = outcomes
         .iter()
         .map(|o| match o {
@@ -1492,9 +1608,17 @@ pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
                 "outcome": "skipped",
                 "reason": reason_label,
             }),
-            SubmitOutcome::Refused { reason_label } => serde_json::json!({
+            SubmitOutcome::Refused {
+                reason_label,
+                session_ref,
+                size_bytes,
+                limit_bytes,
+            } => serde_json::json!({
                 "outcome": "refused",
                 "reason": reason_label,
+                "session_ref": session_ref,
+                "size_bytes": size_bytes,
+                "limit_bytes": limit_bytes,
             }),
             SubmitOutcome::Failed { reason_label } => serde_json::json!({
                 "outcome": "failed",
@@ -1504,6 +1628,7 @@ pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "schema_version": "trace_commons.submit_result.v1",
+        "unenrolled_preview": unenrolled_preview,
         "results": entries,
     })
 }
@@ -1515,25 +1640,26 @@ mod json_output_tests {
     #[test]
     fn every_outcome_kind_is_represented() {
         let id = Uuid::new_v4();
-        let out = outcomes_to_json(&[
-            SubmitOutcome::Submitted {
-                submission_id: id,
-                status: "accepted".to_string(),
-            },
-            SubmitOutcome::AlreadySubmitted {
-                submission_id: id,
-                prior_status: "quarantined".to_string(),
-            },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
-            SubmitOutcome::Failed {
-                reason_label: "claim-mint-failed".to_string(),
-            },
-            SubmitOutcome::SkippedParseFailure {
-                reason_label: "parse-failed".to_string(),
-            },
-        ]);
+        let out = outcomes_to_json(
+            &[
+                SubmitOutcome::Submitted {
+                    submission_id: id,
+                    status: "accepted".to_string(),
+                },
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id: id,
+                    prior_status: "quarantined".to_string(),
+                },
+                refused("secret-leak-detected", "sha256:test"),
+                SubmitOutcome::Failed {
+                    reason_label: "claim-mint-failed".to_string(),
+                },
+                SubmitOutcome::SkippedParseFailure {
+                    reason_label: "parse-failed".to_string(),
+                },
+            ],
+            false,
+        );
 
         let results = out["results"].as_array().unwrap();
         // A caller automating submission must be able to see a refusal. The
@@ -1547,6 +1673,7 @@ mod json_output_tests {
         );
         assert_eq!(results[2]["outcome"], "refused");
         assert_eq!(results[2]["reason"], "secret-leak-detected");
+        assert_eq!(results[2]["session_ref"], "sha256:test");
         assert_eq!(results[3]["outcome"], "failed");
         assert_eq!(results[4]["outcome"], "skipped");
     }
@@ -1556,11 +1683,16 @@ mod json_output_tests {
         // Reason labels are fixed strings by construction. Pinning it here
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
-        let out = outcomes_to_json(&[SubmitOutcome::Refused {
-            reason_label: "session-too-large".to_string(),
-        }]);
+        let out = outcomes_to_json(&[refused_for_size("sha256:test", 1_600_000)], true);
         let reason = out["results"][0]["reason"].as_str().unwrap();
         assert!(!reason.contains('/'), "a label must not look like a path");
         assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+        assert_eq!(out["unenrolled_preview"], true);
+        assert_eq!(out["results"][0]["session_ref"], "sha256:test");
+        assert_eq!(out["results"][0]["size_bytes"], 1_600_000);
+        assert_eq!(
+            out["results"][0]["limit_bytes"],
+            crate::envelope::MAX_ENVELOPE_BYTES
+        );
     }
 }

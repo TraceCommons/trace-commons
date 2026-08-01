@@ -230,22 +230,35 @@ pub fn envelope_has_residual_secret(
 /// networked privacy-filter pass on sessions that would be refused for size
 /// anyway; `envelope_size_ok` remains the authoritative post-redaction guard.
 pub fn raw_contribution_size_ok(raw: &RawTraceContribution) -> Result<usize> {
-    let bytes = serde_json::to_vec(raw).map_err(|_| anyhow::anyhow!("raw-serialize-failed"))?;
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    let size = raw_contribution_size(raw)?;
+    if size > MAX_ENVELOPE_BYTES {
         anyhow::bail!("session too large");
     }
-    Ok(bytes.len())
+    Ok(size)
+}
+
+/// Serialized size of a raw contribution before redaction.
+pub fn raw_contribution_size(raw: &RawTraceContribution) -> Result<usize> {
+    serde_json::to_vec(raw)
+        .map(|bytes| bytes.len())
+        .map_err(|_| anyhow::anyhow!("raw-serialize-failed"))
 }
 
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
-    let bytes =
-        serde_json::to_vec(envelope).map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    let size = envelope_size(envelope)?;
+    if size > MAX_ENVELOPE_BYTES {
         anyhow::bail!("session too large");
     }
-    Ok(bytes.len())
+    Ok(size)
+}
+
+/// Serialized size of a finished envelope before upload.
+pub fn envelope_size(envelope: &TraceContributionEnvelope) -> Result<usize> {
+    serde_json::to_vec(envelope)
+        .map(|bytes| bytes.len())
+        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))
 }
 
 /// Map a locally discovered transcript into a `RawTraceContribution` ready
