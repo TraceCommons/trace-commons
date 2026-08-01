@@ -36,15 +36,22 @@ Onboarding refusals use these public labels:
 |---|---|---|
 | `InviteMalformed` | 400 | Invite schema/version/format is invalid |
 | `DeviceKeyMalformed` | 400 | Device public key is not base64 Ed25519 public-key bytes |
-| `InviteNotValid` | 403 | Invite hash is not allowlisted or revoked |
+| `InviteNotValid` | 403 | Invite hash is not allowlisted, revoked, or expired |
 | `InviteAlreadyConsumed` | 403 | Invite is valid but its retry budget is exhausted |
 | `OnboardAllowlistNotConfigured` | 503 | Issuer has no allowlist source |
 | `OnboardRegistryNotConfigured` | 503 | Device-key registry DB is not enabled |
 | `OnboardTenantConfigMissing` | 503 | Issuer is missing the onboarding URL config returned to clients |
 | `OnboardAllowlistStale` | 503 | Cached snapshot is stale and the source has not reloaded successfully |
-| `InviteExpired` | 403 | Reserved wire label for an invite that failed only because it expired. The registry-backed redemption path does not currently distinguish this from `InviteNotValid` — expired, revoked, and never-existed invites all collapse to the same 403 today. |
 | `InviteRegistryNotConfigured` | 503 | Authoritative mode is on (`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true`) but `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is not set, so there is no registry to redeem against |
 | `InviteRegistryStale` | 503 | Authoritative mode is on and the registry's in-process cache has not refreshed within its staleness window |
+
+An expired invite is refused with the same `InviteNotValid` (403) as a
+revoked or unknown invite — deliberately. A caller cannot use the response
+to learn whether a guessed code was ever real, only that it does not
+currently work. If a contributor reports a failed onboard, `InviteNotValid`
+alone does not tell you which of the three it was; check
+`/v1/admin/invite-registry-status` and, if you have the hash, the invite's
+row directly.
 
 ## Provisioning invite codes
 
