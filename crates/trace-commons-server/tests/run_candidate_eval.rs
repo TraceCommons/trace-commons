@@ -153,6 +153,29 @@ impl PerplexityScorer for ClassCorrelatedFailureScorer {
     }
 }
 
+struct ParaphraseReproductionScorer {
+    fail_x: bool,
+}
+
+impl PerplexityScorer for ParaphraseReproductionScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        let aggregate_perplexity_micros = match plaintext {
+            b"H" => 3_000_000,
+            b"L" => 1_000_000,
+            b"D" | b"S" | b"O" => 2_000_000,
+            b"Z" => 0,
+            b"X" if self.fail_x => anyhow::bail!("SelectiveParaphraseFailure"),
+            b"X" => 0,
+            _ => 2_000_000,
+        };
+        Ok(PerplexityResult {
+            aggregate_perplexity_micros,
+            tail_fraction_micros: 0,
+            tokens_scored: 1,
+        })
+    }
+}
+
 #[tokio::test]
 async fn class_correlated_failures_cannot_pass_baseline_dominance() {
     let mut novel = vec!["H".to_string(); 10];
@@ -195,7 +218,46 @@ async fn class_correlated_failures_cannot_pass_baseline_dominance() {
 }
 
 #[tokio::test]
-async fn paraphrase_failures_do_not_affect_baseline_dominance() {
+async fn duplicate_correlated_failures_cannot_pass_baseline_dominance() {
+    let mut duplicate = vec!["D".to_string(); 17];
+    duplicate.extend(vec!["X".to_string(); 3]);
+    let corpus = LoadedCorpus {
+        novel: vec!["H".to_string(); 20],
+        duplicate,
+        paraphrase: vec![
+            ParaphrasePair {
+                original: "P".to_string(),
+                paraphrase: "Q".to_string(),
+            };
+            20
+        ],
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 failures in 80 attempts remain inside the pooled budget");
+
+    assert_eq!(result.dropped_novel_rows, 0);
+    assert_eq!(result.dropped_duplicate_rows, 3);
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    assert!(baselines.clears(result.discrimination_auc));
+    assert!(!bakeoff_report::passes_baseline_dominance(
+        &result, &baselines
+    ));
+    assert!(bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none());
+}
+
+#[tokio::test]
+async fn paraphrase_failures_preserve_baseline_evidence_but_block_weighted_selection() {
+    // Policy test: paraphrase support belongs to the weighted-score stage,
+    // while baseline dominance continues to describe only novel/duplicate
+    // common support.
     let mut paraphrase = vec![
         ParaphrasePair {
             original: "P".to_string(),
@@ -224,11 +286,89 @@ async fn paraphrase_failures_do_not_affect_baseline_dominance() {
 
     assert_eq!(result.dropped_novel_rows, 0);
     assert_eq!(result.dropped_duplicate_rows, 0);
+    assert_eq!(result.dropped_paraphrase_rows, 3);
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     assert!(
-        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_some(),
-        "paraphrase failures must not affect the common-support requirement"
+        bakeoff_report::passes_baseline_dominance(&result, &baselines),
+        "paraphrase failures must not alter novel/duplicate baseline evidence"
     );
+    assert!(
+        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none(),
+        "incomplete paraphrase support must not reach weighted scoring"
+    );
+}
+
+#[tokio::test]
+async fn selective_paraphrase_failures_cannot_improve_winner_selection() {
+    let mut novel = vec!["H".to_string(); 18];
+    novel.extend(vec!["L".to_string(); 2]);
+    let mut paraphrase = vec![
+        ParaphrasePair {
+            original: "S".to_string(),
+            paraphrase: "S".to_string(),
+        };
+        10
+    ];
+    paraphrase.extend(vec![
+        ParaphrasePair {
+            original: "O".to_string(),
+            paraphrase: "Z".to_string(),
+        };
+        6
+    ]);
+    paraphrase.extend(vec![
+        ParaphrasePair {
+            original: "O".to_string(),
+            paraphrase: "X".to_string(),
+        };
+        4
+    ]);
+    let corpus = LoadedCorpus {
+        novel,
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase,
+    };
+
+    let honest_scorer = ParaphraseReproductionScorer { fail_x: false };
+    let selective_scorer = ParaphraseReproductionScorer { fail_x: true };
+    let mut honest = run_candidate_eval(
+        EvalScorers::perplexity_only(&honest_scorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("honest evaluation");
+    let mut selective = run_candidate_eval(
+        EvalScorers::perplexity_only(&selective_scorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("4 failures in 80 attempts equal the allowed 5 percent");
+    honest.id = "honest".to_string();
+    selective.id = "selective".to_string();
+    honest.throughput_tps = 100.0;
+    selective.throughput_tps = 100.0;
+
+    assert_eq!(honest.discrimination_auc, 0.9);
+    assert_eq!(selective.discrimination_auc, 0.9);
+    assert_eq!(honest.paraphrase_delta, 0.5);
+    assert_eq!(selective.paraphrase_delta, 0.0);
+    assert_eq!(selective.dropped_paraphrase_rows, 4);
+    let honest_score = bakeoff_report::weighted_score(&honest, 0.0);
+    let selective_score = bakeoff_report::weighted_score(&selective, 0.0);
+    assert!((honest_score - 0.69).abs() < 1e-12);
+    assert!((selective_score - 0.84).abs() < 1e-12);
+    assert!(honest_score < selective_score * (1.0 - bakeoff_report::TIE_TOLERANCE));
+
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    let results = [honest, selective];
+    let winner = bakeoff_report::pick_winner(&results, &baselines).expect("honest winner");
+    assert_eq!(winner.id, "honest");
 }
 
 impl PerplexityScorer for FlakyScorer {
@@ -265,6 +405,17 @@ async fn failure_above_5pct_aborts_candidate() {
         msg.contains("failure rate"),
         "error must mention failure rate, got: {msg}"
     );
+    let aborted = err
+        .downcast_ref::<run_candidate_eval::CandidateEvalAborted>()
+        .expect("abort error must preserve dropped-row counters");
+    assert_eq!(aborted.dropped_novel_rows, 2);
+    assert_eq!(aborted.dropped_duplicate_rows, 2);
+    assert_eq!(aborted.dropped_paraphrase_rows, 2);
+    let failed =
+        run_candidate_eval::failed_candidate_result(&candidate, "RunCandidateEvalFailed", &err);
+    assert_eq!(failed.dropped_novel_rows, 2);
+    assert_eq!(failed.dropped_duplicate_rows, 2);
+    assert_eq!(failed.dropped_paraphrase_rows, 2);
 }
 
 #[tokio::test]

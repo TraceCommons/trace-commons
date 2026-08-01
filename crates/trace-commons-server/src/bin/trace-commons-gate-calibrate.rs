@@ -954,18 +954,10 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                     error_class = class,
                     "bakeoff_candidate_failed"
                 );
-                bakeoff_report::CandidateResult::failed(
-                    c.id.clone(),
-                    run_candidate_eval::map_license(&c.license),
-                    c.params_b.unwrap_or(0),
-                    c.release_date_unix.unwrap_or(0),
-                    class,
-                )
+                run_candidate_eval::failed_candidate_result(c, class, &e)
             }
         };
-        candidate_result.passed_baseline_dominance = candidate_result.dropped_novel_rows == 0
-            && candidate_result.dropped_duplicate_rows == 0
-            && baselines.clears(candidate_result.discrimination_auc);
+        bakeoff_report::record_baseline_dominance(&mut candidate_result, &baselines);
 
         results.push(candidate_result);
 

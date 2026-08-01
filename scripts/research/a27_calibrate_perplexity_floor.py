@@ -16,7 +16,9 @@ where:
       Youden's J (TPR - FPR) on novel-vs-duplicate classification
     - p10_novel       = 10th percentile of novel-slice perplexity
     - calibration candidate = worst-of-passing in the report (AUC>0.5,
-      passed_determinism_gate, and zero score-failure rate on novel)
+      passed_determinism_gate, and zero score-failure rate on novel;
+      decision-rule v3 also requires a report winner, baseline dominance,
+      and complete novel/duplicate/paraphrase support)
 
 Stdlib-only. No new dependencies.
 
@@ -95,7 +97,13 @@ def pick_calibration_candidate(report):
        - passed_determinism_gate = true
        - have non-null per_trace_scores
        - have no null entries in the novel slice (zero score failures)
+       - under decision-rule v3, the report has a winner and the candidate
+         passed baseline dominance with no dropped decision-metric rows
     """
+    decision_rule_version = report.get("decision_rule_version", 1)
+    if decision_rule_version >= 3 and report.get("winner_id") is None:
+        return None
+
     eligible = []
     for c in report["candidates"]:
         if c.get("discrimination_auc", 0) <= 0.5:
@@ -108,6 +116,15 @@ def pick_calibration_candidate(report):
         novel = scores.get("novel") or []
         if not novel or any(v is None for v in novel):
             continue
+        if decision_rule_version >= 3:
+            if not c.get("passed_baseline_dominance"):
+                continue
+            if c.get("dropped_novel_rows", 0) != 0:
+                continue
+            if c.get("dropped_duplicate_rows", 0) != 0:
+                continue
+            if c.get("dropped_paraphrase_rows", 0) != 0:
+                continue
         eligible.append(c)
     if not eligible:
         return None

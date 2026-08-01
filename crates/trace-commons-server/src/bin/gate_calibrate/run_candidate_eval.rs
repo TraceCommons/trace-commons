@@ -79,6 +79,21 @@ impl<'a> EvalScorers<'a> {
     }
 }
 
+/// Evaluation abort carrying the slice support observed before the pooled
+/// failure-rate guard fired. The bake-off report preserves these counters
+/// instead of presenting an aborted candidate as having complete support.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "RunCandidateEval: candidate aborted; failure rate {failure_rate:.3} exceeds {threshold:.3} threshold"
+)]
+pub struct CandidateEvalAborted {
+    pub dropped_novel_rows: u64,
+    pub dropped_duplicate_rows: u64,
+    pub dropped_paraphrase_rows: u64,
+    failure_rate: f64,
+    threshold: f64,
+}
+
 /// Conversion of `u64` micros (scorer output) to floating-point. Centralized
 /// so the metric-feeding code reads as one boundary cross rather than a
 /// scatter of inline `as f64 / 1_000_000.0` divisions.
@@ -164,6 +179,37 @@ pub fn map_license(lic: &CandidateLicense) -> License {
         CandidateLicense::LlamaCommunity => License::LlamaCommunity,
         CandidateLicense::GemmaCustom => License::GemmaCustom,
     }
+}
+
+/// Convert a load or evaluation error into the fail-closed report row used by
+/// the bake-off binary. Pooled evaluation aborts preserve their observed
+/// support counters; errors before scoring retain zero counters.
+#[allow(dead_code)] // called by the gate-calibrate binary
+pub fn failed_candidate_result(
+    candidate: &Candidate,
+    error_class: &str,
+    error: &anyhow::Error,
+) -> CandidateResult {
+    let dropped_rows = error
+        .downcast_ref::<CandidateEvalAborted>()
+        .map(|aborted| {
+            (
+                aborted.dropped_novel_rows,
+                aborted.dropped_duplicate_rows,
+                aborted.dropped_paraphrase_rows,
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    CandidateResult::failed_with_dropped_rows(
+        candidate.id.clone(),
+        map_license(&candidate.license),
+        candidate.params_b.unwrap_or(0),
+        candidate.release_date_unix.unwrap_or(0),
+        error_class,
+        dropped_rows.0,
+        dropped_rows.1,
+        dropped_rows.2,
+    )
 }
 
 /// Maximum fraction of per-entry scoring failures we tolerate before aborting
@@ -455,6 +501,11 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_paraphrase_rows = if scorers.perplexity.is_some() {
+        corpus.paraphrase.len() as u64 - para_pairs.len() as u64
+    } else {
+        0
+    };
 
     tracing::info!(
         candidate_id = %candidate.id,
@@ -472,12 +523,14 @@ pub async fn run_candidate_eval(
     if attempts > 0 {
         let failure_rate = failures as f64 / attempts as f64;
         if failure_rate > FAILURE_RATE_ABORT {
-            anyhow::bail!(
-                "RunCandidateEval: candidate {} aborted; failure rate {:.3} exceeds {:.3} threshold",
-                candidate.id,
+            return Err(CandidateEvalAborted {
+                dropped_novel_rows,
+                dropped_duplicate_rows,
+                dropped_paraphrase_rows,
                 failure_rate,
-                FAILURE_RATE_ABORT
-            );
+                threshold: FAILURE_RATE_ABORT,
+            }
+            .into());
         }
     }
 
@@ -644,6 +697,7 @@ pub async fn run_candidate_eval(
         passed_baseline_dominance: false,
         dropped_novel_rows,
         dropped_duplicate_rows,
+        dropped_paraphrase_rows,
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

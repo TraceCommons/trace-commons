@@ -298,7 +298,7 @@ fn eligible_candidate_sets_baseline_flag_in_json_and_markdown() {
         let id = candidate.get("id").and_then(|v| v.as_str()).unwrap();
         md.lines()
             .find(|line| line.starts_with(&format!("| {id} |")))
-            .is_some_and(|line| line.ends_with("| 0 | 0 | true |"))
+            .is_some_and(|line| line.ends_with("| 0 | 0 | 0 | true |"))
     });
     assert!(
         json_passed && markdown_passed,

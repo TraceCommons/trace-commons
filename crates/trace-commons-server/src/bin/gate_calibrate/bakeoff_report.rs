@@ -41,6 +41,12 @@ pub const DISCRIMINATION_FLOOR: f64 = 0.5;
 #[allow(dead_code)] // consumed by baseline computation in the gate-calibrate binary; test targets re-import modules independently
 pub const BASELINE_DOMINANCE_MARGIN: f64 = 0.05;
 
+/// Floating-point slack for comparing an independently computed candidate AUC
+/// with the reported baseline floor. Eight machine epsilon units absorb the
+/// separate division and addition paths without admitting a materially lower
+/// AUC.
+const BASELINE_COMPARISON_ULPS: f64 = 8.0;
+
 /// Version of the decision rule below. Stamped onto every report so a
 /// recorded winner can be traced to the rule that chose it.
 ///
@@ -137,7 +143,15 @@ impl BaselineResults {
 
     #[allow(dead_code)] // called by the decision rule and report assembly in the gate-calibrate binary
     pub fn clears(&self, candidate_auc: f64) -> bool {
-        candidate_auc >= self.required_discrimination_auc
+        if !candidate_auc.is_finite() || !self.required_discrimination_auc.is_finite() {
+            return false;
+        }
+        let scale = candidate_auc
+            .abs()
+            .max(self.required_discrimination_auc.abs())
+            .max(1.0);
+        let tolerance = f64::EPSILON * scale * BASELINE_COMPARISON_ULPS;
+        candidate_auc + tolerance >= self.required_discrimination_auc
     }
 }
 
@@ -219,6 +233,12 @@ pub struct CandidateResult {
     /// a scorer error. See [`CandidateResult::dropped_novel_rows`].
     #[serde(default)]
     pub dropped_duplicate_rows: u64,
+    /// Paraphrase pairs omitted from `paraphrase_delta` because either half
+    /// failed to score. Any non-zero count makes the candidate ineligible for
+    /// weighted winner selection so selective failures cannot improve the
+    /// metric.
+    #[serde(default)]
+    pub dropped_paraphrase_rows: u64,
     /// Release date of the underlying model weights, unix seconds.
     /// Sourced from the manifest. Third tiebreaker (newer wins).
     pub release_date_unix: i64,
@@ -324,6 +344,32 @@ impl CandidateResult {
         release_date_unix: i64,
         error_class: &str,
     ) -> Self {
+        Self::failed_with_dropped_rows(
+            id,
+            license,
+            params_b,
+            release_date_unix,
+            error_class,
+            0,
+            0,
+            0,
+        )
+    }
+
+    /// Construct a failed result while preserving the support lost before an
+    /// evaluation abort. Load failures use [`CandidateResult::failed`], where
+    /// no corpus row was attempted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn failed_with_dropped_rows(
+        id: String,
+        license: License,
+        params_b: u32,
+        release_date_unix: i64,
+        error_class: &str,
+        dropped_novel_rows: u64,
+        dropped_duplicate_rows: u64,
+        dropped_paraphrase_rows: u64,
+    ) -> Self {
         Self {
             id,
             discrimination_auc: 0.0,
@@ -336,14 +382,30 @@ impl CandidateResult {
             params_b,
             passed_determinism_gate: false,
             passed_baseline_dominance: false,
-            dropped_novel_rows: 0,
-            dropped_duplicate_rows: 0,
+            dropped_novel_rows,
+            dropped_duplicate_rows,
+            dropped_paraphrase_rows,
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
             metrics: None,
             per_trace_scores: None,
         }
     }
+}
+
+/// Evaluate the corpus-level baseline stage once for both winner selection
+/// and persisted report evidence.
+#[allow(dead_code)] // called by the gate-calibrate binary; integration targets import this module independently
+pub fn passes_baseline_dominance(candidate: &CandidateResult, baselines: &BaselineResults) -> bool {
+    candidate.dropped_novel_rows == 0
+        && candidate.dropped_duplicate_rows == 0
+        && baselines.clears(candidate.discrimination_auc)
+}
+
+/// Persist the exact predicate used by [`pick_winner`] on a candidate row.
+#[allow(dead_code)] // called by the gate-calibrate binary
+pub fn record_baseline_dominance(candidate: &mut CandidateResult, baselines: &BaselineResults) {
+    candidate.passed_baseline_dominance = passes_baseline_dominance(candidate, baselines);
 }
 
 /// Weighted score per the spec:
@@ -366,12 +428,13 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 /// 2. Drop candidates at or below `DISCRIMINATION_FLOOR` AUC.
 /// 3. Drop candidates that do not beat the strongest no-model baseline by
 ///    [`BASELINE_DOMINANCE_MARGIN`].
-/// 4. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
+/// 4. Drop candidates with incomplete paraphrase support.
+/// 5. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
 ///    measured over the discriminating set.
-/// 5. Compute weighted scores using `max(tail_fraction_range)` over the
+/// 6. Compute weighted scores using `max(tail_fraction_range)` over the
 ///    in-budget set as the normalizer.
-/// 6. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
-/// 7. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
+/// 7. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
+/// 8. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
 #[allow(dead_code)] // called by the gate-calibrate binary; not reached from the test target
 pub fn pick_winner<'a>(
     results: &'a [CandidateResult],
@@ -404,23 +467,29 @@ pub fn pick_winner<'a>(
     // no material discrimination over a cheap structural measure.
     let baseline_dominating: Vec<&CandidateResult> = discriminating
         .into_iter()
-        .filter(|r| {
-            r.dropped_novel_rows == 0
-                && r.dropped_duplicate_rows == 0
-                && baselines.clears(r.discrimination_auc)
-        })
+        .filter(|r| passes_baseline_dominance(r, baselines))
         .collect();
     if baseline_dominating.is_empty() {
         return None;
     }
 
-    // Step 4: throughput floor.
-    let fastest = baseline_dominating
+    // Step 4: require complete paraphrase support before a metric derived
+    // from paraphrase pairs can contribute to weighted scoring.
+    let paraphrase_complete: Vec<&CandidateResult> = baseline_dominating
+        .into_iter()
+        .filter(|r| r.dropped_paraphrase_rows == 0)
+        .collect();
+    if paraphrase_complete.is_empty() {
+        return None;
+    }
+
+    // Step 5: throughput floor.
+    let fastest = paraphrase_complete
         .iter()
         .map(|r| r.throughput_tps)
         .fold(f64::NEG_INFINITY, f64::max);
     let floor = THROUGHPUT_FLOOR_RATIO * fastest;
-    let in_budget: Vec<&CandidateResult> = baseline_dominating
+    let in_budget: Vec<&CandidateResult> = paraphrase_complete
         .into_iter()
         .filter(|r| r.throughput_tps >= floor)
         .collect();
@@ -428,7 +497,7 @@ pub fn pick_winner<'a>(
         return None;
     }
 
-    // Step 5: normalize tail term using in-budget max.
+    // Step 6: normalize tail term using in-budget max.
     let tail_norm_max = in_budget
         .iter()
         .map(|r| r.tail_fraction_range)
@@ -439,7 +508,7 @@ pub fn pick_winner<'a>(
         .map(|r| (*r, weighted_score(r, tail_norm_max)))
         .collect();
 
-    // Step 6: contenders within tolerance band of top score.
+    // Step 7: contenders within tolerance band of top score.
     let top_score = scored
         .iter()
         .map(|(_, s)| *s)
@@ -448,7 +517,7 @@ pub fn pick_winner<'a>(
     let mut contenders: Vec<&(&CandidateResult, f64)> =
         scored.iter().filter(|(_, s)| *s >= threshold).collect();
 
-    // Step 7: sort by license DESC, params_b ASC, release_date DESC.
+    // Step 8: sort by license DESC, params_b ASC, release_date DESC.
     contenders.sort_by(|a, b| {
         let lp_a = a.0.license.permissiveness();
         let lp_b = b.0.license.permissiveness();
@@ -513,30 +582,34 @@ pub fn render_markdown(report: &Report) -> String {
         report.determinism_gate_value
     ));
 
-    out.push_str("## No-model structural baselines\n\n");
-    out.push_str("| baseline | auc | strongest |\n");
-    out.push_str("| --- | --- | --- |\n");
-    for baseline in &report.baselines.measures {
-        let strongest = report.baselines.strongest_name.as_deref() == Some(&baseline.name);
+    if report.decision_rule_version >= 3 {
+        out.push_str("## No-model structural baselines\n\n");
+        out.push_str("| baseline | auc | strongest |\n");
+        out.push_str("| --- | --- | --- |\n");
+        for baseline in &report.baselines.measures {
+            let strongest = report.baselines.strongest_name.as_deref() == Some(&baseline.name);
+            out.push_str(&format!(
+                "| {} | {:.6} | {} |\n",
+                baseline.name, baseline.discrimination_auc, strongest
+            ));
+        }
+        let strongest = report.baselines.strongest_name.as_deref().unwrap_or("none");
         out.push_str(&format!(
-            "| {} | {:.6} | {} |\n",
-            baseline.name, baseline.discrimination_auc, strongest
+            "\nStrongest baseline: {} ({:.6})\n\nRequired discrimination AUC: {:.6}\n\n",
+            strongest, report.baselines.strongest_auc, report.baselines.required_discrimination_auc
         ));
     }
-    let strongest = report.baselines.strongest_name.as_deref().unwrap_or("none");
-    out.push_str(&format!(
-        "\nStrongest baseline: {} ({:.6})\n\nRequired discrimination AUC: {:.6}\n\n",
-        strongest, report.baselines.strongest_auc, report.baselines.required_discrimination_auc
-    ));
 
     let winner = report.winner_id.as_deref().unwrap_or("none");
     out.push_str(&format!("Winner: {}\n\n", winner));
 
-    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_determinism | dropped_novel_rows | dropped_duplicate_rows | passed_baseline_dominance |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_determinism | dropped_novel_rows | dropped_duplicate_rows | dropped_paraphrase_rows | passed_baseline_dominance |\n");
+    out.push_str(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
     for c in &report.candidates {
         out.push_str(&format!(
-            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} | {} | {} |\n",
+            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} | {} | {} | {} |\n",
             c.id,
             c.discrimination_auc,
             c.paraphrase_delta,
@@ -548,6 +621,7 @@ pub fn render_markdown(report: &Report) -> String {
             c.passed_determinism_gate,
             c.dropped_novel_rows,
             c.dropped_duplicate_rows,
+            c.dropped_paraphrase_rows,
             c.passed_baseline_dominance,
         ));
     }
@@ -658,6 +732,7 @@ mod tests {
             passed_baseline_dominance: false,
             dropped_novel_rows: 0,
             dropped_duplicate_rows: 0,
+            dropped_paraphrase_rows: 0,
             release_date_unix: 0,
             load_or_eval_error: None,
             metrics: None,
@@ -796,6 +871,20 @@ mod tests {
         )];
         let winner = pick_winner(&results, &baselines).expect("margin is inclusive");
         assert_eq!(winner.id, "boundary");
+    }
+
+    #[test]
+    fn ulp_adjusted_comparison_boundary_is_inclusive() {
+        let baselines = baselines(0.75);
+        let tolerance = f64::EPSILON
+            * baselines.required_discrimination_auc.abs().max(1.0)
+            * BASELINE_COMPARISON_ULPS;
+        let candidate_auc = baselines.required_discrimination_auc - tolerance;
+        assert_eq!(
+            candidate_auc + tolerance,
+            baselines.required_discrimination_auc
+        );
+        assert!(baselines.clears(candidate_auc));
     }
 
     #[test]

@@ -41,6 +41,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         passed_baseline_dominance: false,
         dropped_novel_rows: 0,
         dropped_duplicate_rows: 0,
+        dropped_paraphrase_rows: 0,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: None,
@@ -141,7 +142,7 @@ fn fixture_report() -> bakeoff_report::Report {
         manifest_sha256: "sha256:def".into(),
         candidates: vec![result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7)],
         winner_id: Some("x".into()),
-        decision_rule_version: 1,
+        decision_rule_version: 3,
         mock_scorer: false,
         ctx_max_tokens: 4096,
         determinism_gate_value: 1e-5,
@@ -192,11 +193,13 @@ fn dropped_baseline_rows_persist_in_json_and_markdown() {
     let mut report = fixture_report();
     report.candidates[0].dropped_novel_rows = 3;
     report.candidates[0].dropped_duplicate_rows = 1;
+    report.candidates[0].dropped_paraphrase_rows = 2;
 
     let json = serde_json::to_string(&report).expect("serialize report");
     let back: bakeoff_report::Report = serde_json::from_str(&json).expect("parse report");
     assert_eq!(back.candidates[0].dropped_novel_rows, 3);
     assert_eq!(back.candidates[0].dropped_duplicate_rows, 1);
+    assert_eq!(back.candidates[0].dropped_paraphrase_rows, 2);
 
     let md = bakeoff_report::render_markdown(&report);
     assert!(
@@ -208,8 +211,12 @@ fn dropped_baseline_rows_persist_in_json_and_markdown() {
         "missing duplicate count: {md}"
     );
     assert!(
+        md.contains("dropped_paraphrase_rows"),
+        "missing paraphrase count: {md}"
+    );
+    assert!(
         md.contains(
-            "| x | 0.900000 | 0.100000 | 0.500000 | 1000.000 | 1.000e-7 | Apache2 | 8 | true | 3 | 1 | false |"
+            "| x | 0.900000 | 0.100000 | 0.500000 | 1000.000 | 1.000e-7 | Apache2 | 8 | true | 3 | 1 | 2 | false |"
         ),
         "missing candidate counts: {md}"
     );
@@ -264,6 +271,91 @@ fn committed_a26_v1_report_deserializes_unchanged() {
 }
 
 #[test]
+fn archived_v1_markdown_omits_v3_baseline_evidence() {
+    let archived =
+        include_str!("../../../docs/superpowers/reports/2026-05-14-model-bakeoff-result-a26.json");
+    let report: bakeoff_report::Report = serde_json::from_str(archived).expect("parse A2.6 JSON");
+    let markdown = bakeoff_report::render_markdown(&report);
+
+    assert!(!markdown.contains("## No-model structural baselines"));
+    assert!(!markdown.contains("Strongest baseline:"));
+    assert!(!markdown.contains("Required discrimination AUC:"));
+}
+
+#[test]
+fn baseline_table_renders_each_measure_and_one_strongest_marker() {
+    let mut report = fixture_report();
+    report.baselines = BaselineResults {
+        measures: vec![
+            NoModelBaseline {
+                name: "utf8_byte_count".into(),
+                discrimination_auc: 0.6,
+            },
+            NoModelBaseline {
+                name: "line_count".into(),
+                discrimination_auc: 0.7,
+            },
+        ],
+        strongest_name: Some("line_count".into()),
+        strongest_auc: 0.7,
+        required_discrimination_auc: 0.75,
+    };
+
+    let markdown = bakeoff_report::render_markdown(&report);
+    assert!(markdown.contains("| utf8_byte_count | 0.600000 | false |"));
+    assert!(markdown.contains("| line_count | 0.700000 | true |"));
+    let strongest_rows = markdown
+        .lines()
+        .filter(|line| {
+            (*line == "| utf8_byte_count | 0.600000 | true |")
+                || (*line == "| line_count | 0.700000 | true |")
+        })
+        .count();
+    assert_eq!(strongest_rows, 1);
+}
+
+#[test]
+fn independently_computed_exact_margin_passes_and_below_margin_fails() {
+    let novel = vec!["nnnn".to_string()];
+    let mut duplicate = vec!["ddd".to_string(); 7];
+    duplicate.extend(vec!["dddd".to_string(); 2]);
+    duplicate.push("ddddd".to_string());
+    let baselines = BaselineResults::from_corpus(&novel, &duplicate);
+    assert_eq!(baselines.strongest_auc, 0.8);
+
+    let exact_duplicate_scores = [0.0; 8]
+        .into_iter()
+        .chain([1.0])
+        .chain([2.0])
+        .collect::<Vec<_>>();
+    let exact_auc = bakeoff_metrics::discrimination_auc(&[1.0], &exact_duplicate_scores);
+
+    let below_duplicate_scores = [0.0; 849].into_iter().chain([2.0; 151]).collect::<Vec<_>>();
+    let below_auc = bakeoff_metrics::discrimination_auc(&[1.0], &below_duplicate_scores);
+
+    assert_eq!(exact_auc, 0.85);
+    assert_eq!(below_auc, 0.849);
+    assert!(baselines.clears(exact_auc));
+    assert!(!baselines.clears(below_auc));
+}
+
+#[test]
+fn persisted_baseline_flag_uses_shared_dropped_row_predicate() {
+    let mut candidate = result("dropped", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    candidate.dropped_duplicate_rows = 1;
+    bakeoff_report::record_baseline_dominance(&mut candidate, &baselines(0.6));
+    assert!(!candidate.passed_baseline_dominance);
+
+    let mut report = fixture_report();
+    report.candidates = vec![candidate];
+    let json = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(
+        json["candidates"][0]["passed_baseline_dominance"],
+        serde_json::Value::Bool(false)
+    );
+}
+
+#[test]
 fn failed_candidate_with_load_error_is_excluded_from_winner() {
     // A candidate row produced by the new failure path:
     // load_or_eval_error = Some(_), passed_determinism_gate = false,
@@ -285,6 +377,30 @@ fn failed_candidate_with_load_error_is_excluded_from_winner() {
     let cands = [failed, healthy];
     let winner = pick_winner(&cands, &baselines(0.6)).expect("a winner");
     assert_eq!(winner.id, "healthy");
+}
+
+#[test]
+fn aborted_candidate_preserves_dropped_rows_in_report() {
+    let failed = bakeoff_report::CandidateResult::failed_with_dropped_rows(
+        "aborted".into(),
+        License::Apache2,
+        8,
+        0,
+        "RunCandidateEvalFailed",
+        5,
+        0,
+        2,
+    );
+    assert_eq!(failed.dropped_novel_rows, 5);
+    assert_eq!(failed.dropped_duplicate_rows, 0);
+    assert_eq!(failed.dropped_paraphrase_rows, 2);
+
+    let mut report = fixture_report();
+    report.candidates = vec![failed];
+    let json = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(json["candidates"][0]["dropped_novel_rows"], 5);
+    assert_eq!(json["candidates"][0]["dropped_duplicate_rows"], 0);
+    assert_eq!(json["candidates"][0]["dropped_paraphrase_rows"], 2);
 }
 
 #[test]
@@ -443,6 +559,7 @@ fn rarity_block_round_trips_through_json() {
         passed_baseline_dominance: true,
         dropped_novel_rows: 0,
         dropped_duplicate_rows: 0,
+        dropped_paraphrase_rows: 0,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: Some(bakeoff_report::CandidateMetrics {
