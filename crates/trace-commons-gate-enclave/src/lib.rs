@@ -28,8 +28,8 @@ pub mod vector_index_usearch;
 // `trace_commons_gate_enclave::{Embedder, PerplexityScorer, ...}` paths keep
 // resolving. Implementations below remain local to this crate.
 pub use trace_commons_gate_api::{
-    ChunkPerplexity, Embedder, NearestNeighbor, PerplexityResult, PerplexityScorer,
-    TokenRarityResult, TokenRarityScorer, VectorIndex, MOCK_EMBEDDING_DIM,
+    ChunkPerplexity, Embedder, MOCK_EMBEDDING_DIM, NearestNeighbor, PerplexityResult,
+    PerplexityScorer, TokenRarityResult, TokenRarityScorer, VectorIndex,
 };
 
 pub use embedder::MockEmbedder;
