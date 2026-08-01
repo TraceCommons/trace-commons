@@ -38,6 +38,9 @@ import statistics
 import sys
 
 
+SUPPORTED_DECISION_RULE_VERSIONS = frozenset((1, 2, 3))
+
+
 def auc_from_scores(novel, duplicate):
     """Mann-Whitney U style AUC: P(score(novel) > score(duplicate))."""
     novel = [n for n in novel if n is not None]
@@ -91,6 +94,14 @@ def percentile(values, p):
     return cleaned[k]
 
 
+def decision_rule_version(report):
+    """Return a supported rule version, rejecting bools and other JSON types."""
+    version = report.get("decision_rule_version")
+    if type(version) is not int or version not in SUPPORTED_DECISION_RULE_VERSIONS:
+        return None
+    return version
+
+
 def pick_calibration_candidate(report):
     """Worst-of-passing: lowest AUC among candidates that:
        - AUC > 0.5
@@ -100,8 +111,10 @@ def pick_calibration_candidate(report):
        - under decision-rule v3, the report has a winner and the candidate
          passed baseline dominance with no dropped decision-metric rows
     """
-    decision_rule_version = report.get("decision_rule_version", 1)
-    if decision_rule_version >= 3 and report.get("winner_id") is None:
+    version = decision_rule_version(report)
+    if version is None:
+        return None
+    if version == 3 and report.get("winner_id") is None:
         return None
 
     eligible = []
@@ -116,14 +129,14 @@ def pick_calibration_candidate(report):
         novel = scores.get("novel") or []
         if not novel or any(v is None for v in novel):
             continue
-        if decision_rule_version >= 3:
+        if version == 3:
             if not c.get("passed_baseline_dominance"):
                 continue
-            if c.get("dropped_novel_rows", 0) != 0:
+            if c.get("dropped_novel_rows") != 0:
                 continue
-            if c.get("dropped_duplicate_rows", 0) != 0:
+            if c.get("dropped_duplicate_rows") != 0:
                 continue
-            if c.get("dropped_paraphrase_rows", 0) != 0:
+            if c.get("dropped_paraphrase_rows") != 0:
                 continue
         eligible.append(c)
     if not eligible:
@@ -143,6 +156,10 @@ def main():
 
     with open(args.report) as f:
         report = json.load(f)
+
+    if decision_rule_version(report) is None:
+        print("error: invalid or unsupported decision_rule_version", file=sys.stderr)
+        sys.exit(2)
 
     if args.candidate:
         target = next((c for c in report["candidates"]

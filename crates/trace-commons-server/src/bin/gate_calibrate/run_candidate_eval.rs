@@ -695,9 +695,9 @@ pub async fn run_candidate_eval(
         // Filled by run_bakeoff after comparison with the corpus-level
         // structural baselines. Candidate evaluation has no baseline input.
         passed_baseline_dominance: false,
-        dropped_novel_rows,
-        dropped_duplicate_rows,
-        dropped_paraphrase_rows,
+        dropped_novel_rows: Some(dropped_novel_rows),
+        dropped_duplicate_rows: Some(dropped_duplicate_rows),
+        dropped_paraphrase_rows: Some(dropped_paraphrase_rows),
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

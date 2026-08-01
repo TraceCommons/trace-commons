@@ -204,8 +204,8 @@ async fn class_correlated_failures_cannot_pass_baseline_dominance() {
     .expect("3 failures in 80 attempts remain inside the pooled budget");
 
     assert!((result.discrimination_auc - (10.0 / 17.0)).abs() < 1e-12);
-    assert_eq!(result.dropped_novel_rows, 3);
-    assert_eq!(result.dropped_duplicate_rows, 0);
+    assert_eq!(result.dropped_novel_rows, Some(3));
+    assert_eq!(result.dropped_duplicate_rows, Some(0));
     assert!(result.passed_determinism_gate);
 
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
@@ -243,8 +243,8 @@ async fn duplicate_correlated_failures_cannot_pass_baseline_dominance() {
     .await
     .expect("3 failures in 80 attempts remain inside the pooled budget");
 
-    assert_eq!(result.dropped_novel_rows, 0);
-    assert_eq!(result.dropped_duplicate_rows, 3);
+    assert_eq!(result.dropped_novel_rows, Some(0));
+    assert_eq!(result.dropped_duplicate_rows, Some(3));
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     assert!(baselines.clears(result.discrimination_auc));
     assert!(!bakeoff_report::passes_baseline_dominance(
@@ -284,9 +284,9 @@ async fn paraphrase_failures_preserve_baseline_evidence_but_block_weighted_selec
     .await
     .expect("3 paraphrase failures in 80 attempts remain inside the pooled budget");
 
-    assert_eq!(result.dropped_novel_rows, 0);
-    assert_eq!(result.dropped_duplicate_rows, 0);
-    assert_eq!(result.dropped_paraphrase_rows, 3);
+    assert_eq!(result.dropped_novel_rows, Some(0));
+    assert_eq!(result.dropped_duplicate_rows, Some(0));
+    assert_eq!(result.dropped_paraphrase_rows, Some(3));
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     assert!(
         bakeoff_report::passes_baseline_dominance(&result, &baselines),
@@ -358,7 +358,7 @@ async fn selective_paraphrase_failures_cannot_improve_winner_selection() {
     assert_eq!(selective.discrimination_auc, 0.9);
     assert_eq!(honest.paraphrase_delta, 0.5);
     assert_eq!(selective.paraphrase_delta, 0.0);
-    assert_eq!(selective.dropped_paraphrase_rows, 4);
+    assert_eq!(selective.dropped_paraphrase_rows, Some(4));
     let honest_score = bakeoff_report::weighted_score(&honest, 0.0);
     let selective_score = bakeoff_report::weighted_score(&selective, 0.0);
     assert!((honest_score - 0.69).abs() < 1e-12);
@@ -413,9 +413,9 @@ async fn failure_above_5pct_aborts_candidate() {
     assert_eq!(aborted.dropped_paraphrase_rows, 2);
     let failed =
         run_candidate_eval::failed_candidate_result(&candidate, "RunCandidateEvalFailed", &err);
-    assert_eq!(failed.dropped_novel_rows, 2);
-    assert_eq!(failed.dropped_duplicate_rows, 2);
-    assert_eq!(failed.dropped_paraphrase_rows, 2);
+    assert_eq!(failed.dropped_novel_rows, Some(2));
+    assert_eq!(failed.dropped_duplicate_rows, Some(2));
+    assert_eq!(failed.dropped_paraphrase_rows, Some(2));
 }
 
 #[tokio::test]

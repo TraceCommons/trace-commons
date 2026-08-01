@@ -41,11 +41,23 @@ pub const DISCRIMINATION_FLOOR: f64 = 0.5;
 #[allow(dead_code)] // consumed by baseline computation in the gate-calibrate binary; test targets re-import modules independently
 pub const BASELINE_DOMINANCE_MARGIN: f64 = 0.05;
 
-/// Floating-point slack for comparing an independently computed candidate AUC
-/// with the reported baseline floor. Eight machine epsilon units absorb the
-/// separate division and addition paths without admitting a materially lower
-/// AUC.
-const BASELINE_COMPARISON_ULPS: f64 = 8.0;
+/// Maximum distance between independently computed candidate and baseline AUCs
+/// at an inclusive boundary. Four adjacent representable values cover the
+/// observed division/addition rounding without scaling epsilon by both operands
+/// or adding the entire scaled tolerance to one side. The committed 300x300
+/// corpus has an AUC half-step near 5.6e-6, far above this allowance; arbitrary
+/// direct callers are the practical exposure this bound controls.
+const BASELINE_COMPARISON_ULPS: u64 = 4;
+
+fn ordered_f64_bits(value: f64) -> u64 {
+    const SIGN_BIT: u64 = 1 << 63;
+    let bits = value.to_bits();
+    if bits & SIGN_BIT == 0 {
+        bits | SIGN_BIT
+    } else {
+        !bits
+    }
+}
 
 /// Version of the decision rule below. Stamped onto every report so a
 /// recorded winner can be traced to the rule that chose it.
@@ -146,12 +158,11 @@ impl BaselineResults {
         if !candidate_auc.is_finite() || !self.required_discrimination_auc.is_finite() {
             return false;
         }
-        let scale = candidate_auc
-            .abs()
-            .max(self.required_discrimination_auc.abs())
-            .max(1.0);
-        let tolerance = f64::EPSILON * scale * BASELINE_COMPARISON_ULPS;
-        candidate_auc + tolerance >= self.required_discrimination_auc
+        candidate_auc >= self.required_discrimination_auc
+            || (candidate_auc < self.required_discrimination_auc
+                && ordered_f64_bits(candidate_auc)
+                    .abs_diff(ordered_f64_bits(self.required_discrimination_auc))
+                    <= BASELINE_COMPARISON_ULPS)
     }
 }
 
@@ -226,19 +237,20 @@ pub struct CandidateResult {
     /// Novel rows omitted from this candidate's discrimination AUC after a
     /// scorer error. Any non-zero count disqualifies the candidate from the
     /// baseline-dominance stage because the structural baseline uses every
-    /// corpus row.
+    /// corpus row. `None` means the report did not evidence this counter and
+    /// is also ineligible under decision-rule v3.
     #[serde(default)]
-    pub dropped_novel_rows: u64,
+    pub dropped_novel_rows: Option<u64>,
     /// Duplicate rows omitted from this candidate's discrimination AUC after
     /// a scorer error. See [`CandidateResult::dropped_novel_rows`].
     #[serde(default)]
-    pub dropped_duplicate_rows: u64,
+    pub dropped_duplicate_rows: Option<u64>,
     /// Paraphrase pairs omitted from `paraphrase_delta` because either half
     /// failed to score. Any non-zero count makes the candidate ineligible for
     /// weighted winner selection so selective failures cannot improve the
-    /// metric.
+    /// metric. `None` is missing evidence and fails the same stage closed.
     #[serde(default)]
-    pub dropped_paraphrase_rows: u64,
+    pub dropped_paraphrase_rows: Option<u64>,
     /// Release date of the underlying model weights, unix seconds.
     /// Sourced from the manifest. Third tiebreaker (newer wins).
     pub release_date_unix: i64,
@@ -382,9 +394,9 @@ impl CandidateResult {
             params_b,
             passed_determinism_gate: false,
             passed_baseline_dominance: false,
-            dropped_novel_rows,
-            dropped_duplicate_rows,
-            dropped_paraphrase_rows,
+            dropped_novel_rows: Some(dropped_novel_rows),
+            dropped_duplicate_rows: Some(dropped_duplicate_rows),
+            dropped_paraphrase_rows: Some(dropped_paraphrase_rows),
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
             metrics: None,
@@ -397,8 +409,8 @@ impl CandidateResult {
 /// and persisted report evidence.
 #[allow(dead_code)] // called by the gate-calibrate binary; integration targets import this module independently
 pub fn passes_baseline_dominance(candidate: &CandidateResult, baselines: &BaselineResults) -> bool {
-    candidate.dropped_novel_rows == 0
-        && candidate.dropped_duplicate_rows == 0
+    candidate.dropped_novel_rows == Some(0)
+        && candidate.dropped_duplicate_rows == Some(0)
         && baselines.clears(candidate.discrimination_auc)
 }
 
@@ -477,7 +489,7 @@ pub fn pick_winner<'a>(
     // from paraphrase pairs can contribute to weighted scoring.
     let paraphrase_complete: Vec<&CandidateResult> = baseline_dominating
         .into_iter()
-        .filter(|r| r.dropped_paraphrase_rows == 0)
+        .filter(|r| r.dropped_paraphrase_rows == Some(0))
         .collect();
     if paraphrase_complete.is_empty() {
         return None;
@@ -608,6 +620,15 @@ pub fn render_markdown(report: &Report) -> String {
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for c in &report.candidates {
+        let dropped_novel_rows = c
+            .dropped_novel_rows
+            .map_or_else(|| "not_evidenced".to_string(), |count| count.to_string());
+        let dropped_duplicate_rows = c
+            .dropped_duplicate_rows
+            .map_or_else(|| "not_evidenced".to_string(), |count| count.to_string());
+        let dropped_paraphrase_rows = c
+            .dropped_paraphrase_rows
+            .map_or_else(|| "not_evidenced".to_string(), |count| count.to_string());
         out.push_str(&format!(
             "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} | {} | {} | {} |\n",
             c.id,
@@ -619,9 +640,9 @@ pub fn render_markdown(report: &Report) -> String {
             c.license,
             c.params_b,
             c.passed_determinism_gate,
-            c.dropped_novel_rows,
-            c.dropped_duplicate_rows,
-            c.dropped_paraphrase_rows,
+            dropped_novel_rows,
+            dropped_duplicate_rows,
+            dropped_paraphrase_rows,
             c.passed_baseline_dominance,
         ));
     }
@@ -730,9 +751,9 @@ mod tests {
             params_b: 8,
             passed_determinism_gate: true,
             passed_baseline_dominance: false,
-            dropped_novel_rows: 0,
-            dropped_duplicate_rows: 0,
-            dropped_paraphrase_rows: 0,
+            dropped_novel_rows: Some(0),
+            dropped_duplicate_rows: Some(0),
+            dropped_paraphrase_rows: Some(0),
             release_date_unix: 0,
             load_or_eval_error: None,
             metrics: None,
@@ -876,13 +897,12 @@ mod tests {
     #[test]
     fn ulp_adjusted_comparison_boundary_is_inclusive() {
         let baselines = baselines(0.75);
-        let tolerance = f64::EPSILON
-            * baselines.required_discrimination_auc.abs().max(1.0)
-            * BASELINE_COMPARISON_ULPS;
-        let candidate_auc = baselines.required_discrimination_auc - tolerance;
+        let candidate_auc = f64::from_bits(
+            baselines.required_discrimination_auc.to_bits() - BASELINE_COMPARISON_ULPS,
+        );
         assert_eq!(
-            candidate_auc + tolerance,
-            baselines.required_discrimination_auc
+            baselines.required_discrimination_auc.to_bits() - candidate_auc.to_bits(),
+            BASELINE_COMPARISON_ULPS
         );
         assert!(baselines.clears(candidate_auc));
     }

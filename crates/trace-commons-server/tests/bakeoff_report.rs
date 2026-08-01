@@ -39,9 +39,9 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         params_b: 8,
         passed_determinism_gate: det < DETERMINISM_GATE,
         passed_baseline_dominance: false,
-        dropped_novel_rows: 0,
-        dropped_duplicate_rows: 0,
-        dropped_paraphrase_rows: 0,
+        dropped_novel_rows: Some(0),
+        dropped_duplicate_rows: Some(0),
+        dropped_paraphrase_rows: Some(0),
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: None,
@@ -167,6 +167,29 @@ fn report_json_round_trips() {
 }
 
 #[test]
+fn v3_candidate_without_drop_evidence_is_ineligible() {
+    let report = fixture_report();
+    for field in [
+        "dropped_novel_rows",
+        "dropped_duplicate_rows",
+        "dropped_paraphrase_rows",
+    ] {
+        let mut json = serde_json::to_value(&report).expect("serialize report");
+        json["candidates"][0]
+            .as_object_mut()
+            .expect("candidate object")
+            .remove(field);
+
+        let back: bakeoff_report::Report =
+            serde_json::from_value(json).expect("missing evidence remains representable");
+        assert!(
+            pick_winner(&back.candidates, &back.baselines).is_none(),
+            "missing {field} must fail closed"
+        );
+    }
+}
+
+#[test]
 fn report_markdown_includes_winner_and_table() {
     let md = bakeoff_report::render_markdown(&fixture_report());
     assert!(md.contains("Winner: x"), "missing winner line: {md}");
@@ -191,15 +214,15 @@ fn report_markdown_includes_winner_and_table() {
 #[test]
 fn dropped_baseline_rows_persist_in_json_and_markdown() {
     let mut report = fixture_report();
-    report.candidates[0].dropped_novel_rows = 3;
-    report.candidates[0].dropped_duplicate_rows = 1;
-    report.candidates[0].dropped_paraphrase_rows = 2;
+    report.candidates[0].dropped_novel_rows = Some(3);
+    report.candidates[0].dropped_duplicate_rows = Some(1);
+    report.candidates[0].dropped_paraphrase_rows = Some(2);
 
     let json = serde_json::to_string(&report).expect("serialize report");
     let back: bakeoff_report::Report = serde_json::from_str(&json).expect("parse report");
-    assert_eq!(back.candidates[0].dropped_novel_rows, 3);
-    assert_eq!(back.candidates[0].dropped_duplicate_rows, 1);
-    assert_eq!(back.candidates[0].dropped_paraphrase_rows, 2);
+    assert_eq!(back.candidates[0].dropped_novel_rows, Some(3));
+    assert_eq!(back.candidates[0].dropped_duplicate_rows, Some(1));
+    assert_eq!(back.candidates[0].dropped_paraphrase_rows, Some(2));
 
     let md = bakeoff_report::render_markdown(&report);
     assert!(
@@ -340,9 +363,17 @@ fn independently_computed_exact_margin_passes_and_below_margin_fails() {
 }
 
 #[test]
+fn ulp_comparison_allows_three_but_not_seven_representable_steps() {
+    let baselines = baselines(0.75);
+
+    assert!(baselines.clears(0.7999999999999997));
+    assert!(!baselines.clears(0.7999999999999993));
+}
+
+#[test]
 fn persisted_baseline_flag_uses_shared_dropped_row_predicate() {
     let mut candidate = result("dropped", 0.9, 0.1, 0.5, 1000.0, 1e-7);
-    candidate.dropped_duplicate_rows = 1;
+    candidate.dropped_duplicate_rows = Some(1);
     bakeoff_report::record_baseline_dominance(&mut candidate, &baselines(0.6));
     assert!(!candidate.passed_baseline_dominance);
 
@@ -391,9 +422,9 @@ fn aborted_candidate_preserves_dropped_rows_in_report() {
         0,
         2,
     );
-    assert_eq!(failed.dropped_novel_rows, 5);
-    assert_eq!(failed.dropped_duplicate_rows, 0);
-    assert_eq!(failed.dropped_paraphrase_rows, 2);
+    assert_eq!(failed.dropped_novel_rows, Some(5));
+    assert_eq!(failed.dropped_duplicate_rows, Some(0));
+    assert_eq!(failed.dropped_paraphrase_rows, Some(2));
 
     let mut report = fixture_report();
     report.candidates = vec![failed];
@@ -557,9 +588,9 @@ fn rarity_block_round_trips_through_json() {
         params_b: 8,
         passed_determinism_gate: true,
         passed_baseline_dominance: true,
-        dropped_novel_rows: 0,
-        dropped_duplicate_rows: 0,
-        dropped_paraphrase_rows: 0,
+        dropped_novel_rows: Some(0),
+        dropped_duplicate_rows: Some(0),
+        dropped_paraphrase_rows: Some(0),
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: Some(bakeoff_report::CandidateMetrics {
