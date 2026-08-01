@@ -58,13 +58,49 @@ pub struct ChunkPlan {
 }
 
 /// Render one event to its canonical text form: `kind (tool): content\n` or
-/// `kind: content\n`. Shared by both signals so they score identical text.
-/// Intentionally NOT raw JSON — braces/keys would dilute the perplexity
-/// signal.
+/// `kind: content\n`. The envelope parser adds allow-listed category and
+/// side-effect structure when a tool name is absent. Shared by both signals
+/// so they score identical text. Intentionally NOT raw JSON — braces/keys
+/// would dilute the perplexity signal.
 pub fn render_event_text(event_type: &str, tool_name: Option<&str>, content: &str) -> String {
+    render_event_text_with_tool_structure(event_type, tool_name, None, None, content)
+}
+
+fn render_event_text_with_tool_structure(
+    event_type: &str,
+    tool_name: Option<&str>,
+    tool_category: Option<&str>,
+    side_effect: Option<&str>,
+    content: &str,
+) -> String {
     match tool_name {
         Some(t) if !t.is_empty() => format!("{event_type} ({t}): {content}\n"),
-        _ => format!("{event_type}: {content}\n"),
+        Some(_) => format!("{event_type}: {content}\n"),
+        None => match tool_category.and_then(canonical_tool_category) {
+            Some(category) => match side_effect.and_then(canonical_side_effect) {
+                Some(effect) => {
+                    format!("{event_type} (category={category} side_effect={effect}): {content}\n")
+                }
+                None => format!("{event_type} (category={category}): {content}\n"),
+            },
+            None => format!("{event_type}: {content}\n"),
+        },
+    }
+}
+
+fn canonical_tool_category(category: &str) -> Option<&str> {
+    match category {
+        "network" | "workspace" | "retrieval" | "external_app" | "other" => Some(category),
+        _ => None,
+    }
+}
+
+fn canonical_side_effect(side_effect: &str) -> Option<&str> {
+    match side_effect {
+        "none" | "read_only" | "local_write" | "external_write" | "credential_use" | "unknown" => {
+            Some(side_effect)
+        }
+        _ => None,
     }
 }
 
@@ -86,11 +122,19 @@ pub fn parse_envelope_rendered_events(plaintext: &[u8]) -> Option<Vec<String>> {
                     .and_then(|x| x.as_str())
                     .unwrap_or("event");
                 let tool_name = e.get("tool_name").and_then(|x| x.as_str());
+                let tool_category = e.get("tool_category").and_then(|x| x.as_str());
+                let side_effect = e.get("side_effect").and_then(|x| x.as_str());
                 let content = e
                     .get("redacted_content")
                     .and_then(|x| x.as_str())
                     .unwrap_or("");
-                render_event_text(event_type, tool_name, content)
+                render_event_text_with_tool_structure(
+                    event_type,
+                    tool_name,
+                    tool_category,
+                    side_effect,
+                    content,
+                )
             })
             .collect(),
     )
@@ -219,6 +263,17 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap()
     }
 
+    fn category_only_tool_envelope(category: &str, side_effect: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "events": [{
+                "event_type": "tool_call",
+                "tool_category": category,
+                "side_effect": side_effect,
+            }],
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn render_event_text_is_role_plus_content_not_json() {
         let rendered = render_event_text("tool_call", Some("Bash"), "ls -la");
@@ -226,6 +281,69 @@ mod tests {
         let rendered = render_event_text("user_message", None, "hello");
         assert_eq!(rendered, "user_message: hello\n");
         assert!(!rendered.contains('{'), "rendering must not be raw JSON");
+    }
+
+    #[test]
+    fn category_only_tool_envelopes_have_distinct_rendered_gate_text() {
+        let send_email = parse_envelope_rendered_events(&category_only_tool_envelope(
+            "external_app",
+            "external_write",
+        ))
+        .unwrap();
+        let http_get =
+            parse_envelope_rendered_events(&category_only_tool_envelope("network", "read_only"))
+                .unwrap();
+
+        assert_eq!(
+            send_email,
+            ["tool_call (category=external_app side_effect=external_write): \n"]
+        );
+        assert_eq!(
+            http_get,
+            ["tool_call (category=network side_effect=read_only): \n"]
+        );
+        assert_ne!(send_email, http_get);
+    }
+
+    #[test]
+    fn category_and_side_effect_each_affect_category_only_gate_text() {
+        let render = |category, side_effect| {
+            parse_envelope_rendered_events(&category_only_tool_envelope(category, side_effect))
+                .unwrap()
+        };
+
+        let baseline = render("network", "read_only");
+        assert_ne!(baseline, render("external_app", "read_only"));
+        assert_ne!(baseline, render("network", "external_write"));
+    }
+
+    #[test]
+    fn named_tool_gate_text_remains_byte_identical() {
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "events": [{
+                "event_type": "tool_call",
+                "tool_name": "send_email",
+                "tool_category": "external_app",
+                "side_effect": "external_write",
+            }],
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parse_envelope_rendered_events(&plaintext).unwrap(),
+            ["tool_call (send_email): \n"]
+        );
+    }
+
+    #[test]
+    fn unallowlisted_category_is_absent_from_rendered_gate_text() {
+        let rendered = parse_envelope_rendered_events(&category_only_tool_envelope(
+            "attacker supplied category",
+            "external_write",
+        ))
+        .unwrap();
+
+        assert_eq!(rendered, ["tool_call: \n"]);
     }
 
     #[test]
