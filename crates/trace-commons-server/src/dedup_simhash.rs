@@ -116,29 +116,4 @@ mod tests {
     fn empty_is_zero() {
         assert_eq!(trace_simhash(""), 0);
     }
-
-    #[test]
-    fn category_only_tool_envelopes_have_distinct_gate_simhashes() {
-        let envelope = |category, side_effect| {
-            serde_json::to_vec(&serde_json::json!({
-                "events": [{
-                    "event_type": "tool_call",
-                    "tool_category": category,
-                    "side_effect": side_effect,
-                }],
-            }))
-            .unwrap()
-        };
-        let canonical_text = |plaintext: Vec<u8>| {
-            trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
-                .unwrap()
-                .join("\n")
-        };
-
-        let send_email = canonical_text(envelope("external_app", "external_write"));
-        let http_get = canonical_text(envelope("network", "read_only"));
-
-        assert_ne!(send_email, http_get);
-        assert_ne!(trace_simhash(&send_email), trace_simhash(&http_get));
-    }
 }

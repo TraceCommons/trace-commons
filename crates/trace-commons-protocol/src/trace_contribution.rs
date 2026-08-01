@@ -4160,15 +4160,6 @@ fn canonical_whole_trace_representation(envelope: &TraceContributionEnvelope) ->
         let mut line = format!("  {:?}:", event.event_type);
         if let Some(tool_name) = &event.tool_name {
             line.push_str(&format!(" tool={tool_name}"));
-        } else if let Some(tool_category) = event
-            .tool_category
-            .as_deref()
-            .and_then(canonical_tool_category)
-        {
-            line.push_str(&format!(
-                " category={tool_category} side_effect={}",
-                canonical_side_effect(event.side_effect)
-            ));
         }
         if let Some(content) = &event.redacted_content {
             line.push(' ');
@@ -4181,24 +4172,6 @@ fn canonical_whole_trace_representation(envelope: &TraceContributionEnvelope) ->
     }
 
     lines.join("\n")
-}
-
-fn canonical_tool_category(category: &str) -> Option<&str> {
-    match category {
-        "network" | "workspace" | "retrieval" | "external_app" | "other" => Some(category),
-        _ => None,
-    }
-}
-
-fn canonical_side_effect(side_effect: SideEffectLevel) -> &'static str {
-    match side_effect {
-        SideEffectLevel::None => "none",
-        SideEffectLevel::ReadOnly => "read_only",
-        SideEffectLevel::LocalWrite => "local_write",
-        SideEffectLevel::ExternalWrite => "external_write",
-        SideEffectLevel::CredentialUse => "credential_use",
-        SideEffectLevel::Unknown => "unknown",
-    }
 }
 
 fn canonical_turn_representations(envelope: &TraceContributionEnvelope) -> Vec<String> {
@@ -5880,46 +5853,6 @@ mod tests {
         event.tool_category = Some(category.to_string());
         event.side_effect = side_effect;
         envelope
-    }
-
-    #[test]
-    fn category_only_tool_envelopes_have_distinct_canonical_summaries() {
-        use super::{SideEffectLevel, canonical_summary_for_embedding};
-
-        let send_email =
-            category_only_tool_envelope("external_app", SideEffectLevel::ExternalWrite);
-        let http_get = category_only_tool_envelope("network", SideEffectLevel::ReadOnly);
-
-        let send_email_summary = canonical_summary_for_embedding(&send_email);
-        let http_get_summary = canonical_summary_for_embedding(&http_get);
-
-        assert_ne!(send_email_summary, http_get_summary);
-        assert!(
-            send_email_summary
-                .contains("ToolCall: category=external_app side_effect=external_write")
-        );
-        assert!(http_get_summary.contains("ToolCall: category=network side_effect=read_only"));
-    }
-
-    #[test]
-    fn category_and_side_effect_each_affect_category_only_canonical_summary() {
-        use super::{SideEffectLevel, canonical_summary_for_embedding};
-
-        let baseline = canonical_summary_for_embedding(&category_only_tool_envelope(
-            "network",
-            SideEffectLevel::ReadOnly,
-        ));
-        let different_category = canonical_summary_for_embedding(&category_only_tool_envelope(
-            "external_app",
-            SideEffectLevel::ReadOnly,
-        ));
-        let different_side_effect = canonical_summary_for_embedding(&category_only_tool_envelope(
-            "network",
-            SideEffectLevel::ExternalWrite,
-        ));
-
-        assert_ne!(baseline, different_category);
-        assert_ne!(baseline, different_side_effect);
     }
 
     #[test]
