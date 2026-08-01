@@ -39,6 +39,8 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         params_b: 8,
         passed_determinism_gate: det < DETERMINISM_GATE,
         passed_baseline_dominance: false,
+        dropped_novel_rows: 0,
+        dropped_duplicate_rows: 0,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: None,
@@ -182,6 +184,34 @@ fn report_markdown_includes_winner_and_table() {
     assert!(
         md.contains("passed_baseline_dominance"),
         "missing candidate baseline result: {md}"
+    );
+}
+
+#[test]
+fn dropped_baseline_rows_persist_in_json_and_markdown() {
+    let mut report = fixture_report();
+    report.candidates[0].dropped_novel_rows = 3;
+    report.candidates[0].dropped_duplicate_rows = 1;
+
+    let json = serde_json::to_string(&report).expect("serialize report");
+    let back: bakeoff_report::Report = serde_json::from_str(&json).expect("parse report");
+    assert_eq!(back.candidates[0].dropped_novel_rows, 3);
+    assert_eq!(back.candidates[0].dropped_duplicate_rows, 1);
+
+    let md = bakeoff_report::render_markdown(&report);
+    assert!(
+        md.contains("dropped_novel_rows"),
+        "missing novel count: {md}"
+    );
+    assert!(
+        md.contains("dropped_duplicate_rows"),
+        "missing duplicate count: {md}"
+    );
+    assert!(
+        md.contains(
+            "| x | 0.900000 | 0.100000 | 0.500000 | 1000.000 | 1.000e-7 | Apache2 | 8 | true | 3 | 1 | false |"
+        ),
+        "missing candidate counts: {md}"
     );
 }
 
@@ -411,6 +441,8 @@ fn rarity_block_round_trips_through_json() {
         params_b: 8,
         passed_determinism_gate: true,
         passed_baseline_dominance: true,
+        dropped_novel_rows: 0,
+        dropped_duplicate_rows: 0,
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: Some(bakeoff_report::CandidateMetrics {

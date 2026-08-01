@@ -34,22 +34,37 @@ fn build_synthetic_corpus(
     dup_n: usize,
     para_n: usize,
 ) -> PathBuf {
+    let novel = (0..novel_n)
+        .map(|i| format!("novel-{i}-body"))
+        .collect::<Vec<_>>();
+    let duplicate = (0..dup_n)
+        .map(|i| format!("dup-{i}-body"))
+        .collect::<Vec<_>>();
+    build_synthetic_corpus_from_rows(dir, &novel, &duplicate, para_n)
+}
+
+fn build_synthetic_corpus_from_rows(
+    dir: &tempfile::TempDir,
+    novel_rows: &[String],
+    duplicate_rows: &[String],
+    para_n: usize,
+) -> PathBuf {
     let staging = dir.path().join("staging");
     fs::create_dir_all(staging.join("novel")).unwrap();
     fs::create_dir_all(staging.join("duplicate")).unwrap();
     fs::create_dir_all(staging.join("paraphrase")).unwrap();
 
     let mut novel_files: Vec<(String, Vec<u8>)> = Vec::new();
-    for i in 0..novel_n {
+    for (i, body) in novel_rows.iter().enumerate() {
         let name = format!("novel-{i:04}.txt");
-        let body = format!("novel-{i}-body").into_bytes();
+        let body = body.as_bytes().to_vec();
         fs::write(staging.join("novel").join(&name), &body).unwrap();
         novel_files.push((name, body));
     }
     let mut dup_files: Vec<(String, Vec<u8>)> = Vec::new();
-    for i in 0..dup_n {
+    for (i, body) in duplicate_rows.iter().enumerate() {
         let name = format!("dup-{i:04}.txt");
-        let body = format!("dup-{i}-body").into_bytes();
+        let body = body.as_bytes().to_vec();
         fs::write(staging.join("duplicate").join(&name), &body).unwrap();
         dup_files.push((name, body));
     }
@@ -217,6 +232,78 @@ fn bake_off_subcommand_writes_mock_report() {
     assert!(md.contains("Strongest baseline: utf8_byte_count (1.000000)"));
     assert!(md.contains("Required discrimination AUC: 1.050000"));
     assert!(md.contains("passed_baseline_dominance"));
+}
+
+#[test]
+fn eligible_candidate_sets_baseline_flag_in_json_and_markdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let novel = vec!["H".to_string(); 20];
+    let duplicate = vec!["D".to_string(); 20];
+    let corpus = build_synthetic_corpus_from_rows(&dir, &novel, &duplicate, 20);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("eligible-report.json");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let out = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .output()
+        .expect("invoke binary");
+    assert!(
+        out.status.success(),
+        "bake-off must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
+    let baselines = report.get("baselines").expect("baselines object");
+    assert_eq!(
+        baselines.get("strongest_auc").and_then(|v| v.as_f64()),
+        Some(0.5)
+    );
+    assert_eq!(
+        baselines
+            .get("required_discrimination_auc")
+            .and_then(|v| v.as_f64()),
+        Some(0.55)
+    );
+    let candidates = report
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .expect("candidates array");
+    let json_passed = candidates.iter().all(|candidate| {
+        candidate
+            .get("passed_baseline_dominance")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+            && candidate.get("dropped_novel_rows").and_then(|v| v.as_u64()) == Some(0)
+            && candidate
+                .get("dropped_duplicate_rows")
+                .and_then(|v| v.as_u64())
+                == Some(0)
+    });
+    assert!(report.get("winner_id").is_some_and(|v| !v.is_null()));
+
+    let md = fs::read_to_string(report_json.with_extension("md")).unwrap();
+    let markdown_passed = candidates.iter().all(|candidate| {
+        let id = candidate.get("id").and_then(|v| v.as_str()).unwrap();
+        md.lines()
+            .find(|line| line.starts_with(&format!("| {id} |")))
+            .is_some_and(|line| line.ends_with("| 0 | 0 | true |"))
+    });
+    assert!(
+        json_passed && markdown_passed,
+        "eligible candidates must persist true in JSON and markdown: {md}"
+    );
 }
 
 // The third real-scorer-path test that would exercise the

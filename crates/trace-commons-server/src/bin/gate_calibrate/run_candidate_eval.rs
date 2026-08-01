@@ -351,11 +351,12 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_novel_rows = failures - novel_failures_before;
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "novel",
         scored = novel_perp.len().max(novel_rarity.len()) - novel_scored_before,
-        failed = failures - novel_failures_before,
+        failed = dropped_novel_rows,
         elapsed_seconds = novel_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
@@ -394,11 +395,12 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_duplicate_rows = failures - dup_failures_before;
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "duplicate",
         scored = dup_perp.len().max(dup_rarity.len()) - dup_scored_before,
-        failed = failures - dup_failures_before,
+        failed = dropped_duplicate_rows,
         elapsed_seconds = duplicate_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
@@ -640,6 +642,8 @@ pub async fn run_candidate_eval(
         // Filled by run_bakeoff after comparison with the corpus-level
         // structural baselines. Candidate evaluation has no baseline input.
         passed_baseline_dominance: false,
+        dropped_novel_rows,
+        dropped_duplicate_rows,
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

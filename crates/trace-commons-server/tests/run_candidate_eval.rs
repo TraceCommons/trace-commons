@@ -132,6 +132,105 @@ impl FlakyScorer {
     }
 }
 
+/// Reproduces a selective failure pattern that improves the surviving-row
+/// AUC while remaining inside the evaluator's pooled failure budget.
+struct ClassCorrelatedFailureScorer;
+
+impl PerplexityScorer for ClassCorrelatedFailureScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        let aggregate_perplexity_micros = match plaintext {
+            b"H" => 3_000_000,
+            b"L" => 1_000_000,
+            b"X" => anyhow::bail!("ClassCorrelatedFailure"),
+            b"D" => 2_000_000,
+            _ => 2_000_000,
+        };
+        Ok(PerplexityResult {
+            aggregate_perplexity_micros,
+            tail_fraction_micros: 0,
+            tokens_scored: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn class_correlated_failures_cannot_pass_baseline_dominance() {
+    let mut novel = vec!["H".to_string(); 10];
+    novel.extend(vec!["L".to_string(); 7]);
+    novel.extend(vec!["X".to_string(); 3]);
+    let corpus = LoadedCorpus {
+        novel,
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase: vec![
+            ParaphrasePair {
+                original: "P".to_string(),
+                paraphrase: "Q".to_string(),
+            };
+            20
+        ],
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 failures in 80 attempts remain inside the pooled budget");
+
+    assert!((result.discrimination_auc - (10.0 / 17.0)).abs() < 1e-12);
+    assert_eq!(result.dropped_novel_rows, 3);
+    assert_eq!(result.dropped_duplicate_rows, 0);
+    assert!(result.passed_determinism_gate);
+
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    assert_eq!(baselines.strongest_auc, 0.5);
+    assert!(baselines.clears(result.discrimination_auc));
+    assert!(
+        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none(),
+        "a truncated candidate must not qualify against a full-corpus baseline"
+    );
+}
+
+#[tokio::test]
+async fn paraphrase_failures_do_not_affect_baseline_dominance() {
+    let mut paraphrase = vec![
+        ParaphrasePair {
+            original: "P".to_string(),
+            paraphrase: "Q".to_string(),
+        };
+        20
+    ];
+    for pair in paraphrase.iter_mut().take(3) {
+        pair.original = "X".to_string();
+    }
+    let corpus = LoadedCorpus {
+        novel: vec!["H".to_string(); 20],
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase,
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 paraphrase failures in 80 attempts remain inside the pooled budget");
+
+    assert_eq!(result.dropped_novel_rows, 0);
+    assert_eq!(result.dropped_duplicate_rows, 0);
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    assert!(
+        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_some(),
+        "paraphrase failures must not affect the common-support requirement"
+    );
+}
+
 impl PerplexityScorer for FlakyScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);

@@ -209,6 +209,16 @@ pub struct CandidateResult {
     /// report consumers do not have to reconstruct decision-rule v3.
     #[serde(default)]
     pub passed_baseline_dominance: bool,
+    /// Novel rows omitted from this candidate's discrimination AUC after a
+    /// scorer error. Any non-zero count disqualifies the candidate from the
+    /// baseline-dominance stage because the structural baseline uses every
+    /// corpus row.
+    #[serde(default)]
+    pub dropped_novel_rows: u64,
+    /// Duplicate rows omitted from this candidate's discrimination AUC after
+    /// a scorer error. See [`CandidateResult::dropped_novel_rows`].
+    #[serde(default)]
+    pub dropped_duplicate_rows: u64,
     /// Release date of the underlying model weights, unix seconds.
     /// Sourced from the manifest. Third tiebreaker (newer wins).
     pub release_date_unix: i64,
@@ -326,6 +336,8 @@ impl CandidateResult {
             params_b,
             passed_determinism_gate: false,
             passed_baseline_dominance: false,
+            dropped_novel_rows: 0,
+            dropped_duplicate_rows: 0,
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
             metrics: None,
@@ -392,7 +404,11 @@ pub fn pick_winner<'a>(
     // no material discrimination over a cheap structural measure.
     let baseline_dominating: Vec<&CandidateResult> = discriminating
         .into_iter()
-        .filter(|r| baselines.clears(r.discrimination_auc))
+        .filter(|r| {
+            r.dropped_novel_rows == 0
+                && r.dropped_duplicate_rows == 0
+                && baselines.clears(r.discrimination_auc)
+        })
         .collect();
     if baseline_dominating.is_empty() {
         return None;
@@ -516,11 +532,11 @@ pub fn render_markdown(report: &Report) -> String {
     let winner = report.winner_id.as_deref().unwrap_or("none");
     out.push_str(&format!("Winner: {}\n\n", winner));
 
-    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_determinism | passed_baseline_dominance |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_determinism | dropped_novel_rows | dropped_duplicate_rows | passed_baseline_dominance |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for c in &report.candidates {
         out.push_str(&format!(
-            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} |\n",
+            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} | {} | {} | {} |\n",
             c.id,
             c.discrimination_auc,
             c.paraphrase_delta,
@@ -530,6 +546,8 @@ pub fn render_markdown(report: &Report) -> String {
             c.license,
             c.params_b,
             c.passed_determinism_gate,
+            c.dropped_novel_rows,
+            c.dropped_duplicate_rows,
             c.passed_baseline_dominance,
         ));
     }
@@ -638,6 +656,8 @@ mod tests {
             params_b: 8,
             passed_determinism_gate: true,
             passed_baseline_dominance: false,
+            dropped_novel_rows: 0,
+            dropped_duplicate_rows: 0,
             release_date_unix: 0,
             load_or_eval_error: None,
             metrics: None,

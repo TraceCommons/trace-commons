@@ -963,8 +963,9 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 )
             }
         };
-        candidate_result.passed_baseline_dominance =
-            baselines.clears(candidate_result.discrimination_auc);
+        candidate_result.passed_baseline_dominance = candidate_result.dropped_novel_rows == 0
+            && candidate_result.dropped_duplicate_rows == 0
+            && baselines.clears(candidate_result.discrimination_auc);
 
         results.push(candidate_result);
 
