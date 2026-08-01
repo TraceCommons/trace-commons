@@ -247,7 +247,6 @@ pub async fn submit_sessions(
                     if msg.contains("consent scopes not permitted")
                         || msg.contains("allowed uses not permitted")
                     {
-                        println!("hint: re-run login --scopes with a narrower selection");
                         outcomes.push(SubmitOutcome::Refused {
                             reason_label: "scopes-not-permitted".to_string(),
                         });

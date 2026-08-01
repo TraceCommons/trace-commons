@@ -81,6 +81,7 @@ pub fn summary(outcomes: &[SubmitOutcome]) -> String {
     let mut refused = 0usize;
     let mut skipped = 0usize;
     let mut already_submitted = 0usize;
+    let mut submitted = 0usize;
     let mut failed = 0usize;
 
     for outcome in outcomes {
@@ -94,13 +95,14 @@ pub fn summary(outcomes: &[SubmitOutcome]) -> String {
             SubmitOutcome::SkippedParseFailure { .. } => skipped += 1,
             SubmitOutcome::Refused { .. } => refused += 1,
             SubmitOutcome::Failed { .. } => failed += 1,
-            SubmitOutcome::Submitted { .. } => {}
+            SubmitOutcome::Submitted { .. } => submitted += 1,
         }
     }
 
     format!(
         "dry-run summary: low={low} medium={medium} high={high} refused={refused} \
-         skipped={skipped} already-submitted={already_submitted} failed={failed} total={}",
+         skipped={skipped} already-submitted={already_submitted} submitted={submitted} \
+         failed={failed} total={}",
         outcomes.len()
     )
 }
@@ -181,11 +183,15 @@ mod tests {
             SubmitOutcome::Failed {
                 reason_label: "claim-mint-failed".to_string(),
             },
+            SubmitOutcome::Submitted {
+                submission_id: Uuid::nil(),
+                status: "accepted".to_string(),
+            },
         ];
 
         assert_eq!(
             summary(&outcomes),
-            "dry-run summary: low=1 medium=1 high=1 refused=1 skipped=1 already-submitted=1 failed=1 total=7"
+            "dry-run summary: low=1 medium=1 high=1 refused=1 skipped=1 already-submitted=1 submitted=1 failed=1 total=8"
         );
     }
 }

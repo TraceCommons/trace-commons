@@ -29,6 +29,17 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
+/// Marks a failed JSON submit whose complete results document has already
+/// been written to stdout. The binary uses this marker to preserve the
+/// non-zero exit without appending a second `cli_error` document.
+#[derive(Debug, thiserror::Error)]
+#[error("submit failed after its JSON results were rendered")]
+pub struct JsonSubmitResultRendered;
+
+pub fn json_submit_result_was_rendered(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<JsonSubmitResultRendered>().is_some()
+}
+
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
 ///
@@ -463,6 +474,9 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
              so its envelope ids would never exist server-side"
         );
     }
+    if sel.json && !sel.all && !sel.yes {
+        anyhow::bail!("--json submit requires --all or --yes to disable the interactive picker");
+    }
     let cfg = store
         .load_config()
         .context("loading contributor config")?
@@ -473,7 +487,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
 
     if refs.is_empty() {
-        println!("no sessions found");
+        if sel.json {
+            println!("{}", render_submit_json(&[])?);
+        } else {
+            println!("no sessions found");
+        }
         return Ok(());
     }
 
@@ -537,7 +555,9 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         let json = serde_json::to_string_pretty(&entries).context("serializing manifest")?;
         std::fs::write(path, json)
             .with_context(|| format!("writing manifest to {}", path.display()))?;
-        println!("wrote {} envelope id(s) to manifest", entries.len());
+        if !sel.json {
+            println!("wrote {} envelope id(s) to manifest", entries.len());
+        }
     }
 
     if sel.json {
@@ -551,7 +571,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             )
         });
         if had_failure {
-            anyhow::bail!("one or more sessions were refused or failed");
+            return Err(JsonSubmitResultRendered.into());
         }
         return Ok(());
     }
@@ -596,6 +616,9 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             }
             SubmitOutcome::Refused { reason_label } => {
                 println!("refused ({reason_label})");
+                if reason_label == "scopes-not-permitted" {
+                    println!("hint: re-run login --scopes with a narrower selection");
+                }
                 had_failure = true;
             }
             SubmitOutcome::Failed { reason_label } => {

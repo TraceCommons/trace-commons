@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
-use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
+use trace_commons_protocol::trace_contribution::{
+    ConsentMetadata, PrivacyFilterAdapter, ResidualPiiRisk, ResidualRiskCause,
+    TRACE_CONTRIBUTION_POLICY_VERSION, residual_risk_with_cause, run_privacy_filter_canary,
+};
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -46,6 +49,40 @@ async fn classifies_and_redacts_single_span() {
         "email me at [REDACTED:private_email] please"
     );
     assert_eq!(result.summary.span_count, 1);
+}
+
+#[tokio::test]
+async fn secret_span_drives_blocked_secret_risk_through_real_adapter() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "spans": [
+                    {"category": "secret", "start": 8, "end": 34, "score": 0.99}
+                ]
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text("api_key=Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg")
+        .await
+        .expect("call succeeds")
+        .expect("secret span is redacted");
+    let consent = ConsentMetadata {
+        policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+        scopes: Vec::new(),
+        message_text_included: false,
+        tool_payloads_included: false,
+        revocable: true,
+    };
+
+    assert_eq!(
+        residual_risk_with_cause(&consent, &result.report),
+        (ResidualPiiRisk::High, ResidualRiskCause::BlockedSecret)
+    );
 }
 
 #[tokio::test]

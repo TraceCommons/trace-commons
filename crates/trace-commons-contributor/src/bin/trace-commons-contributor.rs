@@ -124,7 +124,7 @@ async fn main() -> std::process::ExitCode {
             // In --json mode a caller parses stdout. Emitting a bare
             // "Error: ..." line there would force it to special-case
             // failure, which is exactly when it most needs structure.
-            if json {
+            if json && !commands::json_submit_result_was_rendered(&error) {
                 let out = serde_json::json!({
                     "schema_version": "trace_commons.cli_error.v1",
                     "error": format!("{error:#}"),
@@ -134,7 +134,7 @@ async fn main() -> std::process::ExitCode {
                     serde_json::to_string_pretty(&out)
                         .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
                 );
-            } else {
+            } else if !json {
                 eprintln!("Error: {error:#}");
             }
             std::process::ExitCode::FAILURE
