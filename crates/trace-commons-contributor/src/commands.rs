@@ -514,11 +514,8 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     };
 
     let selected_filter = sel.pii_filter.or(cfg.pii_filter.as_deref());
-    let near_ai_notice = !unenrolled_preview
-        && selected_filter == Some("near-ai")
-        && store
-            .ensure_near_ai_notice_shown()
-            .context("recording NEAR AI first-use notice")?;
+    let near_ai_notice =
+        !unenrolled_preview && selected_filter == Some("near-ai") && !store.near_ai_notice_shown();
     let mut notices = Vec::new();
     if unenrolled_preview {
         notices.push(UNENROLLED_PREVIEW_NOTICE);

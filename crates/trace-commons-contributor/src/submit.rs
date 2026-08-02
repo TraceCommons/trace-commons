@@ -167,6 +167,8 @@ pub async fn submit_sessions(
     let effective_cfg = effective_config(cfg, opts);
     let device = if opts.unenrolled_preview {
         None
+    } else if opts.dry_run {
+        DeviceIdentity::load(store).context("loading device identity")?
     } else {
         Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
     };
@@ -175,6 +177,15 @@ pub async fn submit_sessions(
 
     let mut claim: Option<ClaimToken> = None;
     let mut canary_checked = false;
+    let mut near_ai_notice_recorded = false;
+    // An unenrolled preview has no enrollment and therefore no submission
+    // history it can truthfully replay. Ignore stale receipts from torn local
+    // state and run the preview pipeline for every selected session.
+    let mut receipts = if opts.unenrolled_preview {
+        Vec::new()
+    } else {
+        store.load_receipts().context("loading receipts")?
+    };
 
     for (source, session_ref) in sessions {
         let mut transcript = match source.load(&session_ref) {
@@ -191,7 +202,6 @@ pub async fn submit_sessions(
             crate::commands::strip_reasoning(&mut transcript);
         }
 
-        let receipts = store.load_receipts().context("loading receipts")?;
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
         // first status it ever had.
@@ -255,6 +265,12 @@ pub async fn submit_sessions(
                 continue;
             }
         };
+        if !near_ai_notice_recorded && effective_cfg.pii_filter.as_deref() == Some("near-ai") {
+            store
+                .ensure_near_ai_notice_shown()
+                .context("recording NEAR AI first-use notice")?;
+            near_ai_notice_recorded = true;
+        }
 
         let size = match envelope_size_ok(&envelope) {
             Ok(s) => s,
@@ -355,11 +371,22 @@ pub async fn submit_sessions(
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
                 };
-                store.append_receipt(&r).context("appending receipt")?;
-                outcomes.push(SubmitOutcome::Submitted {
-                    submission_id: envelope.submission_id,
-                    status: receipt.status,
-                });
+                match store.append_receipt(&r) {
+                    Ok(()) => {
+                        receipts.push(r);
+                        outcomes.push(SubmitOutcome::Submitted {
+                            submission_id: envelope.submission_id,
+                            status: receipt.status,
+                        });
+                    }
+                    Err(_) => outcomes.push(SubmitOutcome::Failed {
+                        reason_label: "receipt-write-failed".to_string(),
+                    }),
+                }
+            }
+            Err(reason_label) if reason_label == "session-too-large" => {
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                outcomes.push(refused_for_size(&transcript.session_hash, size));
             }
             Err(reason_label) => {
                 outcomes.push(SubmitOutcome::Failed { reason_label });
@@ -730,6 +757,62 @@ mod tests {
                 as Box<dyn crate::source::TraceSource>,
             r,
         )]
+    }
+
+    fn write_test_trajectory(path: &std::path::Path, content: &str) {
+        let body = serde_json::json!([
+            {"role": "meta", "source": "submit-test"},
+            {
+                "role": "user",
+                "content": content,
+                "timestamp": "2026-07-31T12:00:00Z"
+            }
+        ]);
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    fn trajectory_selection(
+        root: &std::path::Path,
+    ) -> Vec<(
+        Box<dyn crate::source::TraceSource>,
+        crate::source::SessionRef,
+    )> {
+        let mut refs = crate::source::trajectory::TrajectorySource::new(root.to_path_buf())
+            .discover()
+            .unwrap();
+        refs.sort_by(|a, b| a.path.cmp(&b.path));
+        refs.into_iter()
+            .map(|session_ref| {
+                (
+                    Box::new(crate::source::trajectory::TrajectorySource::new(
+                        root.to_path_buf(),
+                    )) as Box<dyn crate::source::TraceSource>,
+                    session_ref,
+                )
+            })
+            .collect()
+    }
+
+    async fn narrow_boundary_envelope(
+        trajectory_path: &std::path::Path,
+        content_len: usize,
+        cfg: &ContributorConfig,
+        narrow_token: &ClaimToken,
+    ) -> TraceContributionEnvelope {
+        write_test_trajectory(trajectory_path, &"x".repeat(content_len));
+        let source =
+            crate::source::trajectory::TrajectorySource::new(trajectory_path.to_path_buf());
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = build_raw_contribution(&transcript, cfg, now);
+        assert!(raw_contribution_size_ok(&raw).is_ok());
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        stamp_granted_scopes(&mut envelope, cfg, narrow_token);
+        envelope
     }
 
     fn cfg_for(
@@ -1203,10 +1286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_engine_never_writes_renderer_notice_marker() {
-        // The command renderer owns the one-time notice and its marker so it
-        // can keep JSON output to one document. The submit engine returns only
-        // outcomes and must not consume presentation state itself.
+    async fn failed_filter_construction_does_not_write_notice_marker() {
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1231,6 +1311,72 @@ mod tests {
                 if reason_label == "pii-filter-unavailable"
         ));
         assert!(!store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    #[tokio::test]
+    async fn receipt_append_failure_preserves_prior_outcomes_and_finishes_batch() {
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
+        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let receipt_path = store.dir().join("receipts.jsonl");
+        let post_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(Router::new().route(
+            "/v1/traces",
+            post({
+                let post_calls = post_calls.clone();
+                let received = received.clone();
+                move |Json(body): Json<serde_json::Value>| {
+                    let post_calls = post_calls.clone();
+                    let received = received.clone();
+                    let receipt_path = receipt_path.clone();
+                    async move {
+                        received.lock().unwrap().push(body);
+                        let call = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if call == 1 {
+                            std::fs::remove_file(&receipt_path).unwrap();
+                            std::fs::create_dir(&receipt_path).unwrap();
+                        }
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let issuer = spawn(stub_issuer()).await;
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+        };
+
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        assert!(matches!(
+            &outcomes[1],
+            SubmitOutcome::Failed { reason_label } if reason_label == "receipt-write-failed"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 2);
     }
 
     /// Grants strictly less than requested: config asks for
@@ -1434,6 +1580,50 @@ mod tests {
         )
     }
 
+    fn stub_issuer_widens_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let mint_calls = mint_calls.clone();
+                async move {
+                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let (consent_scopes, allowed_uses) = if n == 0 {
+                        (
+                            serde_json::json!(["debugging_evaluation"]),
+                            serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]),
+                        )
+                    } else {
+                        (
+                            serde_json::json!([
+                                "debugging_evaluation",
+                                "benchmark_only",
+                                "ranking_training",
+                                "model_training",
+                                "public_attribution"
+                            ]),
+                            serde_json::json!([
+                                "debugging",
+                                "evaluation",
+                                "benchmark_generation",
+                                "ranking_model_training",
+                                "model_training",
+                                "aggregate_analytics"
+                            ]),
+                        )
+                    };
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": consent_scopes,
+                        "allowed_uses": allowed_uses,
+                    }))
+                }
+            }),
+        )
+    }
+
     /// Refuses the first POST with 401 (forcing a claim re-mint + retry) and
     /// accepts every POST after, recording every received body so the test
     /// can inspect what the *retried* request actually carried.
@@ -1523,6 +1713,105 @@ mod tests {
                 .any(|u| u == &serde_json::json!("model_training")),
             "retried envelope must not retain model_training from the stale claim: {restamped}"
         );
+    }
+
+    #[tokio::test]
+    async fn post_remint_size_overflow_is_a_structured_refusal() {
+        use std::sync::atomic::AtomicUsize;
+
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        let trajectory_path = trajectory_dir.path().join("boundary.json");
+        let base_content_len = 1_496_000usize;
+        write_test_trajectory(&trajectory_path, &"x".repeat(base_content_len));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_widens_on_remint(mint_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(
+            received.clone(),
+            post_calls.clone(),
+        ))
+        .await;
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
+        let narrow_token = ClaimToken {
+            access_token: "narrow".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec![
+                "debugging".to_string(),
+                "evaluation".to_string(),
+                "aggregate_analytics".to_string(),
+            ],
+        };
+        let wide_token = ClaimToken {
+            access_token: "wide".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: crate::consent::VALID_SCOPES
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect(),
+            allowed_uses: crate::consent::scopes_to_allowed_uses(
+                &crate::consent::VALID_SCOPES
+                    .iter()
+                    .map(|scope| scope.to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        };
+
+        let initial =
+            narrow_boundary_envelope(&trajectory_path, base_content_len, &cfg, &narrow_token).await;
+        let target_size = MAX_ENVELOPE_BYTES - 64;
+        let initial_size = envelope_size(&initial).unwrap();
+        let calibrated_len = if initial_size <= target_size {
+            base_content_len + (target_size - initial_size)
+        } else {
+            base_content_len - (initial_size - target_size)
+        };
+        let narrow =
+            narrow_boundary_envelope(&trajectory_path, calibrated_len, &cfg, &narrow_token).await;
+        let narrow_size = envelope_size(&narrow).unwrap();
+        let mut wide = narrow.clone();
+        stamp_granted_scopes(&mut wide, &cfg, &wide_token);
+        let wide_size = envelope_size(&wide).unwrap();
+        assert_eq!(narrow_size, target_size);
+        assert!(wide_size > MAX_ENVELOPE_BYTES);
+
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+        };
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        match &outcomes[0] {
+            SubmitOutcome::Refused {
+                reason_label,
+                size_bytes,
+                limit_bytes,
+                ..
+            } => {
+                assert_eq!(reason_label, "session-too-large");
+                assert!(size_bytes.unwrap() > MAX_ENVELOPE_BYTES);
+                assert_eq!(*limit_bytes, Some(MAX_ENVELOPE_BYTES));
+            }
+            other => panic!("expected structured size refusal, got {other:?}"),
+        }
+        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(post_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Records every claim-request body it receives (as raw JSON) before

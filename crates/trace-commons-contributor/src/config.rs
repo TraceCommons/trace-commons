@@ -202,12 +202,17 @@ impl ConfigStore {
         self.dir.join(NEAR_AI_NOTICE_MARKER_FILE)
     }
 
-    /// Ensure the one-time first-use NEAR AI privacy-filter notice has been
-    /// shown. Returns `true` the first time this is called for a given
-    /// state directory (the marker file did not exist and was just
-    /// created); returns `false` on every later call once the marker
-    /// already exists. Callers print the notice only when this returns
-    /// `true`.
+    /// Whether the first-use NEAR AI privacy-filter notice has already been
+    /// recorded. This read-only check lets the renderer show the disclosure
+    /// before message text leaves the machine without consuming it until the
+    /// filter has actually succeeded.
+    pub fn near_ai_notice_shown(&self) -> bool {
+        self.near_ai_notice_marker_path().exists()
+    }
+
+    /// Record that the one-time first-use NEAR AI privacy-filter notice was
+    /// shown and the filter then succeeded. Returns `true` when this call
+    /// creates the marker and `false` when it was already present.
     pub fn ensure_near_ai_notice_shown(&self) -> Result<bool> {
         let path = self.near_ai_notice_marker_path();
         if path.exists() {
