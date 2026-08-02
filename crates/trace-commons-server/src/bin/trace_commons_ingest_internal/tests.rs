@@ -4947,6 +4947,37 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
 }
 
 #[tokio::test]
+async fn submit_rate_limit_handler_honors_explicit_test_override() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, 1, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("first request reaches validation under the configured test limit");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("second request exceeds the configured test limit");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
 async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
     let _lock = submit_rate_limit_test_lock().lock().await;
     reset_account_rate_limiter_for_test();

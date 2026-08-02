@@ -13906,33 +13906,26 @@ fn submit_principal_rate_limit_key(
 // Their state builders explicitly make those shared keys unbounded; focused
 // rate-limit tests leave their unique keys unset and therefore exercise these
 // production constants through the handler.
-#[cfg(test)]
-static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::LazyLock<
+static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+> = std::sync::OnceLock::new();
 
 fn submit_rate_limits(key: &str) -> (u32, u32) {
-    let production_limits = (SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
-    #[cfg(test)]
-    {
-        let configured = match SUBMIT_RATE_LIMIT_TEST_LIMITS.lock() {
-            Ok(limits) => limits.get(key).copied(),
-            Err(poisoned) => poisoned.into_inner().get(key).copied(),
-        };
-        if let Some(configured) = configured {
-            return configured;
-        }
-    }
-    #[cfg(not(test))]
-    {
-        let _ = key;
-    }
-    production_limits
+    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+        limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+    });
+    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
 }
 
 #[cfg(test)]
 fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
-    match SUBMIT_RATE_LIMIT_TEST_LIMITS.lock() {
+    let limits = SUBMIT_RATE_LIMIT_TEST_LIMITS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    match limits.lock() {
         Ok(mut limits) => {
             limits.insert(key.to_string(), (rate, concurrency));
         }
@@ -14038,9 +14031,11 @@ impl AccountRateLimiter {
             Ok(mut concurrency) => concurrency.clear(),
             Err(poisoned) => poisoned.into_inner().clear(),
         }
-        match SUBMIT_RATE_LIMIT_TEST_LIMITS.lock() {
-            Ok(mut limits) => limits.clear(),
-            Err(poisoned) => poisoned.into_inner().clear(),
+        if let Some(limits) = SUBMIT_RATE_LIMIT_TEST_LIMITS.get() {
+            match limits.lock() {
+                Ok(mut limits) => limits.clear(),
+                Err(poisoned) => poisoned.into_inner().clear(),
+            }
         }
         configure_submit_rate_limit_pause_for_test(None);
     }
