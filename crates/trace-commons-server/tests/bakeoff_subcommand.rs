@@ -464,9 +464,17 @@ fn incremental_report_write_failure_stops_before_next_candidate() {
         "an incremental write failure must abort"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let logs = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr);
+    // `tracing` emits ANSI styling around every field name and separator, so a
+    // literal `candidate_id=<value>` never appears in captured output. Strip the
+    // escapes before matching rather than asserting on a spelling that depends
+    // on whether colour happened to be enabled for this run.
+    let logs = strip_ansi(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        stderr
+    ));
     assert!(
-        stderr.contains("BakeoffIncrementalWriteFailed"),
+        strip_ansi(&stderr).contains("BakeoffIncrementalWriteFailed"),
         "stderr must name the failed control: {stderr}"
     );
     assert!(
@@ -515,4 +523,26 @@ fn bake_off_subcommand_respects_skip_models() {
         cands[0].get("id").unwrap().as_str().unwrap(),
         "llama-3.1-8b-instruct"
     );
+}
+
+/// Remove ANSI SGR escape sequences so assertions can match the logical text
+/// `tracing` emitted rather than its styled rendering.
+fn strip_ansi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        let ch_len = input[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
 }
