@@ -910,6 +910,7 @@ async fn enroll_mint_submit_round_trip() {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         },
     )
     .await

@@ -31,7 +31,8 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::ContributorConfig;
 use crate::source::{
-    SessionEvent, SessionEventKind, SessionTranscript, session_hash, submission_id_for,
+    SessionEvent, SessionEventKind, SessionTranscript, preview_submission_id_for, session_hash,
+    submission_id_for,
 };
 
 /// Envelopes larger than this are refused before submission (label-only
@@ -88,14 +89,7 @@ pub fn build_redactor_with(
     transcript_cwd: Option<&str>,
     near_ai: Option<NearAiSettings>,
 ) -> Result<DeterministicTraceRedactor> {
-    let mut known_path_prefixes = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        known_path_prefixes.push(home.to_string_lossy().into_owned());
-    }
-    if let Some(cwd) = transcript_cwd {
-        known_path_prefixes.push(cwd.to_string());
-    }
-
+    let known_path_prefixes = known_path_prefixes(transcript_cwd);
     let redactor = DeterministicTraceRedactor::new(known_path_prefixes)
         .map_err(|_| anyhow::anyhow!("redactor-config-error"))?;
 
@@ -120,6 +114,26 @@ pub fn build_redactor_with(
         }
         Some(_) => Err(anyhow::anyhow!("unknown-pii-filter")),
     }
+}
+
+/// Build an environment-independent deterministic redactor for an
+/// unenrolled preview. This ignores both CLI/config filter selection and
+/// inherited backend variables by construction.
+pub fn build_deterministic_preview_redactor(
+    transcript_cwd: Option<&str>,
+) -> DeterministicTraceRedactor {
+    DeterministicTraceRedactor::deterministic_only(known_path_prefixes(transcript_cwd))
+}
+
+fn known_path_prefixes(transcript_cwd: Option<&str>) -> Vec<String> {
+    let mut known_path_prefixes = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        known_path_prefixes.push(home.to_string_lossy().into_owned());
+    }
+    if let Some(cwd) = transcript_cwd {
+        known_path_prefixes.push(cwd.to_string());
+    }
+    known_path_prefixes
 }
 
 /// Production entry point: thin wrapper over `build_redactor_with` that
@@ -269,6 +283,24 @@ pub fn build_raw_contribution(
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
 ) -> RawTraceContribution {
+    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash))
+}
+
+/// Build the same raw contribution shape with a disjoint preview id.
+pub fn build_preview_raw_contribution(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+) -> RawTraceContribution {
+    build_raw_contribution_with_id(t, cfg, now, preview_submission_id_for(&t.session_hash))
+}
+
+fn build_raw_contribution_with_id(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    submission_id: Uuid,
+) -> RawTraceContribution {
     let mut feature_flags = BTreeMap::new();
     feature_flags.insert("agent".to_string(), t.source.to_string());
     feature_flags.insert(
@@ -293,7 +325,7 @@ pub fn build_raw_contribution(
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
-        submission_id: submission_id_for(&t.session_hash),
+        submission_id,
         created_at: now,
         ironclaw: IronclawTraceMetadata {
             version: t

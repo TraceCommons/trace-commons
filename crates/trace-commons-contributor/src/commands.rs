@@ -28,15 +28,23 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
-const UNENROLLED_PREVIEW_NOTICE: &str =
-    "unenrolled preview: identity fields are placeholders; nothing was submitted";
+const UNENROLLED_PREVIEW_NOTICE: &str = "unenrolled preview: deterministic-only redaction; identity \
+    fields are placeholders, external privacy filters are ignored to keep pre-enrollment data \
+    offline, and nothing was submitted";
+const NEAR_AI_FIRST_USE_NOTICE: &str = "notice: this will send redacted-but-unscrubbed message text \
+    to NEAR AI under your API key (one-time notice; see `--pii-filter near-ai` in the README for \
+    scope).";
 
 // These explicit placeholders exist only so an unenrolled preview can build
 // the same local envelope shape without claiming a real contributor identity.
 const PREVIEW_ISSUER_URL: &str = "https://unenrolled-preview.invalid";
 const PREVIEW_INGEST_URL: &str = "https://unenrolled-preview.invalid";
 const PREVIEW_AUDIENCE: &str = "unenrolled-preview-placeholder";
-const PREVIEW_TENANT_ID: &str = "unenrolled-preview-placeholder";
+// Canonical tenant ids are `tenant-` plus a SHA-256 hex digest. Keeping the
+// placeholder at that exact serialized width makes the envelope size boundary
+// independent of whether enrollment has happened.
+const PREVIEW_TENANT_ID: &str =
+    "tenant-0000000000000000000000000000000000000000000000000000000000000000";
 const PREVIEW_INSTANCE_ID: &str = "unenrolled-preview-placeholder";
 const PREVIEW_USER_SUBJECT: &str = "unenrolled-preview-placeholder";
 const PREVIEW_DEVICE_KEY_ID: &str = "unenrolled-preview-placeholder";
@@ -56,6 +64,13 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         allowed_hosts: None,
     }
 }
+
+/// Signals that a JSON submit result has already been rendered to stdout.
+/// The binary uses this to return a failing exit status without appending a
+/// second JSON document.
+#[derive(Debug, thiserror::Error)]
+#[error("one or more sessions were refused or failed")]
+pub struct RenderedSubmitFailure;
 
 /// Enroll this device with an instance-signed grant, or (with no grant)
 /// print this device's key id so an instance operator can mint one.
@@ -497,8 +512,24 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         None if sel.dry_run => (unenrolled_preview_config(), true),
         None => anyhow::bail!("not logged in; run `login` first"),
     };
-    if unenrolled_preview && !sel.json {
-        println!("{UNENROLLED_PREVIEW_NOTICE}");
+
+    let selected_filter = sel.pii_filter.or(cfg.pii_filter.as_deref());
+    let near_ai_notice = !unenrolled_preview
+        && selected_filter == Some("near-ai")
+        && store
+            .ensure_near_ai_notice_shown()
+            .context("recording NEAR AI first-use notice")?;
+    let mut notices = Vec::new();
+    if unenrolled_preview {
+        notices.push(UNENROLLED_PREVIEW_NOTICE);
+    }
+    if near_ai_notice {
+        notices.push(NEAR_AI_FIRST_USE_NOTICE);
+    }
+    if !sel.json {
+        for notice in &notices {
+            println!("{notice}");
+        }
     }
 
     let since = sel.since.map(picker::parse_since).transpose()?;
@@ -552,6 +583,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
         machine_readable: sel.json,
+        unenrolled_preview,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -564,21 +596,30 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     }
 
     if sel.json {
-        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview);
+        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
         println!("{}", serde_json::to_string_pretty(&document)?);
         if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
-            anyhow::bail!("one or more sessions were refused or failed");
+            return Err(RenderedSubmitFailure.into());
         }
         return Ok(());
     }
 
+    let preview_prefix = if unenrolled_preview {
+        "unenrolled-preview "
+    } else {
+        ""
+    };
     for outcome in &outcomes {
         match outcome {
             SubmitOutcome::Submitted {
                 submission_id,
                 status,
             } => {
-                println!("submitted {submission_id} {status}");
+                if unenrolled_preview {
+                    println!("{preview_prefix}previewed {submission_id} {status}");
+                } else {
+                    println!("submitted {submission_id} {status}");
+                }
                 // "quarantined" reads as rejection to a first-time
                 // contributor. It is not: the trace was delivered and is
                 // held pending operator privacy review. Say so at the moment
@@ -597,10 +638,10 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 // Name the status it already has. "already-submitted" alone
                 // reads as a failure when it usually means the trace was
                 // accepted on an earlier run.
-                println!("already-submitted {submission_id} ({prior_status})");
+                println!("{preview_prefix}already-submitted {submission_id} ({prior_status})");
             }
             SubmitOutcome::SkippedParseFailure { reason_label } => {
-                println!("skipped ({reason_label})");
+                println!("{preview_prefix}skipped ({reason_label})");
             }
             SubmitOutcome::Refused {
                 reason_label,
@@ -610,14 +651,15 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             } => {
                 if let (Some(size), Some(limit)) = (size_bytes, limit_bytes) {
                     println!(
-                        "refused ({reason_label}) session={session_ref} size={size} limit={limit}"
+                        "{preview_prefix}refused ({reason_label}) session={session_ref} \
+                         size={size} limit={limit}"
                     );
                 } else {
-                    println!("refused ({reason_label}) session={session_ref}");
+                    println!("{preview_prefix}refused ({reason_label}) session={session_ref}");
                 }
             }
             SubmitOutcome::Failed { reason_label } => {
-                println!("failed ({reason_label})");
+                println!("{preview_prefix}failed ({reason_label})");
             }
         }
     }

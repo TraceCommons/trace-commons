@@ -17,7 +17,8 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_raw_contribution, build_redactor_with,
+    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_deterministic_preview_redactor,
+    build_preview_raw_contribution, build_raw_contribution, build_redactor_with,
     canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
     near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
     raw_contribution_size_ok, redact_to_envelope,
@@ -72,6 +73,9 @@ pub struct SubmitOptions {
     /// Suppress progress prose so stdout remains one machine-readable JSON
     /// document. Outcome data is still returned to the command renderer.
     pub machine_readable: bool,
+    /// This run has no persisted contributor config. It must remain offline,
+    /// use preview ids, and leave the contributor state directory untouched.
+    pub unenrolled_preview: bool,
 }
 
 fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
@@ -92,12 +96,20 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
     }
 }
 
-/// Whether a submit result must make the command exit non-zero. A refusal is
-/// a preview finding during dry-run, while a delivery failure remains fatal.
+/// Whether a submit result must make the command exit non-zero. Only an
+/// expected size finding is non-fatal during dry-run. Every known privacy or
+/// pipeline refusal, and every future refusal label, fails closed.
 pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
     outcomes.iter().any(|outcome| match outcome {
         SubmitOutcome::Failed { .. } => true,
-        SubmitOutcome::Refused { .. } => !dry_run,
+        SubmitOutcome::Refused { reason_label, .. } => match reason_label.as_str() {
+            "session-too-large" => !dry_run,
+            "pii-filter-unavailable"
+            | "redaction-failed"
+            | "secret-leak-detected"
+            | "scopes-not-permitted" => true,
+            _ => true,
+        },
         _ => false,
     })
 }
@@ -148,21 +160,16 @@ pub async fn submit_sessions(
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
 ) -> Result<Vec<SubmitOutcome>> {
+    if opts.unenrolled_preview && !opts.dry_run {
+        anyhow::bail!("unenrolled preview requires dry-run");
+    }
     let mut outcomes = Vec::with_capacity(sessions.len());
     let effective_cfg = effective_config(cfg, opts);
-
-    if effective_cfg.pii_filter.as_deref() == Some("near-ai")
-        && store
-            .ensure_near_ai_notice_shown()
-            .context("recording NEAR AI first-use notice")?
-    {
-        println!(
-            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
-             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
-        );
-    }
-
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = if opts.unenrolled_preview {
+        None
+    } else {
+        Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
+    };
     let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
         .context("building issuer client")?;
 
@@ -203,15 +210,19 @@ pub async fn submit_sessions(
             continue;
         }
 
-        let redactor = match build_redactor_with(
-            &effective_cfg,
-            transcript.cwd.as_deref(),
-            near_ai_settings_from_env(),
-        ) {
-            Ok(r) => r,
-            Err(_) => {
-                outcomes.push(refused("pii-filter-unavailable", &transcript.session_hash));
-                continue;
+        let redactor = if opts.unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            match build_redactor_with(
+                &effective_cfg,
+                transcript.cwd.as_deref(),
+                near_ai_settings_from_env(),
+            ) {
+                Ok(r) => r,
+                Err(_) => {
+                    outcomes.push(refused("pii-filter-unavailable", &transcript.session_hash));
+                    continue;
+                }
             }
         };
 
@@ -223,7 +234,11 @@ pub async fn submit_sessions(
         }
 
         let now = Utc::now();
-        let raw = build_raw_contribution(&transcript, &effective_cfg, now);
+        let raw = if opts.unenrolled_preview {
+            build_preview_raw_contribution(&transcript, &effective_cfg, now)
+        } else {
+            build_raw_contribution(&transcript, &effective_cfg, now)
+        };
         // Skip sessions that already exceed the envelope limit before the
         // expensive redaction/privacy-filter pass; they would be refused for
         // size after redaction anyway (envelope_size_ok below is the
@@ -258,10 +273,18 @@ pub async fn submit_sessions(
                 continue;
             }
             if !opts.machine_readable {
-                println!(
-                    "dry-run: submission_id={} bytes={size}",
-                    envelope.submission_id
-                );
+                if opts.unenrolled_preview {
+                    println!(
+                        "unenrolled-preview dry-run: preview_id={} bytes={size} \
+                         deterministic-only",
+                        envelope.submission_id
+                    );
+                } else {
+                    println!(
+                        "dry-run: submission_id={} bytes={size}",
+                        envelope.submission_id
+                    );
+                }
             }
             outcomes.push(SubmitOutcome::Submitted {
                 submission_id: envelope.submission_id,
@@ -271,7 +294,10 @@ pub async fn submit_sessions(
         }
 
         if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
-            match mint_claim(&issuer, cfg, &device, now).await {
+            let device = device
+                .as_ref()
+                .context("device identity unavailable outside unenrolled preview")?;
+            match mint_claim(&issuer, cfg, device, now).await {
                 Ok(token) => claim = Some(token),
                 Err(e) => {
                     let msg = e.to_string();
@@ -312,7 +338,9 @@ pub async fn submit_sessions(
         match upload_with_retry(
             cfg,
             &issuer,
-            &device,
+            device
+                .as_ref()
+                .context("device identity unavailable outside unenrolled preview")?,
             &mut claim,
             &mut envelope,
             &effective_cfg,
@@ -449,7 +477,9 @@ fn residual_secret_refusal(
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
 fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> ContributorConfig {
     let mut c = cfg.clone();
-    if opts.pii_filter.is_some() {
+    if opts.unenrolled_preview {
+        c.pii_filter = None;
+    } else if opts.pii_filter.is_some() {
         c.pii_filter = opts.pii_filter.clone();
     }
     c
@@ -722,76 +752,171 @@ mod tests {
         }
     }
 
-    async fn privacy_for_fixture(
+    async fn outcome_for_fixture(
         cfg: &crate::config::ContributorConfig,
+        unenrolled_preview: bool,
     ) -> trace_commons_protocol::trace_contribution::TraceContributionEnvelope {
         let root =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
         let source = crate::source::claude_code::ClaudeCodeSource::new(root);
         let session_ref = source.discover().unwrap().remove(0);
         let transcript = source.load(&session_ref).unwrap();
-        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
-        let raw = build_raw_contribution(&transcript, cfg, Utc::now());
+        let redactor = if unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = if unenrolled_preview {
+            build_preview_raw_contribution(&transcript, cfg, now)
+        } else {
+            build_raw_contribution(&transcript, cfg, now)
+        };
         redact_to_envelope(&redactor, raw).await.unwrap()
     }
 
     #[tokio::test]
-    async fn unenrolled_and_enrolled_previews_have_identical_privacy_findings() {
+    async fn unenrolled_and_enrolled_previews_have_full_outcome_parity() {
         let preview_cfg = crate::commands::unenrolled_preview_config();
-        let mut enrolled_cfg = cfg_for(
-            "https://issuer.example",
-            "https://ingest.example",
-            "sha256:enrolled",
-        );
-        enrolled_cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
+        let enrolled_cfg = crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "https://issuer.example".into(),
+            ingest_url: "https://ingest.example".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: trace_commons_protocol::onboarding::derive_user_tenant_id(
+                "instance-1",
+                "alice",
+            ),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: "sha256:enrolled".into(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
+        assert_eq!(preview_cfg.tenant_id.len(), 71);
 
-        let preview = privacy_for_fixture(&preview_cfg).await;
-        let enrolled = privacy_for_fixture(&enrolled_cfg).await;
+        let preview = outcome_for_fixture(&preview_cfg, true).await;
+        let enrolled = outcome_for_fixture(&enrolled_cfg, false).await;
 
         assert_eq!(
-            preview.privacy.residual_pii_risk, enrolled.privacy.residual_pii_risk,
-            "placeholder identity must not change predicted risk"
+            envelope_size(&preview).unwrap(),
+            envelope_size(&enrolled).unwrap(),
+            "canonical-width placeholder identity must preserve serialized size"
         );
         assert_eq!(
-            preview.privacy.redaction_counts, enrolled.privacy.redaction_counts,
-            "placeholder identity must not change redaction counts"
+            envelope_size_ok(&preview).is_ok(),
+            envelope_size_ok(&enrolled).is_ok(),
+            "placeholder identity must not change the size decision"
         );
         assert_eq!(
-            preview.privacy.pii_labels_present, enrolled.privacy.pii_labels_present,
-            "placeholder identity must not change PII labels"
+            preview.consent, enrolled.consent,
+            "consent must agree without rewriting either fixture"
         );
+        assert_eq!(
+            preview.privacy.redaction_pipeline_version,
+            enrolled.privacy.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.privacy.redaction_counts,
+            enrolled.privacy.redaction_counts
+        );
+        assert_eq!(
+            preview.privacy.privacy_filter_summary,
+            enrolled.privacy.privacy_filter_summary
+        );
+        assert_eq!(
+            preview.privacy.pii_labels_present,
+            enrolled.privacy.pii_labels_present
+        );
+        assert_eq!(
+            preview.privacy.residual_pii_risk,
+            enrolled.privacy.residual_pii_risk
+        );
+        assert_eq!(preview.privacy.warnings, enrolled.privacy.warnings);
+        // The redaction hash commits to each envelope's deliberately disjoint
+        // preview/submission id, so equality would erase the namespace fix.
+        for hash in [
+            &preview.privacy.redaction_hash,
+            &enrolled.privacy.redaction_hash,
+        ] {
+            assert!(hash.starts_with("sha256:"));
+            assert_eq!(hash.len(), 71);
+        }
+        assert_eq!(
+            preview.trace_card.consent_scope,
+            enrolled.trace_card.consent_scope
+        );
+        assert_eq!(
+            preview.trace_card.redaction_pipeline_version,
+            enrolled.trace_card.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.trace_card.source_channel,
+            enrolled.trace_card.source_channel
+        );
+        assert_eq!(
+            preview.trace_card.tool_categories,
+            enrolled.trace_card.tool_categories
+        );
+        assert_eq!(
+            preview.trace_card.allowed_uses,
+            enrolled.trace_card.allowed_uses
+        );
+        assert_eq!(
+            preview.trace_card.retention_policy,
+            enrolled.trace_card.retention_policy
+        );
+        assert!(Uuid::parse_str(&preview.trace_card.revocation_handle).is_ok());
+        assert!(Uuid::parse_str(&enrolled.trace_card.revocation_handle).is_ok());
         let residual_scanner =
-            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
-                .unwrap();
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::deterministic_only(
+                Vec::new(),
+            );
         assert_eq!(
             envelope_has_residual_secret(&residual_scanner, &preview).unwrap(),
             envelope_has_residual_secret(&residual_scanner, &enrolled).unwrap(),
             "placeholder identity must not change the residual-secret result"
         );
-        assert_eq!(
-            preview.consent.scopes,
-            vec![trace_commons_protocol::trace_contribution::ConsentScope::DebuggingEvaluation]
-        );
+        assert_eq!(preview.submission_id.get_version_num(), 8);
+        assert_eq!(enrolled.submission_id.get_version_num(), 5);
+        assert_ne!(preview.submission_id, enrolled.submission_id);
     }
 
     #[test]
-    fn dry_run_refusal_is_a_finding_but_failed_is_always_fatal() {
-        let refusal = refused("session-too-large", "sha256:test");
-        let failed = SubmitOutcome::Failed {
-            reason_label: "transport".to_string(),
-        };
-
-        assert!(!outcomes_have_failure(&[refusal], true));
+    fn only_size_refusal_is_non_fatal_in_dry_run() {
+        assert!(!outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            true
+        ));
         assert!(outcomes_have_failure(
             &[refused("session-too-large", "sha256:test")],
             false
         ));
-        assert!(outcomes_have_failure(&[failed], true));
+        for reason in [
+            "pii-filter-unavailable",
+            "redaction-failed",
+            "secret-leak-detected",
+            "scopes-not-permitted",
+            "future-refusal",
+        ] {
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], true),
+                "dry-run suppressed {reason}"
+            );
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], false),
+                "real submit suppressed {reason}"
+            );
+        }
         assert!(outcomes_have_failure(
             &[SubmitOutcome::Failed {
-                reason_label: "transport".to_string(),
+                reason_label: "transport".into(),
             }],
-            false
+            true
         ));
     }
 
@@ -839,6 +964,7 @@ mod tests {
                 pii_filter: None,
                 no_reasoning,
                 machine_readable: false,
+                unenrolled_preview: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
                 .await
@@ -891,6 +1017,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1000,6 +1127,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -1064,6 +1192,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -1074,12 +1203,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn near_ai_batch_creates_first_use_notice_marker() {
-        // No TRACE_NEAR_AI_PRIVACY_API_KEY is set in this process, so every
-        // session will be refused as pii-filter-unavailable -- but the
-        // once-per-batch first-use notice marker must still be created,
-        // since it is unconditional on effective_cfg.pii_filter and does
-        // not depend on the redactor actually building successfully.
+    async fn submit_engine_never_writes_renderer_notice_marker() {
+        // The command renderer owns the one-time notice and its marker so it
+        // can keep JSON output to one document. The submit engine returns only
+        // outcomes and must not consume presentation state itself.
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1093,11 +1220,17 @@ mod tests {
             pii_filter: Some("near-ai".to_string()),
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
-        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
-        assert!(store.dir().join("near-ai-notice-shown").exists());
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Refused { reason_label, .. }
+                if reason_label == "pii-filter-unavailable"
+        ));
+        assert!(!store.dir().join("near-ai-notice-shown").exists());
     }
 
     /// Grants strictly less than requested: config asks for
@@ -1136,6 +1269,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1190,6 +1324,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1219,6 +1354,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1248,6 +1384,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1351,6 +1488,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1489,6 +1627,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1552,6 +1691,7 @@ mod tests {
             pii_filter: None,
             no_reasoning: false,
             machine_readable: false,
+            unenrolled_preview: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1584,51 +1724,68 @@ mod tests {
 /// Every outcome is represented, including the ones `build_manifest` drops:
 /// a caller automating submission needs to know a session was refused and
 /// why, not merely that it is absent from the manifest.
-pub fn outcomes_to_json(outcomes: &[SubmitOutcome], unenrolled_preview: bool) -> serde_json::Value {
+pub fn outcomes_to_json(
+    outcomes: &[SubmitOutcome],
+    unenrolled_preview: bool,
+    notices: &[&str],
+) -> serde_json::Value {
     let entries: Vec<serde_json::Value> = outcomes
         .iter()
-        .map(|o| match o {
-            SubmitOutcome::Submitted {
-                submission_id,
-                status,
-            } => serde_json::json!({
-                "outcome": "submitted",
-                "submission_id": submission_id,
-                "status": status,
-            }),
-            SubmitOutcome::AlreadySubmitted {
-                submission_id,
-                prior_status,
-            } => serde_json::json!({
-                "outcome": "already-submitted",
-                "submission_id": submission_id,
-                "status": prior_status,
-            }),
-            SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
-                "outcome": "skipped",
-                "reason": reason_label,
-            }),
-            SubmitOutcome::Refused {
-                reason_label,
-                session_ref,
-                size_bytes,
-                limit_bytes,
-            } => serde_json::json!({
-                "outcome": "refused",
-                "reason": reason_label,
-                "session_ref": session_ref,
-                "size_bytes": size_bytes,
-                "limit_bytes": limit_bytes,
-            }),
-            SubmitOutcome::Failed { reason_label } => serde_json::json!({
-                "outcome": "failed",
-                "reason": reason_label,
-            }),
+        .map(|o| {
+            let mut entry = match o {
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } if unenrolled_preview => serde_json::json!({
+                    "outcome": "previewed",
+                    "preview_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } => serde_json::json!({
+                    "outcome": "submitted",
+                    "submission_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id,
+                    prior_status,
+                } => serde_json::json!({
+                    "outcome": "already-submitted",
+                    "submission_id": submission_id,
+                    "status": prior_status,
+                }),
+                SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
+                    "outcome": "skipped",
+                    "reason": reason_label,
+                }),
+                SubmitOutcome::Refused {
+                    reason_label,
+                    session_ref,
+                    size_bytes,
+                    limit_bytes,
+                } => serde_json::json!({
+                    "outcome": "refused",
+                    "reason": reason_label,
+                    "session_ref": session_ref,
+                    "size_bytes": size_bytes,
+                    "limit_bytes": limit_bytes,
+                }),
+                SubmitOutcome::Failed { reason_label } => serde_json::json!({
+                    "outcome": "failed",
+                    "reason": reason_label,
+                }),
+            };
+            entry["unenrolled_preview"] = serde_json::Value::Bool(unenrolled_preview);
+            entry
         })
         .collect();
     serde_json::json!({
         "schema_version": "trace_commons.submit_result.v1",
         "unenrolled_preview": unenrolled_preview,
+        "notices": notices,
         "results": entries,
     })
 }
@@ -1659,6 +1816,7 @@ mod json_output_tests {
                 },
             ],
             false,
+            &[],
         );
 
         let results = out["results"].as_array().unwrap();
@@ -1683,11 +1841,17 @@ mod json_output_tests {
         // Reason labels are fixed strings by construction. Pinning it here
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
-        let out = outcomes_to_json(&[refused_for_size("sha256:test", 1_600_000)], true);
+        let out = outcomes_to_json(
+            &[refused_for_size("sha256:test", 1_600_000)],
+            true,
+            &["preview notice"],
+        );
         let reason = out["results"][0]["reason"].as_str().unwrap();
         assert!(!reason.contains('/'), "a label must not look like a path");
         assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
         assert_eq!(out["unenrolled_preview"], true);
+        assert_eq!(out["results"][0]["unenrolled_preview"], true);
+        assert_eq!(out["notices"][0], "preview notice");
         assert_eq!(out["results"][0]["session_ref"], "sha256:test");
         assert_eq!(out["results"][0]["size_bytes"], 1_600_000);
         assert_eq!(
