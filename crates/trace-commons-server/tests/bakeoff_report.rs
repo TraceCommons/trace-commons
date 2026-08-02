@@ -371,11 +371,19 @@ fn ulp_comparison_allows_three_but_not_seven_representable_steps() {
 }
 
 #[test]
-fn persisted_baseline_flag_uses_shared_dropped_row_predicate() {
+fn report_assembly_and_winner_share_v3_candidate_eligibility() {
     let mut candidate = result("dropped", 0.9, 0.1, 0.5, 1000.0, 1e-7);
     candidate.dropped_duplicate_rows = Some(1);
-    bakeoff_report::record_baseline_dominance(&mut candidate, &baselines(0.6));
+    let baseline = baselines(0.6);
+    candidate.passed_baseline_dominance =
+        bakeoff_report::is_v3_candidate_eligible(&candidate, &baseline);
+
     assert!(!candidate.passed_baseline_dominance);
+    assert_eq!(
+        pick_winner(std::slice::from_ref(&candidate), &baseline).is_some(),
+        candidate.passed_baseline_dominance,
+        "report assembly and winner selection must call the same predicate"
+    );
 
     let mut report = fixture_report();
     report.candidates = vec![candidate];
@@ -390,11 +398,13 @@ fn persisted_baseline_flag_uses_shared_dropped_row_predicate() {
 fn persisted_v3_flag_rejects_incomplete_paraphrase_support() {
     let mut candidate = result("dropped-paraphrase", 0.9, 0.1, 0.5, 1000.0, 1e-7);
     candidate.dropped_paraphrase_rows = Some(1);
+    let baseline = baselines(0.6);
 
-    bakeoff_report::record_baseline_dominance(&mut candidate, &baselines(0.6));
+    candidate.passed_baseline_dominance =
+        bakeoff_report::is_v3_candidate_eligible(&candidate, &baseline);
 
     assert!(!candidate.passed_baseline_dominance);
-    assert!(pick_winner(std::slice::from_ref(&candidate), &baselines(0.6)).is_none());
+    assert!(pick_winner(std::slice::from_ref(&candidate), &baseline).is_none());
 }
 
 #[test]

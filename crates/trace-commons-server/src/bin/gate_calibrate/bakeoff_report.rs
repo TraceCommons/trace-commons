@@ -233,7 +233,8 @@ pub struct CandidateResult {
     /// eligibility check before relative throughput and tie-breaking:
     /// determinism, discrimination, complete novel/duplicate/paraphrase
     /// support, and dominance over the strongest no-model baseline. Persisted
-    /// explicitly so report consumers do not have to reconstruct those gates.
+    /// as audit evidence; consumers must recompute eligibility from the
+    /// counters, AUC, and report baseline rather than trust this claim alone.
     /// The historic field name is retained for report-schema compatibility.
     #[serde(default)]
     pub passed_baseline_dominance: bool,
@@ -412,19 +413,13 @@ impl CandidateResult {
 /// both winner selection and persisted report evidence. Relative throughput
 /// and tie-breaking remain in [`pick_winner`] because they depend on peers.
 #[allow(dead_code)] // called by the gate-calibrate binary; integration targets import this module independently
-pub fn passes_baseline_dominance(candidate: &CandidateResult, baselines: &BaselineResults) -> bool {
+pub fn is_v3_candidate_eligible(candidate: &CandidateResult, baselines: &BaselineResults) -> bool {
     candidate.passed_determinism_gate
         && candidate.discrimination_auc > DISCRIMINATION_FLOOR
         && candidate.dropped_novel_rows == Some(0)
         && candidate.dropped_duplicate_rows == Some(0)
         && candidate.dropped_paraphrase_rows == Some(0)
         && baselines.clears(candidate.discrimination_auc)
-}
-
-/// Persist the exact predicate used by [`pick_winner`] on a candidate row.
-#[allow(dead_code)] // called by the gate-calibrate binary
-pub fn record_baseline_dominance(candidate: &mut CandidateResult, baselines: &BaselineResults) {
-    candidate.passed_baseline_dominance = passes_baseline_dominance(candidate, baselines);
 }
 
 /// Weighted score per the spec:
@@ -443,8 +438,8 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 
 /// Apply the full decision rule and return the winner, if any.
 ///
-/// 1. Drop candidates that fail the candidate-local v3 predicate persisted in
-///    `passed_baseline_dominance`.
+/// 1. Drop candidates that fail the candidate-local v3 predicate also used to
+///    assemble `passed_baseline_dominance`.
 /// 2. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
 ///    measured over the discriminating set.
 /// 3. Compute weighted scores using `max(tail_fraction_range)` over the
@@ -461,7 +456,7 @@ pub fn pick_winner<'a>(
     // cannot rescue incomplete or non-discriminating evidence.
     let eligible: Vec<&CandidateResult> = results
         .iter()
-        .filter(|r| passes_baseline_dominance(r, baselines))
+        .filter(|r| is_v3_candidate_eligible(r, baselines))
         .collect();
     if eligible.is_empty() {
         return None;

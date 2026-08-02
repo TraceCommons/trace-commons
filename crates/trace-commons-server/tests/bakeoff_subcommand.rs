@@ -9,7 +9,9 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -436,15 +438,103 @@ fn bake_off_writes_incremental_report_after_each_candidate() {
     assert!(!tmp_path.exists(), "stray tmp file: {}", tmp_path.display());
 }
 
+#[cfg(unix)]
+#[test]
+fn start_of_run_tombstone_supersedes_complete_report_before_first_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("report.json");
+    fs::write(
+        &report_json,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "winner_id": "stale-winner",
+            "partial": false,
+            "candidates": [{"id": "stale-winner"}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // The JSON rename happens before the companion Markdown write. A FIFO with
+    // no reader therefore pauses the child after the tombstone is authoritative
+    // but before run_bakeoff can start its first candidate.
+    let report_md = report_json.with_extension("md");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&report_md)
+        .status()
+        .expect("invoke mkfifo");
+    assert!(mkfifo.success(), "mkfifo failed with {mkfifo}");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let mut child = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn bake-off");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let tombstone = loop {
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_json).unwrap())
+            .expect("authoritative report remains valid JSON");
+        if report.get("partial").and_then(|value| value.as_bool()) == Some(true) {
+            break report;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("start-of-run tombstone was not written before timeout");
+        }
+        if let Some(status) = child.try_wait().expect("poll bake-off") {
+            panic!("bake-off exited before the tombstone was observed: {status}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    child.kill().expect("kill before first candidate");
+    child.wait().expect("reap killed bake-off");
+
+    assert!(
+        tombstone
+            .get("winner_id")
+            .is_some_and(serde_json::Value::is_null),
+        "a start-of-run tombstone cannot retain the stale winner: {tombstone}"
+    );
+    assert_eq!(
+        tombstone
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "the process was killed before the first candidate write: {tombstone}"
+    );
+}
+
 #[test]
 fn incremental_report_write_failure_stops_before_next_candidate() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
     let manifest = write_two_candidate_manifest(&dir);
-    let report_json = dir.path().join("missing-parent").join("report.json");
+    let report_json = dir.path().join("report.json");
+    let report_md = report_json.with_extension("md");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&report_md)
+        .status()
+        .expect("invoke mkfifo");
+    assert!(mkfifo.success(), "mkfifo failed with {mkfifo}");
 
     let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
-    let out = Command::new(bin)
+    let mut child = Command::new(bin)
         .env("RUST_LOG", "info")
         .arg("bake-off")
         .arg("--candidates")
@@ -456,8 +546,35 @@ fn incremental_report_write_failure_stops_before_next_candidate() {
         .arg(&report_json)
         .arg("--mock-scorer")
         .arg("--determinism-repeat-runs=2")
-        .output()
-        .expect("invoke binary");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn binary");
+
+    // Pause the initial Markdown companion write, wait until the JSON
+    // tombstone is visible, then replace the JSON destination with a directory.
+    // The initial write returns after the FIFO gets a reader; the first
+    // candidate completes, and its incremental atomic rename fails.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if report_json.exists() {
+            let report: serde_json::Value =
+                serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
+            if report.get("partial").and_then(|value| value.as_bool()) == Some(true) {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("initial tombstone was not written before timeout");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    fs::rename(&report_json, dir.path().join("initial-report.json")).unwrap();
+    fs::create_dir(&report_json).unwrap();
+    let _fifo_reader = fs::File::open(&report_md).expect("unblock initial markdown write");
+    let out = child.wait_with_output().expect("wait for binary");
 
     assert!(
         !out.status.success(),

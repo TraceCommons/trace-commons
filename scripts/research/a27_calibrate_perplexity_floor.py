@@ -17,8 +17,8 @@ where:
     - p10_novel       = 10th percentile of novel-slice perplexity
     - calibration candidate = worst-of-passing in the report (AUC>0.5,
       passed_determinism_gate, and zero score-failure rate on novel;
-      decision-rule v3 also requires a report winner, baseline dominance,
-      and complete novel/duplicate/paraphrase support)
+      decision-rule v3 also requires a valid report winner, recomputed baseline
+      dominance, and complete novel/duplicate/paraphrase support)
 
 Stdlib-only. No new dependencies.
 
@@ -35,11 +35,13 @@ import argparse
 import json
 import math
 import statistics
+import struct
 import sys
 
 
 SUPPORTED_DECISION_RULE_VERSIONS = frozenset((1, 2, 3))
 U64_MAX = (1 << 64) - 1
+BASELINE_COMPARISON_ULPS = 4
 
 
 def auc_from_scores(novel, duplicate):
@@ -108,7 +110,29 @@ def is_finite_json_number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def candidate_is_eligible(candidate, version):
+def ordered_float_bits(value):
+    """Map an IEEE-754 double to monotonically ordered unsigned bits."""
+    sign_bit = 1 << 63
+    bits = struct.unpack(">Q", struct.pack(">d", value))[0]
+    return bits | sign_bit if bits & sign_bit == 0 else (~bits & U64_MAX)
+
+
+def clears_required_auc(candidate_auc, required_auc):
+    """Mirror Rust's inclusive four-ULP baseline boundary."""
+    if not is_finite_json_number(candidate_auc):
+        return False
+    if not is_finite_json_number(required_auc):
+        return False
+    return candidate_auc >= required_auc or (
+        candidate_auc < required_auc
+        and abs(
+            ordered_float_bits(candidate_auc) - ordered_float_bits(required_auc)
+        )
+        <= BASELINE_COMPARISON_ULPS
+    )
+
+
+def candidate_is_eligible(candidate, version, required_auc=None):
     """Apply the version-appropriate eligibility checks to one candidate."""
     auc = candidate.get("discrimination_auc")
     if not is_finite_json_number(auc) or auc <= 0.5:
@@ -151,7 +175,13 @@ def candidate_is_eligible(candidate, version):
             for value in dropped_rows
         ):
             return False
-        if not passed_baseline_dominance or any(value != 0 for value in dropped_rows):
+        recomputed = not any(value != 0 for value in dropped_rows) and (
+            clears_required_auc(auc, required_auc)
+        )
+        # The persisted boolean is an auditable producer claim. Treat any
+        # disagreement with the evidence-derived predicate as malformed and
+        # fail closed; it is never the authority for eligibility.
+        if passed_baseline_dominance != recomputed or not recomputed:
             return False
 
     return True
@@ -163,8 +193,8 @@ def pick_calibration_candidate(report, candidate_id=None):
        - passed_determinism_gate = true
        - have non-null per_trace_scores
        - have no null entries in the novel slice (zero score failures)
-       - under decision-rule v3, the report has a winner and the candidate
-         passed baseline dominance with no dropped decision-metric rows
+       - under decision-rule v3, the report has a valid winner and the
+         candidate's counters and AUC recompute as baseline-dominant
     """
     version = decision_rule_version(report)
     if version is None:
@@ -172,19 +202,32 @@ def pick_calibration_candidate(report, candidate_id=None):
     partial = report.get("partial", False)
     if type(partial) is not bool or partial:
         return None
-    if version == 3 and report.get("winner_id") is None:
-        return None
-
     candidates = report.get("candidates")
     if type(candidates) is not list:
         return None
+    required_auc = None
+    if version == 3:
+        winner_id = report.get("winner_id")
+        if type(winner_id) is not str or not winner_id:
+            return None
+        if not any(
+            type(candidate) is dict and candidate.get("id") == winner_id
+            for candidate in candidates
+        ):
+            return None
+        baselines = report.get("baselines")
+        if type(baselines) is not dict:
+            return None
+        required_auc = baselines.get("required_discrimination_auc")
+        if not is_finite_json_number(required_auc):
+            return None
     eligible = []
     for candidate in candidates:
         if type(candidate) is not dict:
             continue
         if candidate_id is not None and candidate.get("id") != candidate_id:
             continue
-        if candidate_is_eligible(candidate, version):
+        if candidate_is_eligible(candidate, version, required_auc):
             eligible.append(candidate)
     if not eligible:
         return None

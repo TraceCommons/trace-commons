@@ -247,7 +247,7 @@ async fn duplicate_correlated_failures_cannot_pass_baseline_dominance() {
     assert_eq!(result.dropped_duplicate_rows, Some(3));
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     assert!(baselines.clears(result.discrimination_auc));
-    assert!(!bakeoff_report::passes_baseline_dominance(
+    assert!(!bakeoff_report::is_v3_candidate_eligible(
         &result, &baselines
     ));
     assert!(bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none());
@@ -287,7 +287,8 @@ async fn paraphrase_failures_clear_neither_persisted_v3_flag_nor_winner_gate() {
     assert_eq!(result.dropped_duplicate_rows, Some(0));
     assert_eq!(result.dropped_paraphrase_rows, Some(3));
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
-    bakeoff_report::record_baseline_dominance(&mut result, &baselines);
+    result.passed_baseline_dominance =
+        bakeoff_report::is_v3_candidate_eligible(&result, &baselines);
     assert!(
         !result.passed_baseline_dominance,
         "incomplete paraphrase support must clear the persisted v3 eligibility flag"
@@ -519,7 +520,7 @@ async fn rarity_only_paraphrase_support_cannot_be_promoted_into_v3_eligibility()
         required_discrimination_auc: 0.55,
     };
     assert_eq!(result.dropped_paraphrase_rows, None);
-    assert!(!bakeoff_report::passes_baseline_dominance(
+    assert!(!bakeoff_report::is_v3_candidate_eligible(
         &result, &baselines
     ));
 }

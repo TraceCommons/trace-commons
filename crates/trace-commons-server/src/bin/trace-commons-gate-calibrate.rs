@@ -695,6 +695,14 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         }
     };
 
+    // Supersede any complete report from an earlier run before the first
+    // candidate starts. If the process is killed during candidate evaluation,
+    // consumers see this authoritative partial tombstone instead of stale
+    // results for a different corpus or rule invocation.
+    let initial_report = snapshot(&results);
+    bakeoff_report::write_report_atomic(&initial_report, &args.report_out)
+        .map_err(|e| anyhow::anyhow!("BakeoffInitialWriteFailed: {}", hash_err(&e)))?;
+
     // Shared mock scorers for the --mock-scorer path; built lazily so the
     // real-scorer arm doesn't pay for them. Constructed per-selection so
     // `--scorer perplexity` doesn't allocate a rarity mock (and vice versa).
@@ -957,7 +965,8 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 run_candidate_eval::failed_candidate_result(c, class, &e)
             }
         };
-        bakeoff_report::record_baseline_dominance(&mut candidate_result, &baselines);
+        candidate_result.passed_baseline_dominance =
+            bakeoff_report::is_v3_candidate_eligible(&candidate_result, &baselines);
 
         results.push(candidate_result);
 

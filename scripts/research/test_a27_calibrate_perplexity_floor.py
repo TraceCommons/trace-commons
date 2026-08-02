@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,10 @@ def candidate(**overrides):
     return row
 
 
+def baselines(required_discrimination_auc=0.85):
+    return {"required_discrimination_auc": required_discrimination_auc}
+
+
 def run_cli(report, *args):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as report_file:
         json.dump(report, report_file)
@@ -44,6 +49,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         report = {
             "decision_rule_version": 3,
             "winner_id": None,
+            "baselines": baselines(),
             "candidates": [candidate()],
         }
 
@@ -53,6 +59,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         report = {
             "decision_rule_version": 3,
             "winner_id": "eligible",
+            "baselines": baselines(),
             "candidates": [
                 candidate(id="failed-baseline", passed_baseline_dominance=False),
                 candidate(id="dropped-novel", dropped_novel_rows=1),
@@ -77,6 +84,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
                 report = {
                     "decision_rule_version": 3,
                     "winner_id": "candidate",
+                    "baselines": baselines(),
                     "candidates": [row],
                 }
 
@@ -89,6 +97,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
                 report = {
                     "decision_rule_version": version,
                     "winner_id": "candidate",
+                    "baselines": baselines(),
                     "candidates": [candidate()],
                 }
                 self.assertIsNone(calibration.pick_calibration_candidate(report))
@@ -105,6 +114,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         report = {
             "decision_rule_version": 4,
             "winner_id": "candidate",
+            "baselines": baselines(),
             "candidates": [candidate()],
         }
 
@@ -114,6 +124,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         report = {
             "decision_rule_version": None,
             "winner_id": "candidate",
+            "baselines": baselines(),
             "candidates": [candidate()],
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as report_file:
@@ -142,6 +153,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         report = {
             "decision_rule_version": 3,
             "winner_id": "coerced",
+            "baselines": baselines(),
             "candidates": [{
                 "id": "coerced",
                 "discrimination_auc": 0.9,
@@ -194,6 +206,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
             "decision_rule_version": 3,
             "winner_id": None,
             "partial": False,
+            "baselines": baselines(),
             "candidates": [candidate(passed_baseline_dominance=False)],
         }
 
@@ -211,6 +224,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
                 "decision_rule_version": 3,
                 "winner_id": "candidate",
                 "partial": False,
+                "baselines": baselines(),
                 "candidates": [candidate()],
             }
 
@@ -269,6 +283,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
                     "decision_rule_version": version,
                     "winner_id": "candidate" if version == 3 else None,
                     "partial": True,
+                    "baselines": baselines(),
                     "candidates": [candidate()],
                 }
                 completed = run_cli(report)
@@ -286,6 +301,7 @@ class PickCalibrationCandidateTests(unittest.TestCase):
             "decision_rule_version": 3,
             "winner_id": "candidate",
             "partial": False,
+            "baselines": baselines(),
             "candidates": [candidate()],
         }
 
@@ -295,6 +311,80 @@ class PickCalibrationCandidateTests(unittest.TestCase):
         self.assertIn(
             "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=", completed.stdout
         )
+
+    def test_v3_recomputes_baseline_dominance_instead_of_trusting_flag(self):
+        report = {
+            "decision_rule_version": 3,
+            "winner_id": "forged",
+            "partial": False,
+            "baselines": baselines(0.95),
+            "candidates": [
+                candidate(
+                    id="forged",
+                    discrimination_auc=0.9,
+                    passed_baseline_dominance=True,
+                )
+            ],
+        }
+
+        completed = run_cli(report)
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("error: no eligible calibration candidate", completed.stderr)
+        self.assertNotIn(
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=", completed.stdout
+        )
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_v3_baseline_recomputation_matches_four_ulp_boundary(self):
+        required = 0.9
+        within = required
+        for _ in range(4):
+            within = math.nextafter(within, -math.inf)
+        outside = math.nextafter(within, -math.inf)
+
+        within_report = {
+            "decision_rule_version": 3,
+            "winner_id": "within",
+            "partial": False,
+            "baselines": baselines(required),
+            "candidates": [candidate(id="within", discrimination_auc=within)],
+        }
+        outside_report = {
+            "decision_rule_version": 3,
+            "winner_id": "outside",
+            "partial": False,
+            "baselines": baselines(required),
+            "candidates": [candidate(id="outside", discrimination_auc=outside)],
+        }
+
+        self.assertEqual(
+            calibration.pick_calibration_candidate(within_report)["id"], "within"
+        )
+        self.assertIsNone(calibration.pick_calibration_candidate(outside_report))
+
+    def test_v3_winner_id_must_be_a_string_naming_a_report_candidate(self):
+        for winner_id in ("", 0, True, "does-not-exist"):
+            with self.subTest(winner_id=winner_id):
+                report = {
+                    "decision_rule_version": 3,
+                    "winner_id": winner_id,
+                    "partial": False,
+                    "baselines": baselines(),
+                    "candidates": [candidate()],
+                }
+
+                completed = run_cli(report)
+
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn(
+                    "error: no eligible calibration candidate", completed.stderr
+                )
+                self.assertNotIn(
+                    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=",
+                    completed.stdout,
+                )
+                self.assertNotIn("Traceback", completed.stderr)
 
 
 if __name__ == "__main__":
