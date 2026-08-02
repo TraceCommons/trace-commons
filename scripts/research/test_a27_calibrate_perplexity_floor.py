@@ -27,6 +27,18 @@ def candidate(**overrides):
     return row
 
 
+def run_cli(report, *args):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as report_file:
+        json.dump(report, report_file)
+        report_file.flush()
+        return subprocess.run(
+            [sys.executable, calibration.__file__, report_file.name, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
 class PickCalibrationCandidateTests(unittest.TestCase):
     def test_v3_report_without_winner_rejects_all_candidates(self):
         report = {
@@ -176,6 +188,113 @@ class PickCalibrationCandidateTests(unittest.TestCase):
                 }
                 selected = calibration.pick_calibration_candidate(report)
                 self.assertEqual(selected["id"], "candidate")
+
+    def test_explicit_candidate_cannot_bypass_v3_eligibility(self):
+        report = {
+            "decision_rule_version": 3,
+            "winner_id": None,
+            "partial": False,
+            "candidates": [candidate(passed_baseline_dominance=False)],
+        }
+
+        completed = run_cli(report, "--candidate", "candidate")
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("candidate 'candidate' is not eligible", completed.stderr)
+        self.assertNotIn(
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=", completed.stdout
+        )
+
+    def test_full_boolean_and_numeric_field_set_requires_exact_json_types(self):
+        def complete_report():
+            return {
+                "decision_rule_version": 3,
+                "winner_id": "candidate",
+                "partial": False,
+                "candidates": [candidate()],
+            }
+
+        malformed = [
+            ("decision_rule_version_bool", ("decision_rule_version",), True),
+            ("decision_rule_version_float", ("decision_rule_version",), 3.0),
+            ("decision_rule_version_string", ("decision_rule_version",), "3"),
+            ("partial", ("partial",), "false"),
+            ("discrimination_auc", ("candidates", 0, "discrimination_auc"), True),
+            (
+                "passed_determinism_gate",
+                ("candidates", 0, "passed_determinism_gate"),
+                "false",
+            ),
+            (
+                "passed_baseline_dominance",
+                ("candidates", 0, "passed_baseline_dominance"),
+                1,
+            ),
+            ("dropped_novel_rows", ("candidates", 0, "dropped_novel_rows"), False),
+            (
+                "dropped_duplicate_rows",
+                ("candidates", 0, "dropped_duplicate_rows"),
+                0.0,
+            ),
+            (
+                "dropped_paraphrase_rows",
+                ("candidates", 0, "dropped_paraphrase_rows"),
+                "0",
+            ),
+            (
+                "novel_score",
+                ("candidates", 0, "per_trace_scores", "novel", 0),
+                True,
+            ),
+            (
+                "duplicate_score",
+                ("candidates", 0, "per_trace_scores", "duplicate", 0),
+                "1.0",
+            ),
+        ]
+
+        for field, path, value in malformed:
+            with self.subTest(field=field):
+                report = complete_report()
+                target = report
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.assertIsNone(calibration.pick_calibration_candidate(report))
+
+    def test_partial_report_is_rejected_for_every_supported_version(self):
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                report = {
+                    "decision_rule_version": version,
+                    "winner_id": "candidate" if version == 3 else None,
+                    "partial": True,
+                    "candidates": [candidate()],
+                }
+                completed = run_cli(report)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn(
+                    "error: no eligible calibration candidate", completed.stderr
+                )
+                self.assertNotIn(
+                    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=",
+                    completed.stdout,
+                )
+
+    def test_well_formed_complete_v3_report_emits_floor(self):
+        report = {
+            "decision_rule_version": 3,
+            "winner_id": "candidate",
+            "partial": False,
+            "candidates": [candidate()],
+        }
+
+        completed = run_cli(report)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=", completed.stdout
+        )
 
 
 if __name__ == "__main__":

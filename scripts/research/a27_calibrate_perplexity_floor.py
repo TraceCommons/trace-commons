@@ -27,7 +27,7 @@ Usage:
 
 Optional args:
     --headroom 0.5    Headroom multiplier (default 0.5)
-    --candidate ID    Force a specific candidate by id instead of
+    --candidate ID    Select a specific eligible candidate by id instead of
                       auto-picking worst-of-passing
 """
 
@@ -103,7 +103,61 @@ def decision_rule_version(report):
     return version
 
 
-def pick_calibration_candidate(report):
+def is_finite_json_number(value):
+    """Accept JSON integers/floats, excluding bool and non-finite extensions."""
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def candidate_is_eligible(candidate, version):
+    """Apply the version-appropriate eligibility checks to one candidate."""
+    auc = candidate.get("discrimination_auc")
+    if not is_finite_json_number(auc) or auc <= 0.5:
+        return False
+
+    passed_determinism_gate = candidate.get("passed_determinism_gate")
+    if type(passed_determinism_gate) is not bool or not passed_determinism_gate:
+        return False
+
+    scores = candidate.get("per_trace_scores")
+    if type(scores) is not dict:
+        return False
+    novel = scores.get("novel")
+    duplicate = scores.get("duplicate")
+    if type(novel) is not list or not novel:
+        return False
+    if type(duplicate) is not list or not duplicate:
+        return False
+    if any(not is_finite_json_number(value) for value in novel):
+        return False
+    if any(
+        value is not None and not is_finite_json_number(value)
+        for value in duplicate
+    ):
+        return False
+    if not any(value is not None for value in duplicate):
+        return False
+
+    if version == 3:
+        passed_baseline_dominance = candidate.get("passed_baseline_dominance")
+        dropped_rows = (
+            candidate.get("dropped_novel_rows"),
+            candidate.get("dropped_duplicate_rows"),
+            candidate.get("dropped_paraphrase_rows"),
+        )
+        if type(passed_baseline_dominance) is not bool:
+            return False
+        if any(
+            type(value) is not int or value < 0 or value > U64_MAX
+            for value in dropped_rows
+        ):
+            return False
+        if not passed_baseline_dominance or any(value != 0 for value in dropped_rows):
+            return False
+
+    return True
+
+
+def pick_calibration_candidate(report, candidate_id=None):
     """Worst-of-passing: lowest AUC among candidates that:
        - AUC > 0.5
        - passed_determinism_gate = true
@@ -115,40 +169,23 @@ def pick_calibration_candidate(report):
     version = decision_rule_version(report)
     if version is None:
         return None
+    partial = report.get("partial", False)
+    if type(partial) is not bool or partial:
+        return None
     if version == 3 and report.get("winner_id") is None:
         return None
 
+    candidates = report.get("candidates")
+    if type(candidates) is not list:
+        return None
     eligible = []
-    for c in report["candidates"]:
-        if c.get("discrimination_auc", 0) <= 0.5:
+    for candidate in candidates:
+        if type(candidate) is not dict:
             continue
-        if not c.get("passed_determinism_gate"):
+        if candidate_id is not None and candidate.get("id") != candidate_id:
             continue
-        scores = c.get("per_trace_scores")
-        if not scores:
-            continue
-        novel = scores.get("novel") or []
-        if not novel or any(v is None for v in novel):
-            continue
-        if version == 3:
-            passed_baseline_dominance = c.get("passed_baseline_dominance")
-            dropped_rows = (
-                c.get("dropped_novel_rows"),
-                c.get("dropped_duplicate_rows"),
-                c.get("dropped_paraphrase_rows"),
-            )
-            if type(passed_baseline_dominance) is not bool:
-                continue
-            if any(
-                type(value) is not int or value < 0 or value > U64_MAX
-                for value in dropped_rows
-            ):
-                continue
-            if not passed_baseline_dominance:
-                continue
-            if any(value != 0 for value in dropped_rows):
-                continue
-        eligible.append(c)
+        if candidate_is_eligible(candidate, version):
+            eligible.append(candidate)
     if not eligible:
         return None
     eligible.sort(key=lambda c: c["discrimination_auc"])
@@ -161,7 +198,7 @@ def main():
     ap.add_argument("--headroom", type=float, default=0.5,
                     help="headroom multiplier (default 0.5)")
     ap.add_argument("--candidate", default=None,
-                    help="force a specific candidate by id")
+                    help="select a specific eligible candidate by id")
     args = ap.parse_args()
 
     with open(args.report) as f:
@@ -172,18 +209,29 @@ def main():
         sys.exit(2)
 
     if args.candidate:
-        target = next((c for c in report["candidates"]
-                      if c["id"] == args.candidate), None)
-        if not target:
+        candidates = report.get("candidates")
+        exists = type(candidates) is list and any(
+            type(candidate) is dict and candidate.get("id") == args.candidate
+            for candidate in candidates
+        )
+        if not exists:
             print(f"error: candidate '{args.candidate}' not in report",
                   file=sys.stderr)
+            sys.exit(2)
+        # Explicit selection chooses among eligible candidates. This command
+        # emits a deployable floor, so selecting an id is not an eligibility
+        # override and has no force mode.
+        target = pick_calibration_candidate(report, args.candidate)
+        if not target:
+            print(f"error: candidate '{args.candidate}' is not eligible for "
+                  "calibration", file=sys.stderr)
             sys.exit(2)
     else:
         target = pick_calibration_candidate(report)
         if not target:
             print("error: no eligible calibration candidate "
-                  "(need AUC>0.5, passed_det_gate, "
-                  "per_trace_scores, no nulls in novel slice)",
+                  "(need a complete report and version-appropriate "
+                  "candidate evidence)",
                   file=sys.stderr)
             sys.exit(2)
 

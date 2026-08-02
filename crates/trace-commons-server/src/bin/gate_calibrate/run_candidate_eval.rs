@@ -501,11 +501,9 @@ pub async fn run_candidate_eval(
             }
         }
     }
-    let dropped_paraphrase_rows = if scorers.perplexity.is_some() {
-        corpus.paraphrase.len() as u64 - para_pairs.len() as u64
-    } else {
-        0
-    };
+    let dropped_paraphrase_rows = scorers
+        .perplexity
+        .map(|_| corpus.paraphrase.len() as u64 - para_pairs.len() as u64);
 
     tracing::info!(
         candidate_id = %candidate.id,
@@ -526,7 +524,11 @@ pub async fn run_candidate_eval(
             return Err(CandidateEvalAborted {
                 dropped_novel_rows,
                 dropped_duplicate_rows,
-                dropped_paraphrase_rows,
+                // A scorer-less paraphrase slice was not evaluated. The
+                // aborted row is already ineligible; count the whole slice as
+                // dropped rather than presenting absence as complete support.
+                dropped_paraphrase_rows: dropped_paraphrase_rows
+                    .unwrap_or(corpus.paraphrase.len() as u64),
                 failure_rate,
                 threshold: FAILURE_RATE_ABORT,
             }
@@ -538,9 +540,9 @@ pub async fn run_candidate_eval(
     // Perplexity-derived metrics populate the legacy `CandidateResult`
     // fields. When perplexity is absent (rarity-only mode), AUC is 0.5 (the
     // empty-input convention) and tail / paraphrase collapse to 0. The
-    // decision rule already requires `passed_determinism_gate = true` to
-    // pick a winner, so a rarity-only run cannot accidentally elect one
-    // through these zeroed fields.
+    // decision rule requires AUC above chance and evidenced paraphrase
+    // support, so a rarity-only run cannot accidentally elect one through
+    // these empty legacy fields.
     let auc = discrimination_auc(&novel_perp, &dup_perp);
     let para_delta = paraphrase_delta(&para_pairs);
     let tail_range = tail_fraction_range(&novel_tail, &dup_tail);
@@ -697,7 +699,10 @@ pub async fn run_candidate_eval(
         passed_baseline_dominance: false,
         dropped_novel_rows: Some(dropped_novel_rows),
         dropped_duplicate_rows: Some(dropped_duplicate_rows),
-        dropped_paraphrase_rows: Some(dropped_paraphrase_rows),
+        // `None` means the selected scorer mode never evaluated paraphrases.
+        // Winner eligibility requires `Some(0)`, so rarity-only evidence
+        // cannot masquerade as complete paraphrase support.
+        dropped_paraphrase_rows,
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

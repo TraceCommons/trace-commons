@@ -229,9 +229,12 @@ pub struct CandidateResult {
     pub license: License,
     pub params_b: u32,
     pub passed_determinism_gate: bool,
-    /// Whether this candidate exceeded the corpus's strongest no-model
-    /// baseline by [`BASELINE_DOMINANCE_MARGIN`]. Persisted explicitly so
-    /// report consumers do not have to reconstruct decision-rule v3.
+    /// Whether this candidate passed every candidate-local decision-rule-v3
+    /// eligibility check before relative throughput and tie-breaking:
+    /// determinism, discrimination, complete novel/duplicate/paraphrase
+    /// support, and dominance over the strongest no-model baseline. Persisted
+    /// explicitly so report consumers do not have to reconstruct those gates.
+    /// The historic field name is retained for report-schema compatibility.
     #[serde(default)]
     pub passed_baseline_dominance: bool,
     /// Novel rows omitted from this candidate's discrimination AUC after a
@@ -405,12 +408,16 @@ impl CandidateResult {
     }
 }
 
-/// Evaluate the corpus-level baseline stage once for both winner selection
-/// and persisted report evidence.
+/// Evaluate every candidate-local decision-rule-v3 eligibility check once for
+/// both winner selection and persisted report evidence. Relative throughput
+/// and tie-breaking remain in [`pick_winner`] because they depend on peers.
 #[allow(dead_code)] // called by the gate-calibrate binary; integration targets import this module independently
 pub fn passes_baseline_dominance(candidate: &CandidateResult, baselines: &BaselineResults) -> bool {
-    candidate.dropped_novel_rows == Some(0)
+    candidate.passed_determinism_gate
+        && candidate.discrimination_auc > DISCRIMINATION_FLOOR
+        && candidate.dropped_novel_rows == Some(0)
         && candidate.dropped_duplicate_rows == Some(0)
+        && candidate.dropped_paraphrase_rows == Some(0)
         && baselines.clears(candidate.discrimination_auc)
 }
 
@@ -436,72 +443,37 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 
 /// Apply the full decision rule and return the winner, if any.
 ///
-/// 1. Drop candidates that failed the determinism gate.
-/// 2. Drop candidates at or below `DISCRIMINATION_FLOOR` AUC.
-/// 3. Drop candidates that do not beat the strongest no-model baseline by
-///    [`BASELINE_DOMINANCE_MARGIN`].
-/// 4. Drop candidates with incomplete paraphrase support.
-/// 5. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
+/// 1. Drop candidates that fail the candidate-local v3 predicate persisted in
+///    `passed_baseline_dominance`.
+/// 2. Drop candidates slower than `THROUGHPUT_FLOOR_RATIO * fastest_throughput`,
 ///    measured over the discriminating set.
-/// 6. Compute weighted scores using `max(tail_fraction_range)` over the
+/// 3. Compute weighted scores using `max(tail_fraction_range)` over the
 ///    in-budget set as the normalizer.
-/// 7. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
-/// 8. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
+/// 4. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
+/// 5. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
 #[allow(dead_code)] // called by the gate-calibrate binary; not reached from the test target
 pub fn pick_winner<'a>(
     results: &'a [CandidateResult],
     baselines: &BaselineResults,
 ) -> Option<&'a CandidateResult> {
-    // Step 1: determinism gate.
-    let gated: Vec<&CandidateResult> = results
+    // Step 1: the shared predicate covers every candidate-local v3 gate.
+    // It precedes throughput so speed, licensing, model size, and recency
+    // cannot rescue incomplete or non-discriminating evidence.
+    let eligible: Vec<&CandidateResult> = results
         .iter()
-        .filter(|r| r.passed_determinism_gate)
-        .collect();
-    if gated.is_empty() {
-        return None;
-    }
-
-    // Step 2: discrimination floor. A metric at or below chance is unusable
-    // regardless of speed, and must not be allowed to displace a candidate
-    // that actually discriminates. Runs before the throughput floor so a fast
-    // sub-chance candidate cannot set the floor that eliminates a slower
-    // discriminating one.
-    let discriminating: Vec<&CandidateResult> = gated
-        .into_iter()
-        .filter(|r| r.discrimination_auc > DISCRIMINATION_FLOOR)
-        .collect();
-    if discriminating.is_empty() {
-        return None;
-    }
-
-    // Step 3: baseline-dominance floor. This precedes throughput so speed,
-    // licensing, model size, and recency cannot rescue a candidate that adds
-    // no material discrimination over a cheap structural measure.
-    let baseline_dominating: Vec<&CandidateResult> = discriminating
-        .into_iter()
         .filter(|r| passes_baseline_dominance(r, baselines))
         .collect();
-    if baseline_dominating.is_empty() {
+    if eligible.is_empty() {
         return None;
     }
 
-    // Step 4: require complete paraphrase support before a metric derived
-    // from paraphrase pairs can contribute to weighted scoring.
-    let paraphrase_complete: Vec<&CandidateResult> = baseline_dominating
-        .into_iter()
-        .filter(|r| r.dropped_paraphrase_rows == Some(0))
-        .collect();
-    if paraphrase_complete.is_empty() {
-        return None;
-    }
-
-    // Step 5: throughput floor.
-    let fastest = paraphrase_complete
+    // Step 2: throughput floor.
+    let fastest = eligible
         .iter()
         .map(|r| r.throughput_tps)
         .fold(f64::NEG_INFINITY, f64::max);
     let floor = THROUGHPUT_FLOOR_RATIO * fastest;
-    let in_budget: Vec<&CandidateResult> = paraphrase_complete
+    let in_budget: Vec<&CandidateResult> = eligible
         .into_iter()
         .filter(|r| r.throughput_tps >= floor)
         .collect();
@@ -509,7 +481,7 @@ pub fn pick_winner<'a>(
         return None;
     }
 
-    // Step 6: normalize tail term using in-budget max.
+    // Step 3: normalize tail term using in-budget max.
     let tail_norm_max = in_budget
         .iter()
         .map(|r| r.tail_fraction_range)
@@ -520,7 +492,7 @@ pub fn pick_winner<'a>(
         .map(|r| (*r, weighted_score(r, tail_norm_max)))
         .collect();
 
-    // Step 7: contenders within tolerance band of top score.
+    // Step 4: contenders within tolerance band of top score.
     let top_score = scored
         .iter()
         .map(|(_, s)| *s)
@@ -529,7 +501,7 @@ pub fn pick_winner<'a>(
     let mut contenders: Vec<&(&CandidateResult, f64)> =
         scored.iter().filter(|(_, s)| *s >= threshold).collect();
 
-    // Step 8: sort by license DESC, params_b ASC, release_date DESC.
+    // Step 5: sort by license DESC, params_b ASC, release_date DESC.
     contenders.sort_by(|a, b| {
         let lp_a = a.0.license.permissiveness();
         let lp_b = b.0.license.permissiveness();

@@ -437,6 +437,49 @@ fn bake_off_writes_incremental_report_after_each_candidate() {
 }
 
 #[test]
+fn incremental_report_write_failure_stops_before_next_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("missing-parent").join("report.json");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let out = Command::new(bin)
+        .env("RUST_LOG", "info")
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .output()
+        .expect("invoke binary");
+
+    assert!(
+        !out.status.success(),
+        "an incremental write failure must abort"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let logs = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr);
+    assert!(
+        stderr.contains("BakeoffIncrementalWriteFailed"),
+        "stderr must name the failed control: {stderr}"
+    );
+    assert!(
+        logs.contains("candidate_id=llama-3.1-8b-instruct"),
+        "the first candidate must complete before the write fails: {logs}"
+    );
+    assert!(
+        !logs.contains("candidate_id=qwen-2.5-7b"),
+        "the second candidate must not run after an authoritative write failure: {logs}"
+    );
+}
+
+#[test]
 fn bake_off_subcommand_respects_skip_models() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = build_synthetic_corpus(&dir, 4, 4, 4);

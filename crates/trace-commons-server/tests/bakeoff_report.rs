@@ -387,6 +387,17 @@ fn persisted_baseline_flag_uses_shared_dropped_row_predicate() {
 }
 
 #[test]
+fn persisted_v3_flag_rejects_incomplete_paraphrase_support() {
+    let mut candidate = result("dropped-paraphrase", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    candidate.dropped_paraphrase_rows = Some(1);
+
+    bakeoff_report::record_baseline_dominance(&mut candidate, &baselines(0.6));
+
+    assert!(!candidate.passed_baseline_dominance);
+    assert!(pick_winner(std::slice::from_ref(&candidate), &baselines(0.6)).is_none());
+}
+
+#[test]
 fn failed_candidate_with_load_error_is_excluded_from_winner() {
     // A candidate row produced by the new failure path:
     // load_or_eval_error = Some(_), passed_determinism_gate = false,

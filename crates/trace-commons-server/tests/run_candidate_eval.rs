@@ -254,10 +254,9 @@ async fn duplicate_correlated_failures_cannot_pass_baseline_dominance() {
 }
 
 #[tokio::test]
-async fn paraphrase_failures_preserve_baseline_evidence_but_block_weighted_selection() {
-    // Policy test: paraphrase support belongs to the weighted-score stage,
-    // while baseline dominance continues to describe only novel/duplicate
-    // common support.
+async fn paraphrase_failures_clear_neither_persisted_v3_flag_nor_winner_gate() {
+    // The persisted flag is the candidate-local v3 eligibility predicate,
+    // including paraphrase support, and must agree with winner selection.
     let mut paraphrase = vec![
         ParaphrasePair {
             original: "P".to_string(),
@@ -274,7 +273,7 @@ async fn paraphrase_failures_preserve_baseline_evidence_but_block_weighted_selec
         paraphrase,
     };
 
-    let result = run_candidate_eval(
+    let mut result = run_candidate_eval(
         EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
         &synth_candidate(),
         &corpus,
@@ -288,9 +287,10 @@ async fn paraphrase_failures_preserve_baseline_evidence_but_block_weighted_selec
     assert_eq!(result.dropped_duplicate_rows, Some(0));
     assert_eq!(result.dropped_paraphrase_rows, Some(3));
     let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    bakeoff_report::record_baseline_dominance(&mut result, &baselines);
     assert!(
-        bakeoff_report::passes_baseline_dominance(&result, &baselines),
-        "paraphrase failures must not alter novel/duplicate baseline evidence"
+        !result.passed_baseline_dominance,
+        "incomplete paraphrase support must clear the persisted v3 eligibility flag"
     );
     assert!(
         bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none(),
@@ -468,6 +468,10 @@ async fn token_rarity_only_populates_metrics_block_and_zeroes_legacy_auc() {
     assert!((result.discrimination_auc - 0.5).abs() < 1e-12);
     assert_eq!(result.paraphrase_delta, 0.0);
     assert_eq!(result.tail_fraction_range, 0.0);
+    assert_eq!(
+        result.dropped_paraphrase_rows, None,
+        "a skipped paraphrase slice must remain not evidenced"
+    );
 
     // The new metrics block exists, the perplexity sub-field is absent, and
     // the rarity sub-field carries the K we asked for.
@@ -485,6 +489,39 @@ async fn token_rarity_only_populates_metrics_block_and_zeroes_legacy_auc() {
     assert_eq!(rarity_block.duplicate_scores.len(), corpus.duplicate.len());
     assert!(rarity_block.discrimination_auc.is_finite());
     assert!((0.0..=1.0).contains(&rarity_block.discrimination_auc));
+}
+
+#[tokio::test]
+async fn rarity_only_paraphrase_support_cannot_be_promoted_into_v3_eligibility() {
+    let rarity = MockTokenRarityScorer::new();
+    let corpus = synth_corpus();
+    let mut result = run_candidate_eval(
+        EvalScorers {
+            perplexity: None,
+            token_rarity: Some(&rarity),
+            token_rarity_k: 10,
+        },
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("rarity-only eval must succeed");
+
+    // Simulate the planned promotion of rarity AUC into the decision column.
+    // Missing paraphrase evidence must remain independently disqualifying.
+    result.discrimination_auc = 0.9;
+    let baselines = bakeoff_report::BaselineResults {
+        measures: Vec::new(),
+        strongest_name: None,
+        strongest_auc: 0.5,
+        required_discrimination_auc: 0.55,
+    };
+    assert_eq!(result.dropped_paraphrase_rows, None);
+    assert!(!bakeoff_report::passes_baseline_dominance(
+        &result, &baselines
+    ));
 }
 
 #[tokio::test]

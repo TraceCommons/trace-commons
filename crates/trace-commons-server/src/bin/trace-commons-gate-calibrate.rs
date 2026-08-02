@@ -965,13 +965,10 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         // Atomic-rename so a process kill mid-write cannot leave a half-
         // written report.json on disk.
         let partial_report = snapshot(&results);
-        if let Err(e) = bakeoff_report::write_report_atomic(&partial_report, &args.report_out) {
-            tracing::warn!(
-                err = %hash_err(&e),
-                error_class = "BakeoffIncrementalWriteFailed",
-                "incremental report write failed; continuing"
-            );
-        }
+        // Fail the run immediately. Continuing could leave a stale complete
+        // report from an earlier run at this authoritative path.
+        bakeoff_report::write_report_atomic(&partial_report, &args.report_out)
+            .map_err(|e| anyhow::anyhow!("BakeoffIncrementalWriteFailed: {}", hash_err(&e)))?;
     }
 
     // Final write: compute winner and flip partial=false. `pick_winner`
