@@ -440,6 +440,9 @@ pub struct SubmitSelection<'a> {
     pub json: bool,
     /// Drop model reasoning from this run. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Re-submit corrected envelopes for locally-known quarantined sessions
+    /// under the same submission_id (server supersedes; see #214).
+    pub remediate_quarantined: bool,
 }
 
 /// Drop reasoning events before envelope construction. Reasoning is captured
@@ -517,6 +520,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
+        remediate_quarantined: sel.remediate_quarantined,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -842,6 +846,7 @@ mod project_filter_tests {
             trajectory: None,
             json: false,
             no_reasoning: false,
+            remediate_quarantined: false,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");

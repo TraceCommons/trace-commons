@@ -4886,6 +4886,147 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
 }
 
 #[tokio::test]
+async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id() {
+    // #214: same content-addressed submission_id; owned quarantined rows are
+    // remediable. Fresh ids for the same session are deliberately not minted.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut first);
+    // Force Medium via consent flags so the first landing is quarantined.
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    let Json(first_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(first.clone()),
+    )
+    .await
+    .expect("first submission quarantines");
+    assert_eq!(first_receipt.status, "quarantined");
+    let prior = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let prior_received_at = prior.received_at;
+
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    // Keep the same submission_id — remediation supersedes in place.
+    assert_eq!(corrected.submission_id, first.submission_id);
+
+    let Json(remediated) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(corrected.clone()),
+    )
+    .await
+    .expect("owned quarantined remediation supersedes");
+    assert_eq!(remediated.status, "accepted");
+
+    let record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.privacy_risk, ResidualPiiRisk::Low);
+    assert_eq!(
+        record.received_at, prior_received_at,
+        "remediation must preserve the original receipt timestamp"
+    );
+    assert_eq!(record.auth_principal_ref, prior.auth_principal_ref);
+
+    // Without ownership, another principal still gets the conflict.
+    let blocked = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a-2"),
+        Json(corrected),
+    )
+    .await
+    .expect_err("other principal cannot remediate");
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+
+    // Accepted rows stay classic-idempotent: a further POST returns the
+    // stored receipt without rewriting.
+    let mut again = sample_envelope().await;
+    again.submission_id = first.submission_id;
+    make_metadata_only_low_risk(&mut again);
+    again.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
+        .await
+        .expect("accepted remains idempotent");
+    assert_eq!(idempotent.status, "accepted");
+    let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        final_record.privacy_risk,
+        ResidualPiiRisk::Low,
+        "idempotent retry must not rewrite an accepted record"
+    );
+}
+
+#[tokio::test]
+async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    // Path-bearing content → Medium → quarantined under default pilot config.
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("medium-risk submission quarantines");
+    assert_eq!(receipt.status, "quarantined");
+
+    // Flip the pilot override after the row is stuck, then operator-rescrub
+    // so the same stored envelope reclassifies under current rules.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let Json(result) = review_quarantine_rescrub_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest {
+            reason: Some("pilot backlog reclassify".into()),
+        }),
+    )
+    .await
+    .expect("operator rescrub succeeds");
+    assert_eq!(result.submission_id, envelope.submission_id);
+    assert_eq!(result.prior_status, "quarantined");
+    assert!(result.changed);
+    assert_eq!(result.status, "accepted");
+    assert_eq!(result.privacy_risk, "medium");
+
+    let updated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(updated.status, TraceCorpusStatus::Accepted);
+    assert_eq!(updated.privacy_risk, ResidualPiiRisk::Medium);
+
+    // Dry-run batch leaves the record untouched when already accepted... but
+    // accepted rows are skipped by the quarantined filter. Confirm contributor
+    // cannot call the reviewer route.
+    let denied = review_quarantine_rescrub_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest { reason: None }),
+    )
+    .await
+    .expect_err("contributor cannot operator-rescrub");
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn submit_accepts_medium_risk_when_pilot_flag_enabled() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());

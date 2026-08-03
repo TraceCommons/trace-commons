@@ -79,6 +79,10 @@ enum Command {
         /// Exclude model reasoning from this submission (reasoning is included by default)
         #[arg(long)]
         no_reasoning: bool,
+        /// Re-submit sessions whose local receipt is quarantined, keeping the
+        /// same submission_id so the server can supersede the stored envelope
+        #[arg(long)]
+        remediate_quarantined: bool,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -172,6 +176,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             manifest,
             trajectory,
             no_reasoning,
+            remediate_quarantined,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -185,6 +190,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 trajectory: trajectory.as_deref(),
                 json: cli.json,
                 no_reasoning,
+                remediate_quarantined,
             };
             commands::submit(&store, &sel).await
         }

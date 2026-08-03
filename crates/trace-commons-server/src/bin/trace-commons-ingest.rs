@@ -2604,6 +2604,15 @@ impl TenantCtx {
         event
     }
 
+    fn quarantine_remediated_audit_event(
+        &self,
+        record: &TraceCommonsSubmissionRecord,
+    ) -> TraceCommonsAuditEvent {
+        let mut event = TraceCommonsAuditEvent::quarantine_remediated(record, self.auth());
+        event.reason = Some(self.auth_method_reason());
+        event
+    }
+
     fn revoked_audit_event(&self, submission_id: Uuid, reason: &str) -> TraceCommonsAuditEvent {
         TraceCommonsAuditEvent::revoked(self.auth(), submission_id, reason)
     }
@@ -6855,6 +6864,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/review/{submission_id}/decision",
             post(review_decision_handler),
+        )
+        .route(
+            "/v1/review/{submission_id}/rescrub",
+            post(review_quarantine_rescrub_handler),
+        )
+        .route(
+            "/v1/review/quarantine/rescrub",
+            post(review_quarantine_rescrub_batch_handler),
         )
         .route(
             "/v1/review/leases/claim-next",
@@ -11698,7 +11715,12 @@ async fn submit_trace_handler(
     .await?;
     validate_envelope(&envelope)?;
 
-    if let Some(existing) = tenant
+    // Idempotency: same submission_id always addresses the same record.
+    // Owned quarantined rows are the exception — a re-POST supersedes the
+    // stored envelope and reclassifies under current server rules (#214).
+    // Fresh submission ids for the same session are rejected: they would
+    // compete with themselves for novelty credit.
+    let remediating_prior = if let Some(existing) = tenant
         .read_submission_record(&state.root, envelope.submission_id)
         .map_err(internal_error)?
     {
@@ -11708,15 +11730,21 @@ async fn submit_trace_handler(
                 "submission id already belongs to another principal",
             ));
         }
-        let receipt = receipt_from_record(&existing);
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.idempotent_submit_audit_event(envelope.submission_id),
-        )
-        .map_err(internal_error)?;
-        return Ok(Json(receipt));
-    }
+        if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+            Some(existing)
+        } else {
+            let receipt = receipt_from_record(&existing);
+            append_audit_event(
+                &state.root,
+                tenant.tenant_id(),
+                tenant.idempotent_submit_audit_event(envelope.submission_id),
+            )
+            .map_err(internal_error)?;
+            return Ok(Json(receipt));
+        }
+    } else {
+        None
+    };
 
     let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
     enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
@@ -11742,7 +11770,11 @@ async fn submit_trace_handler(
         &envelope.privacy.redaction_hash,
         &derived_precheck.canonical_summary_hash,
     )?;
-    enforce_submission_quota(state.as_ref(), &tenant)?;
+    // Same-id quarantine remediation does not consume a new quota slot — the
+    // prior quarantined row already counted.
+    if remediating_prior.is_none() {
+        enforce_submission_quota(state.as_ref(), &tenant)?;
+    }
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     apply_credit_estimate_to_envelope(&mut envelope);
     let corpus_status = status_for_risk(
@@ -11772,11 +11804,16 @@ async fn submit_trace_handler(
         state.pii_backstop_driver.is_some(),
     );
 
+    let artifact_label = if remediating_prior.is_some() {
+        "remediated-envelope"
+    } else {
+        "submitted-envelope"
+    };
     let stored_envelope = store_envelope(
         &state,
         tenant.tenant_id(),
         corpus_status,
-        "submitted-envelope",
+        artifact_label,
         &envelope,
     )
     .map_err(internal_error)?;
@@ -11787,14 +11824,23 @@ async fn submit_trace_handler(
         derived_precheck,
     );
     let retention_policy = retention_policy_for_trace(&envelope);
-    let received_at = Utc::now();
+    // Preserve original receipt time on remediation so retention and hourly
+    // quota windows stay anchored to first receipt of this submission_id.
+    let received_at = remediating_prior
+        .as_ref()
+        .map(|prior| prior.received_at)
+        .unwrap_or_else(Utc::now);
     let expires_at = retention_policy
         .max_age_days
         .map(|days| received_at + Duration::days(i64::from(days)));
-    let record = TraceCommonsSubmissionRecord {
+    let auth_principal_ref = remediating_prior
+        .as_ref()
+        .map(|prior| prior.auth_principal_ref.clone())
+        .unwrap_or_else(|| tenant.principal_ref().to_string());
+    let mut record = TraceCommonsSubmissionRecord {
         tenant_id: tenant.tenant_id().to_string(),
         tenant_storage_ref: tenant.tenant_storage_ref(),
-        auth_principal_ref: tenant.principal_ref().to_string(),
+        auth_principal_ref,
         submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
         contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
         submission_id: envelope.submission_id,
@@ -11819,6 +11865,14 @@ async fn submit_trace_handler(
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
     };
+    // Remediating a quarantined row always clears any outstanding review lease;
+    // the prior assessment is obsolete.
+    clear_review_lease_metadata(&mut record);
+    let audit_event = if remediating_prior.is_some() {
+        tenant.quarantine_remediated_audit_event(&record)
+    } else {
+        tenant.submitted_audit_event(&record)
+    };
     if state.require_db_mirror_writes {
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
@@ -11835,21 +11889,11 @@ async fn submit_trace_handler(
             .map_err(internal_error)?;
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
     } else {
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
                 .await;
@@ -11862,6 +11906,24 @@ async fn submit_trace_handler(
         }
         enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Best-effort cleanup of the pre-remediation artifact once the new
+    // pointers are durable. Same-path overwrite (status stayed quarantined) is
+    // a no-op because object keys match.
+    if let Some(prior) = remediating_prior.as_ref() {
+        let object_moved = prior.object_key != record.object_key
+            || prior.artifact_receipt.as_ref().map(|r| &r.object_key)
+                != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+        if object_moved {
+            if let Err(error) = delete_trace_objects_for_record(state.as_ref(), prior) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons prior quarantine artifact cleanup failed after remediation"
+                );
+            }
+        }
     }
 
     Ok(Json(receipt_from_record(&record)))
@@ -16512,6 +16574,308 @@ async fn review_quarantine_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(queue))
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubBatchRequest {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    submission_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubResult {
+    submission_id: Uuid,
+    prior_status: String,
+    prior_privacy_risk: String,
+    status: String,
+    privacy_risk: String,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubBatchSummary {
+    dry_run: bool,
+    scanned: usize,
+    changed: usize,
+    unchanged: usize,
+    failed: usize,
+    results: Vec<TraceQuarantineRescrubResult>,
+}
+
+/// Re-scrub a single quarantined submission under current server rules and
+/// reclassify its residual risk / corpus status in place (#214 operator path).
+async fn review_quarantine_rescrub_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+    Json(body): Json<TraceQuarantineRescrubRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubResult>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub");
+    let result = operator_rescrub_quarantined_submission(
+        state.as_ref(),
+        tenant.auth(),
+        submission_id,
+        reason,
+        false,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+/// Batch operator re-scrub over the reviewer's visible quarantine queue.
+/// Reclassifies under current residual-risk rules without minting new
+/// submission ids — the same content-addressed identity, version N+1.
+async fn review_quarantine_rescrub_batch_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceQuarantineRescrubBatchRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubBatchSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let limit = body.limit.unwrap_or(50).clamp(1, 500);
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub_batch");
+    let TraceCommonsMetadataView { records, .. } =
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
+    let requested: Option<BTreeSet<Uuid>> =
+        body.submission_ids.map(|ids| ids.into_iter().collect());
+    let candidates = records
+        .into_iter()
+        .filter(|record| record.status == TraceCorpusStatus::Quarantined)
+        .filter(|record| {
+            requested
+                .as_ref()
+                .is_none_or(|set| set.contains(&record.submission_id))
+        })
+        .take(limit)
+        .map(|record| record.submission_id)
+        .collect::<Vec<_>>();
+
+    let mut summary = TraceQuarantineRescrubBatchSummary {
+        dry_run,
+        scanned: 0,
+        changed: 0,
+        unchanged: 0,
+        failed: 0,
+        results: Vec::new(),
+    };
+    for submission_id in candidates {
+        summary.scanned += 1;
+        match operator_rescrub_quarantined_submission(
+            state.as_ref(),
+            tenant.auth(),
+            submission_id,
+            reason,
+            dry_run,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.changed {
+                    summary.changed += 1;
+                } else {
+                    summary.unchanged += 1;
+                }
+                summary.results.push(result);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %submission_id,
+                    status = %error.0,
+                    "Trace Commons quarantine operator rescrub failed"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(Json(summary))
+}
+
+async fn operator_rescrub_quarantined_submission(
+    state: &AppState,
+    auth: &TenantAuth,
+    submission_id: Uuid,
+    reason: &str,
+    dry_run: bool,
+) -> ApiResult<TraceQuarantineRescrubResult> {
+    let mut record = read_submission_record(&state.root, &auth.tenant_id, submission_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if !can_access_submission(auth, &record) {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    }
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "only quarantined trace submissions are eligible for operator rescrub",
+        ));
+    }
+
+    let prior_status = record.status;
+    let prior_privacy_risk = record.privacy_risk;
+    let mut envelope = read_envelope_by_record(state, &record).map_err(internal_error)?;
+    rescrub_trace_envelope(&mut envelope)
+        .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
+    let target_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
+    let target_status = corpus_status_with_pii_backstop_hold(
+        target_status,
+        envelope.consent.message_text_included,
+        state.pii_backstop_driver.is_some(),
+    );
+    let changed = target_status != prior_status
+        || envelope.privacy.residual_pii_risk != prior_privacy_risk
+        || envelope.privacy.redaction_counts != record.redaction_counts;
+
+    let result = TraceQuarantineRescrubResult {
+        submission_id,
+        prior_status: prior_status.as_str().to_string(),
+        prior_privacy_risk: residual_pii_risk_name(prior_privacy_risk).to_string(),
+        status: target_status.as_str().to_string(),
+        privacy_risk: residual_pii_risk_name(envelope.privacy.residual_pii_risk).to_string(),
+        changed,
+    };
+    if dry_run {
+        return Ok(result);
+    }
+
+    if target_status != TraceCorpusStatus::Accepted
+        && target_status != TraceCorpusStatus::AwaitingPiiBackstop
+    {
+        envelope.value.credit_points_pending = 0.0;
+        envelope.value.explanation = vec![
+            "Submission is quarantined until privacy review completes; credit is held at 0.0."
+                .to_string(),
+        ];
+        envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+    } else if target_status == TraceCorpusStatus::Accepted {
+        apply_credit_estimate_to_envelope(&mut envelope);
+    }
+
+    let prior_object_key = record.object_key.clone();
+    let prior_artifact = record.artifact_receipt.clone();
+    let stored = store_envelope(
+        state,
+        &auth.tenant_id,
+        target_status,
+        "operator-rescrubbed-envelope",
+        &envelope,
+    )
+    .map_err(internal_error)?;
+    record.status = target_status;
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
+    record.credit_points_pending = envelope.value.credit_points_pending;
+    record.credit_points_final = envelope.value.credit_points_final;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    clear_review_lease_metadata(&mut record);
+
+    let existing_derived = read_all_derived_records(&state.root, &auth.tenant_id)
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    let derived_record =
+        build_derived_record(&auth.tenant_id, target_status, &envelope, derived_precheck);
+
+    if state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+            if let Err(cleanup_error) = delete_trace_objects_for_record(state, &record) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&cleanup_error),
+                    %submission_id,
+                    "Trace Commons operator-rescrub envelope cleanup failed after DB mirror failure"
+                );
+            }
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    write_submission_record(&state.root, &record).map_err(internal_error)?;
+    write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+    append_audit_event(
+        &state.root,
+        &auth.tenant_id,
+        TraceCommonsAuditEvent::quarantine_operator_rescrub(
+            auth,
+            submission_id,
+            record.status,
+            Some(reason),
+        ),
+    )
+    .map_err(internal_error)?;
+
+    if !state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    let object_moved = prior_object_key != record.object_key
+        || prior_artifact.as_ref().map(|r| &r.object_key)
+            != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+    if object_moved {
+        let prior_cleanup = TraceCommonsSubmissionRecord {
+            object_key: prior_object_key,
+            artifact_receipt: prior_artifact,
+            ..record.clone()
+        };
+        if let Err(error) = delete_trace_objects_for_record(state, &prior_cleanup) {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                %submission_id,
+                "Trace Commons prior quarantine artifact cleanup failed after operator rescrub"
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 async fn review_routing_summary_handler(
@@ -49736,6 +50100,17 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(&auth.principal_ref, record)
 }
 
+/// Owned quarantined submissions may be superseded by a corrected envelope on
+/// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
+/// classic-idempotent; reviewers use the dedicated rescrub route instead.
+fn principal_can_remediate_quarantined(
+    auth: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> bool {
+    record.status == TraceCorpusStatus::Quarantined
+        && principal_can_self_revoke_submission(auth, record)
+}
+
 fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
     auth.role.can_review() || principal_owns_storage_submission(&auth.principal_ref, record)
 }
@@ -65663,6 +66038,49 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: None,
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_remediated(record: &TraceCommonsSubmissionRecord, auth: &TenantAuth) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            kind: "quarantine_remediated".to_string(),
+            created_at: Utc::now(),
+            status: Some(record.status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(record.auth_principal_ref.clone()),
+            reason: Some(format!("auth_method={}", auth.auth_method.storage_name())),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_operator_rescrub(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        reason: Option<&str>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "quarantine_operator_rescrub".to_string(),
+            created_at: Utc::now(),
+            status: Some(status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: reason.map(ToOwned::to_owned),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,

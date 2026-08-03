@@ -154,10 +154,13 @@ Three levers, in rough order of leverage:
    HIGH may be firing too readily for some workloads. Worth measuring before
    assuming the contributor is at fault.
 3. **Automated re-scrub release.** The async backstop (#166) only intercepts
-   *new* submissions, and the re-scrub path cannot lower a HIGH risk, so neither
-   clears a backlog today. Work to make re-scrub drive risk classification would
-   change that — but note it must fix the zero-span classifier response in the
-   same change, or an unavailable classifier silently releases traces.
+   *new* submissions. For already-quarantined rows, operators can re-scrub and
+   reclassify in place (`POST /v1/review/quarantine/rescrub`, or
+   `POST /v1/review/{submission_id}/rescrub`) under current residual-risk rules
+   without minting a new submission id. Contributors who can ship a corrected
+   envelope (for example after fixing consent declarations) re-submit with
+   `trace-commons-contributor submit --remediate-quarantined`, which keeps the
+   same content-addressed `submission_id` and asks the server to supersede.
 
 ## What not to do
 

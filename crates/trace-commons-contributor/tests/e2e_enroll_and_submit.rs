@@ -909,6 +909,7 @@ async fn enroll_mint_submit_round_trip() {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            remediate_quarantined: false,
         },
     )
     .await
