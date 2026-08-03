@@ -79754,3 +79754,322 @@ fn dedup_vector_index_builder_returns_a_trait_object() {
 
     let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
 }
+
+// --- #198 settlement batch-to-outbox atomicity ---
+
+fn sample_finalized_settlement_with_outbox_ids(
+    outbox_ids: &[Uuid],
+) -> (
+    TraceCreditSettlementBatchRecord,
+    Vec<TraceNearCreditOutboxItem>,
+) {
+    let settlement_batch_id = Uuid::new_v4();
+    let mut line_items = Vec::new();
+    let mut outbox_items = Vec::new();
+    for (index, near_outbox_id) in outbox_ids.iter().copied().enumerate() {
+        let credit_account_ref = format!("principal-{}", index);
+        let credit_account_hash = sha256_prefixed(&credit_account_ref);
+        let item_source_list_hash = sha256_prefixed(&format!("settlement-item-sources-{index}"));
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: item_source_list_hash.clone(),
+            attestation_hash: sha256_prefixed(&format!("settlement-attestation-{index}")),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: sha256_prefixed(&format!("settlement-issuer-signature-{index}")),
+        };
+        line_items.push(StorageTraceCreditAccountSettlementLineItem {
+            credit_account_ref,
+            credit_account_hash: credit_account_hash.clone(),
+            settled_credit_delta_micros: 1_000_000,
+            source_credit_event_ids: vec![Uuid::new_v4()],
+            source_submission_ids: vec![Uuid::new_v4()],
+            source_list_hash: item_source_list_hash,
+            near_status: StorageTraceCreditSettlementNearStatus::Pending,
+            near_outbox_id: Some(near_outbox_id),
+            near_payout_hold_reason: None,
+        });
+        outbox_items.push(TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash,
+            near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                .expect("NEAR call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
+            created_at: Utc::now(),
+            submitted_at: None,
+            near_transaction_hash: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        });
+    }
+    let batch = TraceCreditSettlementBatchRecord {
+        settlement_batch_id,
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        status: StorageTraceCreditSettlementBatchStatus::Finalized,
+        reason_hash: "sha256:settlement-reason".to_string(),
+        issuer_approval_evidence_hash: None,
+        source_credit_event_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_credit_event_ids.iter().copied())
+            .collect(),
+        source_submission_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_submission_ids.iter().copied())
+            .collect(),
+        source_list_hash: "sha256:settlement-sources".to_string(),
+        settled_credit_points: outbox_ids.len() as f32,
+        settled_credit_micros: (outbox_ids.len() as i64) * 1_000_000,
+        line_items,
+        near_contract_id: Some("trace-credits.testnet".to_string()),
+        ranking_model_version: None,
+        ranking_target_use: None,
+        ranking_calibration_run_id: None,
+        ranking_calibration_report_hash: None,
+        ranking_calibration_joined_evidence_hash: None,
+        ranking_credit_events_excluded_count: 0,
+        ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        created_at: Utc::now(),
+    };
+    (batch, outbox_items)
+}
+
+/// Crash after the batch write and before any outbox row: repair must re-emit every
+/// expected row from the line-item `near_outbox_id` invariant (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_batch_only_crash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    // Simulate: batch durable, outbox loop never started.
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    assert!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .is_empty(),
+        "crash left zero outbox rows"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch.clone()],
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 3, "repair re-emits every expected outbox row");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>(),
+        "repaired ids match the batch line-item invariant"
+    );
+    assert_eq!(outbox.len(), expected_items.len());
+
+    let repaired_again = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair re-run");
+    assert_eq!(repaired_again, 0, "repair is idempotent");
+}
+
+/// Crash after item k of n: repair must fill only the missing suffix (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_partial_outbox_crash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    // Survive the first two appends; crash before the third.
+    for item in &expected_items[..2] {
+        append_near_credit_outbox_item(temp.path(), "tenant-a", item).expect("partial outbox");
+    }
+    assert_eq!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .len(),
+        2,
+        "crash left a partial outbox"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 2, "repair fills only the missing suffix");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 4);
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
+}
+
+/// File-primary finalize writes batch + outbox together and remains repairable.
+#[tokio::test]
+async fn settlement_finalize_writes_batch_and_outbox_together() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("finalize writes");
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1);
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 2);
+    assert_eq!(
+        outbox
+            .iter()
+            .map(|item| item.near_outbox_id)
+            .collect::<BTreeSet<_>>(),
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
+}
+
+/// Two overlapping live settlement runs: the second must conflict rather than
+/// race the source-event conflict check (#198 concurrent-run requirement).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_settlement_in_process_lock_rejects_concurrent_live_runs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    // Hold the in-process lock the way a live settlement run would.
+    let held = credit_settlement_in_process_lock("tenant-a");
+    let _guard = held
+        .try_lock_owned()
+        .expect("test acquires the settlement lock");
+
+    let err = credit_settlement_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "overlapping settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: None,
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect_err("overlapping live settlement must conflict");
+    assert_eq!(err.0, StatusCode::CONFLICT);
+}
+
+/// DB-authoritative finalize commits batch + outbox in one transaction.
+#[tokio::test]
+async fn settlement_finalize_db_transaction_writes_batch_and_outbox_atomically() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("db-authoritative finalize");
+
+    let db_batches = backend
+        .list_trace_credit_settlement_batches("tenant-a")
+        .await
+        .expect("list batches");
+    assert_eq!(db_batches.len(), 1);
+    assert_eq!(db_batches[0].settlement_batch_id, batch.settlement_batch_id);
+
+    let db_outbox = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("list outbox");
+    assert_eq!(db_outbox.len(), 2);
+    let db_ids = db_outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(db_ids, outbox_ids.into_iter().collect::<BTreeSet<_>>());
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Postgres advisory lock: a second acquire while the first is held returns None.
+#[tokio::test]
+async fn credit_settlement_advisory_lock_serializes_overlapping_acquires() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let first = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("first acquire")
+        .expect("first acquire succeeds");
+    let second = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("second acquire attempt");
+    assert!(
+        second.is_none(),
+        "overlapping settlement lock must not be granted"
+    );
+    first.release().await.expect("release first lock");
+    let third = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("third acquire")
+        .expect("lock is free after release");
+    third.release().await.expect("release third lock");
+}

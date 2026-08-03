@@ -51,7 +51,8 @@ use trace_commons_server::account_passkey::{
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{
-    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
+    TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -21272,6 +21273,27 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    // Live settlement serializes per tenant so two overlapping runs cannot both
+    // pass the source-event conflict check and finalize divergent batches (or
+    // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
+    let settlement_locks = if body.dry_run {
+        None
+    } else {
+        Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
+    };
+    let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
+    if let Some(locks) = settlement_locks {
+        locks.release().await.map_err(internal_error)?;
+    }
+    result
+}
+
+async fn run_credit_settlement_unlocked(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
     require_credit_settlement_policy_version_allowed_for_live(
@@ -21693,14 +21715,9 @@ async fn run_credit_settlement(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
+        append_credit_settlement_finalize_with_db_mirror(state, tenant, &batch, &near_outbox_items)
             .await
             .map_err(internal_error)?;
-        for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
-                .await
-                .map_err(internal_error)?;
-        }
     }
 
     Ok(TraceCreditSettlementRunResponse {
@@ -25226,6 +25243,237 @@ async fn append_credit_settlement_batch_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+/// Persist a finalized settlement batch and every NEAR outbox row it expects as
+/// one durability unit.
+///
+/// Design (#198):
+/// - When a DB mirror is required, batch + outbox rows commit in one Postgres
+///   transaction (`Database::upsert_credit_settlement_finalize`), then the file
+///   journal is updated. A process death cannot finalize the ledger without its
+///   payout work.
+/// - Across stores / process death after the batch is durable, each line item's
+///   `near_outbox_id` is the repair invariant: `repair_missing_near_credit_outbox_items_for_finalized_batches`
+///   re-emits any missing row. Finalize invokes that repair immediately if a
+///   post-batch outbox write fails, so the same request converges when the
+///   failure is transient.
+async fn append_credit_settlement_finalize_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    outbox_items: &[TraceNearCreditOutboxItem],
+) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
+    let outbox_writes = outbox_items
+        .iter()
+        .map(near_credit_outbox_item_to_storage_write)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if state.require_db_mirror_writes {
+        let Some(db) = state.db_mirror.as_ref() else {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for credit settlement finalize"
+            );
+        };
+        db.upsert_credit_settlement_finalize(
+            credit_settlement_batch_to_storage_write(batch)?,
+            outbox_writes,
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: credit settlement finalize")?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        let mut file_outbox_error: Option<anyhow::Error> = None;
+        for item in outbox_items {
+            if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            {
+                file_outbox_error = Some(error);
+                break;
+            }
+        }
+        if file_outbox_error.is_some() {
+            // DB already has the full set. Repair the file journal from the
+            // expected ids without going through the admin reader (which may be
+            // DB-authoritative and would otherwise skip already-mirrored rows).
+            let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                .into_iter()
+                .map(|item| item.near_outbox_id)
+                .collect::<BTreeSet<_>>();
+            let mut repaired = 0usize;
+            for item in outbox_items {
+                if present.contains(&item.near_outbox_id) {
+                    continue;
+                }
+                append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item).with_context(
+                    || {
+                        format!(
+                            "failed to repair file NEAR outbox item {} after DB-authoritative finalize",
+                            item.near_outbox_id
+                        )
+                    },
+                )?;
+                repaired += 1;
+            }
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired_outbox_count = repaired,
+                    settlement_batch_id = %batch.settlement_batch_id,
+                    tenant_id = %tenant.tenant_id,
+                    "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
+                );
+            }
+            if let Some(error) = file_outbox_error {
+                let expected = outbox_items.len();
+                let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                    .iter()
+                    .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                    .count();
+                if present < expected {
+                    return Err(error.context(format!(
+                        "settlement finalize left incomplete file NEAR outbox ({present}/{expected} present after repair)"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // File-primary path: batch is the commit marker (carries expected outbox
+    // ids). Append outbox rows next; on any failure, repair from the durable
+    // batch before propagating so callers do not observe a silent half-write.
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    let mut outbox_error: Option<anyhow::Error> = None;
+    for item in outbox_items {
+        if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item) {
+            outbox_error = Some(error);
+            break;
+        }
+    }
+    if outbox_error.is_some() {
+        let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state,
+            tenant,
+            std::slice::from_ref(batch),
+        )
+        .await
+        .context("settlement outbox repair after partial finalize failed")?;
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_outbox_count = repaired,
+                settlement_batch_id = %batch.settlement_batch_id,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items after partial settlement finalize"
+            );
+        }
+        if let Some(error) = outbox_error {
+            // Prefer reporting the original failure; repair ran best-effort so the
+            // next settlement / outbox tick can still converge if repair itself
+            // could not complete every row in this request.
+            let expected = outbox_items.len();
+            let existing = read_near_credit_outbox_items_for_admin(state, tenant)
+                .await
+                .unwrap_or_default();
+            let present = existing
+                .iter()
+                .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                .count();
+            if present < expected {
+                return Err(error.context(format!(
+                    "settlement finalize left incomplete NEAR outbox ({present}/{expected} present after repair)"
+                )));
+            }
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let mirror_result = db
+            .upsert_credit_settlement_finalize(
+                credit_settlement_batch_to_storage_write(batch)?,
+                outbox_writes,
+            )
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement finalize mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+    }
+    Ok(())
+}
+
+struct CreditSettlementRunLocks {
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
+    advisory: Option<CreditSettlementAdvisoryLock>,
+}
+
+impl CreditSettlementRunLocks {
+    async fn release(self) -> anyhow::Result<()> {
+        if let Some(advisory) = self.advisory {
+            advisory
+                .release()
+                .await
+                .context("failed to release credit settlement advisory lock")?;
+        }
+        Ok(())
+    }
+}
+
+fn credit_settlement_in_process_lock(tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(tenant_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn acquire_credit_settlement_run_locks(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<CreditSettlementRunLocks> {
+    let in_process = credit_settlement_in_process_lock(tenant_id);
+    let _in_process = match in_process.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "credit settlement already in progress for this tenant",
+            ));
+        }
+    };
+
+    let advisory = if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .try_acquire_credit_settlement_lock(tenant_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "credit settlement already in progress for this tenant",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(CreditSettlementRunLocks {
+        _in_process,
+        advisory,
+    })
 }
 
 async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
@@ -36318,6 +36566,29 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     config: &TraceNearCreditOutboxSchedulerConfig,
 ) -> ApiResult<TraceNearCreditOutboxSchedulerTickSummary> {
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    // Before draining, repair any finalized settlement whose expected outbox rows
+    // are missing (crash between batch commit and outbox append). Settlement runs
+    // already repair on entry; the outbox scheduler is the continuous path that
+    // must converge even when nobody re-triggers settlement (#198).
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &batches,
+    )
+    .await
+    .map_err(internal_error)?;
+    if repaired > 0 {
+        tracing::warn!(
+            repaired_outbox_count = repaired,
+            tenant_id = %tenant.tenant_id,
+            "repaired missing NEAR credit outbox items before outbox scheduler drain"
+        );
+    }
     let Json(submit) = near_credit_outbox_submit_worker_handler(
         State(state.clone()),
         headers.clone(),

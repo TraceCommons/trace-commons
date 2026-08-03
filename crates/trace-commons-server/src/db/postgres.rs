@@ -52,6 +52,11 @@ fn session_rotation_grace_secs() -> i64 {
 /// audit-chain append, so the two can never alias.
 const NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID: i32 = 0x7472_6163u32 as i32; // "trac"
 
+/// Fixed advisory-lock namespace for live credit-settlement finalize. Distinct from
+/// the submit classid so a submit pass and a settlement pass never contend on the
+/// same key — they serialize different money-path races.
+const CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID: i32 = 0x7365_7474u32 as i32; // "sett"
+
 /// Owns the pooled connection that holds a session-level advisory lock for the
 /// duration of a NEAR settlement submit pass. Released explicitly via
 /// [`NearCreditSubmitAdvisoryLockInner::release`]; see the public
@@ -70,6 +75,25 @@ impl NearCreditSubmitAdvisoryLockInner {
             .execute(
                 "SELECT pg_advisory_unlock($1, $2)",
                 &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &self.objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
+/// Owns the pooled connection holding the live credit-settlement advisory lock.
+pub struct CreditSettlementAdvisoryLockInner {
+    client: deadpool_postgres::Object,
+    objid: i32,
+}
+
+impl CreditSettlementAdvisoryLockInner {
+    pub(crate) async fn release(self) -> Result<(), DatabaseError> {
+        self.client
+            .execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &self.objid],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -433,6 +457,45 @@ impl Database for PgBackend {
         Ok(Some(crate::db::NearCreditSubmitAdvisoryLock::new(
             NearCreditSubmitAdvisoryLockInner { client, objid },
         )))
+    }
+
+    async fn try_acquire_credit_settlement_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::db::CreditSettlementAdvisoryLock>, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let objid: i32 = client
+            .query_one("SELECT hashtext('credit-settlement:' || $1)", &[&tenant_id])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        let acquired: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if !acquired {
+            return Ok(None);
+        }
+        Ok(Some(crate::db::CreditSettlementAdvisoryLock::new(
+            CreditSettlementAdvisoryLockInner { client, objid },
+        )))
+    }
+
+    async fn upsert_credit_settlement_finalize(
+        &self,
+        batch: crate::trace_corpus_storage::TraceCreditSettlementBatchWrite,
+        outbox_items: Vec<crate::trace_corpus_storage::TraceNearCreditOutboxItemWrite>,
+    ) -> Result<(), DatabaseError> {
+        self.upsert_credit_settlement_finalize_tx(batch, &outbox_items)
+            .await
     }
 
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
