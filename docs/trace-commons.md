@@ -422,6 +422,9 @@ Review and analytics:
   `GET /v1/review/routing-summary`
 - `POST /v1/review/batch-decisions` (up to 50 ids),
   `POST /v1/review/{submission_id}/decision`
+- `POST /v1/review/{submission_id}/rescrub`,
+  `POST /v1/review/quarantine/rescrub` (operator re-scrub / reclassify of
+  quarantined rows under current residual-risk rules; optional dry-run batch)
 - `POST` / `DELETE /v1/review/{submission_id}/lease`
 - `POST /v1/review/{submission_id}/credit-events`
 - `GET /v1/analytics/summary` — optional `release_scope=operator|broad`
