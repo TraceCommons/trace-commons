@@ -853,6 +853,20 @@ impl IssuerError {
             message: "PilotAllowlistMalformed",
         }
     }
+
+    /// Tenant-binding refusal: the workload token carried no usable
+    /// `tenant_id`, so it conveys authority over no tenant at all.
+    ///
+    /// Forbidden rather than bad-request on purpose: the request is
+    /// well-formed, it is the presented credential that authorises nothing.
+    /// Naming the missing control keeps the refusal greppable without
+    /// echoing the token or the requested tenant.
+    fn workload_tenant_missing() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "WorkloadTenantMissing",
+        }
+    }
 }
 
 impl IntoResponse for IssuerError {
@@ -1472,20 +1486,42 @@ impl TraceUploadClaimIssuerState {
         // requests don't pay for schema/window/grant lookups.
         let policy_label = self.enforce_pilot_allowlist(workload)?;
         let now = self.validate_upload_claim_request(&request)?;
-        let tenant_id = normalized_required(
-            request
-                .tenant_id
-                .as_deref()
-                .or(workload.tenant_id.as_deref()),
-            "tenant_id is required",
-        )?;
-        if let Some(workload_tenant) = workload.tenant_id.as_deref().map(str::trim)
-            && !workload_tenant.is_empty()
-            && workload_tenant != tenant_id
-        {
-            return Err(IssuerError::forbidden(
-                "workload tenant does not match request",
-            ));
+        // The workload token is the ONLY authority for the tenant on this
+        // path. The request body is caller-controlled, so it may confirm the
+        // tenant but must never supply one: a token that carries no tenant
+        // conveys authority over no tenant, and falling back to the request
+        // would let any validly signed token mint a claim for any tenant.
+        //
+        // Refused before the request is consulted, and unconditionally --
+        // the binding below is the security property this function exists to
+        // enforce, so it must not be contingent on an optional field being
+        // present. Mirrors the device-key path, where `DeviceWorkloadClaims`
+        // takes a required `tenant_id` and `validate_device_workload_claims`
+        // compares it with no `is_some()` guard.
+        let Some(tenant_id) = workload
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|tenant| !tenant.is_empty())
+            .map(str::to_string)
+        else {
+            tracing::warn!(
+                error_class = "WorkloadTenantMissing",
+                "upload-claim refused: workload token carries no tenant_id"
+            );
+            return Err(IssuerError::workload_tenant_missing());
+        };
+        // Attribution only: when the request names a tenant it must agree
+        // exactly with the token's. A blank-but-present value stays a
+        // bad-request, as before.
+        if let Some(requested_tenant) = request.tenant_id.as_deref() {
+            let requested_tenant =
+                normalized_required(Some(requested_tenant), "tenant_id is required")?;
+            if requested_tenant != tenant_id {
+                return Err(IssuerError::forbidden(
+                    "workload tenant does not match request",
+                ));
+            }
         }
         enforce_subset(
             &request.consent_scopes,
@@ -3513,6 +3549,116 @@ mod tests {
             requested_at: Utc::now(),
         };
         assert!(state.issue_claim(&workload, request).await.is_err());
+    }
+
+    /// Builds a workload token whose only interesting property is its
+    /// `tenant_id`. Scopes are wide enough that the request below is refused
+    /// for the tenant binding and nothing else.
+    fn workload_with_tenant(tenant_id: Option<&str>) -> WorkloadClaims {
+        WorkloadClaims {
+            sub: Some("principal:agent-1".to_string()),
+            principal_ref: None,
+            tenant_id: tenant_id.map(str::to_string),
+            iss: None,
+            aud: None,
+            exp: Utc::now().timestamp() + 60,
+            iat: Some(Utc::now().timestamp()),
+            allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            invite_code: None,
+        }
+    }
+
+    fn upload_claim_request(tenant_id: Option<&str>) -> TraceUploadClaimRequest {
+        TraceUploadClaimRequest {
+            schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: tenant_id.map(str::to_string),
+            audience: Some("trace-commons-upload".to_string()),
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            subject: None,
+            requested_at: Utc::now(),
+        }
+    }
+
+    /// A workload token that carries no `tenant_id` must not be able to mint
+    /// a claim for a tenant named only in the request body.
+    ///
+    /// `tenant_id` is `Option<String>` on `WorkloadClaims`, token validation
+    /// never requires it, and the default config here has no allowlist
+    /// source — so nothing upstream supplies the binding. Before the tenant
+    /// became authoritative this request succeeded and minted a claim for
+    /// whatever tenant the caller asked for.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_workload_token_carries_no_tenant() {
+        let state = test_config().build_state().expect("state builds");
+        let error = state
+            .issue_claim(
+                &workload_with_tenant(None),
+                upload_claim_request(Some("tenant-not-ours")),
+            )
+            .await
+            .expect_err("a token with no tenant authorises no tenant");
+        assert_eq!(error.message, "WorkloadTenantMissing");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    /// Same refusal for a present-but-blank tenant: whitespace is not a
+    /// tenant, and trimming it must not leave an empty binding that compares
+    /// equal to nothing.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_workload_tenant_is_blank() {
+        let state = test_config().build_state().expect("state builds");
+        for blank in ["", "   ", "\t"] {
+            let error = state
+                .issue_claim(
+                    &workload_with_tenant(Some(blank)),
+                    upload_claim_request(Some("tenant-not-ours")),
+                )
+                .await
+                .expect_err("blank workload tenant is refused");
+            assert_eq!(
+                error.message, "WorkloadTenantMissing",
+                "blank tenant {blank:?} must fail closed"
+            );
+        }
+    }
+
+    /// The token's tenant is authoritative, so a request that omits the
+    /// field is still bound to the token's tenant rather than being refused.
+    #[tokio::test]
+    async fn workload_tenant_is_authoritative_when_request_omits_tenant() {
+        let state = test_config().build_state().expect("state builds");
+        let response = state
+            .issue_claim(
+                &workload_with_tenant(Some("tenant-a")),
+                upload_claim_request(None),
+            )
+            .await
+            .expect("issue succeeds on the token's own tenant");
+        let payload = base64_url_decode(response.access_token.split('.').collect::<Vec<_>>()[1]);
+        assert!(
+            payload.contains("tenant-a"),
+            "claim is minted for the token's tenant: {payload}"
+        );
+    }
+
+    /// A request naming a different tenant than the token is still refused,
+    /// and now unconditionally rather than only when the token happened to
+    /// carry a tenant.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_request_tenant_differs_from_workload() {
+        let state = test_config().build_state().expect("state builds");
+        let error = state
+            .issue_claim(
+                &workload_with_tenant(Some("tenant-a")),
+                upload_claim_request(Some("tenant-b")),
+            )
+            .await
+            .expect_err("cross-tenant request is refused");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
     }
 
     #[test]
