@@ -87,7 +87,10 @@ breaks the contributor's trust contract.
   `<PRIVATE_LOCAL_PATH_1>`) rather than flattening every entity to one token.
 - **MUST NOT** include raw message text unless the contributor opted into
   message text; likewise tool payloads. Setting `message_text_included` /
-  `tool_payloads_included` is a factual declaration, not a default.
+  `tool_payloads_included` is a factual declaration, not a default. The
+  server **MUST** correct under-reported declarations upward to match the
+  envelope payload before risk classification and PII-backstop decisions
+  (over-reporting is left alone).
 - **MUST NOT** serialize original PII-filter text, raw `detected_spans[*].text`,
   raw offsets, or unsafe span labels. Only the safe
   `SafePrivacyFilterSummary` (redacted text + allow-listed label counts +
@@ -140,8 +143,8 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 |---|---|---|---|
 | `policy_version` | string | yes | Consent policy version (`2026-04-24`). |
 | `scopes` | `[ConsentScope]` | yes | What uses the contributor authorized. See matrix in Part 3. |
-| `message_text_included` | bool | yes | Whether raw redacted message text is present. |
-| `tool_payloads_included` | bool | yes | Whether tool payloads are present. |
+| `message_text_included` | bool | yes | Whether raw redacted message text is present. Server corrects `false` → `true` when events/outcome carry message content. |
+| `tool_payloads_included` | bool | yes | Whether tool payloads are present. Server corrects `false` → `true` when events carry tool content, structured payloads, or tool names. |
 | `revocable` | bool | yes | Whether the contributor retains a revocation right. |
 
 `ConsentScope` values: `debugging_evaluation`, `benchmark_only`,

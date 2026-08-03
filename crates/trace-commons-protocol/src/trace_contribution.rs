@@ -2988,6 +2988,11 @@ pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
 ) {
+    // Consent flags are a factual declaration of what the envelope carries.
+    // Correct under-reported flags before risk derivation so residual_risk
+    // and the PII-backstop hold cannot be skipped by a false declaration.
+    reconcile_consent_declarations(envelope);
+
     let mut report = RedactionReport::default();
     let mut state = RedactionState::default();
 
@@ -3272,6 +3277,10 @@ pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
 ) -> Result<(), TraceContributionError> {
+    // Same concordance floor as the sync server re-scrub: under-reported
+    // consent must not survive into residual_risk / status decisions.
+    reconcile_consent_declarations(envelope);
+
     let mut event_updates: Vec<(usize, String)> = Vec::new();
     let mut correction_update: Option<String> = None;
     let mut structured_updates: Vec<(usize, Value)> = Vec::new();
@@ -3726,6 +3735,102 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     }
 
     ResidualPiiRisk::Low
+}
+
+/// What content-bearing surfaces an envelope actually carries.
+///
+/// Used to check `ConsentMetadata::{message_text_included,tool_payloads_included}`
+/// against the payload those flags claim to describe. The flags are a factual
+/// declaration (`docs/trace-spec.md`), not a client preference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnvelopeContentPresence {
+    pub message_text: bool,
+    pub tool_payloads: bool,
+}
+
+/// Inspect an envelope for content that must be declared in consent flags.
+///
+/// Minimum concordance rule (issue #208):
+/// - non-empty `redacted_content` on user / assistant / reasoning (and other
+///   prose event types), or `outcome.human_correction`, implies message text;
+/// - tool-call / tool-result / http content, a non-null `structured_payload`,
+///   or a `tool_name` implies tool payloads.
+///
+/// Does not mutate the envelope. Callers that need enforcement should use
+/// [`reconcile_consent_declarations`], which only corrects flags upward.
+pub fn derive_envelope_content_presence(
+    envelope: &TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let mut presence = EnvelopeContentPresence::default();
+
+    for event in &envelope.events {
+        if event
+            .redacted_content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty())
+        {
+            match event.event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => presence.message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
+            }
+        }
+        if !event.structured_payload.is_null()
+            || event
+                .tool_name
+                .as_ref()
+                .is_some_and(|name| !name.is_empty())
+        {
+            presence.tool_payloads = true;
+        }
+    }
+
+    if envelope
+        .outcome
+        .human_correction
+        .as_ref()
+        .is_some_and(|text| !text.is_empty())
+    {
+        presence.message_text = true;
+    }
+
+    presence
+}
+
+/// Correct under-reported consent declarations to match the envelope payload.
+///
+/// Only moves flags from `false` → `true`. Over-reporting (true flags on an
+/// empty payload) is left alone: that is a stricter declaration and does not
+/// open an acceptance path the payload did not earn.
+///
+/// Returns the presence that was derived, so callers can log or assert.
+pub fn reconcile_consent_declarations(
+    envelope: &mut TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let presence = derive_envelope_content_presence(envelope);
+    let mut corrected = false;
+    if presence.message_text && !envelope.consent.message_text_included {
+        envelope.consent.message_text_included = true;
+        corrected = true;
+    }
+    if presence.tool_payloads && !envelope.consent.tool_payloads_included {
+        envelope.consent.tool_payloads_included = true;
+        corrected = true;
+    }
+    if corrected {
+        let warning =
+            "Server corrected under-reported consent declarations to match envelope payload."
+                .to_string();
+        if !envelope.privacy.warnings.contains(&warning) {
+            envelope.privacy.warnings.push(warning);
+        }
+    }
+    presence
 }
 
 fn max_residual_risk(left: ResidualPiiRisk, right: ResidualPiiRisk) -> ResidualPiiRisk {
@@ -6380,6 +6485,221 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::High,
             "a classifier finding on an object KEY must force High"
+        );
+    }
+
+    fn bare_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: false,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: Vec::new(),
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    fn message_event(content: &str) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::UserMessage,
+            timestamp: Utc::now(),
+            redacted_content: Some(content.to_string()),
+            structured_payload: Value::Null,
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
+    #[test]
+    fn reconcile_consent_raises_message_text_for_prose_events() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+        assert!(
+            envelope
+                .privacy
+                .warnings
+                .iter()
+                .any(|w| w.contains("under-reported consent"))
+        );
+    }
+
+    #[test]
+    fn reconcile_consent_raises_tool_payloads_for_tool_name_or_payload() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: Value::Null,
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn reconcile_consent_raises_message_text_for_human_correction() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.outcome.human_correction = Some("use the other API key".to_string());
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(envelope.consent.message_text_included);
+    }
+
+    #[test]
+    fn reconcile_consent_never_lowers_over_reported_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.consent.message_text_included = true;
+        envelope.consent.tool_payloads_included = true;
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+        assert!(envelope.privacy.warnings.is_empty());
+    }
+
+    #[test]
+    fn empty_content_does_not_force_consent_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(message_event(""));
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: Utc::now(),
+            redacted_content: Some(String::new()),
+            structured_payload: Value::Null,
+            tool_name: Some(String::new()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn rescrub_raises_risk_for_clean_prose_under_reported_as_low() {
+        use super::*;
+        // The reproduction from issue #208: ordinary prose matches no
+        // deterministic detector, consent says false/false, and without
+        // concordance residual_risk would stay Low → Accepted.
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+        assert!(!envelope.consent.message_text_included);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        assert!(
+            envelope.consent.message_text_included,
+            "server must correct the under-reported message-text declaration"
+        );
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "content-bearing prose must not stay Low after concordance"
         );
     }
 }
