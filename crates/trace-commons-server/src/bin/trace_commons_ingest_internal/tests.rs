@@ -4723,6 +4723,62 @@ async fn server_rescrub_raises_risk_when_it_redacts_pii_the_client_under_reporte
     );
 }
 
+// The synchronous deterministic pass must NOT downgrade a prior HIGH.
+//
+// This test previously asserted the opposite, and that was a fail-open
+// found by security review: the pass set `useful_classifier_result: true`
+// on the reasoning that a pure function is self-evidencing. Being a pure
+// function establishes availability, not detection completeness. The prior
+// risk is HIGH because something already found cause for concern; the
+// deterministic patterns failing to match is a proxy for cleanliness, not
+// evidence of it, so a HIGH trace the regex suite missed would have been
+// published without any classifier examining it.
+#[tokio::test]
+async fn server_rescrub_does_not_downgrade_high_without_classifier_evidence() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    // Simulate a trace that arrived already classified HIGH (e.g. a
+    // contributor-side scan flagged it), but whose content is in fact
+    // clean once the server's own deterministic pass and residual scan
+    // run over it.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::High,
+        "the deterministic pass alone must never lower a prior HIGH: not matching \
+         its own patterns is not evidence the content is clean"
+    );
+}
+
+// The corollary of the test above: because the deterministic pass cannot
+// downgrade a prior HIGH, it cannot release a quarantined trace either.
+// Release requires classifier evidence, which only the async backstop path
+// can supply.
+#[tokio::test]
+async fn server_rescrub_alone_does_not_release_a_quarantined_trace() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "sanity: a HIGH-risk envelope must start out quarantined"
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "the deterministic pass must leave a quarantined trace quarantined"
+    );
+}
+
 #[tokio::test]
 async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
     // Regression guard on the residual scan: the envelope is full of
@@ -4820,7 +4876,12 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     assert_eq!(record.status, TraceCorpusStatus::Quarantined);
     let stored = std::fs::read_to_string(temp.path().join(record.object_key))
         .expect("stored envelope reads");
-    assert!(stored.contains("server-rescrub-v1"));
+    // Reference the constant rather than the literal, so a pipeline-version
+    // bump does not require editing this assertion. What it is checking is
+    // that the server re-scrub stamp is present, not which revision it is.
+    assert!(
+        stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
+    );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
 }
 
@@ -79613,4 +79674,83 @@ async fn attestation_keyset_handler_fails_closed_then_publishes_the_key() {
         keyset["keys"][0]["public_key_pem"].as_str(),
         Some(TEST_EDDSA_PUBLIC_KEY_PEM)
     );
+}
+
+#[test]
+fn settlement_cap_bounds_the_account_not_each_principal() {
+    fn event(principal: &str, points: f32) -> TraceCommonsCreditLedgerRecord {
+        TraceCommonsCreditLedgerRecord {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: principal.to_string(),
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: points,
+            reason: None,
+            external_ref: None,
+            actor_role: TokenRole::Admin,
+            actor_principal_ref: principal.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    // Three principals, each individually under a 1.0-point cap, all linked
+    // to one durable account. Together they are 1.8 points against that cap.
+    let events = vec![
+        event("principal-1", 0.6),
+        event("principal-2", 0.6),
+        event("principal-3", 0.6),
+    ];
+    let cap = Some(1_000_000); // 1.0 points in micros
+    let account = Uuid::new_v4();
+    let linked: HashMap<String, Uuid> = ["principal-1", "principal-2", "principal-3"]
+        .into_iter()
+        .map(|p| (p.to_string(), account))
+        .collect();
+
+    let (settled, excluded, reasons) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &linked);
+    assert!(
+        settled.is_empty(),
+        "the account is over cap, so none of its principals may settle"
+    );
+    assert_eq!(excluded, 3);
+    assert_eq!(
+        reasons.get("account_settlement_amount_exceeds_cap"),
+        Some(&3)
+    );
+
+    // Without account linkage there is nothing to fold up, so the legacy
+    // per-principal behaviour is preserved: each is under cap and settles.
+    let (settled_unlinked, excluded_unlinked, _) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &HashMap::new());
+    assert_eq!(
+        settled_unlinked.len(),
+        3,
+        "unlinked principals are each under the cap and settle as before"
+    );
+    assert_eq!(excluded_unlinked, 0);
+
+    // A single principal over the cap is still blocked, linked or not.
+    let (over, over_excluded, _) =
+        apply_credit_settlement_account_cap(vec![event("solo", 1.5)], cap, &HashMap::new());
+    assert!(over.is_empty());
+    assert_eq!(over_excluded, 1);
+}
+
+/// The dedup index must be held as a trait object so Phase 2 can substitute a
+/// remote implementation without touching AppState's shape.
+///
+/// This is a compile-time assertion. `Option<Arc<UsearchVectorIndex>>` does NOT
+/// coerce to `Option<Arc<dyn VectorIndex>>` — unsizing does not reach through
+/// `Option` — so this fails to build until the builder's return type changes.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_vector_index_builder_returns_a_trait_object() {
+    use std::sync::Arc;
+    use trace_commons_gate_enclave::VectorIndex;
+
+    let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
 }

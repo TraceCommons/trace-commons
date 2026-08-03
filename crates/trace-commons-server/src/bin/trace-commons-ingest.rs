@@ -1341,8 +1341,7 @@ struct AppState {
     // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
     #[allow(dead_code)]
     #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-    dedup_vector_index:
-        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    dedup_vector_index: Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>>,
     /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
     /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
     /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
@@ -5268,8 +5267,7 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 /// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-fn build_dedup_vector_index_from_env()
--> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
     use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
     let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
@@ -21442,6 +21440,32 @@ async fn run_credit_settlement(
         }
     }
     let eligible_source_event_count = selected_events.len();
+
+    // Resolve principals to their durable accounts BEFORE capping. The cap is
+    // a per-account bound, and principals fold into accounts a few lines
+    // below; capping first would bound each principal separately and then
+    // merge them, so a contributor holding N principals under one account
+    // would settle up to N times the cap in a single account line item.
+    // Resolving first makes the cap key and the payout key the same key.
+    //
+    // The resolve only runs when a DB mirror is present; without one there is
+    // no account linkage to fold up, the map stays empty, and both the cap and
+    // the grouping fall back to per-principal exactly as before.
+    let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
+        let distinct_refs = selected_events
+            .iter()
+            .map(|event| event.auth_principal_ref.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        db.resolve_principals_to_accounts(&tenant.tenant_id, &distinct_refs)
+            .await
+            .context("failed to resolve contributor principals to accounts for settlement")
+            .map_err(internal_error)?
+    } else {
+        HashMap::new()
+    };
+
     let (
         mut selected_events,
         settlement_policy_excluded_source_event_count,
@@ -21449,6 +21473,7 @@ async fn run_credit_settlement(
     ) = apply_credit_settlement_account_cap(
         selected_events,
         state.credit_settlement_max_micros_per_account,
+        &principal_to_account,
     );
     selected_events.sort_by_key(|event| event.event_id);
     if let Some(limit) = limit {
@@ -21491,31 +21516,11 @@ async fn run_credit_settlement(
     // mirror is present; without one there is no account linkage to fold up and we
     // preserve the legacy per-principal behavior.
     //
-    // A single shared prefix for both the account-group build site and the parse
-    // site below: drift between the two literals would silently route every
-    // account group down the unlinked path and misroute the on-chain payout.
     const ACCOUNT_KEY_PREFIX: &str = ACCOUNT_SETTLEMENT_KEY_PREFIX;
-    let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
-        let distinct_refs = selected_events
-            .iter()
-            .map(|event| event.auth_principal_ref.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        db.resolve_principals_to_accounts(&tenant.tenant_id, &distinct_refs)
-            .await
-            .context("failed to resolve contributor principals to accounts for settlement")
-            .map_err(internal_error)?
-    } else {
-        HashMap::new()
-    };
 
     let mut grouped = BTreeMap::<String, Vec<TraceCommonsCreditLedgerRecord>>::new();
     for event in selected_events {
-        let resolved_key = principal_to_account
-            .get(&event.auth_principal_ref)
-            .map(|account_id| format!("{ACCOUNT_KEY_PREFIX}{account_id}"))
-            .unwrap_or_else(|| event.auth_principal_ref.clone());
+        let resolved_key = settlement_group_key(&event.auth_principal_ref, &principal_to_account);
         grouped.entry(resolved_key).or_default().push(event);
     }
 
@@ -21762,9 +21767,28 @@ fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult
     Ok(limit)
 }
 
+/// The key a credit event settles under: its contributor account when the
+/// principal resolves to one, else the raw principal.
+///
+/// Single definition on purpose. The settlement cap and the line-item
+/// grouping must agree on this key exactly -- if the cap groups by principal
+/// while the payout groups by account, a contributor holding several
+/// principals under one account is capped once per principal and paid once
+/// per account.
+fn settlement_group_key(
+    auth_principal_ref: &str,
+    principal_to_account: &HashMap<String, Uuid>,
+) -> String {
+    principal_to_account
+        .get(auth_principal_ref)
+        .map(|account_id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}"))
+        .unwrap_or_else(|| auth_principal_ref.to_string())
+}
+
 fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,
+    principal_to_account: &HashMap<String, Uuid>,
 ) -> (
     Vec<TraceCommonsCreditLedgerRecord>,
     usize,
@@ -21776,7 +21800,10 @@ fn apply_credit_settlement_account_cap(
     let mut account_totals = BTreeMap::<String, i64>::new();
     for event in &events {
         *account_totals
-            .entry(event.auth_principal_ref.clone())
+            .entry(settlement_group_key(
+                &event.auth_principal_ref,
+                principal_to_account,
+            ))
             .or_insert(0) += credit_delta_micros(event.credit_points_delta);
     }
     let blocked_accounts = account_totals
@@ -21790,7 +21817,10 @@ fn apply_credit_settlement_account_cap(
     let selected = events
         .into_iter()
         .filter(|event| {
-            let excluded = blocked_accounts.contains(&event.auth_principal_ref);
+            let excluded = blocked_accounts.contains(&settlement_group_key(
+                &event.auth_principal_ref,
+                principal_to_account,
+            ));
             if excluded {
                 excluded_count += 1;
             }
