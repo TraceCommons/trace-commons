@@ -11689,11 +11689,31 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authorize_tenant_access_grant_ctx(
-        state.as_ref(),
-        authenticate_ctx(state.as_ref(), &headers)?,
-    )
-    .await?;
+    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+
+    // Submission work includes the server re-scrub and gate preparation, so
+    // bound it before the tenant-access-grant query, envelope validation, or any
+    // submission-record read. Length-prefixing the authenticated tenant, method,
+    // and principal components makes every authentication boundary unambiguous.
+    // Static-token configuration has no stable caller identity beyond the
+    // credential, so that path is necessarily per credential; overlapping
+    // rotation credentials receive separate budgets.
+    let submit_key = submit_principal_rate_limit_key(
+        authenticated_tenant.tenant_id(),
+        authenticated_tenant.safe_auth_method(),
+        authenticated_tenant.principal_ref(),
+    );
+    let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
+    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
+        Some(guard) => guard,
+        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
+    };
+    #[cfg(test)]
+    pause_submit_after_rate_limit_for_test(&submit_key).await;
+    let tenant = authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?;
     validate_envelope(&envelope)?;
 
     if let Some(existing) = tenant
@@ -13858,6 +13878,62 @@ const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
+/// Per-principal cap on `POST /v1/traces` submissions per window. A submission
+/// performs more work than a content read, so this is half the content limit of
+/// 60 and matches the existing confirm-attempt ceiling of 30.
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+/// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
+/// path gets half the content-read concurrency allowance of 4.
+const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
+
+fn submit_principal_rate_limit_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    let auth_method = auth_method.storage_name();
+    format!(
+        "submit-principal:{}:{tenant_id}:{}:{auth_method}:{}:{principal_ref}",
+        tenant_id.len(),
+        auth_method.len(),
+        principal_ref.len()
+    )
+}
+
+// Most ingest unit tests share fixture principals while running in parallel.
+// Their state builders explicitly make those shared keys unbounded; focused
+// rate-limit tests leave their unique keys unset and therefore exercise these
+// production constants through the handler.
+static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
+> = std::sync::OnceLock::new();
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+        limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+    });
+    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+#[cfg(test)]
+fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
+    let limits = SUBMIT_RATE_LIMIT_TEST_LIMITS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    match limits.lock() {
+        Ok(mut limits) => {
+            limits.insert(key.to_string(), (rate, concurrency));
+        }
+        Err(poisoned) => {
+            poisoned
+                .into_inner()
+                .insert(key.to_string(), (rate, concurrency));
+        }
+    }
+}
 
 /// One fixed-window counter: a count and the instant the current window started.
 struct RateWindow {
@@ -13953,6 +14029,24 @@ impl AccountRateLimiter {
             Ok(mut concurrency) => concurrency.clear(),
             Err(poisoned) => poisoned.into_inner().clear(),
         }
+        if let Some(limits) = SUBMIT_RATE_LIMIT_TEST_LIMITS.get() {
+            match limits.lock() {
+                Ok(mut limits) => limits.clear(),
+                Err(poisoned) => poisoned.into_inner().clear(),
+            }
+        }
+        configure_submit_rate_limit_pause_for_test(None);
+    }
+
+    #[cfg(test)]
+    fn count_for_test(&self, key: &str) -> u32 {
+        match self.windows.lock() {
+            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .get(key)
+                .map_or(0, |window| window.count),
+        }
     }
 }
 
@@ -13965,7 +14059,56 @@ pub fn reset_account_rate_limiter_for_test() {
     ACCOUNT_RATE_LIMITER.reset_for_test();
 }
 
-/// RAII release of a per-account content concurrency slot.
+#[cfg(test)]
+fn submit_rate_limit_count_for_test(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> u32 {
+    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(
+        tenant_id,
+        auth_method,
+        principal_ref,
+    ))
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct SubmitRateLimitTestPause {
+    key: String,
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    proceed: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static SUBMIT_RATE_LIMIT_TEST_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<SubmitRateLimitTestPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn configure_submit_rate_limit_pause_for_test(pause: Option<SubmitRateLimitTestPause>) {
+    match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(mut configured) => *configured = pause,
+        Err(poisoned) => *poisoned.into_inner() = pause,
+    }
+}
+
+#[cfg(test)]
+async fn pause_submit_after_rate_limit_for_test(key: &str) {
+    let pause = match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(configured) => configured.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let Some(pause) = pause.filter(|pause| pause.key == key) else {
+        return;
+    };
+    let _ = pause.entered.send(());
+    if let Ok(permit) = pause.proceed.acquire().await {
+        permit.forget();
+    }
+}
+
+/// RAII release of a per-key concurrency slot.
 struct ConcurrencyGuard<'a> {
     limiter: &'a AccountRateLimiter,
     key: String,
@@ -13977,7 +14120,7 @@ impl Drop for ConcurrencyGuard<'_> {
     }
 }
 
-/// Process-global account-surface limiter. Single-instance (see module note).
+/// Process-global authenticated-surface limiter. Single-instance (see module note).
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
