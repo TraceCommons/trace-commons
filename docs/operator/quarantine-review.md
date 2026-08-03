@@ -17,16 +17,21 @@ means two keys were *found and replaced* with `[REDACTED:...]`, not that two
 keys sit in the stored trace. Envelopes are stored as encrypted ciphertext of
 the already-redacted payload. There is nothing to purge.
 
-**So `privacy_risk = high` is a proxy for residual risk, not evidence of
-retained PII.** It says the redactor found a lot, which correlates with the
-possibility that it also missed something. Reviewing means judging that residual
-possibility, not deleting content that is still present.
+**So `privacy_risk = high` is reserved for scrub failure or unredactable
+findings** (a residual post-scrub scan still matching, an object key that
+cannot be rewritten, or a residual scan that could not complete). A secret the
+redactor found and removed is `medium`: the report is an annotation on a
+reviewable record, not evidence that live credentials remain. Reviewing a
+High still means judging residual possibility, not deleting content that is
+still present; reviewing a Medium is the same posture with an operator path
+(`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`) that High does not have.
 
 **Approval releases a high-risk trace without changing its risk level.**
 `review-decision --decision approve` sets `status = accepted` and leaves
 `privacy_risk = high`. This matters: clearing the backlog does **not** depend on
 the monotonic-risk work in the re-scrub path. The existing tooling is sufficient
-today.
+today. Re-scrubbing under the scrub-polarity rule (#219) can additionally move
+successful-secret cases from High to Medium without an approve decision.
 
 ## Prerequisites
 
