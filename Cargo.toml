@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/trace-commons-contributor",
+    "crates/trace-commons-gate-api",
     "crates/trace-commons-gate-enclave",
     "crates/trace-commons-operator-client",
     "crates/trace-commons-protocol",
