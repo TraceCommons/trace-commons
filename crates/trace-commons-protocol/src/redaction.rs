@@ -171,9 +171,32 @@ fn redact_in_place(value: &mut Value) {
     }
 }
 
-fn redact_object(map: &mut Map<String, Value>) {
+/// True when `map` is a k8s/env-style `{name, value}` object whose `name`
+/// string is itself a sensitive key cue (e.g. `API_KEY`, `DATABASE_PASSWORD`).
+///
+/// The cue sits in a sibling value rather than in the JSON key, so
+/// key-name redaction and the text cue-window never see it (#193 row 6).
+fn is_env_array_secret_object(map: &Map<String, Value>) -> bool {
+    let mut saw_value = false;
+    let mut name_is_sensitive = false;
     for (key, val) in map {
-        if is_sensitive_key(key) {
+        if key.eq_ignore_ascii_case("value") {
+            saw_value = true;
+        } else if key.eq_ignore_ascii_case("name") {
+            if let Value::String(name) = val {
+                name_is_sensitive = is_sensitive_key(name);
+            }
+        }
+    }
+    saw_value && name_is_sensitive
+}
+
+fn redact_object(map: &mut Map<String, Value>) {
+    let redact_env_value = is_env_array_secret_object(map);
+    for (key, val) in map.iter_mut() {
+        if is_sensitive_key(key)
+            || (redact_env_value && key.eq_ignore_ascii_case("value"))
+        {
             *val = Value::String(REDACTED.to_string());
         } else {
             redact_in_place(val);
@@ -247,5 +270,53 @@ mod tests {
         assert!(is_sensitive_key("password123"));
         assert!(is_sensitive_key("secret99"));
         assert!(is_sensitive_key("accounttoken2"));
+    }
+
+    #[test]
+    fn redacts_json_key_name_cues_regardless_of_value_shape() {
+        // #193 row 7: dominant tool-call-argument shape. Key-name cue is
+        // enough; the value does not need to look like a known provider key.
+        let input = serde_json::json!({
+            "apiKey": "ck_live_not_a_known_prefix",
+            "nested": {"clientSecret": "short"},
+            "safe": "keep"
+        });
+        let out = redact_sensitive_json(&input);
+        assert_eq!(out["apiKey"], "[REDACTED]");
+        assert_eq!(out["nested"]["clientSecret"], "[REDACTED]");
+        assert_eq!(out["safe"], "keep");
+    }
+
+    #[test]
+    fn redacts_k8s_env_name_value_arrays_when_name_is_cue_like() {
+        // #193 row 6: cue lives in the sibling `name` string, not the key.
+        let input = serde_json::json!({
+            "env": [
+                {"name": "API_KEY", "value": "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae"},
+                {"name": "PORT", "value": "8080"},
+                {"name": "DATABASE_PASSWORD", "value": "hunter2-adjacent"},
+                {"Name": "OPENAI_API_KEY", "Value": "sk-not-scanned-here"}
+            ]
+        });
+        let out = redact_sensitive_json(&input);
+        assert_eq!(out["env"][0]["name"], "API_KEY");
+        assert_eq!(out["env"][0]["value"], "[REDACTED]");
+        assert_eq!(out["env"][1]["name"], "PORT");
+        assert_eq!(out["env"][1]["value"], "8080");
+        assert_eq!(out["env"][2]["value"], "[REDACTED]");
+        assert_eq!(out["env"][3]["Value"], "[REDACTED]");
+    }
+
+    #[test]
+    fn env_array_shape_does_not_redact_non_secret_names() {
+        let input = serde_json::json!({
+            "env": [
+                {"name": "NODE_ENV", "value": "production"},
+                {"name": "token_count", "value": "42"},
+                {"name": "author", "value": "alice"}
+            ]
+        });
+        let out = redact_sensitive_json(&input);
+        assert_eq!(out, input);
     }
 }

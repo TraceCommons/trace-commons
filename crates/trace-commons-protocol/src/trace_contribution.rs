@@ -2088,8 +2088,13 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection. Shorter tokens are too noisy to gate reliably.
-const ENTROPY_MIN_LEN: usize = 16;
+/// detection when a secret cue is present.
+///
+/// Historically 16 (#157). #193 row 2 lowers it to 8: a cue plus a short
+/// opaque value is a strong enough signal that the old floor was leaking
+/// real API keys in the 8–15 range. The floor is still an FP control —
+/// below 8 even a cue is too noisy (see the #193 FP-budget fixtures).
+const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -2273,7 +2278,11 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
+        // Floor matches [`ENTROPY_MIN_LEN`] (8): shorter tokens never become
+        // candidates. Cue + allowlist + entropy gates still reject the vast
+        // majority; lowering from 16 closes #193 row 2 without scanning
+        // sub-8 noise.
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -2328,8 +2337,17 @@ fn is_pure_hex(s: &str) -> bool {
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, hex hash/sha, or this module's own report-metric label) rather
+/// prefix, short git sha, or this module's own report-metric label) rather
 /// than an opaque secret.
+///
+/// Content-hash shapes (lowercase hex ≥32, pure hex of length 40/64) are
+/// deliberately NOT allowlisted here. Those shapes are rarely cue-adjacent
+/// when they are real hashes, and when they *are* cue-adjacent they are
+/// indistinguishable from HMAC/AES key material (#193 row 4). Uncued hashes
+/// still survive because [`is_cued_secret`] requires a cue before any
+/// allowlist check runs. Short pure-hex of length 7 or 8 stays allowlisted
+/// even when cued: git short SHAs dominate that length and the FP cost of
+/// redacting them after a cue exceeds the recall gain.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -2343,16 +2361,9 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
-        return true;
-    }
-    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
-    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
-    if token.len() >= 32
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
+    // Git short SHAs (and similar). Longer pure-hex (40/64) used to live
+    // here too and is now redacted when cued — see #193 row 4.
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
         return true;
     }
     false
@@ -2437,8 +2448,9 @@ fn is_cued_secret(
 /// here. A literal zero-separator glue with no `=` at all (`api_keySECRET`,
 /// `BearerSECRET`) is NOT covered -- there is no `=` to split on, so the cue
 /// word and the value are one token and [`has_secret_cue`]'s window still
-/// never sees a cue word immediately before `start`. That is a separate,
-/// unaddressed gap, not a variant of the one this function fixes.
+/// never sees a cue word immediately before `start`. That is a deliberate
+/// accept under #193 row 1 (FP cost of splitting inside identifiers), not an
+/// untracked gap.
 fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     for candidate in entropy_candidate_regex().find_iter(content) {
@@ -5417,10 +5429,14 @@ mod tests {
         // unchanged on the pre-split code and proved nothing about the split
         // path. Assert directly on the split position instead: a cue IS
         // found there, and the allowlist excludes the narrowed value anyway.
+        //
+        // Content-hash hex is deliberately absent: #193 row 4 redacts cued
+        // lowercase hex ≥32 (including 40/64 shas). UUID and prefixed IDs
+        // stay allowlisted even when cued (~105k structural IDs vs ~20 real
+        // secrets in the prototype scan).
         for text in [
             "token=550e8400-e29b-41d4-a716-446655440000",
             "api_key=550e8400-e29b-41d4-a716-446655440000",
-            "secret=0123456789abcdef0123456789abcdef01234567",
             "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
         ] {
             let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
@@ -5682,32 +5698,32 @@ mod tests {
             o1.contains("msg_01ABCDEFghijklmnopqrstuvwx"),
             "allowlisted id got redacted: {o1}"
         );
-        // git sha after cue must survive (hex len 40)
+        // git sha with NO secret cue nearby must survive. Bare "key" is not
+        // in the cue list; cued shas are redacted under #193 row 4 (covered
+        // separately).
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let (o2, _) = r.redact_text(&format!("key {sha}"));
-        assert!(o2.contains(sha), "git sha got redacted: {o2}");
+        let (o2, _) = r.redact_text(&format!("commit {sha}"));
+        assert!(o2.contains(sha), "uncued git sha got redacted: {o2}");
         // high-entropy token with NO cue nearby must survive (avoids shredding base64 content)
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
     }
 
-    /// This pass's re-anchoring after `=` only covers unspaced *assignment*
-    /// glue (`api_key=<secret>`). It documents that boundary against the
-    /// pre-existing evasions/exclusions rather than leaving it assumed. None
-    /// of the five cases below are things this pass is meant to fix; each
-    /// comment says why. Do not "fix" these here -- they are separate
-    /// decisions with false-positive tradeoffs (see PR discussion for Fix 4).
+    /// #193 decision matrix for the shapes deferred by #187.
+    ///
+    /// Defects (must redact): row 2 short cued opaque, row 4 cued lowercase
+    /// hex ≥32. Deliberate survivals (must not redact): row 1 zero-separator
+    /// glue, row 3 UUID even when cued, sub-threshold entropy. Row 5
+    /// (spaced padding) is covered by the windowed-entropy tests above.
+    /// Rows 6–7 live in `redaction.rs` (structured JSON).
     #[test]
-    fn contextual_entropy_documents_the_glued_assignment_boundary() {
+    fn contextual_entropy_applies_cued_secret_shape_decisions() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
 
-        // 1. Zero-separator glue: no `=` between the cue word and the value,
-        //    so there is nothing for this pass's re-anchoring to split on.
-        //    The cue and the value are one token and the cue-window check
-        //    never sees a cue word immediately before the candidate. NOT
-        //    addressed by this pass.
+        // Row 1 — Accept, documented. No separator means no boundary without
+        // splitting inside arbitrary identifiers; FP cost is too high.
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
             let (out, _) = r.redact_text(&text);
@@ -5718,25 +5734,135 @@ mod tests {
             );
         }
 
-        // 2. UUID-shaped value: intentionally allowlisted as a structural
-        //    identifier (`is_allowlisted_entropy_candidate`'s `uuid_regex`
-        //    check), even when cued.
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
         let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
 
-        // 3. Lowercase hex, length >= 32: intentionally treated as a content
-        //    hash (sha256/git blob), not a secret, even when cued.
-        let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
+        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("secret={hex40}"),
+            format!("api_key: {hex64}"),
+            format!("api_key={hex64}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
 
-        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
-        //    short to gate reliably, even when cued and opaque.
-        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
-        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
-        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+        // Sub-threshold entropy — still not opaque enough, even when cued.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
+    }
 
-        // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
-        //    as not opaque enough, even when cued and long enough.
+    /// False-positive budget for the #193 row 2 / row 4 loosenings.
+    ///
+    /// Each fixture is a shape that must NOT be redacted after the floor and
+    /// hex-allowlist changes. If a future tweak makes any of these fire, the
+    /// FP cost has moved and needs an explicit decision — do not "fix" by
+    /// deleting the fixture.
+    #[test]
+    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // Uncued content hashes / shas must still survive (row 4 narrows the
+        // allowlist to the *cued* case only; uncued path never reached it).
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("commit {sha40}"),
+            format!("digest {sha64}"),
+            format!("blob {sha64} verified"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_eq!(out, text, "uncued hash was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // UUID stays allowlisted even when cued (row 3).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
+        }
+
+        // Prefixed structural IDs stay allowlisted even when cued.
+        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
+
+        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
+        // rate on `api_key: deadbeef`-style short hex dominates recall here.
+        for sha in ["deadbee", "deadbeef"] {
+            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
+            assert!(
+                out.contains(sha),
+                "short git sha was redacted (FP budget): {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Low-entropy short values after a cue must survive (row 2 lowers
+        // length, not the entropy floor).
+        for text in [
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            "secret: none1234",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Sub-floor length even with a cue and high opacity — still too short.
+        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
+        assert_eq!(out, "api_key=Zx9Qk2L");
+
+        // Uncued short opaque tokens must survive (candidate class is wider
+        // now, but the cue gate is the FP control).
+        let short = "Q7vM2xP9sL4nR8k";
+        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
+        assert!(out.contains(short), "uncued short opaque was redacted: {out}");
+        assert!(!rep.blocked_secret_detected);
+    }
+
+    /// This pass's re-anchoring after `=` only covers unspaced *assignment*
+    /// glue (`api_key=<secret>`). It documents that boundary against the
+    /// pre-existing evasions/exclusions rather than leaving it assumed.
+    /// Shape-level redact-vs-accept decisions for the remaining gaps live in
+    /// `contextual_entropy_applies_cued_secret_shape_decisions` (#193).
+    #[test]
+    fn contextual_entropy_documents_the_glued_assignment_boundary() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Zero-separator glue: no `=` between the cue word and the value,
+        // so there is nothing for this pass's re-anchoring to split on.
+        // Accepted as deliberate under #193 row 1.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
+        // as not opaque enough, even when cued and long enough.
         let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
         assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
