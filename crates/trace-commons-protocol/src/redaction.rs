@@ -196,9 +196,7 @@ fn is_env_array_secret_object(map: &Map<String, Value>) -> bool {
 fn redact_object(map: &mut Map<String, Value>) {
     let redact_env_value = is_env_array_secret_object(map);
     for (key, val) in map.iter_mut() {
-        if is_sensitive_key(key)
-            || (redact_env_value && key.eq_ignore_ascii_case("value"))
-        {
+        if is_sensitive_key(key) || (redact_env_value && key.eq_ignore_ascii_case("value")) {
             *val = Value::String(REDACTED.to_string());
         } else {
             redact_in_place(val);

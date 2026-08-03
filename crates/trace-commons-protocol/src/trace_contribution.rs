@@ -5834,7 +5834,10 @@ mod tests {
         // now, but the cue gate is the FP control).
         let short = "Q7vM2xP9sL4nR8k";
         let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
-        assert!(out.contains(short), "uncued short opaque was redacted: {out}");
+        assert!(
+            out.contains(short),
+            "uncued short opaque was redacted: {out}"
+        );
         assert!(!rep.blocked_secret_detected);
     }
 
