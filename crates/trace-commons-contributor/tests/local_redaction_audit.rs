@@ -209,7 +209,9 @@ const REPORT_METRIC_LABELS: &[&str] = &[
 ];
 
 /// Mirror of the detector's `is_allowlisted_entropy_candidate`: structural
-/// IDs, UUIDs, and content hashes are not secrets even at high entropy.
+/// IDs, UUIDs, and short git SHAs are not secrets even at high entropy.
+/// Content-hash hex ≥32 / 40 / 64 is intentionally absent when cued (#193
+/// row 4); this mirror is only consulted after a cue, matching production.
 /// Also excludes this harness's own false-positive surface: the redaction
 /// pipeline's report metric label names (see `REPORT_METRIC_LABELS`).
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
@@ -222,14 +224,7 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
-        return true;
-    }
-    if token.len() >= 32
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
         return true;
     }
     false
@@ -240,17 +235,18 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
 ///
 /// Every other matcher here mirrors a detector exactly, which makes a
 /// post-redaction hit a genuine leak. `bearer value` is different by design:
-/// production covers bearer tokens only through the cue-gated entropy rule,
-/// which UUID-shaped, lowercase-hex, short, and low-entropy tokens all evade.
-/// This matcher exists to make that gap visible, so its hits are expected
-/// until the detector grows a real bearer rule. Reporting them as hard
+/// production covers bearer tokens through the cue-gated entropy rule, and
+/// #193 closed the short-cued and cued-hex evasions, but UUID-shaped and
+/// low-entropy tokens still evade (plus accepted zero-separator glue).
+/// This matcher exists to make that residual visible, so its hits are
+/// expected until a dedicated bearer rule lands. Reporting them as hard
 /// failures would leave the audit permanently red and train everyone to
 /// ignore it -- the exact failure mode that let five false positives sit
 /// unexamined. They are printed for triage instead.
 const ADVISORY_PATTERNS: &[&str] = &["bearer value"];
 
 const CUE_WINDOW: usize = 48;
-const ENTROPY_MIN_LEN: usize = 16;
+const ENTROPY_MIN_LEN: usize = 8;
 const ENTROPY_BITS_MIN: f64 = 3.2;
 
 /// True for the detector cue regex's separator class: `[\x22'`:=\s]`.
@@ -295,7 +291,7 @@ fn window_has_cue(window: &str) -> bool {
 }
 
 /// Recall-oriented mirror of the detector's cue-gated high-entropy
-/// catch-all: any run of entropy-candidate chars (len >= 16), not
+/// catch-all: any run of entropy-candidate chars (len >= 8), not
 /// allowlisted, with Shannon entropy >= 3.2 bits/char, immediately preceded
 /// (within the 48-char window, and immediately abutting the candidate
 /// modulo 1-6 separator chars) by a secret-shaped cue word.
@@ -438,14 +434,15 @@ fn count_pem_private_key(hay: &str) -> usize {
 ///
 /// This matcher deliberately does NOT mirror a single detector regex, and it
 /// is the one place in this file where being broader than production is
-/// correct. Production covers bearer tokens only through the cue-gated
-/// entropy rule, which a realistic opaque token evades in at least four ways:
-/// a UUID-shaped token is allowlisted outright, a lowercase-hex token of 32+
-/// chars is treated as a content hash, a token under 16 chars is below the
-/// minimum length, and a low-entropy static credential falls under the 3.2
-/// bits/char threshold. A bearer header is an unambiguous declaration that
-/// what follows is a credential, so anything of plausible token shape after
-/// it is worth surfacing even when production would not redact it.
+/// correct. Production covers bearer tokens through the cue-gated entropy
+/// rule. #193 closed the short-cued (8–15) and cued-lowercase-hex≥32
+/// evasions; a realistic opaque token can still evade in two deliberate
+/// ways — a UUID-shaped token is allowlisted, and a low-entropy static
+/// credential falls under the 3.2 bits/char threshold — plus the accepted
+/// zero-separator form (`BearerSECRET`). A bearer header is an unambiguous
+/// declaration that what follows is a credential, so anything of plausible
+/// token shape after it is worth surfacing even when production would not
+/// redact it.
 ///
 /// Prose is excluded by requiring at least one digit or uppercase character:
 /// "bearer per-a-slot-based" is all-lowercase kebab case, whereas real
