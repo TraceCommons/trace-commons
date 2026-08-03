@@ -75,6 +75,31 @@ pub struct NearAiScorerConfig {
     pub timeout: Duration,
 }
 
+/// True when `base_url` uses TLS, or is plain HTTP against a loopback host.
+///
+/// Loopback is exempt because such a request never leaves the machine: local
+/// sidecars and the mock servers used in tests are the intended cases. Any
+/// other plaintext endpoint would put the bearer API key on the wire.
+fn base_url_is_tls_or_loopback(base_url: &str) -> bool {
+    if base_url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = base_url.strip_prefix("http://") else {
+        // Neither http nor https: not a URL shape this scorer will post to.
+        return false;
+    };
+    // Authority runs to the first path/query/fragment delimiter; any
+    // userinfo before an `@` is not part of the host.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal: the host is what sits inside the brackets.
+        Some(inner) => inner.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 impl NearAiScorerConfig {
     /// Validate the config. Called at construction; cheap.
     fn validate(&self) -> anyhow::Result<()> {
@@ -83,6 +108,14 @@ impl NearAiScorerConfig {
         }
         if self.base_url.ends_with('/') {
             bail!("NearAiScorerConfigBaseUrlTrailingSlash");
+        }
+        // The API key rides on every request as a bearer token, so this URL
+        // decides who receives a credential -- it is a disclosure surface,
+        // not just a routing detail. Require TLS, exempting loopback (which
+        // never reaches a network). Fail-closed rather than silently
+        // shipping the key in the clear.
+        if !base_url_is_tls_or_loopback(&self.base_url) {
+            bail!("NearAiScorerConfigBaseUrlNotTls");
         }
         if self.model.is_empty() {
             bail!("NearAiScorerConfigModelMissing");
@@ -121,6 +154,11 @@ impl NearAiPerplexityScorer {
 
         let client = reqwest::blocking::Client::builder()
             .timeout(cfg.timeout)
+            // Do not follow redirects: the request carries a bearer API key,
+            // and a redirect would hand the validated endpoint's authority to
+            // a host that was never validated. Matching the ingest binary,
+            // which builds every outbound client with this policy.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("NearAiScorerHttpClientBuildFailed")?;
 
@@ -354,6 +392,42 @@ mod tests {
         let mut c = ok_cfg();
         c.base_url.push('/');
         assert!(c.validate().is_err());
+    }
+
+    /// The bearer API key goes to whatever host `base_url` names, so a
+    /// plaintext endpoint would put it on the wire. Loopback stays allowed:
+    /// the request never reaches a network.
+    #[test]
+    fn config_rejects_plaintext_non_loopback_base_url() {
+        for rejected in [
+            "http://qwen3-30b.completions.near.ai/v1",
+            "http://evil.example.com/v1",
+            "http://127.0.0.1.evil.example.com/v1",
+            "http://user@evil.example.com/v1",
+            "ftp://qwen3-30b.completions.near.ai/v1",
+            "qwen3-30b.completions.near.ai/v1",
+        ] {
+            let mut c = ok_cfg();
+            c.base_url = rejected.to_string();
+            assert!(
+                c.validate().is_err(),
+                "plaintext or non-http base URL must be refused: {rejected}"
+            );
+        }
+
+        for allowed in [
+            "https://qwen3-30b.completions.near.ai/v1",
+            "http://localhost:8000/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            let mut c = ok_cfg();
+            c.base_url = allowed.to_string();
+            assert!(
+                c.validate().is_ok(),
+                "tls or loopback base URL must be accepted: {allowed}"
+            );
+        }
     }
 
     #[test]
