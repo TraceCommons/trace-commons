@@ -48,6 +48,30 @@ pub struct NearAiPrivacyFilterAdapter {
     max_input_bytes: usize,
 }
 
+/// True when `base_url` uses TLS, or is plain HTTP against a loopback host.
+///
+/// Loopback is exempt because such a request never leaves the machine: local
+/// sidecars and the mock servers used in tests are the intended cases. Any
+/// other plaintext endpoint would put the bearer API key on the wire.
+fn base_url_is_tls_or_loopback(base_url: &str) -> bool {
+    if base_url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = base_url.strip_prefix("http://") else {
+        return false;
+    };
+    // Authority runs to the first path/query/fragment delimiter; any
+    // userinfo before an `@` is not part of the host.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal: the host is what sits inside the brackets.
+        Some(inner) => inner.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 impl NearAiPrivacyFilterAdapter {
     pub fn new(
         base_url: impl Into<String>,
@@ -56,8 +80,22 @@ impl NearAiPrivacyFilterAdapter {
         timeout: Duration,
         max_input_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
+        let base_url = base_url.into();
+        // The classify request carries the API key as a bearer token, so the
+        // configured endpoint decides who receives a credential. Require TLS
+        // unless the endpoint is loopback (local sidecars, test mock
+        // servers), and refuse rather than shipping the key in plaintext.
+        if !base_url_is_tls_or_loopback(&base_url) {
+            return Err(PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_NEAR_AI_PRIVACY_BASE_URL",
+                reason: "base URL must use https (or loopback http)".to_string(),
+            });
+        }
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            // No redirect following: a redirect would hand the bearer key to
+            // a host that never passed the check above.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
                 var: "<reqwest client>",
@@ -65,7 +103,7 @@ impl NearAiPrivacyFilterAdapter {
             })?;
         Ok(Self {
             client,
-            base_url: base_url.into(),
+            base_url,
             model: model.into(),
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
@@ -434,6 +472,42 @@ fn apply_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classify call sends the API key as a bearer token, so a plaintext
+    /// non-loopback endpoint would put it on the wire. Loopback stays
+    /// allowed — that is what the wiremock-backed tests use.
+    #[test]
+    fn adapter_refuses_plaintext_non_loopback_base_url() {
+        let build = |base_url: &str| {
+            NearAiPrivacyFilterAdapter::new(
+                base_url,
+                "openai/privacy-filter",
+                "test-api-key-do-not-leak",
+                Duration::from_secs(5),
+                1_000_000,
+            )
+        };
+        for rejected in [
+            "http://near-ai.example.com",
+            "http://127.0.0.1.evil.example.com",
+            "ftp://near-ai.example.com",
+        ] {
+            assert!(
+                build(rejected).is_err(),
+                "plaintext or non-http base URL must be refused: {rejected}"
+            );
+        }
+        for allowed in [
+            "https://near-ai.example.com",
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+        ] {
+            assert!(
+                build(allowed).is_ok(),
+                "tls or loopback base URL must be accepted: {allowed}"
+            );
+        }
+    }
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
         ClassifySpan {
