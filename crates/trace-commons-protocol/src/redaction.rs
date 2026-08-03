@@ -184,7 +184,9 @@ fn is_env_array_secret_object(map: &Map<String, Value>) -> bool {
             saw_value = true;
         } else if key.eq_ignore_ascii_case("name") {
             if let Value::String(name) = val {
-                name_is_sensitive = is_sensitive_key(name);
+                // OR across duplicate casings (`name` + `Name`): a later
+                // non-sensitive sibling must not clear an earlier hit.
+                name_is_sensitive |= is_sensitive_key(name);
             }
         }
     }
@@ -318,5 +320,18 @@ mod tests {
         });
         let out = redact_sensitive_json(&input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn env_array_ors_duplicate_name_casings() {
+        // Pathological but legal JSON: both `Name` and `name` present.
+        // A non-sensitive later sibling must not clear an earlier cue.
+        let input = serde_json::json!({
+            "Name": "API_KEY",
+            "name": "PORT",
+            "value": "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae"
+        });
+        let out = redact_sensitive_json(&input);
+        assert_eq!(out["value"], "[REDACTED]");
     }
 }
