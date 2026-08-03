@@ -7151,6 +7151,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-gate-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sha2 0.10.9",
+ "uuid 1.23.1",
+]
+
+[[package]]
 name = "trace-commons-gate-enclave"
 version = "0.1.0"
 dependencies = [
@@ -7167,6 +7176,7 @@ dependencies = [
  "tempfile",
  "tokenizers 0.21.4",
  "tokio",
+ "trace-commons-gate-api",
  "tracing",
  "usearch",
  "uuid 1.23.1",

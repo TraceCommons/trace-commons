@@ -1341,8 +1341,7 @@ struct AppState {
     // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
     #[allow(dead_code)]
     #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-    dedup_vector_index:
-        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    dedup_vector_index: Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>>,
     /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
     /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
     /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
@@ -5277,8 +5276,7 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 /// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-fn build_dedup_vector_index_from_env()
--> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
     use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
     let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)

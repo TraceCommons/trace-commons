@@ -79880,3 +79880,18 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
     assert!(over.is_empty());
     assert_eq!(over_excluded, 1);
 }
+
+/// The dedup index must be held as a trait object so Phase 2 can substitute a
+/// remote implementation without touching AppState's shape.
+///
+/// This is a compile-time assertion. `Option<Arc<UsearchVectorIndex>>` does NOT
+/// coerce to `Option<Arc<dyn VectorIndex>>` — unsizing does not reach through
+/// `Option` — so this fails to build until the builder's return type changes.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_vector_index_builder_returns_a_trait_object() {
+    use std::sync::Arc;
+    use trace_commons_gate_enclave::VectorIndex;
+
+    let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
+}
