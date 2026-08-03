@@ -16766,6 +16766,10 @@ async fn operator_rescrub_quarantined_submission(
         return Ok(result);
     }
 
+    // Match submit: estimate credit from the post-rescrub envelope, then
+    // zero it unless the risk-derived status is Accepted (including the
+    // Accepted→AwaitingPiiBackstop hold, which keeps pending credit).
+    apply_credit_estimate_to_envelope(&mut envelope);
     if target_status != TraceCorpusStatus::Accepted
         && target_status != TraceCorpusStatus::AwaitingPiiBackstop
     {
@@ -16775,8 +16779,6 @@ async fn operator_rescrub_quarantined_submission(
                 .to_string(),
         ];
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
-    } else if target_status == TraceCorpusStatus::Accepted {
-        apply_credit_estimate_to_envelope(&mut envelope);
     }
 
     let prior_object_key = record.object_key.clone();
