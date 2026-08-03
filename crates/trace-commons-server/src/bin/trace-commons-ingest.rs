@@ -21283,7 +21283,15 @@ async fn run_credit_settlement(
     };
     let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
     if let Some(locks) = settlement_locks {
-        locks.release().await.map_err(internal_error)?;
+        // Settlement may already be durable; never convert a successful finalize into
+        // a caller-visible failure because advisory unlock hiccuped.
+        if let Err(error) = locks.release().await {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                tenant_id = %tenant.tenant_id,
+                "failed to release credit settlement run locks after settlement"
+            );
+        }
     }
     result
 }
