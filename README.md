@@ -110,6 +110,7 @@ Authoritative contracts to read before changing anything substantive:
 ```
 crates/
 ├── trace-commons-protocol/      DTOs + redaction helpers shared with the client.
+├── trace-commons-gate-api/      Public gate contracts plus the reference scorer.
 ├── trace-commons-gate-enclave/  Scoring orchestrator (perplexity, embedder, vector index).
 │                                Two real perplexity backends: mistralrs (local CUDA,
 │                                feature `local-gpu-models`) and NEAR AI Cloud HTTP

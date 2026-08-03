@@ -73,16 +73,25 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Four jobs gate every PR:
+Eight jobs gate every PR (see `.github/workflows/ci.yml`):
 
-- `cargo check` (with `RUSTFLAGS=-D warnings`).
-- `cargo test --no-run` (with `RUSTFLAGS=-D warnings`).
+- `cargo fmt --check` — runs `cargo fmt --all -- --check`. Run `cargo fmt --all`
+  before committing.
 - `cargo clippy` with the allow-list above (`-A clippy::type_complexity
   -A clippy::collapsible_if -A clippy::manual_option_as_slice
   -A clippy::useless_vec -A clippy::redundant_pattern_matching`). Do not
   widen the allow-list without explicit approval.
-- `scripts/operator/pilot-bootstrap-smoke.sh` — pilot-bootstrap smoke job
-  exercising the JSONL loader path on every PR. Do not break it.
+- `cargo check (default features)` (with `RUSTFLAGS=-D warnings`).
+- `cargo check (local-gpu-models, non-CUDA)` (with `RUSTFLAGS=-D warnings`).
+  Note this feature IS checked in CI even though it cannot link locally without
+  a CUDA toolchain — a change that only compiles under default features will
+  fail here.
+- `cargo check (near-ai-scorer)` (with `RUSTFLAGS=-D warnings`). This is the
+  configuration the pilot builds.
+- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
+- `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
+  exercising the JSONL loader path. Do not break it.
+- `operator-binaries smoke`.
 
 GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
@@ -103,6 +112,14 @@ those versions unless intentionally upgrading.
   go through `trace_current_tenant_id()`; the raw pool is restricted.
 - **No emojis in commits, PRs, code, or reports.** Match the existing commit
   style (short imperative subjects without `feat:` / `fix:` prefixes).
+- **Gate contracts live in `trace-commons-gate-api`.** Traits, result types, and
+  decision types belong there; scoring implementations do not. Code that holds a
+  scorer, embedder, or vector index must hold it as a trait object, never as a
+  concrete type — a proprietary backend substitutes at that seam, and a concrete
+  type cannot participate in one. The `Reference*` implementations in that crate
+  are real but deliberately simple and uncalibrated; the `Mock*` types in
+  `trace-commons-gate-enclave` are hash-derived test doubles and must never gate
+  anything. See `crates/trace-commons-gate-api/README.md`.
 
 ## Working with this codebase
 
