@@ -1279,43 +1279,41 @@ async fn insert_credit_settlement_batch_on_tx(
             ))
         })?;
     tx.execute(
-        &format!(
-            "INSERT INTO trace_credit_settlement_batches (
-                tenant_id, settlement_batch_id, policy_version, status, reason_hash,
-                issuer_approval_evidence_hash, source_credit_event_ids,
-                source_submission_ids, source_list_hash, settled_credit_points,
-                settled_credit_micros, line_items_json, near_contract_id,
-                ranking_model_version, ranking_target_use,
-                ranking_calibration_run_id, ranking_calibration_report_hash,
-                ranking_calibration_joined_evidence_hash,
-                ranking_credit_events_excluded_count,
-                ranking_credit_events_excluded_reason_counts_json,
-                actor_principal_ref
-             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, $21
-             )
-             ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
-                policy_version = excluded.policy_version,
-                status = excluded.status,
-                reason_hash = excluded.reason_hash,
-                issuer_approval_evidence_hash = excluded.issuer_approval_evidence_hash,
-                source_credit_event_ids = excluded.source_credit_event_ids,
-                source_submission_ids = excluded.source_submission_ids,
-                source_list_hash = excluded.source_list_hash,
-                settled_credit_points = excluded.settled_credit_points,
-                settled_credit_micros = excluded.settled_credit_micros,
-                line_items_json = excluded.line_items_json,
-                near_contract_id = excluded.near_contract_id,
-                ranking_model_version = excluded.ranking_model_version,
-                ranking_target_use = excluded.ranking_target_use,
-                ranking_calibration_run_id = excluded.ranking_calibration_run_id,
-                ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
-                ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
-                ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
-                ranking_credit_events_excluded_reason_counts_json = excluded.ranking_credit_events_excluded_reason_counts_json,
-                actor_principal_ref = excluded.actor_principal_ref"
-        ),
+        "INSERT INTO trace_credit_settlement_batches (
+            tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+            issuer_approval_evidence_hash, source_credit_event_ids,
+            source_submission_ids, source_list_hash, settled_credit_points,
+            settled_credit_micros, line_items_json, near_contract_id,
+            ranking_model_version, ranking_target_use,
+            ranking_calibration_run_id, ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash,
+            ranking_credit_events_excluded_count,
+            ranking_credit_events_excluded_reason_counts_json,
+            actor_principal_ref
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21
+         )
+         ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
+            policy_version = excluded.policy_version,
+            status = excluded.status,
+            reason_hash = excluded.reason_hash,
+            issuer_approval_evidence_hash = excluded.issuer_approval_evidence_hash,
+            source_credit_event_ids = excluded.source_credit_event_ids,
+            source_submission_ids = excluded.source_submission_ids,
+            source_list_hash = excluded.source_list_hash,
+            settled_credit_points = excluded.settled_credit_points,
+            settled_credit_micros = excluded.settled_credit_micros,
+            line_items_json = excluded.line_items_json,
+            near_contract_id = excluded.near_contract_id,
+            ranking_model_version = excluded.ranking_model_version,
+            ranking_target_use = excluded.ranking_target_use,
+            ranking_calibration_run_id = excluded.ranking_calibration_run_id,
+            ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
+            ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
+            ranking_credit_events_excluded_reason_counts_json = excluded.ranking_credit_events_excluded_reason_counts_json,
+            actor_principal_ref = excluded.actor_principal_ref",
         &[
             &batch.tenant_id,
             &batch.settlement_batch_id,

@@ -79863,7 +79863,7 @@ async fn settlement_outbox_repair_converges_after_batch_only_crash() {
     let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
         state.as_ref(),
         &tenant,
-        &[batch.clone()],
+        std::slice::from_ref(&batch),
     )
     .await
     .expect("repair runs");

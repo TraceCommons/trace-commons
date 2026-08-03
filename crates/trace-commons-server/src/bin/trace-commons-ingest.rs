@@ -25223,6 +25223,14 @@ async fn append_utility_attestation_with_db_mirror(
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
 
+/// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
+/// which writes the batch and its NEAR outbox rows in one transaction. This
+/// batch-only variant is retained because it is the narrowest way to exercise
+/// `ensure_credit_settlement_batch_has_no_finalized_source_conflict` on its own;
+/// see the finalized-source-conflict test in the sibling test module. Without
+/// the allow, `-D warnings` fails the non-test build, since the only remaining
+/// caller is `#[cfg(test)]`.
+#[allow(dead_code)]
 async fn append_credit_settlement_batch_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
