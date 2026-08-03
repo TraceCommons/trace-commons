@@ -111,7 +111,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 |---|---|---|---|---|
 | `schema_version` | string | yes | client | Must equal `ironclaw.trace_contribution.v1`. |
 | `trace_id` | UUID | yes | client | Stable identity of the underlying trace. |
-| `submission_id` | UUID | yes | client | Identity of *this* submission; idempotency key for retries. |
+| `submission_id` | UUID | yes | client | Identity of *this* submission; idempotency key for retries. Derived from the underlying session hash on the contributor CLI so the same local session always maps to the same id. **Owned `quarantined` rows may be superseded** by a corrected envelope on the same id (remediation); `accepted` / `rejected` / `revoked` rows stay classic-idempotent. Do not mint a fresh id to "fix" a quarantine — that would create a second record competing with itself for novelty credit. |
 | `created_at` | RFC3339 datetime | yes | client | Envelope creation time. |
 | `ironclaw` | `IronclawTraceMetadata` | yes | client | Engine/channel provenance. |
 | `consent` | `ConsentMetadata` | yes | client | What the contributor agreed to. |
@@ -315,6 +315,24 @@ Both gates must pass. The resulting submission status is one of:
 | `revoked` | Contributor exercised revocation. | No; derived artifacts invalidated. |
 | `expired` | Retention window elapsed. | No. |
 | `purged` | Removed. | No. |
+
+### Quarantine remediation
+
+A contributor who owns a `quarantined` submission may re-POST a corrected
+envelope on the **same** `submission_id`. The server re-scrubs, reclassifies
+under current residual-risk rules, supersedes the stored artifact, clears any
+review lease, and preserves the original `received_at`. This is the way out of
+a quarantine caused by a bad client consent declaration or a subsequent rule
+change — not a fresh id.
+
+Operators (reviewer role) may also re-scrub stored quarantined envelopes in
+place without a new client upload:
+
+- `POST /v1/review/{submission_id}/rescrub`
+- `POST /v1/review/quarantine/rescrub` (bounded batch / dry-run)
+
+Both paths keep the content-addressed identity so a reclassified row does not
+compete with itself for novelty credit.
 
 Server-authored fields after gating: `embedding_analysis`, `value`,
 `value_card`, and (via evaluators) `process_evaluation`. Clients do not set
