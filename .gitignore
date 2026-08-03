@@ -9,3 +9,6 @@
 # Local Cloudflare/Wrangler state
 community/.wrangler/
 .superpowers/
+
+# Local adversarial review artifacts (pre-PR gate)
+.review/

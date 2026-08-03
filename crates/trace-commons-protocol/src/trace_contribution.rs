@@ -6589,6 +6589,35 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_consent_raises_tool_payloads_for_structured_payload_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::AssistantMessage,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls"}),
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
     fn reconcile_consent_raises_tool_payloads_for_tool_name_or_payload() {
         use super::*;
         let mut envelope = bare_envelope();
