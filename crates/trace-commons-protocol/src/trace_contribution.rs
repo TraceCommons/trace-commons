@@ -1392,6 +1392,15 @@ pub struct RedactionReport {
     pub pii_labels_present: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// True when a secret-shaped span was **found and removed** during scrub.
+    ///
+    /// This is a redaction success signal, not evidence that a live secret
+    /// remains in the envelope. `residual_risk` therefore treats it as a
+    /// Medium floor (reviewable), matching the polarity used by comparable
+    /// corpora (Dolma drops only *unredacted* spans; BigCode / Sentry /
+    /// OTel treat detection reports as annotations). High is reserved for
+    /// `key_finding_detected` (unredactable) and for residual envelope-scan
+    /// hits that survive scrub (via `resolve_post_scrub_risk`).
     pub blocked_secret_detected: bool,
     /// Set when a classifier flagged an *object key* (not just a value) as
     /// PII-bearing. Keys are not rewritten in place (rewriting risks
@@ -3020,9 +3029,10 @@ pub fn rescrub_trace_envelope_with(
     // Detection-only backstop, run after every mutation above. The
     // typed traversal can only cover fields it knows about, and the
     // schema keeps growing; this catches whatever the traversal missed.
-    // It never mutates - anything it finds has already survived
-    // redaction, which is what makes it *residual* and why it forces
-    // High rather than Medium.
+    // It never mutates — anything it finds has already *survived*
+    // redaction, which is what makes it residual and why
+    // [`resolve_post_scrub_risk`] forces High on residual hits (not on
+    // secrets the scrub pass itself found and removed).
     let residual = residual_envelope_scan(redactor, envelope);
 
     // Derive the server-pass risk from what the pass actually found,
@@ -3688,13 +3698,25 @@ impl PostScrubAssessment {
 /// risk. Downgrade only when the assessment proves it is safe to do so;
 /// otherwise the prior risk is preserved (never lowered) via
 /// `max_residual_risk`, exactly as before this pass existed.
+///
+/// High is reserved for scrub *failure* / unredactable findings:
+/// - [`RedactionReport::key_finding_detected`] on the scrub pass (keys cannot
+///   be rewritten in place), or
+/// - any hit on the post-scrub residual scan (content that survived scrub).
+///
+/// A scrub-pass [`RedactionReport::blocked_secret_detected`] alone does **not**
+/// force High: that flag means a secret was found and removed. It flows
+/// through `derived_risk` as Medium so a proven-complete assessment can
+/// actually downgrade High → Medium (the contract #185 documented but which
+/// the previous `findings.blocked_secret_detected → High` short-circuit
+/// made unreachable for the dominant secret-bearing case). See issues
+/// #219 / #210.
 fn resolve_post_scrub_risk(
     prior_risk: ResidualPiiRisk,
     derived_risk: ResidualPiiRisk,
     assessment: &PostScrubAssessment,
 ) -> ResidualPiiRisk {
-    if assessment.findings.blocked_secret_detected
-        || assessment.findings.key_finding_detected
+    if assessment.findings.key_finding_detected
         || assessment.residual_findings.blocked_secret_detected
         || assessment.residual_findings.key_finding_detected
     {
@@ -3708,16 +3730,28 @@ fn resolve_post_scrub_risk(
 }
 
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    if report.blocked_secret_detected || report.key_finding_detected {
+    // Unredactable object-key findings still force High — keys cannot be
+    // rewritten without risking sibling collisions, so there is no scrub
+    // success to annotate.
+    if report.key_finding_detected {
         return ResidualPiiRisk::High;
     }
 
-    // PII the pass actually found and removed raises the floor to
-    // Medium regardless of what the consent flags claim. A contributor
-    // who under-reports risk should not be able to land in accepted
-    // storage with a Low classification just because the flags are
-    // clean; the pass has direct evidence the flags are wrong.
-    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
+    // PII / secrets the pass actually found and removed raise the floor to
+    // Medium regardless of what the consent flags claim. A contributor who
+    // under-reports risk should not land Accepted/Low just because the flags
+    // are clean; the pass has direct evidence the flags are wrong.
+    //
+    // `blocked_secret_detected` is included here (via counts, or alone) as
+    // Medium, not High: the detector's match ranges are collected and then
+    // `apply_redaction_ranges` removes them. Successful scrub is an
+    // annotation on a reviewable record, not terminal rejection. High is
+    // produced only by `key_finding_detected` above, or by a residual
+    // post-scrub scan hit in [`resolve_post_scrub_risk`]. Issue #219.
+    if report.blocked_secret_detected
+        || !report.counts.is_empty()
+        || !report.pii_labels_present.is_empty()
+    {
         return ResidualPiiRisk::Medium;
     }
 
@@ -3749,10 +3783,10 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
+            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -6380,6 +6414,233 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::High,
             "a classifier finding on an object KEY must force High"
+        );
+    }
+
+    /// Issue #219 / #210: `blocked_secret_detected` means found-and-removed.
+    /// That must raise Medium (reviewable), never High by itself.
+    #[test]
+    fn successfully_redacted_secret_is_medium_not_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([
+                ("secret".to_string(), 1),
+                ("secret:openai_api_key".to_string(), 1),
+            ]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must be Medium, not terminal High"
+        );
+    }
+
+    /// Key findings remain High — there is no scrub success to annotate.
+    #[test]
+    fn unredactable_key_finding_still_forces_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            key_finding_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::High,
+            "unredactable key findings must stay High"
+        );
+    }
+
+    /// Residual (post-scrub) secret hits still force High via the assessment
+    /// path — that is scrub *failure*, the polarity High is reserved for.
+    #[test]
+    fn residual_secret_hit_still_forces_high() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let residual_findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings,
+        };
+
+        assert_eq!(
+            resolve_post_scrub_risk(
+                ResidualPiiRisk::Medium,
+                ResidualPiiRisk::Medium,
+                &assessment
+            ),
+            ResidualPiiRisk::High,
+            "a post-scrub residual secret hit must force High"
+        );
+    }
+
+    /// Scrub-pass secret findings alone must not short-circuit High, so a
+    /// proven-complete assessment can actually land on the derived Medium
+    /// (the #185 downgrade contract that the old short-circuit made
+    /// unreachable for secret-bearing traces).
+    #[test]
+    fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings: RedactionReport::default(),
+        };
+
+        assert!(
+            assessment.can_downgrade(),
+            "clean residual + complete coverage must allow downgrade"
+        );
+        assert_eq!(
+            resolve_post_scrub_risk(ResidualPiiRisk::High, ResidualPiiRisk::Medium, &assessment),
+            ResidualPiiRisk::Medium,
+            "successful scrub must not pin High when residual scan is clean"
+        );
+    }
+
+    /// End-to-end: sync server re-scrub of an envelope whose only finding is a
+    /// successfully removed OpenAI key lands Medium, not High.
+    #[test]
+    fn rescrub_of_successfully_redacted_secret_lands_medium() {
+        use super::*;
+
+        let now = Utc::now();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some(format!("export OPENAI_API_KEY={secret}")),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        };
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        let content = env.events[0]
+            .redacted_content
+            .as_deref()
+            .expect("content present");
+        assert!(
+            !content.contains(secret),
+            "secret must be removed from stored content: {content}"
+        );
+        assert!(
+            env.privacy.redaction_counts.contains_key("secret")
+                || env
+                    .privacy
+                    .redaction_counts
+                    .keys()
+                    .any(|k| k.starts_with("secret:")),
+            "redaction telemetry must record the secret finding: {:?}",
+            env.privacy.redaction_counts
+        );
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must land Medium (quarantine-with-override), not High"
         );
     }
 }

@@ -93,7 +93,11 @@ breaks the contributor's trust contract.
   `SafePrivacyFilterSummary` (redacted text + allow-listed label counts +
   warnings) may be carried.
 - **MUST** set `privacy.residual_pii_risk` honestly. Including message text or
-  tool payloads raises the floor to `medium`; a detected secret forces `high`.
+  tool payloads raises the floor to `medium`; a secret that was found **and
+  successfully redacted** also raises the floor to `medium` (reviewable
+  annotation, not terminal rejection). `high` is reserved for scrub *failure*:
+  an unredactable object-key finding, content that still matches after scrub
+  (residual scan), or a residual scan that could not complete.
 - **MUST** be hash-only in any identifier that could deanonymize: contributor
   identity is pseudonymous, the redaction is summarized as a `sha256:` hash, and
   no raw URLs, tokens, ARNs, account refs, or trace bodies appear in metadata
@@ -177,9 +181,13 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 | `warnings` | [string] | optional | Human-readable redaction warnings. |
 
 **How `residual_pii_risk` is derived** (server recomputes this; clients must
-match): a detected secret forces `high`; otherwise including message text or
-tool payloads yields `medium`; otherwise `low`. Only `low`-risk accepted traces
-are eligible for consumer export.
+match): an unredactable object-key finding, a post-scrub residual secret hit,
+or a residual scan that cannot complete forces `high`. Otherwise a
+successfully-redacted secret, any other redaction finding, or including
+message text / tool payloads yields `medium`; otherwise `low`. Only
+`low`-risk accepted traces are eligible for consumer export. Successful
+redaction is an annotation on a reviewable record (Medium), not evidence
+against admission (High) — see issues #219 / #210.
 
 `SafePrivacyFilterSummary`: `schema_version`, `output_mode`, `span_count`,
 `by_label` (counts), `decoded_mismatch`. Never carries raw text or offsets.
