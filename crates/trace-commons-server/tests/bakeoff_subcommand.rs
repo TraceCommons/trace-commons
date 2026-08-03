@@ -165,28 +165,43 @@ fn bake_off_subcommand_writes_mock_report() {
         report.get("mock_scorer").and_then(|v| v.as_bool()),
         Some(true)
     );
+    // Rule version 2 added the discrimination floor ahead of the throughput
+    // floor. Pinned so a rule change cannot land without updating the reports
+    // that consumers key off.
     assert_eq!(
         report.get("decision_rule_version").and_then(|v| v.as_u64()),
-        Some(1)
+        Some(2)
     );
     let cands = report
         .get("candidates")
         .and_then(|v| v.as_array())
         .expect("candidates array");
     assert_eq!(cands.len(), 2);
-    let winner = report
-        .get("winner_id")
-        .and_then(|v| v.as_str())
-        .expect("winner_id present");
-    // With Apache-2.0 vs llama-community in a tie band, the apache-2.0
-    // candidate wins on license permissiveness. The mock scorer's actual
-    // AUC values vary per hash, but the gate (determinism stddev = 0 for
-    // a deterministic mock) is met by both candidates, so both reach the
-    // tiebreaker.
-    assert!(
-        winner == "qwen-2.5-7b" || winner == "llama-3.1-8b-instruct",
-        "winner must be one of the manifest candidates, got {winner}"
-    );
+    // The mock scorer derives AUC from a hash, so it does not discriminate
+    // in any real sense. Under decision rule v2 that means it usually fails
+    // the discrimination floor and the run has no winner, which is the
+    // honest outcome for a scorer whose own report carries a
+    // NOT-VALID-FOR-PRODUCTION banner. This smoke test covers report
+    // emission, not winner selection -- the decision rule itself is tested
+    // directly in `bakeoff_report::tests` against the archived A2.6 numbers.
+    // So: a winner is optional here, but if one is present it must be a
+    // manifest candidate that cleared the floor.
+    if let Some(winner) = report.get("winner_id").and_then(|v| v.as_str()) {
+        assert!(
+            winner == "qwen-2.5-7b" || winner == "llama-3.1-8b-instruct",
+            "winner must be one of the manifest candidates, got {winner}"
+        );
+        let winner_auc = cands
+            .iter()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(winner))
+            .and_then(|c| c.get("discrimination_auc"))
+            .and_then(|v| v.as_f64())
+            .expect("winner appears in candidates with an auc");
+        assert!(
+            winner_auc > 0.5,
+            "a recorded winner must clear the discrimination floor, got {winner_auc}"
+        );
+    }
 
     // Companion markdown must include the loud mock banner.
     let md_bytes = fs::read(report_json.with_extension("md")).expect("markdown companion exists");

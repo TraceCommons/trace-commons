@@ -35,9 +35,17 @@ the prerequisite.
 
 The bake-off binary is the `bake-off` subcommand of
 `trace-commons-gate-calibrate`. The decision rule (`0.6 * AUC + 0.3 *
-stability + 0.1 * tail_range`, with determinism gate, throughput floor,
-and license / size / recency tiebreakers) is committed before the run;
-the winner is determined by formula, not by inspection.
+stability + 0.1 * tail_range`, with determinism gate, discrimination
+floor, throughput floor, and license / size / recency tiebreakers) is
+committed before the run; the winner is determined by formula, not by
+inspection.
+
+The discrimination floor (rule version 2) drops any candidate at or below
+`AUC = 0.5` before the throughput floor is computed. AUC 0.5 is chance, so
+a candidate at or under it carries no usable signal at any speed, and
+letting one into the throughput comparison lets it set a floor that
+eliminates a slower candidate that does discriminate. A run where nothing
+clears the floor has no winner rather than a fast one.
 
 Authoritative design and rollout sequence:
 

@@ -543,4 +543,88 @@ mod tests {
         let r = &src.discover().unwrap()[0];
         assert!(src.load(r).is_err());
     }
+    /// Conformance corpus: every file in `tests/fixtures/letta-conformance`
+    /// is parsed and its outcome checked against the expectation encoded in
+    /// its filename, `<expected>__<case>.jsonl`, where `<expected>` is either
+    /// `ok` or one of the documented error codes.
+    ///
+    /// The point is that a harness vendor can drop a `.jsonl` in that
+    /// directory and get a pass/fail without writing Rust, and that every
+    /// documented rejection reason stays exercised as the parser changes.
+    #[test]
+    fn letta_conformance_corpus_matches_expected_outcomes() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/letta-conformance");
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("conformance corpus unreadable at {dir:?}: {e}"))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+            .collect();
+        entries.sort();
+        assert!(
+            !entries.is_empty(),
+            "conformance corpus is empty at {dir:?}"
+        );
+
+        let mut failures = Vec::new();
+        let mut covered = std::collections::BTreeSet::new();
+        for path in &entries {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let expected = name
+                .split("__")
+                .next()
+                .expect("fixture name must be <expected>__<case>.jsonl")
+                .to_string();
+            covered.insert(expected.clone());
+            let bytes = std::fs::read(path).expect("fixture readable");
+            let result = parse_trajectory(&bytes);
+            match (&expected[..], &result) {
+                ("ok", Ok(_)) => {}
+                ("ok", Err(e)) => failures.push(format!("{name}: expected ok, got {e}")),
+                (code, Err(e)) => {
+                    let actual = e.to_string();
+                    if actual != code {
+                        failures.push(format!("{name}: expected {code}, got {actual}"));
+                    }
+                }
+                (code, Ok(_)) => {
+                    failures.push(format!("{name}: expected {code}, but parsing succeeded"))
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "conformance failures:\n{}",
+            failures.join("\n")
+        );
+
+        // Every rejection reason reachable from bytes must appear in the
+        // corpus, so a newly added code cannot ship without a fixture.
+        // `unreadable_trajectory_file` is excluded deliberately: it is raised
+        // by the file-reading wrapper, not by `parse_trajectory`, so no
+        // fixture content can produce it.
+        for code in [
+            "duplicate_meta_record",
+            "invalid_utf8",
+            "duplicate_tool_call_id",
+            "invalid_source_name",
+            "invalid_timestamp",
+            "malformed_json",
+            "malformed_record",
+            "missing_meta_record",
+            "orphaned_tool_result",
+            "unknown_record",
+        ] {
+            assert!(
+                covered.contains(code),
+                "no conformance fixture covers rejection reason `{code}`"
+            );
+        }
+        println!(
+            "CONFORMANCE_FIXTURES={} CODES_COVERED={}",
+            entries.len(),
+            covered.len()
+        );
+    }
 }
