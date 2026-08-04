@@ -125,6 +125,13 @@ async fn main() -> std::process::ExitCode {
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
+            if json
+                && error
+                    .downcast_ref::<commands::RenderedSubmitFailure>()
+                    .is_some()
+            {
+                return std::process::ExitCode::FAILURE;
+            }
             // In --json mode a caller parses stdout. Emitting a bare
             // "Error: ..." line there would force it to special-case
             // failure, which is exactly when it most needs structure.

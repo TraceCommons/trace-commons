@@ -2580,21 +2580,32 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
-    /// A redactor with no attached privacy-filter adapter and no known path
-    /// prefixes, for detection-only work that never touches
-    /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
-    /// reads `TRACE_PRIVACY_FILTER_BACKEND` or its adapter-specific env
-    /// vars, so it cannot race concurrent env mutation elsewhere in the
-    /// process and cannot fail from missing/invalid privacy-filter config -
-    /// exactly what the residual scan needs, since it only calls the plain
-    /// `redact_text`, which never consults the attached adapter.
-    fn bare() -> Self {
+    /// Build a deterministic-only redactor with explicit path prefixes.
+    ///
+    /// Unlike `new`/`try_default`, this never reads
+    /// `TRACE_PRIVACY_FILTER_BACKEND` or adapter-specific environment
+    /// variables and can never attach a network or process-backed filter.
+    /// Pre-enrollment previews use this constructor to keep local trace data
+    /// offline even when the parent environment requests another backend.
+    pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
+        let mut known_path_prefixes: Vec<String> = known_path_prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        known_path_prefixes.dedup();
+
         Self {
             leak_detector: SecretLeakDetector::new(),
-            known_path_prefixes: Vec::new(),
+            known_path_prefixes,
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
         }
+    }
+
+    /// Detection-only redactor with no known path prefixes.
+    fn bare() -> Self {
+        Self::deterministic_only(Vec::new())
     }
 
     pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
@@ -5155,6 +5166,27 @@ mod tests {
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    #[test]
+    fn deterministic_only_constructor_ignores_inherited_backend() {
+        use super::DeterministicTraceRedactor;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes process-environment mutation across
+        // every env-touching test in this crate.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
+        let has_filter = redactor.attached_privacy_filter().is_some();
+        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(!has_filter);
+        assert!(!redacted.contains("/Users/preview/private"));
     }
 
     #[test]

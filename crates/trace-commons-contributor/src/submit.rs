@@ -17,9 +17,11 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
-    envelope_has_residual_secret, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
-    parse_use_names, raw_contribution_size_ok, redact_to_envelope,
+    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_deterministic_preview_redactor,
+    build_preview_raw_contribution, build_raw_contribution, build_redactor_with,
+    canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
+    near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
+    raw_contribution_size_ok, redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -51,6 +53,11 @@ pub enum SubmitOutcome {
     },
     Refused {
         reason_label: String,
+        /// Opaque content hash identifying the local session without
+        /// exposing its path or trace contents.
+        session_ref: String,
+        size_bytes: Option<usize>,
+        limit_bytes: Option<usize>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -63,10 +70,52 @@ pub struct SubmitOptions {
     /// Drop model reasoning from every session in this run before envelope
     /// construction. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Suppress progress prose so stdout remains one machine-readable JSON
+    /// document. Outcome data is still returned to the command renderer.
+    pub machine_readable: bool,
+    /// This run has no persisted contributor config. It must remain offline,
+    /// use preview ids, and leave the contributor state directory untouched.
+    pub unenrolled_preview: bool,
     /// Re-upload corrected envelopes for sessions whose local receipt is
     /// `quarantined`. Keeps the same content-addressed `submission_id` and
     /// asks the server to supersede the stored record (#214).
     pub remediate_quarantined: bool,
+}
+
+fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: reason_label.to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: None,
+        limit_bytes: None,
+    }
+}
+
+fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: "session-too-large".to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: Some(size_bytes),
+        limit_bytes: Some(MAX_ENVELOPE_BYTES),
+    }
+}
+
+/// Whether a submit result must make the command exit non-zero. Only an
+/// expected size finding is non-fatal during dry-run. Every known privacy or
+/// pipeline refusal, and every future refusal label, fails closed.
+pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
+    outcomes.iter().any(|outcome| match outcome {
+        SubmitOutcome::Failed { .. } => true,
+        SubmitOutcome::Refused { reason_label, .. } => match reason_label.as_str() {
+            "session-too-large" => !dry_run,
+            "pii-filter-unavailable"
+            | "redaction-failed"
+            | "secret-leak-detected"
+            | "scopes-not-permitted" => true,
+            _ => true,
+        },
+        _ => false,
+    })
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -115,26 +164,32 @@ pub async fn submit_sessions(
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
 ) -> Result<Vec<SubmitOutcome>> {
+    if opts.unenrolled_preview && !opts.dry_run {
+        anyhow::bail!("unenrolled preview requires dry-run");
+    }
     let mut outcomes = Vec::with_capacity(sessions.len());
     let effective_cfg = effective_config(cfg, opts);
-
-    if effective_cfg.pii_filter.as_deref() == Some("near-ai")
-        && store
-            .ensure_near_ai_notice_shown()
-            .context("recording NEAR AI first-use notice")?
-    {
-        println!(
-            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
-             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
-        );
-    }
-
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let device = if opts.unenrolled_preview {
+        None
+    } else if opts.dry_run {
+        DeviceIdentity::load(store).context("loading device identity")?
+    } else {
+        Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
+    };
     let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
         .context("building issuer client")?;
 
     let mut claim: Option<ClaimToken> = None;
     let mut canary_checked = false;
+    let mut near_ai_notice_recorded = false;
+    // An unenrolled preview has no enrollment and therefore no submission
+    // history it can truthfully replay. Ignore stale receipts from torn local
+    // state and run the preview pipeline for every selected session.
+    let mut receipts = if opts.unenrolled_preview {
+        Vec::new()
+    } else {
+        store.load_receipts().context("loading receipts")?
+    };
 
     for (source, session_ref) in sessions {
         let mut transcript = match source.load(&session_ref) {
@@ -151,7 +206,6 @@ pub async fn submit_sessions(
             crate::commands::strip_reasoning(&mut transcript);
         }
 
-        let receipts = store.load_receipts().context("loading receipts")?;
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
         // first status it ever had.
@@ -174,17 +228,19 @@ pub async fn submit_sessions(
             }
         }
 
-        let redactor = match build_redactor_with(
-            &effective_cfg,
-            transcript.cwd.as_deref(),
-            near_ai_settings_from_env(),
-        ) {
-            Ok(r) => r,
-            Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "pii-filter-unavailable".to_string(),
-                });
-                continue;
+        let redactor = if opts.unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            match build_redactor_with(
+                &effective_cfg,
+                transcript.cwd.as_deref(),
+                near_ai_settings_from_env(),
+            ) {
+                Ok(r) => r,
+                Err(_) => {
+                    outcomes.push(refused("pii-filter-unavailable", &transcript.session_hash));
+                    continue;
+                }
             }
         };
 
@@ -196,46 +252,64 @@ pub async fn submit_sessions(
         }
 
         let now = Utc::now();
-        let raw = build_raw_contribution(&transcript, &effective_cfg, now);
+        let raw = if opts.unenrolled_preview {
+            build_preview_raw_contribution(&transcript, &effective_cfg, now)
+        } else {
+            build_raw_contribution(&transcript, &effective_cfg, now)
+        };
         // Skip sessions that already exceed the envelope limit before the
         // expensive redaction/privacy-filter pass; they would be refused for
         // size after redaction anyway (envelope_size_ok below is the
         // authoritative check).
         if raw_contribution_size_ok(&raw).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
+            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            outcomes.push(refused_for_size(&transcript.session_hash, size));
             continue;
         }
         let mut envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "redaction-failed".to_string(),
-                });
+                outcomes.push(refused("redaction-failed", &transcript.session_hash));
                 continue;
             }
         };
+        if !near_ai_notice_recorded && effective_cfg.pii_filter.as_deref() == Some("near-ai") {
+            store
+                .ensure_near_ai_notice_shown()
+                .context("recording NEAR AI first-use notice")?;
+            near_ai_notice_recorded = true;
+        }
 
         let size = match envelope_size_ok(&envelope) {
             Ok(s) => s,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "session-too-large".to_string(),
-                });
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                outcomes.push(refused_for_size(&transcript.session_hash, size));
                 continue;
             }
         };
 
         if opts.dry_run {
-            if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
+            if let Some(outcome) =
+                residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+            {
                 outcomes.push(outcome);
                 continue;
             }
-            println!(
-                "dry-run: submission_id={} bytes={size}",
-                envelope.submission_id
-            );
+            if !opts.machine_readable {
+                if opts.unenrolled_preview {
+                    println!(
+                        "unenrolled-preview dry-run: preview_id={} bytes={size} \
+                         deterministic-only",
+                        envelope.submission_id
+                    );
+                } else {
+                    println!(
+                        "dry-run: submission_id={} bytes={size}",
+                        envelope.submission_id
+                    );
+                }
+            }
             outcomes.push(SubmitOutcome::Submitted {
                 submission_id: envelope.submission_id,
                 status: "dry-run".to_string(),
@@ -244,7 +318,10 @@ pub async fn submit_sessions(
         }
 
         if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
-            match mint_claim(&issuer, cfg, &device, now).await {
+            let device = device
+                .as_ref()
+                .context("device identity unavailable outside unenrolled preview")?;
+            match mint_claim(&issuer, cfg, device, now).await {
                 Ok(token) => claim = Some(token),
                 Err(e) => {
                     let msg = e.to_string();
@@ -252,9 +329,7 @@ pub async fn submit_sessions(
                         || msg.contains("allowed uses not permitted")
                     {
                         println!("hint: re-run login --scopes with a narrower selection");
-                        outcomes.push(SubmitOutcome::Refused {
-                            reason_label: "scopes-not-permitted".to_string(),
-                        });
+                        outcomes.push(refused("scopes-not-permitted", &transcript.session_hash));
                     } else {
                         outcomes.push(SubmitOutcome::Failed {
                             reason_label: "claim-mint-failed".to_string(),
@@ -271,22 +346,25 @@ pub async fn submit_sessions(
             .clone();
         stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
 
-        if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
+        if let Some(outcome) =
+            residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+        {
             outcomes.push(outcome);
             continue;
         }
 
         if envelope_size_ok(&envelope).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
+            let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            outcomes.push(refused_for_size(&transcript.session_hash, size));
             continue;
         }
 
         match upload_with_retry(
             cfg,
             &issuer,
-            &device,
+            device
+                .as_ref()
+                .context("device identity unavailable outside unenrolled preview")?,
             &mut claim,
             &mut envelope,
             &effective_cfg,
@@ -301,11 +379,22 @@ pub async fn submit_sessions(
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
                 };
-                store.append_receipt(&r).context("appending receipt")?;
-                outcomes.push(SubmitOutcome::Submitted {
-                    submission_id: envelope.submission_id,
-                    status: receipt.status,
-                });
+                match store.append_receipt(&r) {
+                    Ok(()) => {
+                        receipts.push(r);
+                        outcomes.push(SubmitOutcome::Submitted {
+                            submission_id: envelope.submission_id,
+                            status: receipt.status,
+                        });
+                    }
+                    Err(_) => outcomes.push(SubmitOutcome::Failed {
+                        reason_label: "receipt-write-failed".to_string(),
+                    }),
+                }
+            }
+            Err(reason_label) if reason_label == "session-too-large" => {
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                outcomes.push(refused_for_size(&transcript.session_hash, size));
             }
             Err(reason_label) => {
                 outcomes.push(SubmitOutcome::Failed { reason_label });
@@ -411,12 +500,11 @@ pub async fn fetch_score_attestation(
 fn residual_secret_refusal(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    session_ref: &str,
 ) -> Result<Option<SubmitOutcome>> {
     if envelope_has_residual_secret(redactor, envelope)? {
         tracing::warn!("refusing session: secret survived redaction");
-        return Ok(Some(SubmitOutcome::Refused {
-            reason_label: "secret-leak-detected".to_string(),
-        }));
+        return Ok(Some(refused("secret-leak-detected", session_ref)));
     }
     Ok(None)
 }
@@ -424,7 +512,9 @@ fn residual_secret_refusal(
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
 fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> ContributorConfig {
     let mut c = cfg.clone();
-    if opts.pii_filter.is_some() {
+    if opts.unenrolled_preview {
+        c.pii_filter = None;
+    } else if opts.pii_filter.is_some() {
         c.pii_filter = opts.pii_filter.clone();
     }
     c
@@ -684,6 +774,62 @@ mod tests {
         )]
     }
 
+    fn write_test_trajectory(path: &std::path::Path, content: &str) {
+        let body = serde_json::json!([
+            {"role": "meta", "source": "submit-test"},
+            {
+                "role": "user",
+                "content": content,
+                "timestamp": "2026-07-31T12:00:00Z"
+            }
+        ]);
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    fn trajectory_selection(
+        root: &std::path::Path,
+    ) -> Vec<(
+        Box<dyn crate::source::TraceSource>,
+        crate::source::SessionRef,
+    )> {
+        let mut refs = crate::source::trajectory::TrajectorySource::new(root.to_path_buf())
+            .discover()
+            .unwrap();
+        refs.sort_by(|a, b| a.path.cmp(&b.path));
+        refs.into_iter()
+            .map(|session_ref| {
+                (
+                    Box::new(crate::source::trajectory::TrajectorySource::new(
+                        root.to_path_buf(),
+                    )) as Box<dyn crate::source::TraceSource>,
+                    session_ref,
+                )
+            })
+            .collect()
+    }
+
+    async fn narrow_boundary_envelope(
+        trajectory_path: &std::path::Path,
+        content_len: usize,
+        cfg: &ContributorConfig,
+        narrow_token: &ClaimToken,
+    ) -> TraceContributionEnvelope {
+        write_test_trajectory(trajectory_path, &"x".repeat(content_len));
+        let source =
+            crate::source::trajectory::TrajectorySource::new(trajectory_path.to_path_buf());
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = build_raw_contribution(&transcript, cfg, now);
+        assert!(raw_contribution_size_ok(&raw).is_ok());
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        stamp_granted_scopes(&mut envelope, cfg, narrow_token);
+        envelope
+    }
+
     fn cfg_for(
         issuer: &str,
         ingest: &str,
@@ -702,6 +848,174 @@ mod tests {
             pii_filter: None,
             allowed_hosts: None,
         }
+    }
+
+    async fn outcome_for_fixture(
+        cfg: &crate::config::ContributorConfig,
+        unenrolled_preview: bool,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionEnvelope {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let source = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = if unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = if unenrolled_preview {
+            build_preview_raw_contribution(&transcript, cfg, now)
+        } else {
+            build_raw_contribution(&transcript, cfg, now)
+        };
+        redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn unenrolled_and_enrolled_previews_have_full_outcome_parity() {
+        let preview_cfg = crate::commands::unenrolled_preview_config();
+        let enrolled_cfg = crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "https://issuer.example".into(),
+            ingest_url: "https://ingest.example".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: trace_commons_protocol::onboarding::derive_user_tenant_id(
+                "instance-1",
+                "alice",
+            ),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: "sha256:enrolled".into(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
+        assert_eq!(preview_cfg.tenant_id.len(), 71);
+
+        let preview = outcome_for_fixture(&preview_cfg, true).await;
+        let enrolled = outcome_for_fixture(&enrolled_cfg, false).await;
+
+        assert_eq!(
+            envelope_size(&preview).unwrap(),
+            envelope_size(&enrolled).unwrap(),
+            "canonical-width placeholder identity must preserve serialized size"
+        );
+        assert_eq!(
+            envelope_size_ok(&preview).is_ok(),
+            envelope_size_ok(&enrolled).is_ok(),
+            "placeholder identity must not change the size decision"
+        );
+        assert_eq!(
+            preview.consent, enrolled.consent,
+            "consent must agree without rewriting either fixture"
+        );
+        assert_eq!(
+            preview.privacy.redaction_pipeline_version,
+            enrolled.privacy.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.privacy.redaction_counts,
+            enrolled.privacy.redaction_counts
+        );
+        assert_eq!(
+            preview.privacy.privacy_filter_summary,
+            enrolled.privacy.privacy_filter_summary
+        );
+        assert_eq!(
+            preview.privacy.pii_labels_present,
+            enrolled.privacy.pii_labels_present
+        );
+        assert_eq!(
+            preview.privacy.residual_pii_risk,
+            enrolled.privacy.residual_pii_risk
+        );
+        assert_eq!(preview.privacy.warnings, enrolled.privacy.warnings);
+        // The redaction hash commits to each envelope's deliberately disjoint
+        // preview/submission id, so equality would erase the namespace fix.
+        for hash in [
+            &preview.privacy.redaction_hash,
+            &enrolled.privacy.redaction_hash,
+        ] {
+            assert!(hash.starts_with("sha256:"));
+            assert_eq!(hash.len(), 71);
+        }
+        assert_eq!(
+            preview.trace_card.consent_scope,
+            enrolled.trace_card.consent_scope
+        );
+        assert_eq!(
+            preview.trace_card.redaction_pipeline_version,
+            enrolled.trace_card.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.trace_card.source_channel,
+            enrolled.trace_card.source_channel
+        );
+        assert_eq!(
+            preview.trace_card.tool_categories,
+            enrolled.trace_card.tool_categories
+        );
+        assert_eq!(
+            preview.trace_card.allowed_uses,
+            enrolled.trace_card.allowed_uses
+        );
+        assert_eq!(
+            preview.trace_card.retention_policy,
+            enrolled.trace_card.retention_policy
+        );
+        assert!(Uuid::parse_str(&preview.trace_card.revocation_handle).is_ok());
+        assert!(Uuid::parse_str(&enrolled.trace_card.revocation_handle).is_ok());
+        let residual_scanner =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::deterministic_only(
+                Vec::new(),
+            );
+        assert_eq!(
+            envelope_has_residual_secret(&residual_scanner, &preview).unwrap(),
+            envelope_has_residual_secret(&residual_scanner, &enrolled).unwrap(),
+            "placeholder identity must not change the residual-secret result"
+        );
+        assert_eq!(preview.submission_id.get_version_num(), 8);
+        assert_eq!(enrolled.submission_id.get_version_num(), 5);
+        assert_ne!(preview.submission_id, enrolled.submission_id);
+    }
+
+    #[test]
+    fn only_size_refusal_is_non_fatal_in_dry_run() {
+        assert!(!outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            true
+        ));
+        assert!(outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            false
+        ));
+        for reason in [
+            "pii-filter-unavailable",
+            "redaction-failed",
+            "secret-leak-detected",
+            "scopes-not-permitted",
+            "future-refusal",
+        ] {
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], true),
+                "dry-run suppressed {reason}"
+            );
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], false),
+                "real submit suppressed {reason}"
+            );
+        }
+        assert!(outcomes_have_failure(
+            &[SubmitOutcome::Failed {
+                reason_label: "transport".into(),
+            }],
+            true
+        ));
     }
 
     /// Drives the real submit path twice and inspects what actually reached
@@ -747,6 +1061,8 @@ mod tests {
                 dry_run: false,
                 pii_filter: None,
                 no_reasoning,
+                machine_readable: false,
+                unenrolled_preview: false,
                 remediate_quarantined: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -799,6 +1115,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -849,6 +1167,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -879,6 +1199,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: true,
         };
         let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
@@ -968,6 +1290,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1006,7 +1330,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "secret-leak-detected");
             }
             other => panic!("expected Refused(secret-leak-detected), got {other:?}"),
@@ -1032,6 +1356,8 @@ mod tests {
             dry_run: true,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1043,12 +1369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn near_ai_batch_creates_first_use_notice_marker() {
-        // No TRACE_NEAR_AI_PRIVACY_API_KEY is set in this process, so every
-        // session will be refused as pii-filter-unavailable -- but the
-        // once-per-batch first-use notice marker must still be created,
-        // since it is unconditional on effective_cfg.pii_filter and does
-        // not depend on the redactor actually building successfully.
+    async fn failed_filter_construction_does_not_write_notice_marker() {
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1061,12 +1382,86 @@ mod tests {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
-        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
-        assert!(store.dir().join("near-ai-notice-shown").exists());
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Refused { reason_label, .. }
+                if reason_label == "pii-filter-unavailable"
+        ));
+        assert!(!store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    #[tokio::test]
+    async fn receipt_append_failure_preserves_prior_outcomes_and_finishes_batch() {
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
+        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let receipt_path = store.dir().join("receipts.jsonl");
+        let post_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(Router::new().route(
+            "/v1/traces",
+            post({
+                let post_calls = post_calls.clone();
+                let received = received.clone();
+                move |Json(body): Json<serde_json::Value>| {
+                    let post_calls = post_calls.clone();
+                    let received = received.clone();
+                    let receipt_path = receipt_path.clone();
+                    async move {
+                        received.lock().unwrap().push(body);
+                        let call = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if call == 1 {
+                            std::fs::remove_file(&receipt_path).unwrap();
+                            std::fs::create_dir(&receipt_path).unwrap();
+                        }
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let issuer = spawn(stub_issuer()).await;
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        assert!(matches!(
+            &outcomes[1],
+            SubmitOutcome::Failed { reason_label } if reason_label == "receipt-write-failed"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 2);
     }
 
     /// Grants strictly less than requested: config asks for
@@ -1104,6 +1499,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1158,6 +1555,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1187,6 +1586,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1194,7 +1595,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1216,6 +1617,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1223,7 +1626,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1261,6 +1664,50 @@ mod tests {
                             "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
                         }))
                     }
+                }
+            }),
+        )
+    }
+
+    fn stub_issuer_widens_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let mint_calls = mint_calls.clone();
+                async move {
+                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let (consent_scopes, allowed_uses) = if n == 0 {
+                        (
+                            serde_json::json!(["debugging_evaluation"]),
+                            serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]),
+                        )
+                    } else {
+                        (
+                            serde_json::json!([
+                                "debugging_evaluation",
+                                "benchmark_only",
+                                "ranking_training",
+                                "model_training",
+                                "public_attribution"
+                            ]),
+                            serde_json::json!([
+                                "debugging",
+                                "evaluation",
+                                "benchmark_generation",
+                                "ranking_model_training",
+                                "model_training",
+                                "aggregate_analytics"
+                            ]),
+                        )
+                    };
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": consent_scopes,
+                        "allowed_uses": allowed_uses,
+                    }))
                 }
             }),
         )
@@ -1319,6 +1766,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1354,6 +1803,106 @@ mod tests {
                 .any(|u| u == &serde_json::json!("model_training")),
             "retried envelope must not retain model_training from the stale claim: {restamped}"
         );
+    }
+
+    #[tokio::test]
+    async fn post_remint_size_overflow_is_a_structured_refusal() {
+        use std::sync::atomic::AtomicUsize;
+
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        let trajectory_path = trajectory_dir.path().join("boundary.json");
+        let base_content_len = 1_496_000usize;
+        write_test_trajectory(&trajectory_path, &"x".repeat(base_content_len));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_widens_on_remint(mint_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(
+            received.clone(),
+            post_calls.clone(),
+        ))
+        .await;
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
+        let narrow_token = ClaimToken {
+            access_token: "narrow".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec![
+                "debugging".to_string(),
+                "evaluation".to_string(),
+                "aggregate_analytics".to_string(),
+            ],
+        };
+        let wide_token = ClaimToken {
+            access_token: "wide".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: crate::consent::VALID_SCOPES
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect(),
+            allowed_uses: crate::consent::scopes_to_allowed_uses(
+                &crate::consent::VALID_SCOPES
+                    .iter()
+                    .map(|scope| scope.to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        };
+
+        let initial =
+            narrow_boundary_envelope(&trajectory_path, base_content_len, &cfg, &narrow_token).await;
+        let target_size = MAX_ENVELOPE_BYTES - 64;
+        let initial_size = envelope_size(&initial).unwrap();
+        let calibrated_len = if initial_size <= target_size {
+            base_content_len + (target_size - initial_size)
+        } else {
+            base_content_len - (initial_size - target_size)
+        };
+        let narrow =
+            narrow_boundary_envelope(&trajectory_path, calibrated_len, &cfg, &narrow_token).await;
+        let narrow_size = envelope_size(&narrow).unwrap();
+        let mut wide = narrow.clone();
+        stamp_granted_scopes(&mut wide, &cfg, &wide_token);
+        let wide_size = envelope_size(&wide).unwrap();
+        assert_eq!(narrow_size, target_size);
+        assert!(wide_size > MAX_ENVELOPE_BYTES);
+
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        match &outcomes[0] {
+            SubmitOutcome::Refused {
+                reason_label,
+                size_bytes,
+                limit_bytes,
+                ..
+            } => {
+                assert_eq!(reason_label, "session-too-large");
+                assert!(size_bytes.unwrap() > MAX_ENVELOPE_BYTES);
+                assert_eq!(*limit_bytes, Some(MAX_ENVELOPE_BYTES));
+            }
+            other => panic!("expected structured size refusal, got {other:?}"),
+        }
+        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(post_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Records every claim-request body it receives (as raw JSON) before
@@ -1457,6 +2006,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1486,9 +2037,7 @@ mod tests {
                 submission_id: u2,
                 prior_status: "quarantined".to_string(),
             },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
+            refused("secret-leak-detected", "sha256:test"),
             SubmitOutcome::Failed {
                 reason_label: "claim-mint-failed".to_string(),
             },
@@ -1522,6 +2071,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1555,42 +2106,68 @@ mod tests {
 /// Every outcome is represented, including the ones `build_manifest` drops:
 /// a caller automating submission needs to know a session was refused and
 /// why, not merely that it is absent from the manifest.
-pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
+pub fn outcomes_to_json(
+    outcomes: &[SubmitOutcome],
+    unenrolled_preview: bool,
+    notices: &[&str],
+) -> serde_json::Value {
     let entries: Vec<serde_json::Value> = outcomes
         .iter()
-        .map(|o| match o {
-            SubmitOutcome::Submitted {
-                submission_id,
-                status,
-            } => serde_json::json!({
-                "outcome": "submitted",
-                "submission_id": submission_id,
-                "status": status,
-            }),
-            SubmitOutcome::AlreadySubmitted {
-                submission_id,
-                prior_status,
-            } => serde_json::json!({
-                "outcome": "already-submitted",
-                "submission_id": submission_id,
-                "status": prior_status,
-            }),
-            SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
-                "outcome": "skipped",
-                "reason": reason_label,
-            }),
-            SubmitOutcome::Refused { reason_label } => serde_json::json!({
-                "outcome": "refused",
-                "reason": reason_label,
-            }),
-            SubmitOutcome::Failed { reason_label } => serde_json::json!({
-                "outcome": "failed",
-                "reason": reason_label,
-            }),
+        .map(|o| {
+            let mut entry = match o {
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } if unenrolled_preview => serde_json::json!({
+                    "outcome": "previewed",
+                    "preview_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } => serde_json::json!({
+                    "outcome": "submitted",
+                    "submission_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id,
+                    prior_status,
+                } => serde_json::json!({
+                    "outcome": "already-submitted",
+                    "submission_id": submission_id,
+                    "status": prior_status,
+                }),
+                SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
+                    "outcome": "skipped",
+                    "reason": reason_label,
+                }),
+                SubmitOutcome::Refused {
+                    reason_label,
+                    session_ref,
+                    size_bytes,
+                    limit_bytes,
+                } => serde_json::json!({
+                    "outcome": "refused",
+                    "reason": reason_label,
+                    "session_ref": session_ref,
+                    "size_bytes": size_bytes,
+                    "limit_bytes": limit_bytes,
+                }),
+                SubmitOutcome::Failed { reason_label } => serde_json::json!({
+                    "outcome": "failed",
+                    "reason": reason_label,
+                }),
+            };
+            entry["unenrolled_preview"] = serde_json::Value::Bool(unenrolled_preview);
+            entry
         })
         .collect();
     serde_json::json!({
         "schema_version": "trace_commons.submit_result.v1",
+        "unenrolled_preview": unenrolled_preview,
+        "notices": notices,
         "results": entries,
     })
 }
@@ -1602,25 +2179,27 @@ mod json_output_tests {
     #[test]
     fn every_outcome_kind_is_represented() {
         let id = Uuid::new_v4();
-        let out = outcomes_to_json(&[
-            SubmitOutcome::Submitted {
-                submission_id: id,
-                status: "accepted".to_string(),
-            },
-            SubmitOutcome::AlreadySubmitted {
-                submission_id: id,
-                prior_status: "quarantined".to_string(),
-            },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
-            SubmitOutcome::Failed {
-                reason_label: "claim-mint-failed".to_string(),
-            },
-            SubmitOutcome::SkippedParseFailure {
-                reason_label: "parse-failed".to_string(),
-            },
-        ]);
+        let out = outcomes_to_json(
+            &[
+                SubmitOutcome::Submitted {
+                    submission_id: id,
+                    status: "accepted".to_string(),
+                },
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id: id,
+                    prior_status: "quarantined".to_string(),
+                },
+                refused("secret-leak-detected", "sha256:test"),
+                SubmitOutcome::Failed {
+                    reason_label: "claim-mint-failed".to_string(),
+                },
+                SubmitOutcome::SkippedParseFailure {
+                    reason_label: "parse-failed".to_string(),
+                },
+            ],
+            false,
+            &[],
+        );
 
         let results = out["results"].as_array().unwrap();
         // A caller automating submission must be able to see a refusal. The
@@ -1634,6 +2213,7 @@ mod json_output_tests {
         );
         assert_eq!(results[2]["outcome"], "refused");
         assert_eq!(results[2]["reason"], "secret-leak-detected");
+        assert_eq!(results[2]["session_ref"], "sha256:test");
         assert_eq!(results[3]["outcome"], "failed");
         assert_eq!(results[4]["outcome"], "skipped");
     }
@@ -1643,11 +2223,22 @@ mod json_output_tests {
         // Reason labels are fixed strings by construction. Pinning it here
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
-        let out = outcomes_to_json(&[SubmitOutcome::Refused {
-            reason_label: "session-too-large".to_string(),
-        }]);
+        let out = outcomes_to_json(
+            &[refused_for_size("sha256:test", 1_600_000)],
+            true,
+            &["preview notice"],
+        );
         let reason = out["results"][0]["reason"].as_str().unwrap();
         assert!(!reason.contains('/'), "a label must not look like a path");
         assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+        assert_eq!(out["unenrolled_preview"], true);
+        assert_eq!(out["results"][0]["unenrolled_preview"], true);
+        assert_eq!(out["notices"][0], "preview notice");
+        assert_eq!(out["results"][0]["session_ref"], "sha256:test");
+        assert_eq!(out["results"][0]["size_bytes"], 1_600_000);
+        assert_eq!(
+            out["results"][0]["limit_bytes"],
+            crate::envelope::MAX_ENVELOPE_BYTES
+        );
     }
 }
