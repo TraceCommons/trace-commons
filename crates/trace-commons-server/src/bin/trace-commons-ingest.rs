@@ -2506,7 +2506,11 @@ impl TraceEncryptedObjectStoreKind {
 struct TenantAuth {
     tenant_id: String,
     role: TokenRole,
+    /// Canonical method-bound principal (#209). Written on new submissions.
     principal_ref: String,
+    /// Pre-#209 derivation for the same credential. Dual-read only — never
+    /// written to new submissions, grants, or allowlists after this change.
+    legacy_principal_ref: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     auth_method: TraceAuthMethod,
     signed_claim_issuer: Option<String>,
@@ -2514,6 +2518,24 @@ struct TenantAuth {
     signed_claim_subject: Option<String>,
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     allowed_uses: BTreeSet<TraceAllowedUse>,
+}
+
+impl TenantAuth {
+    /// Canonical ref plus optional pre-#209 alias for the same credential.
+    fn principal_aliases(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.principal_ref.as_str()).chain(self.legacy_principal_ref.as_deref())
+    }
+
+    fn matches_stored_principal(&self, stored_principal_ref: &str) -> bool {
+        self.principal_aliases()
+            .any(|principal_ref| principal_ref == stored_principal_ref)
+    }
+
+    fn matches_any_allowlisted_principal(&self, allowlist: &BTreeSet<String>) -> bool {
+        allowlist
+            .iter()
+            .any(|allowed| self.matches_stored_principal(allowed))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2635,6 +2657,47 @@ impl TraceAuthMethod {
             Self::SignedClaim => "signed_claim",
         }
     }
+}
+
+/// Length-prefixed method+material binding so StaticToken and SignedClaim cannot
+/// share a principal namespace (#209). Mirrors the injectivity approach used by
+/// `submit_principal_rate_limit_key`.
+fn method_bound_principal_material(method: TraceAuthMethod, identity_material: &str) -> String {
+    let method_name = method.storage_name();
+    format!(
+        "{}:{}:{}:{}",
+        method_name.len(),
+        method_name,
+        identity_material.len(),
+        identity_material
+    )
+}
+
+fn method_bound_principal_ref(method: TraceAuthMethod, identity_material: &str) -> String {
+    principal_storage_ref(&method_bound_principal_material(method, identity_material))
+}
+
+fn static_token_principal_refs(token: &str) -> (String, String) {
+    (
+        method_bound_principal_ref(TraceAuthMethod::StaticToken, token),
+        principal_storage_ref(token),
+    )
+}
+
+fn signed_claim_identity_material(tenant_id: &str, actor_ref: &str) -> String {
+    format!("signed:{tenant_id}:{actor_ref}")
+}
+
+fn signed_claim_principal_refs(tenant_id: &str, actor_ref: &str) -> (String, String) {
+    let identity_material = signed_claim_identity_material(tenant_id, actor_ref);
+    (
+        method_bound_principal_ref(TraceAuthMethod::SignedClaim, &identity_material),
+        principal_storage_ref(&identity_material),
+    )
+}
+
+fn static_token_principal_ref(token: &str) -> String {
+    static_token_principal_refs(token).0
 }
 
 type SharedTraceCommonsSignedTokenVerifier = Arc<RwLock<TraceCommonsSignedTokenVerifier>>;
@@ -9402,10 +9465,13 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
         .filter(|subject| !subject.is_empty())
         .map(ToOwned::to_owned);
 
+    let (principal_ref, legacy_principal_ref) = signed_claim_principal_refs(tenant_id, actor_ref);
+
     Ok(TenantAuth {
         tenant_id: tenant_id.to_string(),
         role,
-        principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
+        principal_ref,
+        legacy_principal_ref: Some(legacy_principal_ref),
         expires_at: None,
         auth_method: TraceAuthMethod::SignedClaim,
         signed_claim_issuer,
@@ -10163,12 +10229,14 @@ fn insert_token_with_expiry(
             "duplicate Trace Commons tenant token configured for multiple tenants or roles"
         );
     }
+    let (principal_ref, legacy_principal_ref) = static_token_principal_refs(token);
     tokens.insert(
         token.to_string(),
         TenantAuth {
             tenant_id: tenant_id.to_string(),
             role,
-            principal_ref: principal_storage_ref(token),
+            principal_ref,
+            legacy_principal_ref: Some(legacy_principal_ref),
             expires_at,
             auth_method: TraceAuthMethod::StaticToken,
             signed_claim_issuer: None,
@@ -13381,6 +13449,7 @@ fn account_audit_tenant(ctx: &AccountCtx) -> TenantAuth {
         tenant_id: ctx.tenant_id.clone(),
         role: TokenRole::Contributor,
         principal_ref: ctx.actor_ref.clone(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -22926,9 +22995,8 @@ fn require_credit_settlement_central_issuer_principal_if_configured(
     {
         return Ok(());
     }
-    if state
-        .credit_settlement_central_issuer_principal_refs
-        .contains(&tenant.principal_ref)
+    if tenant
+        .matches_any_allowlisted_principal(&state.credit_settlement_central_issuer_principal_refs)
     {
         return Ok(());
     }
@@ -22945,9 +23013,9 @@ fn require_credit_settlement_approval_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -22966,9 +23034,9 @@ fn require_near_credit_outbox_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -22987,9 +23055,9 @@ fn require_benchmark_registry_outbox_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23006,9 +23074,9 @@ fn require_near_credit_outbox_status_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23025,9 +23093,9 @@ fn require_benchmark_registry_outbox_status_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23044,9 +23112,9 @@ fn require_credit_hold_control_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23065,9 +23133,9 @@ fn require_positive_credit_issuance_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23084,9 +23152,9 @@ fn require_near_credit_hold_account_transition_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -41167,6 +41235,7 @@ fn canary_contributor_auth_from_record(record: &TraceCommonsSubmissionRecord) ->
         tenant_id: record.tenant_id.clone(),
         role: TokenRole::Contributor,
         principal_ref: record.auth_principal_ref.clone(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -49072,14 +49141,27 @@ async fn authorize_tenant_access_grant(
         .db_mirror
         .as_ref()
         .ok_or_else(|| internal_error("tenant access grant enforcement requires DB mirror"))?;
-    let grants = db
-        .list_active_trace_tenant_access_grants_for_principal(
-            &auth.tenant_id,
-            &auth.principal_ref,
-            Utc::now(),
-        )
-        .await
-        .map_err(internal_error)?;
+    let mut grants = Vec::new();
+    for principal_ref in auth.principal_aliases() {
+        let matched = db
+            .list_active_trace_tenant_access_grants_for_principal(
+                &auth.tenant_id,
+                principal_ref,
+                Utc::now(),
+            )
+            .await
+            .map_err(internal_error)?;
+        for grant in matched {
+            if grants
+                .iter()
+                .all(|existing: &StorageTraceTenantAccessGrantRecord| {
+                    existing.grant_id != grant.grant_id
+                })
+            {
+                grants.push(grant);
+            }
+        }
+    }
     let expected_role = trace_tenant_access_grant_role_for_token(auth.role);
     let matching_grants = grants
         .iter()
@@ -49313,7 +49395,9 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
             .iter()
             .filter(|record| submission_counts_toward_quota(record))
             .filter(|record| {
-                record.auth_principal_ref == tenant.principal_ref()
+                tenant
+                    .auth()
+                    .matches_stored_principal(&record.auth_principal_ref)
                     && record.received_at >= window_start
             })
             .count();
@@ -50240,7 +50324,7 @@ fn require_admin(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
-    auth.role.can_review() || principal_owns_submission(&auth.principal_ref, record)
+    auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
 /// Owned quarantined submissions may be superseded by a corrected envelope on
@@ -50255,27 +50339,27 @@ fn principal_can_remediate_quarantined(
 }
 
 fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
-    auth.role.can_review() || principal_owns_storage_submission(&auth.principal_ref, record)
+    auth.role.can_review() || principal_owns_storage_submission(auth, record)
 }
 
-fn principal_owns_submission(principal_ref: &str, record: &TraceCommonsSubmissionRecord) -> bool {
+fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
     record.auth_principal_ref == legacy_principal_ref()
-        || record.auth_principal_ref == principal_ref
+        || auth.matches_stored_principal(&record.auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
-    principal_ref: &str,
+    auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
     record.auth_principal_ref == legacy_principal_ref()
-        || record.auth_principal_ref == principal_ref
+        || auth.matches_stored_principal(&record.auth_principal_ref)
 }
 
 fn principal_can_self_revoke_submission(
     auth: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> bool {
-    record.auth_principal_ref == auth.principal_ref
+    auth.matches_stored_principal(&record.auth_principal_ref)
         || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
 }
 
@@ -50283,7 +50367,7 @@ fn principal_can_self_revoke_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
-    record.auth_principal_ref == auth.principal_ref
+    auth.matches_stored_principal(&record.auth_principal_ref)
         || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
 }
 
@@ -50375,7 +50459,7 @@ fn visible_submission_records_for_account(
 fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRecord) -> bool {
     auth.role.can_review()
         || event.auth_principal_ref == legacy_principal_ref()
-        || event.auth_principal_ref == auth.principal_ref
+        || auth.matches_stored_principal(&event.auth_principal_ref)
 }
 
 /// Account-scope broadening for the contributor credit surface (Slice 3b). An
@@ -50735,12 +50819,18 @@ async fn caller_credit_account_scope(
         // No DB mirror => no account linkage to broaden from. Own-principal only.
         return Ok(None);
     };
-    let caller_principal = &tenant.principal_ref;
+    let aliases = tenant
+        .principal_aliases()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let resolved = db
-        .resolve_principals_to_accounts(&tenant.tenant_id, std::slice::from_ref(caller_principal))
+        .resolve_principals_to_accounts(&tenant.tenant_id, &aliases)
         .await
         .context("failed to resolve contributor principal to account for credit visibility")?;
-    let Some(account_id) = resolved.get(caller_principal).copied() else {
+    let Some(account_id) = aliases
+        .iter()
+        .find_map(|alias| resolved.get(alias).copied())
+    else {
         // Caller has no active account link: unchanged own-principal scope.
         return Ok(None);
     };
@@ -67004,10 +67094,9 @@ impl TraceCommonsTenantCreditResponse {
             }
         }
 
-        let principal_ref = auth.principal_ref.as_str();
         let tenant_wide_credit_view = auth.role.can_review();
-        let legacy_principal_ref = legacy_principal_ref();
-        let legacy_principal_ref = legacy_principal_ref.as_str();
+        let legacy_wildcard_principal_ref = legacy_principal_ref();
+        let legacy_wildcard_principal_ref = legacy_wildcard_principal_ref.as_str();
         // Slice 3b: a credit `account_ref` is visible to this caller iff it is the
         // caller's own principal, the legacy wildcard, a principal on the caller's
         // account (active links only), OR the caller's own account-settlement key.
@@ -67028,8 +67117,8 @@ impl TraceCommonsTenantCreditResponse {
             account_id.map(|id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{id}"));
         let account_ref_visible = |account_ref: &str| -> bool {
             tenant_wide_credit_view
-                || account_ref == principal_ref
-                || account_ref == legacy_principal_ref
+                || auth.matches_stored_principal(account_ref)
+                || account_ref == legacy_wildcard_principal_ref
                 || account_scope.is_some_and(|scope| scope.contains(account_ref))
                 || account_settlement_key
                     .as_deref()
