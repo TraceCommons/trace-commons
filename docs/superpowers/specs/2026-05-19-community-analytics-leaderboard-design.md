@@ -110,10 +110,16 @@ Attackers we design against:
   takedown flow with operator audit.
 - **Stale-opt-in misuse.** Contributor opts in, regrets it,
   withdraws — but cached pages still show them. Mitigation:
-  withdrawal is `UPDATE … SET withdrawn_at = NOW()`, the read API
-  filters on `public_since IS NOT NULL AND withdrawn_at IS NULL`,
-  the cache TTL is short (≤15 min) and a withdrawal forces a
-  targeted cache invalidate.
+  withdrawal is `UPDATE … SET withdrawn_at = NOW()` plus a coalesced
+  community-snapshot invalidation and an eviction receipt in the same
+  transaction; the read API filters live profiles on
+  `public_since IS NOT NULL AND withdrawn_at IS NULL`; public snapshot
+  reads refuse any artifact older than the published ≤15-minute bound
+  or whose `computed_at` precedes a pending invalidation watermark; a
+  bounded in-process worker drains the watermark by recomputing (the
+  same admin-authored recompute path, never contributor-triggered).
+  Serving a withdrawn handle is therefore an availability failure, not
+  a silent privacy failure.
 - **Tenant-leak via display.** A handle's stats reveal which tenant
   they belong to (one-tenant tells one-handle when the cohort is
   small). Mitigation: in pilot the surface is feature-flagged off
@@ -268,11 +274,15 @@ analytics already do. The public read path never sees raw counts.
   publish leaderboard rows when the corpus has fewer than this many
   tenants (pilot stays operator-only until ≥2 tenants).
 - `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS`
-  — default 900s; tighter means more privacy budget burn.
+  — default 900s; tighter means more privacy budget burn. When the
+  community surface is enabled this also drives the withdrawal
+  invalidation drain that recomputes after coalesced opt-outs.
 - Operator can force a takedown for a specific handle by setting
   `withdrawn_at = NOW()` via the existing `/v1/admin/...` reviewer
-  surface; the read path picks it up at the next snapshot or via
-  a targeted cache flush.
+  surface; the public snapshot path refuses any artifact that
+  predates a pending invalidation watermark, so a withdrawal is
+  visible as unavailability until the next successful recompute
+  rather than as a stale published row.
 
 ## Implementation slices
 
