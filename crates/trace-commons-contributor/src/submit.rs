@@ -76,6 +76,10 @@ pub struct SubmitOptions {
     /// This run has no persisted contributor config. It must remain offline,
     /// use preview ids, and leave the contributor state directory untouched.
     pub unenrolled_preview: bool,
+    /// Re-upload corrected envelopes for sessions whose local receipt is
+    /// `quarantined`. Keeps the same content-addressed `submission_id` and
+    /// asks the server to supersede the stored record (#214).
+    pub remediate_quarantined: bool,
 }
 
 fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
@@ -213,11 +217,15 @@ pub async fn submit_sessions(
             })
             .max_by_key(|r| r.submitted_at);
         if let Some(prior) = prior {
-            outcomes.push(SubmitOutcome::AlreadySubmitted {
-                submission_id: prior.submission_id,
-                prior_status: prior.status.clone(),
-            });
-            continue;
+            let remediating_quarantined =
+                opts.remediate_quarantined && prior.status == "quarantined";
+            if !remediating_quarantined {
+                outcomes.push(SubmitOutcome::AlreadySubmitted {
+                    submission_id: prior.submission_id,
+                    prior_status: prior.status.clone(),
+                });
+                continue;
+            }
         }
 
         let redactor = if opts.unenrolled_preview {
@@ -722,6 +730,13 @@ mod tests {
     }
 
     fn stub_ingest(received: Arc<Mutex<Vec<serde_json::Value>>>) -> Router {
+        stub_ingest_status(received, "accepted")
+    }
+
+    fn stub_ingest_status(
+        received: Arc<Mutex<Vec<serde_json::Value>>>,
+        status: &'static str,
+    ) -> Router {
         Router::new().route(
             "/v1/traces",
             post(
@@ -734,7 +749,7 @@ mod tests {
                         );
                         received.lock().unwrap().push(body);
                         Json(serde_json::json!({
-                            "status": "accepted",
+                            "status": status,
                             "credit_points_pending": 0.0,
                             "explanation": []
                         }))
@@ -1048,6 +1063,7 @@ mod tests {
                 no_reasoning,
                 machine_readable: false,
                 unenrolled_preview: false,
+                remediate_quarantined: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
                 .await
@@ -1101,6 +1117,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1135,6 +1152,70 @@ mod tests {
             SubmitOutcome::AlreadySubmitted { .. }
         ));
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remediate_quarantined_reuploads_under_same_submission_id() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_status(received.clone(), "quarantined")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Submitted { status, .. } if status == "quarantined"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        // Default re-run still short-circuits on the quarantined receipt.
+        let blocked = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &blocked[0],
+            SubmitOutcome::AlreadySubmitted {
+                prior_status,
+                ..
+            } if prior_status == "quarantined"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        // Opt-in remediation rebuilds and re-uploads the same submission_id.
+        let remediate = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: true,
+        };
+        let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &outcomes2[0],
+            SubmitOutcome::Submitted { status, .. } if status == "quarantined"
+        ));
+        let received_guard = received.lock().unwrap();
+        assert_eq!(received_guard.len(), 2);
+        assert_eq!(
+            received_guard[0]["submission_id"], received_guard[1]["submission_id"],
+            "remediation must keep the content-addressed submission_id"
+        );
     }
 
     /// The residual-secret guard is a re-scan of the finished envelope with
@@ -1211,6 +1292,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -1276,6 +1358,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -1301,6 +1384,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -1359,6 +1443,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(
@@ -1416,6 +1501,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1471,6 +1557,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1501,6 +1588,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1531,6 +1619,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1679,6 +1768,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1787,6 +1877,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
         let outcomes = submit_sessions(
             &store,
@@ -1917,6 +2008,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1981,6 +2073,7 @@ mod tests {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)

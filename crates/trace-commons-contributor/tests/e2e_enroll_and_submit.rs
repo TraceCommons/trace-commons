@@ -911,6 +911,7 @@ async fn enroll_mint_submit_round_trip() {
             no_reasoning: false,
             machine_readable: false,
             unenrolled_preview: false,
+            remediate_quarantined: false,
         },
     )
     .await
