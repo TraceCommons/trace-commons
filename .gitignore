@@ -12,3 +12,6 @@ community/.wrangler/
 
 # Operator exports can contain submission-level analysis data
 scripts/operator/*.csv
+
+# Local pre-PR review artifacts
+.review/

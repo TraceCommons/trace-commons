@@ -3846,8 +3846,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's decisions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's decisions.
         //
         // DISTINCT + `received_at` in the projection mirrors the sibling
         // `list_submissions_needing_gate_decision` query: `received_at` is a
