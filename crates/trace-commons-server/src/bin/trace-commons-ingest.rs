@@ -12307,7 +12307,12 @@ struct CommunitySnapshotContents {
     privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
-    analytics: CommunityCorpusAnalytics,
+    /// `None` when the analytics gate was unsatisfied at recompute time.
+    /// The aggregates are then never computed at all, rather than
+    /// computed and withheld, so nothing un-noised is written to the
+    /// snapshot table. `privacy.analytics_withheld_controls` says why.
+    #[serde(default)]
+    analytics: Option<CommunityCorpusAnalytics>,
 }
 
 const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
@@ -12332,6 +12337,24 @@ const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 /// Not an env var: no configuration value can approve a mechanism that
 /// has not been implemented.
 const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// The two community surfaces, which carry different disclosure risks
+/// and therefore different controls.
+///
+/// The split is not cosmetic. Everyone on the roster holds
+/// `public_attribution` consent: their handle and their counts being
+/// public is the thing they asked for, and perturbing those figures
+/// protects nobody while making the published number wrong. The
+/// analytics aggregates span every contributor, including those who
+/// never opted in, so they are an inference surface over people who
+/// made no such choice and need a mechanism before they can leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommunitySurface {
+    /// Leaderboard rows and contributor profiles.
+    Roster,
+    /// Corpus aggregates.
+    Analytics,
+}
 
 /// Noise-seed prefixes belonging to mechanisms approved for community
 /// publication.
@@ -12364,6 +12387,7 @@ fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
 /// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
 /// derive it with [`community_noise_mechanism_approved`].
 fn community_publication_missing_controls(
+    surface: CommunitySurface,
     min_cell_count: usize,
     tenant_cohort_size: usize,
     noise_mechanism_approved: bool,
@@ -12372,7 +12396,7 @@ fn community_publication_missing_controls(
     if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if !noise_mechanism_approved {
+    if surface == CommunitySurface::Analytics && !noise_mechanism_approved {
         missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
     }
     if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
@@ -12384,8 +12408,12 @@ fn community_publication_missing_controls(
 /// Recompute-path preconditions, evaluated against live config. The
 /// seed is the one recompute would stamp on the snapshot it is about to
 /// write.
-fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+fn community_publication_missing_controls_for_state(
+    state: &AppState,
+    surface: CommunitySurface,
+) -> Vec<&'static str> {
     community_publication_missing_controls(
+        surface,
         state.analytics_min_cell_count,
         state.community_tenant_ids.len(),
         community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
@@ -12398,6 +12426,7 @@ fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'s
 /// rather than grandfathered in.
 fn community_snapshot_missing_controls(
     row: &trace_commons_server::db::LeaderboardSnapshotRow,
+    surface: CommunitySurface,
 ) -> Vec<&'static str> {
     let cohort_size = row
         .contents
@@ -12406,6 +12435,7 @@ fn community_snapshot_missing_controls(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
     community_publication_missing_controls(
+        surface,
         usize::try_from(row.min_cell_count).unwrap_or(0),
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
@@ -12430,6 +12460,13 @@ struct CommunitySnapshotPrivacy {
     /// Per-contributor sensitivity the noise was calibrated to. `None`
     /// for the same reason.
     sensitivity: Option<f64>,
+    /// Empty when the aggregates were computed. Otherwise the
+    /// label-only control names that withheld them, in the same
+    /// convention as the serve path: no tenant ids, handles or counts,
+    /// so it is safe in a public body. A reader can tell "withheld"
+    /// from "no activity" from "bug", which a bare null cannot.
+    #[serde(default)]
+    analytics_withheld_controls: Vec<String>,
 }
 
 impl CommunitySnapshotPrivacy {
@@ -12443,6 +12480,7 @@ impl CommunitySnapshotPrivacy {
             tenant_cohort_size: 0,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: Vec::new(),
         }
     }
 }
@@ -12462,7 +12500,15 @@ async fn recompute_community_snapshot(
     // Fail closed before touching contributor data: a snapshot that
     // cannot be published is not worth computing, and computing it
     // anyway leaves un-noised aggregates sitting in the snapshot table.
-    let missing_controls = community_publication_missing_controls_for_state(state);
+    //
+    // That second clause is why the analytics gate is evaluated
+    // separately below rather than folded in here. When it fails we do
+    // not compute the aggregates at all, so there is nothing un-noised
+    // to sit anywhere — a stronger position than computing them and
+    // withholding at serve time. The roster has no such problem: it is
+    // published under consent, so failing its gate is still fatal here.
+    let missing_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Roster);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -12481,13 +12527,23 @@ async fn recompute_community_snapshot(
         )
         .await
         .map_err(internal_error)?;
-    let analytics = db
-        .compute_corpus_analytics_summary(
-            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
-            state.community_tenant_ids.as_ref(),
+    let analytics_withheld_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Analytics);
+    let analytics = if analytics_withheld_controls.is_empty() {
+        Some(
+            db.compute_corpus_analytics_summary(
+                COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+                state.community_tenant_ids.as_ref(),
+            )
+            .await
+            .map_err(internal_error)?,
         )
-        .await
-        .map_err(internal_error)?;
+    } else {
+        // Deliberately not computed. See the comment on the roster gate
+        // above: an aggregate that cannot be published is an aggregate
+        // that should never exist at rest.
+        None
+    };
 
     // Rank by novelty_credit (rolling 7d).
     let mut sorted = inputs;
@@ -12547,10 +12603,14 @@ async fn recompute_community_snapshot(
             tenant_cohort_size: state.community_tenant_ids.len() as i32,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: analytics_withheld_controls
+                .iter()
+                .map(|control| (*control).to_string())
+                .collect(),
         },
         leaderboard,
         contributors,
-        analytics: CommunityCorpusAnalytics {
+        analytics: analytics.map(|analytics| CommunityCorpusAnalytics {
             window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
             total_submissions: analytics.total_submissions,
             total_accepted: analytics.total_accepted,
@@ -12565,7 +12625,7 @@ async fn recompute_community_snapshot(
                 })
                 .collect(),
             gate_outcomes: analytics.gate_outcomes.into_iter().collect(),
-        },
+        }),
     };
     let contents_json = serde_json::to_value(&contents).map_err(internal_error)?;
     let contents_canonical = serde_json::to_string(&contents).map_err(internal_error)?;
@@ -12591,8 +12651,13 @@ async fn recompute_community_snapshot(
 /// into one and forgotten on another, and so snapshots already sitting
 /// in the table from before the gate existed stop being served the
 /// moment this ships - without requiring a data migration.
+///
+/// `surface` selects which controls apply. A caller has to name the
+/// surface it is serving, so adding a route cannot silently inherit the
+/// weaker gate.
 async fn latest_publishable_community_snapshot(
     state: &AppState,
+    surface: CommunitySurface,
 ) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
     if !state.community_leaderboard_enabled {
         return Err(api_error(
@@ -12619,7 +12684,7 @@ async fn latest_publishable_community_snapshot(
                 "no community snapshot has been computed yet",
             )
         })?;
-    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    let missing_controls = community_snapshot_missing_controls(&snapshot, surface);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12658,7 +12723,12 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    // Roster gate. The payload still carries `analytics`, which is null
+    // whenever the analytics gate was unsatisfied when this snapshot was
+    // computed; `privacy.analytics_withheld_controls` names why, so a
+    // client can tell that apart from "no activity".
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
     Ok(Json(snapshot.contents))
 }
 
@@ -12666,7 +12736,8 @@ async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12679,11 +12750,23 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Analytics).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    // The gate above passes against current config, but this snapshot may
+    // predate that config: it was computed while analytics were withheld,
+    // so the aggregates were never calculated. Refuse rather than serve an
+    // empty body, and name the fix, since a recompute is all it takes.
+    let analytics = parsed.analytics.ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "latest community snapshot was computed without analytics; \
+             recompute to publish them",
+        )
+    })?;
     Ok(Json(
-        serde_json::to_value(&parsed.analytics).map_err(internal_error)?,
+        serde_json::to_value(&analytics).map_err(internal_error)?,
     ))
 }
 
