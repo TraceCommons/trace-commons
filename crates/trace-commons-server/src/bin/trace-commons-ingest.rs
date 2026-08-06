@@ -12751,13 +12751,59 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Roster gate. The payload still carries `analytics`, which is null
-    // whenever the analytics gate was unsatisfied when this snapshot was
-    // computed; `privacy.analytics_withheld_controls` names why, so a
-    // client can tell that apart from "no activity".
     let snapshot =
         latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
-    Ok(Json(snapshot.contents))
+
+    // Recompute writes `analytics: null` when the analytics gate is
+    // unsatisfied, so a snapshot produced by current code already omits
+    // them. A snapshot written before that gate existed does not: it
+    // carries aggregates computed under no approved mechanism, and this
+    // handler would hand them out through the roster's weaker gate.
+    //
+    // So the gate is re-evaluated against the stored snapshot here rather
+    // than trusted from when it was written. Withheld aggregates are
+    // replaced with null and the reason recorded, matching what recompute
+    // would have produced, so a reader can still tell "withheld" from
+    // "no activity".
+    let withheld = community_snapshot_missing_controls(&snapshot, CommunitySurface::Analytics);
+    Ok(Json(redact_withheld_analytics(
+        snapshot.contents,
+        &withheld,
+    )))
+}
+
+/// Replace withheld aggregates with null and record why, matching what
+/// recompute would have written. Separate from the handler so the
+/// redaction is testable without standing up a database.
+fn redact_withheld_analytics(
+    mut contents: serde_json::Value,
+    withheld: &[&'static str],
+) -> serde_json::Value {
+    if withheld.is_empty() {
+        return contents;
+    }
+    let Some(object) = contents.as_object_mut() else {
+        return contents;
+    };
+    object.insert("analytics".to_string(), serde_json::Value::Null);
+    let reasons = serde_json::Value::Array(
+        withheld
+            .iter()
+            .map(|control| serde_json::Value::String((*control).to_string()))
+            .collect(),
+    );
+    match object.get_mut("privacy").and_then(|p| p.as_object_mut()) {
+        Some(privacy) => {
+            privacy.insert("analytics_withheld_controls".to_string(), reasons);
+        }
+        None => {
+            object.insert(
+                "privacy".to_string(),
+                serde_json::json!({ "analytics_withheld_controls": reasons }),
+            );
+        }
+    }
+    contents
 }
 
 async fn community_contributor_handler(
