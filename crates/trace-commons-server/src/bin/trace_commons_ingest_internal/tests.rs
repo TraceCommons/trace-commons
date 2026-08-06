@@ -68332,7 +68332,7 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
 #[test]
 fn community_publication_blocks_when_min_cell_count_is_unset() {
     // Absent config parses to 0, which disables suppression entirely.
-    let missing = community_publication_missing_controls(0, 4, true);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 0, 4, true);
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -68340,19 +68340,68 @@ fn community_publication_blocks_when_min_cell_count_is_unset() {
 fn community_publication_blocks_when_min_cell_count_is_one() {
     // A threshold of 1 admits every opted-in row: the SQL HAVING
     // clause is satisfied by a cell of size one.
-    let missing = community_publication_missing_controls(1, 4, true);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 1, 4, true);
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
 #[test]
+fn community_roster_publishes_without_an_approved_noise_mechanism() {
+    // The whole point of the split. Everyone on the roster holds
+    // public_attribution consent: their handle and counts being public
+    // is what they asked for, so a mechanism that exists to protect
+    // people who made no such choice is not the control that applies.
+    let missing = community_publication_missing_controls(CommunitySurface::Roster, 2, 2, false);
+    assert!(
+        missing.is_empty(),
+        "roster should publish on consent + cohort shape alone, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_analytics_still_blocks_where_the_roster_publishes() {
+    // Same inputs, opposite answer. If these two ever agree, the split
+    // has collapsed and analytics are riding out on the roster's gate.
+    let inputs = (2usize, 2usize, false);
+    let roster = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    let analytics = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    assert!(roster.is_empty());
+    assert_eq!(analytics, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn community_roster_still_blocks_below_the_cohort_floors() {
+    // The split drops the mechanism requirement and nothing else. A
+    // cell of one is the contributor; a cohort of one republishes one
+    // tenant's corpus as "the community".
+    assert_eq!(
+        community_publication_missing_controls(CommunitySurface::Roster, 1, 2, false),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+    assert_eq!(
+        community_publication_missing_controls(CommunitySurface::Roster, 2, 1, false),
+        vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
+    );
+}
+
+#[test]
 fn community_publication_blocks_on_unapproved_noise_mechanism() {
-    let missing = community_publication_missing_controls(4, 4, false);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 4, 4, false);
     assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
 }
 
 #[test]
 fn community_publication_blocks_single_tenant_cohort() {
-    let missing = community_publication_missing_controls(4, 1, true);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 4, 1, true);
     assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
 }
 
@@ -68361,7 +68410,7 @@ fn community_publication_reports_every_missing_control_at_once() {
     // The pilot's actual configuration: no min-cell value, one tenant,
     // placeholder seed. An operator should see all three, not just the
     // first, so a single fix does not look like it unblocked the path.
-    let missing = community_publication_missing_controls(0, 1, false);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 0, 1, false);
     assert_eq!(
         missing,
         vec![
@@ -68374,7 +68423,7 @@ fn community_publication_reports_every_missing_control_at_once() {
 
 #[test]
 fn community_publication_allows_a_fully_configured_cohort() {
-    let missing = community_publication_missing_controls(2, 2, true);
+    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 2, 2, true);
     assert!(
         missing.is_empty(),
         "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
@@ -68409,12 +68458,22 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
         min_cell_count: 0,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    let missing = community_snapshot_missing_controls(&row);
+    let missing = community_snapshot_missing_controls(&row, CommunitySurface::Analytics);
     assert_eq!(
         missing,
         vec![
             TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
             COMMUNITY_NOISE_MECHANISM_CONTROL,
+            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
+        ]
+    );
+    // And the roster surface refuses it too. The split must not become a
+    // way for a snapshot predating the privacy block to reach the public
+    // read path: it carries no cohort evidence, so it is cohort-of-one.
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Roster),
+        vec![
+            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
             TRACE_COMMONS_COMMUNITY_TENANT_IDS,
         ]
     );
@@ -68439,7 +68498,7 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
     };
     assert_eq!(
-        community_snapshot_missing_controls(&row),
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
 }
