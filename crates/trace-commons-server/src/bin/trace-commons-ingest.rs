@@ -12328,9 +12328,31 @@ const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
 /// is published. A cell of size one is the contributor.
 const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
 
+/// Roster floor. A leaderboard row is not an aggregate that might happen
+/// to identify someone — it is a named person who asked to be named, and
+/// suppressing a contributor for having contributed once hides a
+/// participant rather than protecting a bystander. All this floor does is
+/// keep the SQL honest: below 1, a contributor with nothing accepted in
+/// the window would still take a row.
+///
+/// Note that despite its name, `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT`
+/// is only ever applied to the leaderboard query's HAVING clause.
+/// `compute_corpus_analytics_summary` takes no min-cell argument at all,
+/// so the corpus aggregates have never been cell-suppressed. The
+/// [`COMMUNITY_MIN_CELL_COUNT_FLOOR`] check below therefore gates
+/// analytics publication without suppressing anything inside it — a real
+/// gap, but one that only matters once a noise mechanism exists, since
+/// nothing publishes until then.
+const COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR: usize = 1;
+
 /// Minimum number of distinct tenants in the community cohort before
-/// publication. A single-tenant cohort republishes one tenant's corpus
-/// under a "community" label, which the leaderboard design forbids.
+/// corpus aggregates are published. A single-tenant cohort republishes
+/// one tenant's corpus under a "community" label.
+///
+/// Analytics only. The roster carries no such implication: it is a list
+/// of people who individually chose to appear, and how many tenants they
+/// span changes nothing about who consented to what. The claim of breadth
+/// lives in the aggregates, so the control belongs there.
 const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 
 /// Label-only missing-control name for an unapproved noise mechanism.
@@ -12393,14 +12415,20 @@ fn community_publication_missing_controls(
     noise_mechanism_approved: bool,
 ) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+    let min_cell_floor = match surface {
+        CommunitySurface::Roster => COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR,
+        CommunitySurface::Analytics => COMMUNITY_MIN_CELL_COUNT_FLOOR,
+    };
+    if min_cell_count < min_cell_floor {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if surface == CommunitySurface::Analytics && !noise_mechanism_approved {
-        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
-    }
-    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
-        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    if surface == CommunitySurface::Analytics {
+        if !noise_mechanism_approved {
+            missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+        }
+        if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+            missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+        }
     }
     missing
 }
