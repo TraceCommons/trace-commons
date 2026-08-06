@@ -68379,16 +68379,37 @@ fn community_analytics_still_blocks_where_the_roster_publishes() {
 }
 
 #[test]
-fn community_roster_still_blocks_below_the_cohort_floors() {
-    // The split drops the mechanism requirement and nothing else. A
-    // cell of one is the contributor; a cohort of one republishes one
-    // tenant's corpus as "the community".
+fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
+    // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
+    // person on the roster individually asked to be listed, so neither the
+    // cohort size nor a cell of one tells us anything about consent.
+    let missing = community_publication_missing_controls(CommunitySurface::Roster, 1, 1, false);
+    assert!(
+        missing.is_empty(),
+        "a consented single-tenant roster should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_roster_still_blocks_a_zero_min_cell() {
+    // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
+    // contributors with nothing accepted in the window.
     assert_eq!(
-        community_publication_missing_controls(CommunitySurface::Roster, 1, 2, false),
+        community_publication_missing_controls(CommunitySurface::Roster, 0, 2, false),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_analytics_keeps_both_cohort_floors() {
+    // Everything the roster stopped enforcing is still enforced here,
+    // because these aggregates cover people who never opted into anything.
+    assert_eq!(
+        community_publication_missing_controls(CommunitySurface::Analytics, 1, 2, true),
         vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
     assert_eq!(
-        community_publication_missing_controls(CommunitySurface::Roster, 2, 1, false),
+        community_publication_missing_controls(CommunitySurface::Analytics, 2, 1, true),
         vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
     );
 }
@@ -68467,15 +68488,14 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
             TRACE_COMMONS_COMMUNITY_TENANT_IDS,
         ]
     );
-    // And the roster surface refuses it too. The split must not become a
-    // way for a snapshot predating the privacy block to reach the public
-    // read path: it carries no cohort evidence, so it is cohort-of-one.
+    // And the roster surface refuses it too, which is the point: the split
+    // must not become a way for a snapshot predating the privacy block to
+    // reach the public read path. It reports one control rather than two
+    // now that cohort size is an analytics concern, but a pre-gate snapshot
+    // records min_cell_count 0 and so is still refused.
     assert_eq!(
         community_snapshot_missing_controls(&row, CommunitySurface::Roster),
-        vec![
-            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
-            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
-        ]
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
 }
 
