@@ -68379,6 +68379,36 @@ fn community_analytics_still_blocks_where_the_roster_publishes() {
 }
 
 #[test]
+fn roster_payload_strips_aggregates_a_pregate_snapshot_still_carries() {
+    // The bug this exists to prevent, found in production: recompute
+    // writes analytics: null when they are withheld, but a snapshot
+    // written before that gate existed already has them populated. The
+    // roster's weaker gate would then hand out aggregates computed under
+    // no approved mechanism.
+    let stored = serde_json::json!({
+        "leaderboard": [{"display_handle": "someone", "rank": 1}],
+        "analytics": {"total_submissions": 41, "total_accepted": 40},
+    });
+    let redacted = redact_withheld_analytics(stored, &[COMMUNITY_NOISE_MECHANISM_CONTROL]);
+
+    assert_eq!(redacted["analytics"], serde_json::Value::Null);
+    assert_eq!(
+        redacted["privacy"]["analytics_withheld_controls"],
+        serde_json::json!([COMMUNITY_NOISE_MECHANISM_CONTROL]),
+        "a reader must be able to tell withheld from no activity"
+    );
+    // The roster itself is untouched: those people consented.
+    assert_eq!(redacted["leaderboard"][0]["display_handle"], "someone");
+}
+
+#[test]
+fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
+    let stored = serde_json::json!({"analytics": {"total_submissions": 41}});
+    let kept = redact_withheld_analytics(stored, &[]);
+    assert_eq!(kept["analytics"]["total_submissions"], 41);
+}
+
+#[test]
 fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
     // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
     // person on the roster individually asked to be listed, so neither the
