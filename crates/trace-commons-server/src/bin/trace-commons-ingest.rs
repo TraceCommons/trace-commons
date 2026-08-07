@@ -467,6 +467,8 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1124,6 +1126,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
@@ -1196,6 +1199,10 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    /// How often to recompute the community snapshot in-process. `None`
+    /// leaves recompute admin-triggered only, which is the behaviour
+    /// every deployment had before this existed.
+    community_snapshot_interval: Option<StdDuration>,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -3497,6 +3504,7 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -8372,6 +8380,143 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
 ) {
     if let Ok(mut verifier) = verifier.write() {
         verifier.managed_eddsa_keyset_last_refresh_failed_at = Some(Utc::now());
+    }
+}
+
+/// Minimum recompute interval. Each recompute is a full pass over the
+/// window for every tenant in the cohort, and the snapshot it produces is
+/// only read once per page load, so anything tighter costs database work
+/// nobody sees.
+const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
+
+/// Snapshots kept per window/metric. Only the newest is ever served; the
+/// rest are the record of what was published and under which controls, so
+/// this trims to a short history rather than to one. At the documented
+/// 900s interval that is a bit over a day.
+const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
+
+fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
+        Ok(configured) => parse_community_snapshot_interval(&configured),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_community_snapshot_interval(configured: &str) -> anyhow::Result<Option<StdDuration>> {
+    let trimmed = configured.trim();
+    // Empty and 0 both mean "admin-triggered only", so an operator can
+    // disable the worker without deleting the line.
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let seconds: u64 = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be a whole number of seconds"
+        )
+    })?;
+    if seconds < COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be at least {COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS} seconds"
+        );
+    }
+    Ok(Some(StdDuration::from_secs(seconds)))
+}
+
+/// Keep the published snapshot current without an operator POSTing to the
+/// admin route. Before this existed, a contributor who earned a row had no
+/// way for it to appear: the snapshot only moved when someone remembered
+/// to trigger it by hand.
+fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
+    if !state.community_leaderboard_enabled {
+        return;
+    }
+    let Some(interval) = state.community_snapshot_interval else {
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Each tick runs in its own task so a panic surfaces as a
+            // JoinError here rather than killing this loop. Without that,
+            // one panic leaves the process healthy and the snapshot
+            // silently frozen - the exact failure this worker exists to
+            // prevent, in the form least likely to be noticed.
+            let tick = tokio::spawn(community_snapshot_tick(state.clone(), interval));
+            if let Err(join_error) = tick.await {
+                tracing::error!(
+                    panicked = join_error.is_panic(),
+                    "community snapshot recompute tick did not complete; worker continuing"
+                );
+            }
+        }
+    });
+}
+
+/// One scheduled recompute, including the checks that make running this on
+/// a timer safe rather than merely automatic.
+async fn community_snapshot_tick(state: Arc<AppState>, interval: StdDuration) {
+    // Skip if something already produced a snapshot inside this interval:
+    // the admin route, or another process. This is a cheap coordination,
+    // not a mutual exclusion - two writers can still race inside the same
+    // instant. See the deployment note on the interval env var: the worker
+    // assumes a single writer, and a multi-replica deployment wanting
+    // stronger guarantees needs an elected scheduler or a distributed lock.
+    if let Some(db) = state.db_mirror.as_ref() {
+        if let Ok(Some(existing)) = db
+            .latest_leaderboard_snapshot(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+            )
+            .await
+        {
+            let age = Utc::now().signed_duration_since(existing.computed_at);
+            if age < chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::zero()) {
+                tracing::debug!("community snapshot already fresh; skipping scheduled recompute");
+                return;
+            }
+        }
+    }
+
+    let row = match recompute_community_snapshot(state.as_ref()).await {
+        Ok(row) => row,
+        // A 409 here is the publication gate refusing, which is a steady
+        // state rather than a fault: a deployment with controls
+        // unsatisfied would otherwise log an error every interval forever.
+        Err((status, _)) if status == StatusCode::CONFLICT => {
+            tracing::debug!(
+                "community snapshot recompute skipped: publication controls unsatisfied"
+            );
+            return;
+        }
+        Err((status, _)) => {
+            tracing::warn!(status = %status, "community snapshot recompute failed");
+            return;
+        }
+    };
+    tracing::info!(
+        snapshot_id = %row.snapshot_id,
+        "community snapshot recomputed on schedule"
+    );
+
+    // Retention runs after a successful write, so a failure here never
+    // costs the snapshot that was just published.
+    if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .prune_leaderboard_snapshots(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+                COMMUNITY_SNAPSHOT_RETAINED,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned superseded community snapshots"),
+            Err(error) => tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "pruning superseded community snapshots failed"
+            ),
+        }
     }
 }
 
