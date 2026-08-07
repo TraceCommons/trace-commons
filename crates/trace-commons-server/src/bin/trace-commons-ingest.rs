@@ -467,6 +467,8 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
+    "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
@@ -1126,6 +1128,18 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
     spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
@@ -1203,6 +1217,7 @@ struct AppState {
     /// leaves recompute admin-triggered only, which is the behaviour
     /// every deployment had before this existed.
     community_snapshot_interval: Option<StdDuration>,
+    community_analytics_publication_basis: CommunityAnalyticsPublicationBasis,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -3505,6 +3520,8 @@ impl AppState {
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
+            community_analytics_publication_basis:
+                parse_community_analytics_publication_basis_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -8395,6 +8412,32 @@ const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
 /// 900s interval that is a bit over a day.
 const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
 
+fn parse_community_analytics_publication_basis_from_env()
+-> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS) {
+        Ok(configured) => parse_community_analytics_publication_basis(&configured),
+        // Absent means the stricter basis. Publishing without a mechanism is
+        // a decision an operator has to make explicitly; it is never what a
+        // deployment falls into by not setting something.
+        Err(_) => Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism),
+    }
+}
+
+fn parse_community_analytics_publication_basis(
+    configured: &str,
+) -> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match configured.trim() {
+        "" | "approved_noise_mechanism" => {
+            Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism)
+        }
+        "suppression_only" => Ok(CommunityAnalyticsPublicationBasis::SuppressionOnly),
+        other => anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS} must be \
+             `approved_noise_mechanism` or `suppression_only`, got `{other}`"
+        ),
+    }
+}
+
 fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
     match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
         Ok(configured) => parse_community_snapshot_interval(&configured),
@@ -12505,6 +12548,43 @@ const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 /// has not been implemented.
 const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
 
+/// What a published set of corpus aggregates rests on.
+///
+/// This exists so the answer is recorded rather than inferred. Previously
+/// the only way to publish analytics was to satisfy a noise-mechanism
+/// control, so anything published implied a mechanism had been approved.
+/// An operator who wants to publish without one should have to say so, and
+/// the snapshot should carry which basis was used, rather than a reader of
+/// the code or the artifact assuming noise was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommunityAnalyticsPublicationBasis {
+    /// Aggregates publish only under an approved, calibrated mechanism.
+    /// The default, and the only basis that supports a privacy claim
+    /// stronger than cell suppression.
+    ApprovedNoiseMechanism,
+    /// Aggregates publish under cell suppression alone: cells below the
+    /// min-cell floor are dropped, and nothing else is done to them. This
+    /// is a real protection and it is not differential privacy. Totals are
+    /// not suppressed, so at small corpus sizes they can still describe a
+    /// handful of contributors closely. Anything user-facing that describes
+    /// this deployment must say which basis is in force.
+    SuppressionOnly,
+}
+
+impl CommunityAnalyticsPublicationBasis {
+    fn strict() -> Self {
+        Self::ApprovedNoiseMechanism
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovedNoiseMechanism => "approved_noise_mechanism",
+            Self::SuppressionOnly => "suppression_only",
+        }
+    }
+}
+
 /// The two community surfaces, which carry different disclosure risks
 /// and therefore different controls.
 ///
@@ -12555,6 +12635,7 @@ fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
 /// derive it with [`community_noise_mechanism_approved`].
 fn community_publication_missing_controls(
     surface: CommunitySurface,
+    basis: CommunityAnalyticsPublicationBasis,
     min_cell_count: usize,
     tenant_cohort_size: usize,
     noise_mechanism_approved: bool,
@@ -12564,10 +12645,16 @@ fn community_publication_missing_controls(
         CommunitySurface::Roster => COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR,
         CommunitySurface::Analytics => COMMUNITY_MIN_CELL_COUNT_FLOOR,
     };
+    // The min-cell floor is never waived for analytics. Under
+    // `SuppressionOnly` it stops being one control among several and becomes
+    // the only thing standing between a published aggregate and a small
+    // group, so it is required more strictly there, not less.
     if min_cell_count < min_cell_floor {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if surface == CommunitySurface::Analytics {
+    if surface == CommunitySurface::Analytics
+        && basis == CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    {
         if !noise_mechanism_approved {
             missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
         }
@@ -12587,6 +12674,7 @@ fn community_publication_missing_controls_for_state(
 ) -> Vec<&'static str> {
     community_publication_missing_controls(
         surface,
+        state.community_analytics_publication_basis,
         state.analytics_min_cell_count,
         state.community_tenant_ids.len(),
         community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
@@ -12607,8 +12695,15 @@ fn community_snapshot_missing_controls(
         .and_then(|privacy| privacy.get("tenant_cohort_size"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
+    let basis = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("publication_basis"))
+        .and_then(|basis| serde_json::from_value(basis.clone()).ok())
+        .unwrap_or_else(CommunityAnalyticsPublicationBasis::strict);
     community_publication_missing_controls(
         surface,
+        basis,
         usize::try_from(row.min_cell_count).unwrap_or(0),
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
@@ -12640,6 +12735,12 @@ struct CommunitySnapshotPrivacy {
     /// from "no activity" from "bug", which a bare null cannot.
     #[serde(default)]
     analytics_withheld_controls: Vec<String>,
+    /// What the aggregates in this snapshot rest on. Absent on snapshots
+    /// written before the basis was explicit; those default to the strict
+    /// basis, so an old artifact is never read as having been published
+    /// under suppression alone.
+    #[serde(default = "CommunityAnalyticsPublicationBasis::strict")]
+    publication_basis: CommunityAnalyticsPublicationBasis,
 }
 
 impl CommunitySnapshotPrivacy {
@@ -12654,6 +12755,7 @@ impl CommunitySnapshotPrivacy {
             epsilon_charged: None,
             sensitivity: None,
             analytics_withheld_controls: Vec::new(),
+            publication_basis: CommunityAnalyticsPublicationBasis::strict(),
         }
     }
 }
@@ -12832,6 +12934,7 @@ async fn recompute_community_snapshot(
                 .iter()
                 .map(|control| (*control).to_string())
                 .collect(),
+            publication_basis: state.community_analytics_publication_basis,
         },
         leaderboard,
         contributors,
