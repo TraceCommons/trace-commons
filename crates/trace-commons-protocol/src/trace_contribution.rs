@@ -6862,6 +6862,15 @@ mod tests {
             high.credit_points_estimate, 0.0,
             "high risk earns nothing regardless of quality"
         );
+        // The blast-radius claim is about both outputs, not just credit.
+        // For high risk the gate is 0.0, so the quality terms contribute
+        // nothing and `raw` was negative before this change and is
+        // non-positive after; either way it clamps to 0. Asserting the score
+        // too keeps "only the medium band moves" honest.
+        assert_eq!(
+            high.submission_score, 0.0,
+            "high-risk submission_score must clamp to zero either side of this change"
+        );
     }
 
     /// End-to-end: sync server re-scrub of an envelope whose only finding is a
