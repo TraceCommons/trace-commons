@@ -690,6 +690,74 @@ pub(crate) fn scopes_cell(scopes: &[ConsentScope]) -> String {
 }
 
 /// Print server-side status for every locally recorded submission receipt.
+pub async fn profile(
+    store: &ConfigStore,
+    handle: Option<&str>,
+    bio: Option<&str>,
+    no_bio: bool,
+    withdraw: bool,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    // Deliberately no local public_attribution check. `cfg.consent_scopes`
+    // records what was selected for submissions, while these calls mint an
+    // empty-scope claim that the issuer resolves to the caller's full grant
+    // ceiling - so the local set can be narrower than what the credential
+    // actually carries, and checking it here would refuse contributors the
+    // server would have allowed. The server is the authority; the context
+    // below carries the remedy if it refuses.
+
+    if withdraw {
+        submit::clear_profile(store, &cfg).await?;
+        if json {
+            println!("{}", serde_json::json!({"withdrawn": true}));
+        } else {
+            println!("public attribution withdrawn; the row goes at the next snapshot");
+        }
+        return Ok(());
+    }
+
+    let Some(handle) = handle else {
+        anyhow::bail!("nothing to do: pass --handle <name> or --withdraw");
+    };
+    // The server upserts with `bio = excluded.bio`, so this call replaces the
+    // whole profile - there is no "leave the bio alone". Requiring the choice
+    // is the difference between clearing a published bio because you were
+    // asked, and clearing it because you renamed your handle.
+    if bio.is_none() && !no_bio {
+        anyhow::bail!(
+            "setting a handle replaces your whole public profile: pass --bio <text> \
+             to publish one, or --no-bio to publish none"
+        );
+    }
+
+    let profile = submit::set_profile(store, &cfg, handle, bio)
+        .await
+        .context(
+            "setting your public handle (this needs the public_attribution scope; if the \
+             server refuses, re-run `login` with --scopes debugging_evaluation,public_attribution)",
+        )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "display_handle": profile.display_handle,
+                "bio": profile.bio,
+                "public_since": profile.public_since,
+            })
+        );
+    } else {
+        println!("public handle: {}", profile.display_handle);
+        println!("public since: {}", profile.public_since);
+        println!("your handle appears once an accepted submission lands in the window");
+    }
+    Ok(())
+}
+
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()

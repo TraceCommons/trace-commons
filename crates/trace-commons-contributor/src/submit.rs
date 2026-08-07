@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
@@ -446,6 +447,76 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommunityProfilePutRequest<'a> {
+    display_handle: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bio: Option<&'a str>,
+}
+
+/// The public profile as the server stores it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommunityProfile {
+    pub display_handle: String,
+    pub bio: Option<String>,
+    pub public_since: DateTime<Utc>,
+}
+
+/// Claim or update this contributor's public handle.
+///
+/// `login` can grant `public_attribution`, but until this existed nothing in
+/// this CLI could use it: claiming a handle meant the operator-facing
+/// `/profile` page and a workload token from the *other* enrollment path.
+/// Since the server derives the principal from the authenticated request
+/// rather than from anything in the body, a handle claimed through a
+/// different credential lands on a different principal and never appears
+/// beside this device's traces.
+pub async fn set_profile(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    display_handle: &str,
+    bio: Option<&str>,
+) -> Result<CommunityProfile> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status`: the issuer resolves it to this
+    // caller's full grant ceiling, so claiming a handle does not depend on
+    // whichever scopes were narrowed for the last submission.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile update")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let req = CommunityProfilePutRequest {
+        display_handle,
+        bio,
+    };
+    client
+        .call_json(Method::PUT, "/v1/community/profile", &[], Some(&req))
+        .await
+        .context("setting public profile")
+}
+
+/// Withdraw this contributor's public attribution.
+///
+/// The row goes at the next snapshot. This is the action `/about/privacy`
+/// promises, so it belongs in the tool the contributor already has rather
+/// than only in a page they may never have been given access to.
+pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile withdrawal")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_raw::<()>(Method::DELETE, "/v1/community/profile", &[], None)
+        .await
+        .context("withdrawing public profile")?;
+    Ok(())
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores.
@@ -1986,6 +2057,99 @@ mod tests {
             req["allowed_uses"],
             serde_json::json!([]),
             "status claim request must not request the submit-path's uses: {req}"
+        );
+    }
+
+    /// Records the method and body of every /v1/community/profile call.
+    fn stub_community_profile_ingest(seen: Arc<Mutex<Vec<(String, String)>>>) -> Router {
+        Router::new().route(
+            "/v1/community/profile",
+            axum::routing::put({
+                let seen = seen.clone();
+                move |body: String| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(("PUT".to_string(), body));
+                        Json(serde_json::json!({
+                            "display_handle": "stub_handle",
+                            "handle_normalized": "stub_handle",
+                            "bio": null,
+                            "public_since": chrono::Utc::now(),
+                            "last_updated_at": chrono::Utc::now(),
+                            "update_count": 0,
+                        }))
+                    }
+                }
+            })
+            .delete(move |body: String| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(("DELETE".to_string(), body));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn set_profile_mints_an_empty_scope_claim() {
+        // Same property `status` relies on: an empty request resolves to the
+        // caller's full grant ceiling, so claiming a handle does not depend
+        // on whichever scopes were narrowed for the last submission.
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let profile = set_profile(&store, &cfg, "stub_handle", None)
+            .await
+            .unwrap();
+        assert_eq!(profile.display_handle, "stub_handle");
+
+        let requests = claim_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["consent_scopes"], serde_json::json!([]));
+        assert_eq!(requests[0]["allowed_uses"], serde_json::json!([]));
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].0, "PUT");
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(body["display_handle"], "stub_handle");
+        // Omitting the key is NOT a way to preserve an existing bio: the
+        // server deserializes missing and null identically to None and then
+        // upserts `bio = excluded.bio`, so either form clears it. An earlier
+        // version of this test asserted the opposite. The protection against
+        // clearing a bio by accident lives in the command layer, which
+        // requires --bio or --no-bio; this only pins the wire shape.
+        assert!(
+            body.get("bio").is_none(),
+            "bio must be omitted from the body when not set: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_profile_sends_a_bodyless_delete() {
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        clear_profile(&store, &cfg).await.unwrap();
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].0, "DELETE");
+        assert!(
+            calls[0].1.is_empty(),
+            "withdrawal must not send a JSON body: {:?}",
+            calls[0].1
         );
     }
 
