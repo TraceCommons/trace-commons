@@ -96,14 +96,22 @@ enum Command {
     },
     /// Claim, update, or withdraw your public handle. Requires the
     /// public_attribution scope, which is chosen at `login`.
+    ///
+    /// Setting a handle REPLACES the whole public profile, so one of `--bio`
+    /// or `--no-bio` is required with `--handle`. The API has no way to say
+    /// "leave the bio alone", and defaulting to empty would silently discard
+    /// a bio you had already published.
     Profile {
         /// Handle to publish. ASCII letters, digits, `-` and `_`; no
         /// separator at either end.
         #[arg(long, conflicts_with = "withdraw")]
         handle: Option<String>,
-        /// Optional short bio shown on your contributor page
-        #[arg(long, conflicts_with = "withdraw")]
+        /// Short bio to publish alongside the handle
+        #[arg(long, conflicts_with_all = ["withdraw", "no_bio"], requires = "handle")]
         bio: Option<String>,
+        /// Publish no bio, clearing one if previously set
+        #[arg(long, conflicts_with = "withdraw", requires = "handle")]
+        no_bio: bool,
         /// Withdraw public attribution. The row goes at the next snapshot.
         #[arg(long)]
         withdraw: bool,
@@ -220,12 +228,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Profile {
             handle,
             bio,
+            no_bio,
             withdraw,
         } => {
             commands::profile(
                 &store,
                 handle.as_deref(),
                 bio.as_deref(),
+                no_bio,
                 withdraw,
                 cli.json,
             )

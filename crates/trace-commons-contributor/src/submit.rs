@@ -2119,10 +2119,15 @@ mod tests {
         assert_eq!(calls[0].0, "PUT");
         let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
         assert_eq!(body["display_handle"], "stub_handle");
+        // Omitting the key is NOT a way to preserve an existing bio: the
+        // server deserializes missing and null identically to None and then
+        // upserts `bio = excluded.bio`, so either form clears it. An earlier
+        // version of this test asserted the opposite. The protection against
+        // clearing a bio by accident lives in the command layer, which
+        // requires --bio or --no-bio; this only pins the wire shape.
         assert!(
             body.get("bio").is_none(),
-            "an absent bio must be omitted rather than sent as null, so it \
-             cannot be read as 'clear the bio': {body}"
+            "bio must be omitted from the body when not set: {body}"
         );
     }
 

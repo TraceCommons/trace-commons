@@ -694,6 +694,7 @@ pub async fn profile(
     store: &ConfigStore,
     handle: Option<&str>,
     bio: Option<&str>,
+    no_bio: bool,
     withdraw: bool,
     json: bool,
 ) -> Result<()> {
@@ -702,19 +703,13 @@ pub async fn profile(
         .context("loading contributor config")?
         .context("not logged in; run `login` first")?;
 
-    // Fail here rather than at the server: the contributor picked scopes at
-    // login, and telling them the scope is missing is more useful than
-    // relaying a 403.
-    if !cfg
-        .consent_scopes
-        .iter()
-        .any(|scope| scope == "public_attribution")
-    {
-        anyhow::bail!(
-            "this device did not grant public_attribution; re-run `login` with \
-             --scopes debugging_evaluation,public_attribution"
-        );
-    }
+    // Deliberately no local public_attribution check. `cfg.consent_scopes`
+    // records what was selected for submissions, while these calls mint an
+    // empty-scope claim that the issuer resolves to the caller's full grant
+    // ceiling - so the local set can be narrower than what the credential
+    // actually carries, and checking it here would refuse contributors the
+    // server would have allowed. The server is the authority; the context
+    // below carries the remedy if it refuses.
 
     if withdraw {
         submit::clear_profile(store, &cfg).await?;
@@ -729,8 +724,23 @@ pub async fn profile(
     let Some(handle) = handle else {
         anyhow::bail!("nothing to do: pass --handle <name> or --withdraw");
     };
+    // The server upserts with `bio = excluded.bio`, so this call replaces the
+    // whole profile - there is no "leave the bio alone". Requiring the choice
+    // is the difference between clearing a published bio because you were
+    // asked, and clearing it because you renamed your handle.
+    if bio.is_none() && !no_bio {
+        anyhow::bail!(
+            "setting a handle replaces your whole public profile: pass --bio <text> \
+             to publish one, or --no-bio to publish none"
+        );
+    }
 
-    let profile = submit::set_profile(store, &cfg, handle, bio).await?;
+    let profile = submit::set_profile(store, &cfg, handle, bio)
+        .await
+        .context(
+            "setting your public handle (this needs the public_attribution scope; if the \
+             server refuses, re-run `login` with --scopes debugging_evaluation,public_attribution)",
+        )?;
     if json {
         println!(
             "{}",
