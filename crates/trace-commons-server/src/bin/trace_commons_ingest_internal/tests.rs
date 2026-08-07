@@ -3967,6 +3967,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_export_guardrails,
         community_leaderboard_enabled: false,
         community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -24236,6 +24238,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
         community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -68372,7 +68376,13 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
 #[test]
 fn community_publication_blocks_when_min_cell_count_is_unset() {
     // Absent config parses to 0, which disables suppression entirely.
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 0, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -68380,7 +68390,13 @@ fn community_publication_blocks_when_min_cell_count_is_unset() {
 fn community_publication_blocks_when_min_cell_count_is_one() {
     // A threshold of 1 admits every opted-in row: the SQL HAVING
     // clause is satisfied by a cell of size one.
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 1, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -68390,7 +68406,13 @@ fn community_roster_publishes_without_an_approved_noise_mechanism() {
     // public_attribution consent: their handle and counts being public
     // is what they asked for, so a mechanism that exists to protect
     // people who made no such choice is not the control that applies.
-    let missing = community_publication_missing_controls(CommunitySurface::Roster, 2, 2, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        false,
+    );
     assert!(
         missing.is_empty(),
         "roster should publish on consent + cohort shape alone, got {missing:?}"
@@ -68404,12 +68426,14 @@ fn community_analytics_still_blocks_where_the_roster_publishes() {
     let inputs = (2usize, 2usize, false);
     let roster = community_publication_missing_controls(
         CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         inputs.0,
         inputs.1,
         inputs.2,
     );
     let analytics = community_publication_missing_controls(
         CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         inputs.0,
         inputs.1,
         inputs.2,
@@ -68465,6 +68489,143 @@ fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSumma
 }
 
 #[test]
+fn publication_basis_defaults_to_requiring_a_mechanism() {
+    // Publishing without a mechanism must be something an operator opts
+    // into, never something a deployment falls into by leaving a variable
+    // unset or empty.
+    assert_eq!(
+        parse_community_analytics_publication_basis("").expect("empty parses"),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("approved_noise_mechanism").unwrap(),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("suppression_only").unwrap(),
+        CommunityAnalyticsPublicationBasis::SuppressionOnly
+    );
+    assert!(
+        parse_community_analytics_publication_basis("none").is_err(),
+        "an unrecognised basis must fail at boot rather than pick one"
+    );
+}
+
+#[test]
+fn suppression_only_waives_the_mechanism_but_never_the_cell_floor() {
+    // Under this basis cell suppression stops being one control among
+    // several and becomes the only thing between a published aggregate and
+    // a small group, so the floor is required, not relaxed.
+    assert!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            2,
+            1,
+            false,
+        )
+        .is_empty(),
+        "suppression_only should publish at min-cell 2 with one tenant and no mechanism"
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            1,
+            9,
+            true,
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT],
+        "the cell floor is never waived under suppression_only"
+    );
+}
+
+fn snapshot_row_with_privacy(
+    privacy: serde_json::Value,
+) -> trace_commons_server::db::LeaderboardSnapshotRow {
+    trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({ "privacy": privacy }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    }
+}
+
+#[test]
+fn a_malformed_publication_basis_falls_back_to_strict() {
+    // The serve gate parses the stored basis permissively and falls back to
+    // the strict one. That is deliberate: an unreadable provenance field must
+    // never be the reason aggregates publish. Pinned because the failure mode
+    // is silent by construction - nothing errors, it just gets stricter.
+    for malformed in [
+        serde_json::json!("banana"),
+        serde_json::json!(null),
+        serde_json::json!(7),
+        serde_json::json!({"nested": true}),
+    ] {
+        let row = snapshot_row_with_privacy(
+            serde_json::json!({"tenant_cohort_size": 9, "publication_basis": malformed}),
+        );
+        assert_eq!(
+            community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+            vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+            "a basis of {malformed} must be read as strict, not as permission to publish"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_keeps_the_basis_it_was_published_under() {
+    // The serve gate reads the stored snapshot, never live config, so
+    // changing the operator setting cannot retroactively re-license an
+    // artifact in either direction.
+    let permissive = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 1,
+        "publication_basis": "suppression_only",
+    }));
+    assert!(
+        community_snapshot_missing_controls(&permissive, CommunitySurface::Analytics).is_empty(),
+        "a snapshot published under suppression_only stays servable when config turns strict"
+    );
+
+    let strict = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 9,
+        "publication_basis": "approved_noise_mechanism",
+    }));
+    assert_eq!(
+        community_snapshot_missing_controls(&strict, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "a snapshot published under the strict basis is not loosened by permissive config"
+    );
+}
+
+#[test]
+fn a_pregate_snapshot_is_not_read_as_suppression_only() {
+    // The basis is absent on snapshots written before it existed. Defaulting
+    // those to the strict basis keeps an old artifact from being served as
+    // though someone had chosen to publish it without a mechanism.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"privacy": {"tenant_cohort_size": 9}}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "an absent basis must fall back to requiring a mechanism"
+    );
+}
+
+#[test]
 fn community_analytics_cells_below_the_floor_are_suppressed() {
     // The floor gated whether analytics could publish, but nothing applied
     // it to what was published: compute_corpus_analytics_summary takes no
@@ -68505,7 +68666,13 @@ fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
     // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
     // person on the roster individually asked to be listed, so neither the
     // cohort size nor a cell of one tells us anything about consent.
-    let missing = community_publication_missing_controls(CommunitySurface::Roster, 1, 1, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        1,
+        false,
+    );
     assert!(
         missing.is_empty(),
         "a consented single-tenant roster should publish, got {missing:?}"
@@ -68517,7 +68684,13 @@ fn community_roster_still_blocks_a_zero_min_cell() {
     // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
     // contributors with nothing accepted in the window.
     assert_eq!(
-        community_publication_missing_controls(CommunitySurface::Roster, 0, 2, false),
+        community_publication_missing_controls(
+            CommunitySurface::Roster,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            0,
+            2,
+            false
+        ),
         vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
 }
@@ -68527,24 +68700,48 @@ fn community_analytics_keeps_both_cohort_floors() {
     // Everything the roster stopped enforcing is still enforced here,
     // because these aggregates cover people who never opted into anything.
     assert_eq!(
-        community_publication_missing_controls(CommunitySurface::Analytics, 1, 2, true),
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            1,
+            2,
+            true
+        ),
         vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
     assert_eq!(
-        community_publication_missing_controls(CommunitySurface::Analytics, 2, 1, true),
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            2,
+            1,
+            true
+        ),
         vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
     );
 }
 
 #[test]
 fn community_publication_blocks_on_unapproved_noise_mechanism() {
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 4, 4, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        4,
+        false,
+    );
     assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
 }
 
 #[test]
 fn community_publication_blocks_single_tenant_cohort() {
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 4, 1, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        1,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
 }
 
@@ -68553,7 +68750,13 @@ fn community_publication_reports_every_missing_control_at_once() {
     // The pilot's actual configuration: no min-cell value, one tenant,
     // placeholder seed. An operator should see all three, not just the
     // first, so a single fix does not look like it unblocked the path.
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 0, 1, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        1,
+        false,
+    );
     assert_eq!(
         missing,
         vec![
@@ -68566,7 +68769,13 @@ fn community_publication_reports_every_missing_control_at_once() {
 
 #[test]
 fn community_publication_allows_a_fully_configured_cohort() {
-    let missing = community_publication_missing_controls(CommunitySurface::Analytics, 2, 2, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        true,
+    );
     assert!(
         missing.is_empty(),
         "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
