@@ -12989,6 +12989,33 @@ async fn community_analytics_summary_handler(
     ))
 }
 
+/// Unique index behind `(tenant_id, handle_normalized)`.
+const CONTRIBUTOR_HANDLE_UNIQUE_CONSTRAINT: &str =
+    "trace_contributor_profiles_tenant_id_handle_normalized_key";
+
+/// True when a profile upsert failed because another contributor already
+/// holds the handle.
+///
+/// This reads the structured `DbError` rather than a formatted string.
+/// `tokio_postgres::Error`'s `Display` is deliberately terse - the SQLSTATE
+/// and constraint name live in `as_db_error()`, not in `{0}` - so the
+/// previous `format!("{e}").contains(..)` check could never match, and every
+/// taken handle came back 500 instead of 409.
+fn is_contributor_handle_conflict(error: &DatabaseError) -> bool {
+    let DatabaseError::Postgres(error) = error else {
+        return false;
+    };
+    let Some(db_error) = error.as_db_error() else {
+        return false;
+    };
+    if *db_error.code() != tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+        return false;
+    }
+    // Match the specific index: a violation on any other constraint on this
+    // table is a genuine fault and must keep surfacing as 500.
+    db_error.constraint() == Some(CONTRIBUTOR_HANDLE_UNIQUE_CONSTRAINT)
+}
+
 async fn put_community_profile_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13018,10 +13045,7 @@ async fn put_community_profile_handler(
         )
         .await
         .map_err(|e| {
-            // Handle-uniqueness conflict surfaces as a Postgres unique-violation;
-            // surface as 409 so the contributor can pick a different handle.
-            let raw = format!("{e}");
-            if raw.contains("trace_contributor_profiles_tenant_id_handle_normalized_key") {
+            if is_contributor_handle_conflict(&e) {
                 api_error(
                     StatusCode::CONFLICT,
                     "display_handle is already taken by another contributor",
