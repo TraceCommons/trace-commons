@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
@@ -446,6 +447,76 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommunityProfilePutRequest<'a> {
+    display_handle: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bio: Option<&'a str>,
+}
+
+/// The public profile as the server stores it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommunityProfile {
+    pub display_handle: String,
+    pub bio: Option<String>,
+    pub public_since: DateTime<Utc>,
+}
+
+/// Claim or update this contributor's public handle.
+///
+/// `login` can grant `public_attribution`, but until this existed nothing in
+/// this CLI could use it: claiming a handle meant the operator-facing
+/// `/profile` page and a workload token from the *other* enrollment path.
+/// Since the server derives the principal from the authenticated request
+/// rather than from anything in the body, a handle claimed through a
+/// different credential lands on a different principal and never appears
+/// beside this device's traces.
+pub async fn set_profile(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    display_handle: &str,
+    bio: Option<&str>,
+) -> Result<CommunityProfile> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status`: the issuer resolves it to this
+    // caller's full grant ceiling, so claiming a handle does not depend on
+    // whichever scopes were narrowed for the last submission.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile update")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let req = CommunityProfilePutRequest {
+        display_handle,
+        bio,
+    };
+    client
+        .call_json(Method::PUT, "/v1/community/profile", &[], Some(&req))
+        .await
+        .context("setting public profile")
+}
+
+/// Withdraw this contributor's public attribution.
+///
+/// The row goes at the next snapshot. This is the action `/about/privacy`
+/// promises, so it belongs in the tool the contributor already has rather
+/// than only in a page they may never have been given access to.
+pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile withdrawal")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_raw::<()>(Method::DELETE, "/v1/community/profile", &[], None)
+        .await
+        .context("withdrawing public profile")?;
+    Ok(())
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores.

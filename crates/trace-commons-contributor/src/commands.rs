@@ -690,6 +690,64 @@ pub(crate) fn scopes_cell(scopes: &[ConsentScope]) -> String {
 }
 
 /// Print server-side status for every locally recorded submission receipt.
+pub async fn profile(
+    store: &ConfigStore,
+    handle: Option<&str>,
+    bio: Option<&str>,
+    withdraw: bool,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    // Fail here rather than at the server: the contributor picked scopes at
+    // login, and telling them the scope is missing is more useful than
+    // relaying a 403.
+    if !cfg
+        .consent_scopes
+        .iter()
+        .any(|scope| scope == "public_attribution")
+    {
+        anyhow::bail!(
+            "this device did not grant public_attribution; re-run `login` with \
+             --scopes debugging_evaluation,public_attribution"
+        );
+    }
+
+    if withdraw {
+        submit::clear_profile(store, &cfg).await?;
+        if json {
+            println!("{}", serde_json::json!({"withdrawn": true}));
+        } else {
+            println!("public attribution withdrawn; the row goes at the next snapshot");
+        }
+        return Ok(());
+    }
+
+    let Some(handle) = handle else {
+        anyhow::bail!("nothing to do: pass --handle <name> or --withdraw");
+    };
+
+    let profile = submit::set_profile(store, &cfg, handle, bio).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "display_handle": profile.display_handle,
+                "bio": profile.bio,
+                "public_since": profile.public_since,
+            })
+        );
+    } else {
+        println!("public handle: {}", profile.display_handle);
+        println!("public since: {}", profile.public_since);
+        println!("your handle appears once an accepted submission lands in the window");
+    }
+    Ok(())
+}
+
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()

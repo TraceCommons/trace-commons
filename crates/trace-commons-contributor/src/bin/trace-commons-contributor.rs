@@ -94,6 +94,20 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Claim, update, or withdraw your public handle. Requires the
+    /// public_attribution scope, which is chosen at `login`.
+    Profile {
+        /// Handle to publish. ASCII letters, digits, `-` and `_`; no
+        /// separator at either end.
+        #[arg(long, conflicts_with = "withdraw")]
+        handle: Option<String>,
+        /// Optional short bio shown on your contributor page
+        #[arg(long, conflicts_with = "withdraw")]
+        bio: Option<String>,
+        /// Withdraw public attribution. The row goes at the next snapshot.
+        #[arg(long)]
+        withdraw: bool,
+    },
     /// Print local identity (no network)
     Whoami,
     /// Delete local keystore, config, and receipts
@@ -203,6 +217,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Status => commands::status(&store).await,
         Command::Attest { out } => commands::attest(&store, out.as_deref(), cli.json).await,
+        Command::Profile {
+            handle,
+            bio,
+            withdraw,
+        } => {
+            commands::profile(
+                &store,
+                handle.as_deref(),
+                bio.as_deref(),
+                withdraw,
+                cli.json,
+            )
+            .await
+        }
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
         Command::MintGrant {
