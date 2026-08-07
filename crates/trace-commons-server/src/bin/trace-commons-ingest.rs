@@ -467,6 +467,8 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1124,6 +1126,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
@@ -1196,6 +1199,10 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    /// How often to recompute the community snapshot in-process. `None`
+    /// leaves recompute admin-triggered only, which is the behaviour
+    /// every deployment had before this existed.
+    community_snapshot_interval: Option<StdDuration>,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -3497,6 +3504,7 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -8373,6 +8381,75 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
     if let Ok(mut verifier) = verifier.write() {
         verifier.managed_eddsa_keyset_last_refresh_failed_at = Some(Utc::now());
     }
+}
+
+/// Minimum recompute interval. Each recompute is a full pass over the
+/// window for every tenant in the cohort, and the snapshot it produces is
+/// only read once per page load, so anything tighter costs database work
+/// nobody sees.
+const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
+
+fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
+        Ok(configured) => parse_community_snapshot_interval(&configured),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_community_snapshot_interval(configured: &str) -> anyhow::Result<Option<StdDuration>> {
+    let trimmed = configured.trim();
+    // Empty and 0 both mean "admin-triggered only", so an operator can
+    // disable the worker without deleting the line.
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let seconds: u64 = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be a whole number of seconds"
+        )
+    })?;
+    if seconds < COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be at least {COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS} seconds"
+        );
+    }
+    Ok(Some(StdDuration::from_secs(seconds)))
+}
+
+/// Keep the published snapshot current without an operator POSTing to the
+/// admin route. Before this existed, a contributor who earned a row had no
+/// way for it to appear: the snapshot only moved when someone remembered
+/// to trigger it by hand.
+fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
+    if !state.community_leaderboard_enabled {
+        return;
+    }
+    let Some(interval) = state.community_snapshot_interval else {
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            match recompute_community_snapshot(state.as_ref()).await {
+                Ok(row) => tracing::info!(
+                    snapshot_id = %row.snapshot_id,
+                    "community snapshot recomputed on schedule"
+                ),
+                // A 409 here is the publication gate refusing, which is a
+                // steady state rather than a fault: a deployment with
+                // controls unsatisfied would otherwise log an error every
+                // interval forever. Anything else is worth a warning.
+                Err((status, _)) if status == StatusCode::CONFLICT => tracing::debug!(
+                    "community snapshot recompute skipped: publication controls unsatisfied"
+                ),
+                Err((status, _)) => tracing::warn!(
+                    status = %status,
+                    "community snapshot recompute failed"
+                ),
+            }
+        }
+    });
 }
 
 fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {

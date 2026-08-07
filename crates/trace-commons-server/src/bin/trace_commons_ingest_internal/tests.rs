@@ -3966,6 +3966,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -6546,6 +6547,44 @@ fn parses_analytics_min_cell_count() {
         error
             .to_string()
             .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+    );
+}
+
+#[test]
+fn community_snapshot_interval_defaults_to_admin_triggered_only() {
+    // Absent, empty and 0 all mean the same thing: no worker, recompute
+    // stays admin-triggered. That is what every deployment had before the
+    // worker existed, so it has to remain reachable without deleting the
+    // config line.
+    assert!(
+        parse_community_snapshot_interval("").expect("empty parses") == None
+            && parse_community_snapshot_interval("0").expect("zero parses") == None
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_a_pointlessly_tight_schedule() {
+    let error = parse_community_snapshot_interval("30")
+        .expect_err("below the floor should be rejected at boot, not at runtime");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
+    );
+    assert_eq!(
+        parse_community_snapshot_interval("900").expect("15 minutes parses"),
+        Some(StdDuration::from_secs(900))
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_nonsense() {
+    let error = parse_community_snapshot_interval("every 15 minutes")
+        .expect_err("a non-numeric interval is a config error");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
     );
 }
 
@@ -24196,6 +24235,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),

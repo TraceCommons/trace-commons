@@ -170,6 +170,7 @@ procedure.
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS` | optional | — | Refuse epsilons above this. |
 | `TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED` | optional | `false` | Enables `/v1/community/*` profile, leaderboard, contributor, and analytics snapshot routes. Requires the DB mirror for real data. |
 | `TRACE_COMMONS_COMMUNITY_TENANT_IDS` | optional | — | Comma-separated tenant ids included in community snapshot recompute. Set this when the runtime DB role is non-bypassing and forced RLS would hide `trace_tenants` enumeration. |
+| `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS` | optional | — | Recompute the community snapshot in-process on this interval. Unset, empty or `0` leaves recompute admin-triggered only. Minimum 60s. Without it the published leaderboard is only as fresh as the last manual POST to `/v1/admin/community/snapshots/recompute`. |
 | `TRACE_COMMONS_COMMUNITY_CORS_ORIGINS` | optional | `https://tracecommons.ai,http://localhost:8788,http://127.0.0.1:8788` | Comma-separated browser origins allowed to call `/v1/community/*`. Keep this to the public Pages site plus local preview origins. |
 
 ## 10. Credit / NEAR surface
