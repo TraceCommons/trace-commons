@@ -8389,6 +8389,12 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
 /// nobody sees.
 const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
 
+/// Snapshots kept per window/metric. Only the newest is ever served; the
+/// rest are the record of what was published and under which controls, so
+/// this trims to a short history rather than to one. At the documented
+/// 900s interval that is a bit over a day.
+const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
+
 fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
     match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
         Ok(configured) => parse_community_snapshot_interval(&configured),
@@ -8431,25 +8437,87 @@ fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            match recompute_community_snapshot(state.as_ref()).await {
-                Ok(row) => tracing::info!(
-                    snapshot_id = %row.snapshot_id,
-                    "community snapshot recomputed on schedule"
-                ),
-                // A 409 here is the publication gate refusing, which is a
-                // steady state rather than a fault: a deployment with
-                // controls unsatisfied would otherwise log an error every
-                // interval forever. Anything else is worth a warning.
-                Err((status, _)) if status == StatusCode::CONFLICT => tracing::debug!(
-                    "community snapshot recompute skipped: publication controls unsatisfied"
-                ),
-                Err((status, _)) => tracing::warn!(
-                    status = %status,
-                    "community snapshot recompute failed"
-                ),
+            // Each tick runs in its own task so a panic surfaces as a
+            // JoinError here rather than killing this loop. Without that,
+            // one panic leaves the process healthy and the snapshot
+            // silently frozen - the exact failure this worker exists to
+            // prevent, in the form least likely to be noticed.
+            let tick = tokio::spawn(community_snapshot_tick(state.clone(), interval));
+            if let Err(join_error) = tick.await {
+                tracing::error!(
+                    panicked = join_error.is_panic(),
+                    "community snapshot recompute tick did not complete; worker continuing"
+                );
             }
         }
     });
+}
+
+/// One scheduled recompute, including the checks that make running this on
+/// a timer safe rather than merely automatic.
+async fn community_snapshot_tick(state: Arc<AppState>, interval: StdDuration) {
+    // Skip if something already produced a snapshot inside this interval:
+    // the admin route, or another process. This is a cheap coordination,
+    // not a mutual exclusion - two writers can still race inside the same
+    // instant. See the deployment note on the interval env var: the worker
+    // assumes a single writer, and a multi-replica deployment wanting
+    // stronger guarantees needs an elected scheduler or a distributed lock.
+    if let Some(db) = state.db_mirror.as_ref() {
+        if let Ok(Some(existing)) = db
+            .latest_leaderboard_snapshot(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+            )
+            .await
+        {
+            let age = Utc::now().signed_duration_since(existing.computed_at);
+            if age < chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::zero()) {
+                tracing::debug!("community snapshot already fresh; skipping scheduled recompute");
+                return;
+            }
+        }
+    }
+
+    let row = match recompute_community_snapshot(state.as_ref()).await {
+        Ok(row) => row,
+        // A 409 here is the publication gate refusing, which is a steady
+        // state rather than a fault: a deployment with controls
+        // unsatisfied would otherwise log an error every interval forever.
+        Err((status, _)) if status == StatusCode::CONFLICT => {
+            tracing::debug!(
+                "community snapshot recompute skipped: publication controls unsatisfied"
+            );
+            return;
+        }
+        Err((status, _)) => {
+            tracing::warn!(status = %status, "community snapshot recompute failed");
+            return;
+        }
+    };
+    tracing::info!(
+        snapshot_id = %row.snapshot_id,
+        "community snapshot recomputed on schedule"
+    );
+
+    // Retention runs after a successful write, so a failure here never
+    // costs the snapshot that was just published.
+    if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .prune_leaderboard_snapshots(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+                COMMUNITY_SNAPSHOT_RETAINED,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned superseded community snapshots"),
+            Err(error) => tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "pruning superseded community snapshots failed"
+            ),
+        }
+    }
 }
 
 fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {

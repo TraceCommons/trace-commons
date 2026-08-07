@@ -1741,6 +1741,35 @@ impl Database for PgBackend {
         })
     }
 
+    async fn prune_leaderboard_snapshots(
+        &self,
+        window_label: &str,
+        metric: &str,
+        keep: i64,
+    ) -> Result<u64, DatabaseError> {
+        // Ordered by computed_at with snapshot_id as the tiebreak so the
+        // set kept is deterministic when two snapshots share a timestamp.
+        let client = self.trace_pool().get().await?;
+        let removed = client
+            .execute(
+                "DELETE FROM trace_leaderboard_snapshots
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND snapshot_id NOT IN (
+                        SELECT snapshot_id
+                          FROM trace_leaderboard_snapshots
+                         WHERE window_label = $1
+                           AND metric = $2
+                         ORDER BY computed_at DESC, snapshot_id DESC
+                         LIMIT $3
+                    )",
+                &[&window_label, &metric, &keep],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(removed)
+    }
+
     async fn latest_leaderboard_snapshot(
         &self,
         window_label: &str,
