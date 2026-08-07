@@ -912,8 +912,19 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        - 0.40 * duplicate_penalty
-        - 0.60 * privacy_risk;
+        // Residual privacy risk is applied once, by `gate`, and not again
+        // here. `privacy_gate` and `privacy_risk_score` are both pure
+        // functions of the same enum, so subtracting the second after
+        // multiplying by the first penalised one signal twice. For the
+        // medium band that was a halving plus a flat -0.30, which needs the
+        // weighted terms above 0.6 to clear zero - unreachable in practice
+        // once `replayability` is 0, as it is for any recorded session. Every
+        // medium-risk submission in the pilot corpus scored exactly zero.
+        //
+        // Dropping this term changes nothing for low risk, where
+        // `privacy_risk_score` is already 0.0, and nothing for high risk,
+        // which the `credit_points_estimate` branch below zeroes outright.
+        - 0.40 * duplicate_penalty;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
         if matches!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::High) {
@@ -6698,6 +6709,158 @@ mod tests {
             resolve_post_scrub_risk(ResidualPiiRisk::High, ResidualPiiRisk::Medium, &assessment),
             ResidualPiiRisk::Medium,
             "successful scrub must not pin High when residual scan is clean"
+        );
+    }
+
+    /// An envelope that differs only in residual privacy risk, for comparing
+    /// what the scorer does with each band.
+    fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
+        use super::*;
+
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: risk,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some("ordinary work".to_string()),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            // replayable: false is the realistic case for a recorded session,
+            // and it is what makes the medium band unreachable under the old
+            // formula: 0.20 of the weight is gone before anything is measured.
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    #[test]
+    fn privacy_gate_and_risk_score_are_the_same_signal() {
+        use super::*;
+        // The reason the subtractive term was redundant: these are
+        // complementary functions of one enum. If they ever stop being
+        // complementary, the argument for applying only the gate needs
+        // revisiting, so pin it.
+        for risk in [
+            ResidualPiiRisk::Low,
+            ResidualPiiRisk::Medium,
+            ResidualPiiRisk::High,
+        ] {
+            assert!(
+                (privacy_gate(risk) + privacy_risk_score(risk) - 1.0).abs() < f32::EPSILON,
+                "gate and risk score must remain complementary for {risk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn medium_risk_work_can_earn_credit() {
+        use super::*;
+        // Every medium-risk submission in the pilot corpus scored exactly
+        // zero - ten of ten - because risk was penalised twice: a 0.5 gate
+        // and a flat -0.30. Accepting medium-risk work while guaranteeing it
+        // earns nothing made the accept flag and the scorer disagree.
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "medium-risk work that is accepted must be able to earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    #[test]
+    fn dropping_the_double_penalty_leaves_low_risk_untouched() {
+        use super::*;
+        // The change is confined to the medium band, and this is why rather
+        // than a pinned number: the term that was removed evaluated to
+        // `0.60 * privacy_risk_score(Low)`, and that factor is zero. So the
+        // 331 low-risk submissions already in the corpus keep their scores
+        // by construction, not by coincidence of the current weights.
+        assert_eq!(
+            privacy_risk_score(ResidualPiiRisk::Low),
+            0.0,
+            "the removed subtraction was already inert for low risk"
+        );
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "low-risk work must still earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    #[test]
+    fn risk_bands_stay_ordered_and_high_earns_nothing() {
+        use super::*;
+        let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        let medium = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        let high = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::High));
+
+        assert!(
+            low.credit_points_estimate > medium.credit_points_estimate,
+            "low must still out-earn medium: {} vs {}",
+            low.credit_points_estimate,
+            medium.credit_points_estimate
+        );
+        assert_eq!(
+            high.credit_points_estimate, 0.0,
+            "high risk earns nothing regardless of quality"
         );
     }
 
