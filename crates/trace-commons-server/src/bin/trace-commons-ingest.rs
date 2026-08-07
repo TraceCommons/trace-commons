@@ -12658,6 +12658,45 @@ impl CommunitySnapshotPrivacy {
     }
 }
 
+/// Drop disaggregated analytics cells below the configured minimum size.
+///
+/// A histogram bucket or gate outcome holding one or two records is a
+/// description of those records, and the whole point of a k-anonymity floor
+/// is that such a cell must not be published. `COMMUNITY_MIN_CELL_COUNT_FLOOR`
+/// already gates *whether* analytics publish; this applies the same number to
+/// *what* they contain, which nothing did before.
+///
+/// Suppression drops the cell rather than zeroing it, matching
+/// [`suppress_small_analytics_cells`] on the broad-release path. Dropping
+/// zero-count cells too is deliberate and is the stronger choice: an absent
+/// bucket is then indistinguishable between "no records" and "fewer records
+/// than the floor", where keeping the zeros would have told a reader which.
+///
+/// The totals are deliberately not suppressed: they are the top-level sums
+/// over everything, and blanking them would leave a page that says nothing
+/// while still claiming to be analytics. If a corpus is small enough that its
+/// totals are identifying, the control that should stop publication is the
+/// tenant-cohort floor, not this. Returns the number of cells removed.
+fn suppress_small_community_analytics_cells(
+    summary: &mut trace_commons_server::db::CorpusAnalyticsSummary,
+    min_cell_count: usize,
+) -> usize {
+    let floor = min_cell_count as i64;
+    if floor <= 1 {
+        // A floor of 0 or 1 suppresses nothing by definition: a cell of one
+        // already meets it. Leave the data alone rather than pretending to
+        // filter, and in particular do not strip the empty buckets that give
+        // the histogram its shape.
+        return 0;
+    }
+    let before = summary.novelty_histogram.len() + summary.gate_outcomes.len();
+    summary
+        .novelty_histogram
+        .retain(|(_, count)| *count >= floor);
+    summary.gate_outcomes.retain(|(_, count)| *count >= floor);
+    before.saturating_sub(summary.novelty_histogram.len() + summary.gate_outcomes.len())
+}
+
 /// Compute a fresh snapshot from current DB state and persist it.
 /// Returns the inserted snapshot row so the admin handler can echo
 /// the snapshot_id back to the operator who triggered the recompute.
@@ -12703,14 +12742,27 @@ async fn recompute_community_snapshot(
     let analytics_withheld_controls =
         community_publication_missing_controls_for_state(state, CommunitySurface::Analytics);
     let analytics = if analytics_withheld_controls.is_empty() {
-        Some(
-            db.compute_corpus_analytics_summary(
+        let mut summary = db
+            .compute_corpus_analytics_summary(
                 COMMUNITY_LEADERBOARD_WINDOW_DAYS,
                 state.community_tenant_ids.as_ref(),
             )
             .await
-            .map_err(internal_error)?,
-        )
+            .map_err(internal_error)?;
+        // The min-cell floor gates whether analytics may publish at all, but
+        // until now nothing applied it to what was published: the aggregation
+        // SQL takes no min-cell argument, so every bucket and gate outcome
+        // went out at its true count however small. Suppress here, where the
+        // configured floor is known.
+        let suppressed =
+            suppress_small_community_analytics_cells(&mut summary, state.analytics_min_cell_count);
+        if suppressed > 0 {
+            tracing::info!(
+                suppressed,
+                "suppressed community analytics cells below the min-cell floor"
+            );
+        }
+        Some(summary)
     } else {
         // Deliberately not computed. See the comment on the roster gate
         // above: an aggregate that cannot be published is an aggregate

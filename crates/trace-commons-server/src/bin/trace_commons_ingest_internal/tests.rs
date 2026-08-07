@@ -68448,6 +68448,58 @@ fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
     assert_eq!(kept["analytics"]["total_submissions"], 41);
 }
 
+fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSummary {
+    trace_commons_server::db::CorpusAnalyticsSummary {
+        total_submissions: 43,
+        total_accepted: 40,
+        total_rejected: 3,
+        accept_rate: 0.93,
+        novelty_histogram: vec![(0, 0), (100_000, 1), (200_000, 2), (300_000, 37)],
+        gate_outcomes: vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2),
+            ("perplexity_failed".to_string(), 1),
+            ("both_failed".to_string(), 0),
+        ],
+    }
+}
+
+#[test]
+fn community_analytics_cells_below_the_floor_are_suppressed() {
+    // The floor gated whether analytics could publish, but nothing applied
+    // it to what was published: compute_corpus_analytics_summary takes no
+    // min-cell argument, so a bucket holding one record went out at its
+    // true count.
+    let mut summary = analytics_summary_fixture();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 2);
+
+    assert_eq!(suppressed, 4, "0, 1, 1 and 0 valued cells should all go");
+    assert_eq!(summary.novelty_histogram, vec![(200_000, 2), (300_000, 37)]);
+    assert_eq!(
+        summary.gate_outcomes,
+        vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2)
+        ]
+    );
+    // Totals are the top-level sums and are deliberately left alone.
+    assert_eq!(summary.total_submissions, 43);
+}
+
+#[test]
+fn a_floor_of_one_leaves_the_histogram_shape_intact() {
+    // A floor of 1 suppresses nothing by definition, and must not strip the
+    // empty buckets that give the distribution its shape. Getting this wrong
+    // would silently reshape every chart on the analytics page.
+    let mut summary = analytics_summary_fixture();
+    let before = summary.novelty_histogram.clone();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 1);
+
+    assert_eq!(suppressed, 0);
+    assert_eq!(summary.novelty_histogram, before);
+    assert_eq!(summary.gate_outcomes.len(), 4);
+}
+
 #[test]
 fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
     // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
