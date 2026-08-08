@@ -16,7 +16,9 @@ A unix domain socket at `$TRACE_COMMONS_CONTRIBUTOR_DIR/daemon.sock`
 
 Windows is specified but **not implemented in v1**. A per-user-restricted
 named pipe needs a `SECURITY_DESCRIPTOR`, which needs a `windows-sys`
-dependency; that is deferred until the Windows application is specified.
+dependency. That dependency is approved (2026-08-08), scoped to
+`cfg(windows)` only; the implementation lands with the Windows application.
+See `docs/superpowers/specs/2026-08-08-contributor-shell-windows-design.md`.
 
 ## Framing
 

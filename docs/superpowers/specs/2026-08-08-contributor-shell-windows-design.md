@@ -5,27 +5,35 @@ Status: approved for planning
 Scope: sub-project 5. Platform mechanics only.
 Reads with: `2026-08-08-contributor-shell-shared-design.md`.
 
-**Sequence this last.** It has a hard prerequisite the other two do not, and
-that prerequisite is security-critical rather than plumbing.
+**Sequence this last.** It has a prerequisite the other two do not, and that
+prerequisite is security-critical rather than plumbing.
 
-## The blocker, stated first
+## The named pipe
 
 The daemon's control socket is unix-only. Windows named-pipe support is
-specified in the v1 contract but deliberately not implemented, because a
-per-user-restricted pipe requires building a `SECURITY_DESCRIPTOR`, and tokio
-only exposes `ServerOptions::create_with_security_attributes_raw`. That means
-a **new `windows-sys` dependency, which needs explicit approval** under the
-repo's dependency policy and has not been granted.
+specified in the v1 contract but not yet implemented, because a
+per-user-restricted pipe requires building a `SECURITY_DESCRIPTOR` and tokio
+exposes only `ServerOptions::create_with_security_attributes_raw`.
 
-More importantly: on Unix the 0700 state directory is what protects the
-socket, and Windows has no equivalent doing that work. **The pipe's ACL is the
-only access control there is.** It must be written as security work — reviewed,
-tested against an unprivileged second user — not as a porting detail.
+**`windows-sys` is approved for this** (Zaki, 2026-08-08), under these limits:
 
-Until that lands, the Windows app can still be built in the hosting
-configuration below, because a hosting app calls the library directly and does
-not need the pipe at all. The pipe is required only for CLI control while the
-app runs. Ship without it if necessary, and say so.
+- `[target.'cfg(windows)'.dependencies]` only. macOS and Linux builds must not
+  gain it, and `cargo tree` on those targets must be unchanged — this is worth
+  an explicit CI assertion, since the zero-new-dependency property of the rest
+  of this work is otherwise easy to erode silently.
+- Minimal features: `Win32_Foundation`, `Win32_Security`,
+  `Win32_System_Memory`. Not the umbrella features.
+
+The reason it is security-critical: on Unix the 0700 state directory protects
+the socket, and Windows has no equivalent doing that work. **The pipe's ACL is
+the only access control there is.** Write it as reviewed security code and
+test it against a second unprivileged user, rather than treating it as a
+porting detail.
+
+The Windows app can be built before the pipe lands, because a hosting app
+calls the library directly and does not need it. The pipe is required only for
+CLI control while the app runs. Shipping without it is acceptable if it is
+stated plainly rather than left to be discovered.
 
 ## Shape
 

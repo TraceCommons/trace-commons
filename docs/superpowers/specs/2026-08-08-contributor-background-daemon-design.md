@@ -386,8 +386,9 @@ completely usable over SSH.
 - Polling instead of `notify`.
 
 The only dependency that would be required is `windows-sys`, for the named-pipe
-ACL — deferred with Windows, and subject to explicit approval when the Windows
-shell is specified.
+ACL. It was deferred here and has since been approved (2026-08-08) for the
+Windows shell, scoped to `cfg(windows)` so this sub-project's zero-new-crate
+property holds on macOS and Linux.
 
 ## Error handling
 

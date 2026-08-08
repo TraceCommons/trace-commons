@@ -241,4 +241,6 @@ boundary, which is subject to exactly the same rules as the socket.
 
 - Withdraw (`2026-08-08-trace-withdrawal-design.md`).
 - The shells themselves.
-- The Windows named pipe, still deferred with its `windows-sys` dependency.
+- The Windows named pipe. `windows-sys` is approved (2026-08-08) but scoped
+  to `cfg(windows)`; the implementation lands with the Windows shell, and this
+  sub-project must not add it to the macOS or Linux dependency tree.
