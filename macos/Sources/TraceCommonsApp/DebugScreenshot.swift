@@ -45,6 +45,34 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-consent-scopes.png",
                 size: CGSize(width: 660, height: 760)
             )
+            render(
+                OnboardingWelcomeContent(),
+                to: directory + "/macos-shell-onboarding-welcome.png",
+                size: CGSize(width: 660, height: 520)
+            )
+            render(
+                OnboardingProjectsContent().environmentObject(model),
+                to: directory + "/macos-shell-onboarding-projects.png",
+                size: CGSize(width: 660, height: 520)
+            )
+            render(
+                OnboardingDoneContent(),
+                to: directory + "/macos-shell-onboarding-done.png",
+                size: CGSize(width: 660, height: 360)
+            )
+            if let rollup = model.rollup {
+                render(
+                    CreditRecordView(
+                        creditFinal: rollup.creditFinal,
+                        creditPending: rollup.creditPending,
+                        lastRefreshedAt: rollup.lastRefreshedAt
+                    )
+                    .padding(24)
+                    .frame(maxWidth: 620, alignment: .leading),
+                    to: directory + "/macos-shell-credit-record.png",
+                    size: CGSize(width: 660, height: 260)
+                )
+            }
             if let (entry, preloaded) = await model.loadCaptureSample(needle: "Northwind") {
                 render(
                     PreviewSheet(entry: entry, preloaded: preloaded).environmentObject(model),

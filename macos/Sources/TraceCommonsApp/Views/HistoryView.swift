@@ -104,34 +104,11 @@ struct HistoryView: View {
     private func credit(_ rollup: HistoryRollup) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
-            Text("About credit.").font(.headline)
-            Text("""
-            Contributions earn credit points, scored on how novel and \
-            information-rich a trace is. Today credit is a record, not a currency: \
-            there is no payout, no token, no exchange rate, and no date. The intent \
-            is that credit eventually settles to something real, and if it does it \
-            will settle from this record. Contribute because you want the commons to \
-            exist.
-            """)
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: 560, alignment: .leading)
-
-            if rollup.lastRefreshedAt == nil {
-                // Never a confident 0.0 for a number that was never fetched.
-                Text("Not synced yet").font(.callout)
-            } else {
-                HStack(spacing: 24) {
-                    VStack(alignment: .leading) {
-                        Text("Final").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.1f", rollup.creditFinal)).monospacedDigit()
-                    }
-                    VStack(alignment: .leading) {
-                        Text("Still being scored").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.1f", rollup.creditPending)).monospacedDigit()
-                    }
-                }
-            }
+            CreditRecordView(
+                creditFinal: rollup.creditFinal,
+                creditPending: rollup.creditPending,
+                lastRefreshedAt: rollup.lastRefreshedAt
+            )
         }
     }
 }
