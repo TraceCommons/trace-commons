@@ -251,10 +251,16 @@ impl DaemonShared {
                 let _ = state.save(&self.store);
                 drop(state);
                 self.paused.store(false, Ordering::Relaxed);
+                self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
                 return false;
             }
         }
-        true
+        // Read `state.paused` rather than returning `true` unconditionally:
+        // two concurrent readers both pass the atomic check above, but only
+        // one of them actually clears the lapsed pause (it wins the `state`
+        // lock first); the other must not report a pause that its sibling
+        // call just resolved.
+        state.paused
     }
 
     /// The tray's whole world in one object.
@@ -513,10 +519,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // This synchronous handler cannot run the redaction pipeline (it
             // is async), so this arm reports only the entry itself,
             // honestly flagged as incomplete, rather than the raw file size
-            // the old code returned. Real callers never see this: the
-            // socket loop calls `handle_request_async` and the CLI's
-            // `handle_local` special-cases `"preview"` to `block_on_preview`
-            // -- see the module doc comment.
+            // the old code returned. Real callers never see this: every real
+            // entry point (the socket loop, and the CLI via `handle_local`)
+            // runs `handle_request_async` instead, which answers `"preview"`
+            // for real -- see the module doc's "Sync vs. async dispatch"
+            // section.
             let id = match parse_entry_id(&req.params) {
                 Ok(id) => id,
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
@@ -540,7 +547,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // resume the daemon.
             let until = match req.params.get("until").and_then(|v| v.as_str()) {
                 Some(s) => match s.parse::<chrono::DateTime<Utc>>() {
-                    Ok(dt) => Some(dt),
+                    Ok(dt) if dt > Utc::now() => Some(dt),
+                    // A deadline that has already passed would publish a
+                    // pause event for a pause the very next status call (or
+                    // is_paused check) clears -- reject it up front rather
+                    // than accept a pause that is a lie the instant it's
+                    // acknowledged.
+                    Ok(_) => return Response::err(req.id, ERR_BAD_PARAMS, "until-in-the-past"),
                     Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "until-invalid"),
                 },
                 None => None,
@@ -589,16 +602,42 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
-        "list_audit" => match audit::load(&shared.store) {
-            Ok(entries) => Response::ok(req.id, serde_json::json!({ "entries": entries })),
-            Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "audit-read-failed"),
-        },
-        // Why discovered sessions were not offered: a count of the reason
-        // label attached to every queue entry that did not end up
-        // `Pending`/`Approved`/`Uploading` (dismissed, refused, expired,
-        // superseded). These labels are already computed by the queue and
-        // uploader; this is the first surface that rolls them up.
-        "eligibility_reasons" => {
+        "list_audit" => {
+            // Same cap as `list_history`: the log is append-by-whole-file
+            // rewrite and otherwise unbounded.
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50)
+                .min(1000) as usize;
+            match audit::load(&shared.store) {
+                Ok(mut entries) => {
+                    // Newest first, matching `list_history`'s convention.
+                    entries.reverse();
+                    entries.truncate(limit);
+                    Response::ok(req.id, serde_json::json!({ "entries": entries }))
+                }
+                Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "audit-read-failed"),
+            }
+        }
+        // A count of `reason_label` across every entry currently on the
+        // queue, whatever its state -- no state filter is applied, it is
+        // simply whichever entries currently carry a label (in practice
+        // that's dismissed, refused, expired, and superseded entries, since
+        // nothing else sets one). These labels are already computed by the
+        // queue and uploader; this is the first surface that rolls them up.
+        //
+        // Deliberately NOT named `eligibility_reasons`: every source of a
+        // `reason_label` applies to an entry that already exists in the
+        // queue. It cannot explain the sessions an app most needs explained
+        // -- ones `watcher::tick` discarded before an entry was ever
+        // created, via a bare `continue` on a non-`Eligible` verdict or an
+        // `Ignore`-mode project. Answering "I finished a session, why is
+        // nothing pending?" needs a different, not-yet-built method; this
+        // name is chosen so that one can be added later without a contract
+        // break.
+        "queue_outcome_counts" => {
             let queue = shared.queue.lock().expect("queue lock");
             let mut counts: std::collections::BTreeMap<&str, u64> =
                 std::collections::BTreeMap::new();
@@ -769,6 +808,23 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         obj.insert(
             "near_ai_configured".to_string(),
             serde_json::Value::Bool(configured),
+        );
+        // claude_root / codex_root are local filesystem paths. entry_value
+        // is scrupulous about never putting a path on the wire; this
+        // serialized-wholesale settings blob was not, and leaked one
+        // whenever either root was overridden from the conventional
+        // location. Report presence only.
+        let claude_root_configured = s.claude_root.is_some();
+        let codex_root_configured = s.codex_root.is_some();
+        obj.remove("claude_root");
+        obj.remove("codex_root");
+        obj.insert(
+            "claude_root_configured".to_string(),
+            serde_json::Value::Bool(claude_root_configured),
+        );
+        obj.insert(
+            "codex_root_configured".to_string(),
+            serde_json::Value::Bool(codex_root_configured),
         );
     }
     v
@@ -1007,6 +1063,10 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    fn at(s: &str) -> chrono::DateTime<Utc> {
+        s.parse().unwrap()
     }
 
     #[test]
@@ -1265,6 +1325,26 @@ mod tests {
     }
 
     #[test]
+    fn get_settings_never_carries_a_local_filesystem_path() {
+        // The wholesale-serialized settings blob used to leak claude_root /
+        // codex_root verbatim whenever either was overridden from the
+        // conventional location -- exactly what entry_value is scrupulous
+        // about avoiding for queue entries.
+        let s = shared();
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.claude_root = Some(std::path::PathBuf::from("/Users/z/.claude/projects"));
+            settings.codex_root = Some(std::path::PathBuf::from("/Users/z/.codex/sessions"));
+        }
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        let result = r.result.unwrap();
+        let body = serde_json::to_string(&result).unwrap();
+        assert!(!body.contains('/'), "path leaked to the wire: {body}");
+        assert_eq!(result["claude_root_configured"], true);
+        assert_eq!(result["codex_root_configured"], true);
+    }
+
+    #[test]
     fn a_queue_entry_on_the_wire_carries_no_local_path() {
         use crate::daemon::queue::{QueueEntry, entry_id_for};
         let e = QueueEntry {
@@ -1408,20 +1488,57 @@ mod tests {
     }
 
     #[test]
-    fn a_timed_pause_lapses_on_its_own() {
+    fn pause_rejects_a_deadline_already_in_the_past() {
+        // Accepting it would publish a pause event for a pause the very next
+        // status call (or is_paused check) clears -- a lie the instant it's
+        // acknowledged.
         let s = shared();
-        handle_request(
+        let r = handle_request(
             &s,
             &req(
                 "pause",
                 serde_json::json!({"until": "2020-01-01T00:00:00Z"}),
             ),
         );
-        assert_eq!(
-            s.status_value()["paused"],
-            false,
+        assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+        assert!(!s.paused.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_lapsed_timed_pause_clears_itself_when_checked() {
+        // A deadline that was in the future when set, and has since passed
+        // (unlike the request-time validation above, which only catches a
+        // deadline that was already past when submitted).
+        let s = shared();
+        handle_request(
+            &s,
+            &req(
+                "pause",
+                serde_json::json!({"until": "2030-01-01T00:00:00Z"}),
+            ),
+        );
+        assert!(s.is_paused(at("2029-12-31T00:00:00Z")));
+        assert!(
+            !s.is_paused(at("2030-06-01T00:00:00Z")),
             "an elapsed pause is not a pause"
         );
+        assert_eq!(s.status_value()["paused"], false);
+    }
+
+    #[test]
+    fn a_lapsed_timed_pause_publishes_status_changed() {
+        let s = shared();
+        handle_request(
+            &s,
+            &req(
+                "pause",
+                serde_json::json!({"until": "2030-01-01T00:00:00Z"}),
+            ),
+        );
+        let mut rx = s.events.subscribe();
+        assert!(!s.is_paused(at("2030-06-01T00:00:00Z")));
+        let ev = rx.try_recv().expect("no status_changed event published");
+        assert_eq!(ev.event, EVENT_STATUS_CHANGED);
     }
 
     #[test]
@@ -1458,7 +1575,96 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_reasons_counts_reason_labels_already_on_the_queue() {
+    fn list_audit_honors_a_limit_and_reports_the_most_recent_entries() {
+        // The log is append-by-whole-file-rewrite and otherwise unbounded,
+        // same reason list_history caps.
+        let s = shared();
+        for key in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+            handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": key, "mode": "auto_upload"}),
+                ),
+            );
+        }
+        let r = handle_request(&s, &req("list_audit", serde_json::json!({"limit": 2})));
+        let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        // Newest first: the last-armed project ("c") comes back before "b".
+        assert_eq!(entries[0]["project_label"], "c");
+        assert_eq!(entries[1]["project_label"], "b");
+    }
+
+    #[test]
+    fn list_audit_caps_an_oversize_limit_at_one_thousand() {
+        let s = shared();
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+            ),
+        );
+        let r = handle_request(
+            &s,
+            &req("list_audit", serde_json::json!({"limit": 999_999})),
+        );
+        // Never panics or misbehaves on an absurd limit; still bounded.
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn consent_change_and_notice_acknowledgement_both_appear_in_list_audit() {
+        // Both are at least as consequential as arming auto-upload and were
+        // previously silent.
+        let s = shared();
+        s.store
+            .save_config(&crate::config::ContributorConfig {
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.invalid".to_string(),
+                ingest_url: "https://ingest.invalid".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: None,
+            })
+            .unwrap();
+        handle_request(
+            &s,
+            &req(
+                "set_consent_scopes",
+                serde_json::json!({"scopes": ["model_training"]}),
+            ),
+        );
+        handle_request(
+            &s,
+            &req("acknowledge_near_ai_notice", serde_json::json!({})),
+        );
+
+        let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
+        let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+        let actions: Vec<String> = entries
+            .iter()
+            .map(|e| e["action"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            actions.contains(&"consent-scopes-changed".to_string()),
+            "{actions:?}"
+        );
+        assert!(
+            actions.contains(&"near-ai-notice-acknowledged".to_string()),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn queue_outcome_counts_counts_reason_labels_already_on_the_queue() {
         let s = shared();
         let id = seed_entry_in_state(&s, QueueState::Pending);
         s.queue.lock().unwrap().set_state(
@@ -1466,7 +1672,7 @@ mod tests {
             QueueState::Expired,
             Some("expired-without-decision".to_string()),
         );
-        let r = handle_request(&s, &req("eligibility_reasons", serde_json::json!({})));
+        let r = handle_request(&s, &req("queue_outcome_counts", serde_json::json!({})));
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(r.result.unwrap()["reasons"]["expired-without-decision"], 1);
     }

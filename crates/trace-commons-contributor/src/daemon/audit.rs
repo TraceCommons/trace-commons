@@ -1,12 +1,19 @@
-//! Local audit log of consequential autonomy changes.
+//! Local audit log of consequential, otherwise-invisible changes.
 //!
-//! Two actions are consequential and otherwise invisible: arming a project
-//! for automatic upload (every future session in it uploads with no further
-//! prompt), and approving the whole pending queue at once. Both used to
-//! require a terminal, which was itself a kind of visibility -- a person had
-//! to be sitting at a shell to do either. That restriction was removed, and
-//! this local log is what replaces it: a record a contributor can read to
-//! see when autonomy was granted and when a bulk approval happened.
+//! Arming a project for automatic upload (every future session in it
+//! uploads with no further prompt) and approving the whole pending queue at
+//! once both used to require a terminal, which was itself a kind of
+//! visibility -- a person had to be sitting at a shell to do either. That
+//! restriction was removed, and this local log is what replaces it.
+//!
+//! Two more actions are logged for the same reason, both newly reachable
+//! over the socket: widening consent scopes (a socket caller can silently
+//! add e.g. `model_training`) and acknowledging the NEAR AI first-use
+//! notice (a socket caller asserts, on its own unverified word, that a
+//! third-party disclosure was actually shown to someone -- defeating that
+//! gate is exactly as consequential as the other three, and less
+//! recoverable once traces have already gone out under the false
+//! acknowledgment).
 //!
 //! This is **user-facing visibility, not a security control**. It does not
 //! gate, authorize, or prevent anything; it is written after the fact so a
