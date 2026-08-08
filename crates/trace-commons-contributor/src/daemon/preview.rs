@@ -28,6 +28,26 @@ pub struct PreviewSummary {
     pub opening_prompt: String,
     pub redactions: std::collections::BTreeMap<String, u32>,
     pub pii_labels_present: Vec<String>,
+    /// The consent scopes this device **requests**, taken from the local
+    /// config, which is what `build_raw_contribution` stamps onto the
+    /// envelope here.
+    ///
+    /// These are not necessarily the scopes an upload ends up carrying. An
+    /// actual submission mints an upload claim first, and
+    /// `submit::stamp_granted_scopes` then overwrites the envelope with the
+    /// **granted** set the issuer echoed back -- falling back to the
+    /// requested set only when the issuer is old enough not to echo one.
+    /// Preview cannot show the granted set without minting a claim, which
+    /// it deliberately does not do (preview is a local operation and must
+    /// work offline).
+    ///
+    /// So this field is an upper bound on what an upload will claim, never
+    /// an under-statement: the issuer can only narrow the request, never
+    /// widen it. A consumer rendering this to a contributor should say
+    /// "requested", not "will be sent as". Separately, an entry's approval
+    /// is pinned to exactly this requested set
+    /// (`QueueEntry::approved_scopes`), so a local widening between preview
+    /// and upload revokes the approval rather than riding along with it.
     pub consent_scopes: Vec<String>,
     pub residual_risk: String,
 }

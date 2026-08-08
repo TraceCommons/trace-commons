@@ -215,7 +215,13 @@ impl Uploader<'_, '_> {
         // `queue.expire` discarded pending traces as
         // expired-without-decision -- exactly what expiry suspension exists
         // to prevent.
-        let outcome = match self.ctx.submit_one(source, session_ref).await {
+        // `submit_loaded`, not `submit_one`: the transcript just loaded and
+        // hashed above is the one that gets sent. `submit_one` would load
+        // the file a third, independent time, and it was *that* read --
+        // never hashed, never compared -- whose bytes went out. A session
+        // appended to between the two reads passed the guard and shipped
+        // content the guard had never seen.
+        let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
                 self.health.fail(precondition_health_label(&e), now);

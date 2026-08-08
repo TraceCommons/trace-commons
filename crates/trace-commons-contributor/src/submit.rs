@@ -298,17 +298,17 @@ impl<'a> SubmitContext<'a> {
         self.canary_runs
     }
 
-    /// Redact and submit one session. Independent of every other session: a
-    /// refusal or failure here never affects a later call. The single
-    /// exception is a canary failure, which is a fail-closed precondition and
-    /// returns `Err`.
+    /// Redact and submit one session, loading it from `source` first.
+    ///
+    /// Independent of every other session: a refusal or failure here never
+    /// affects a later call. The single exception is a fail-closed
+    /// precondition (`SubmitPreconditionFailure`), which aborts the batch.
     pub async fn submit_one(
         &mut self,
         source: &dyn TraceSource,
         session_ref: &SessionRef,
     ) -> Result<SubmitOutcome> {
-        let opts = self.opts;
-        let mut transcript = match source.load(session_ref) {
+        let transcript = match source.load(session_ref) {
             Ok(t) => t,
             Err(_) => {
                 return Ok(SubmitOutcome::SkippedParseFailure {
@@ -316,6 +316,26 @@ impl<'a> SubmitContext<'a> {
                 });
             }
         };
+        self.submit_loaded(transcript).await
+    }
+
+    /// Redact and submit a transcript the caller has already loaded.
+    ///
+    /// This is what closes the window between the daemon's re-hash guard
+    /// and the bytes that actually go out. The uploader loads and hashes the
+    /// session to check that its content still matches what the contributor
+    /// approved; `submit_one` then loaded the file a second, independent
+    /// time, and it was *that* read -- never hashed, never compared -- whose
+    /// bytes were sent. A session appended to in between passed the guard
+    /// and shipped content the guard had never seen, which is precisely the
+    /// consent property the guard exists to enforce. The uploader calls this
+    /// with the transcript it verified, so the verified bytes are the sent
+    /// bytes.
+    pub async fn submit_loaded(
+        &mut self,
+        mut transcript: crate::source::SessionTranscript,
+    ) -> Result<SubmitOutcome> {
+        let opts = self.opts;
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1322,6 +1342,91 @@ mod tests {
             "got {second:?}"
         );
         assert_eq!(ctx.canary_runs(), 1, "canary must not re-run per session");
+    }
+
+    #[tokio::test]
+    async fn submit_loaded_sends_the_transcript_it_was_given_not_a_fresh_read() {
+        // The TOCTOU the daemon's re-hash guard could not close. The
+        // uploader loads and hashes the session to check it still matches
+        // what the contributor approved; `submit_one` then loaded the file
+        // a second, independent time, and it was *that* read -- never
+        // hashed, never compared -- whose bytes went out. A session
+        // appended to between the two reads passed the guard and shipped
+        // content the guard had never seen.
+        //
+        // Here the on-disk file is rewritten after the load, so the two
+        // reads would disagree. What arrives at ingest must be what was
+        // handed in.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        // A private copy of the fixture: this test rewrites the session
+        // file, and the checked-in fixture is shared by the whole module.
+        let session_root = dir.path().join("claude-root");
+        let project_dir = session_root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_path = project_dir.join("11111111-1111-1111-1111-111111111111.jsonl");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                "fixtures/claude-code/-Users-testuser-code-myproj/\
+                 11111111-1111-1111-1111-111111111111.jsonl",
+            ),
+            &session_path,
+        )
+        .unwrap();
+        let source = crate::source::claude_code::ClaudeCodeSource::new(session_root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let verified = source.load(&session_ref).unwrap();
+        let verified_hash = verified.session_hash.clone();
+
+        // Whatever is on disk now, it is not what was verified.
+        std::fs::write(
+            &session_ref.path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"APPENDED \
+             AFTER THE GUARD RAN\"},\"cwd\":\"/Users/testuser/code/myproj\",\
+             \"timestamp\":\"2026-08-08T23:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"uuid\":\"z9\"}\n",
+        )
+        .unwrap();
+        assert_ne!(
+            source.load(&session_ref).unwrap().session_hash,
+            verified_hash,
+            "the fixture must actually differ, or this test proves nothing"
+        );
+
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let outcome = ctx.submit_loaded(verified).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let sent = received.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let body = serde_json::to_string(&sent[0]).unwrap();
+        assert!(
+            !body.contains("APPENDED AFTER THE GUARD RAN"),
+            "the verified bytes must be the sent bytes: {body}"
+        );
+
+        // And the receipt records the hash that was actually verified, so a
+        // later dedup check is against the right content.
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].session_hash, verified_hash);
     }
 
     #[tokio::test]
