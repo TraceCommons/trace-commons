@@ -166,6 +166,36 @@ pub async fn run_supervisor(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Re
     supervise(shared, dry_run).await
 }
 
+/// Run `f` -- blocking, non-yielding work with no `.await` of its own
+/// (filesystem scanning, hashing, reading a receipts file) -- off whichever
+/// worker is currently executing this task, via `tokio::task::
+/// block_in_place`, when the current runtime is multi-thread. That is the
+/// only flavor `block_in_place` supports (it panics under
+/// `current_thread`, the default `#[tokio::test]` flavor most of this
+/// crate's async tests use, so `f` just runs inline there instead -- the
+/// same as it always did) and the only one where running `f` off-worker
+/// actually matters: on a `current_thread` runtime there is only ever one
+/// worker regardless.
+///
+/// Without this, blocking work called from inside an async task can
+/// monopolize a runtime's sole worker thread for its entire duration,
+/// starving every other task -- the socket server, `tc_subscribe`
+/// delivery, even a reentrant `tc_daemon_stop`'s own wait on the
+/// supervisor's `JoinHandle`. First found in `watcher::tick`'s session-root
+/// scan; `drain_approved`'s `find_session` re-scan and `refresh_history`'s
+/// receipts read go through this too, for the same reason -- see each call
+/// site.
+pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
+    let multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /// The periodic work: watch, expire, and decide about digests, until asked to
 /// stop.
 async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
@@ -272,8 +302,14 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         unenrolled_preview: false,
         remediate_quarantined: false,
     };
-    let store = crate::config::ConfigStore::open(shared.store.dir().to_path_buf())?;
-    let mut ctx = crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai)?;
+    // Both of these hit the filesystem synchronously with no `.await` of
+    // their own -- `ConfigStore::open` creates/permissions the state dir,
+    // `SubmitContext::new` reads the config and the receipts file -- so
+    // they go off-worker for the same reason `watcher::tick`'s scan does.
+    // See `run_blocking`'s doc.
+    let store =
+        run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
+    let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
 
     let sources = crate::source::all_sources(claude_root, codex_root, None);
     let mut changed = false;
@@ -281,7 +317,10 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     for entry in approved {
         // Re-resolve the session through its own adapter, so the uploader can
         // re-read and re-hash the file before sending anything.
-        let Some((source, session_ref)) = find_session(&sources, &entry) else {
+        // `find_session` re-scans every source (`source.discover()`), the
+        // same blocking, non-yielding pass `watcher::tick` runs -- see
+        // `run_blocking`'s doc.
+        let Some((source, session_ref)) = run_blocking(|| find_session(&sources, &entry)) else {
             let mut q = shared.queue.lock().expect("queue lock");
             q.set_state(
                 entry.entry_id,
@@ -419,7 +458,9 @@ async fn refresh_history(
             return Ok(());
         }
     };
-    let receipts = shared.store.load_receipts()?;
+    // A blocking file read with no `.await` of its own; see `run_blocking`'s
+    // doc.
+    let receipts = run_blocking(|| shared.store.load_receipts())?;
     let labels = {
         let q = shared.queue.lock().expect("queue lock");
         let mut m = std::collections::BTreeMap::new();

@@ -165,7 +165,11 @@ impl Uploader<'_, '_> {
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
         // transfer to the new content.
-        let transcript = match source.load(session_ref) {
+        // `source.load` reads the whole session file and hashes it -- blocking,
+        // non-yielding work with no `.await` of its own, run once per approved
+        // entry from inside the supervisor's task. Off-worker for the same
+        // reason `watcher::tick`'s scan is; see `super::run_blocking`'s doc.
+        let transcript = match super::run_blocking(|| source.load(session_ref)) {
             Ok(t) => t,
             Err(_) => {
                 return Ok(UploadDecision::Refused {
