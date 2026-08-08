@@ -40,6 +40,11 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-menu-bar.png",
                 size: CGSize(width: 380, height: 330)
             )
+            render(
+                ConsentScopesContent().environmentObject(model),
+                to: directory + "/macos-shell-consent-scopes.png",
+                size: CGSize(width: 660, height: 760)
+            )
             if let (entry, preloaded) = await model.loadCaptureSample(needle: "Northwind") {
                 render(
                     PreviewSheet(entry: entry, preloaded: preloaded).environmentObject(model),
