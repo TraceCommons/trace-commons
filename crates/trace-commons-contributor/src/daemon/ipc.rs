@@ -14,44 +14,55 @@
 //!
 //! # Authorization
 //!
-//! Filesystem ownership, plus one carve-out.
+//! Filesystem ownership: the 0700 state directory is the sole access control
+//! on the socket, since `UnixListener::bind` does not portably set the
+//! socket's own mode; the daemon refuses to serve from a directory that is
+//! not 0700.
 //!
-//! The socket is not merely equivalent to holding the device key. Stealing the
-//! device key lets an attacker upload once. The socket would additionally let
-//! them set a project to `auto_upload` and have the contributor's own running,
-//! trusted daemon exfiltrate every future session in that project, under the
-//! contributor's real grant, producing receipts that look entirely normal. The
-//! CLI cannot be used this way because arming autonomy there requires a
-//! terminal.
+//! Two operations -- arming a project for `auto_upload` and bulk-approving
+//! the whole queue -- used to be refused over the socket and required a
+//! terminal. That restriction is gone: the reasoning behind it does not
+//! survive scrutiny. Same-user code execution that can reach this socket can
+//! already read `~/.claude/projects` directly and send it anywhere, and can
+//! install its own persistent watcher -- the daemon confers neither the read
+//! nor the persistence a real attacker needs. Routing exfiltration through it
+//! would in fact be strictly worse for an attacker: rate-limited, capped,
+//! redacted, PII-filtered, and delivered to a server they cannot read from.
 //!
-//! So granting autonomy and bulk-approving are refused over the socket and
-//! must be done from a terminal. Applications surface the command to run.
-//!
-//! `UnixListener::bind` does not portably set the socket mode, so the 0700
-//! state directory is the enforcing control; the daemon refuses to serve from
-//! a directory that is not 0700.
+//! What replaces the restriction is visibility, not gatekeeping: both
+//! operations append a local, hash-only audit entry (`daemon::audit`) that a
+//! contributor can read to see when autonomy was granted and when a bulk
+//! approval happened. This is user-facing visibility, not a security
+//! control, and is not claimed to be one.
 //!
 //! # Sync vs. async dispatch
 //!
-//! `handle_request` answers every method synchronously except `"preview"`,
-//! which it can only answer partially (see its arm) -- it has no way to run
-//! the async redaction pipeline, so it returns the entry plus a
-//! `preview_requires_async: true` marker rather than a wrong byte count.
-//! Both real callers of `"preview"` get the full answer instead:
+//! Most of this surface needs no `.await` and is answered by the synchronous
+//! `handle_request`. A few methods do real async work -- `"preview"` runs the
+//! redaction pipeline to report actual bytes and redactions, `"enroll"`
+//! registers this device with an issuer over the network -- and
+//! `handle_request` cannot run either of those to completion; its arms for
+//! them (where present) return an honest partial or deferred answer rather
+//! than a wrong one.
+//!
+//! `handle_request_async` is the complete dispatcher: it answers the async
+//! methods for real and delegates everything else, unchanged, to
+//! `handle_request`. There are exactly two real entry points, and both go
+//! through it:
 //!
 //! - The socket connection loop (`serve_connection`), already async, calls
 //!   `handle_request_async` directly.
-//! - `handle_local` (the in-process CLI path -- `trace-commons-contributor
-//!   daemon preview <entry_id>`, wired in
-//!   `src/bin/trace-commons-contributor.rs`) special-cases `"preview"` to
-//!   `block_on_preview`, a scoped-OS-thread blocking wrapper around
-//!   `handle_request_async`, since the CLI's own call sites are synchronous
-//!   `fn`s. Every other method still goes through the synchronous
-//!   `handle_request`.
-//!
-//! `handle_request_async` itself delegates every non-`"preview"` method
-//! straight through to `handle_request`, so the two dispatchers cannot
-//! answer the same method two different ways.
+//! - `handle_local` (the in-process CLI path, wired in
+//!   `src/bin/trace-commons-contributor.rs`) is itself synchronous, so it
+//!   runs `handle_request_async` to completion via `block_on_ipc`, a
+//!   scoped-OS-thread blocking wrapper. It does this for *every* method, not
+//!   only the async ones -- a per-method special case here was tried once
+//!   already and is exactly how a socket caller and a CLI caller ended up
+//!   able to get different answers to the same request. Routing every method
+//!   through the one real dispatcher removes that failure mode by
+//!   construction: a method added to `handle_request_async` is automatically
+//!   answered identically by both callers, with nothing to remember to update
+//!   here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,6 +76,7 @@ use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
 use super::audit::{self, AuditEntry};
+use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
 use super::policy::{ProjectMode, ProjectPolicy, disambiguated_label, known_keys};
@@ -137,7 +149,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn ok(id: u64, result: serde_json::Value) -> Self {
+    pub(crate) fn ok(id: u64, result: serde_json::Value) -> Self {
         Self {
             id,
             result: Some(result),
@@ -145,7 +157,7 @@ impl Response {
         }
     }
 
-    fn err(id: u64, code: &str, message: &str) -> Self {
+    pub(crate) fn err(id: u64, code: &str, message: &str) -> Self {
         Self {
             id,
             result: None,
@@ -220,6 +232,31 @@ impl DaemonShared {
         super::uploader::enrollment_is_live(&self.store)
     }
 
+    /// Whether the daemon is currently paused, accounting for a timed pause
+    /// that has lapsed.
+    ///
+    /// An elapsed timed pause auto-clears here (and persists the clear)
+    /// rather than leaving the daemon paused until an explicit `resume`: an
+    /// app-side timer would die with the app and silently fail to un-pause
+    /// it otherwise.
+    pub fn is_paused(&self, now: chrono::DateTime<Utc>) -> bool {
+        if !self.paused.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut state = self.state.lock().expect("state lock");
+        if let Some(until) = state.paused_until {
+            if now >= until {
+                state.paused_until = None;
+                state.paused = false;
+                let _ = state.save(&self.store);
+                drop(state);
+                self.paused.store(false, Ordering::Relaxed);
+                return false;
+            }
+        }
+        true
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         let queue = self.queue.lock().expect("queue lock");
@@ -230,7 +267,7 @@ impl DaemonShared {
             "logged_in": self.logged_in(),
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
-            "paused": self.paused.load(Ordering::Relaxed),
+            "paused": self.is_paused(Utc::now()),
             "queue_depth": queue.pending().len(),
             "next_digest_at": self.next_digest_at(),
             "health": {
@@ -310,15 +347,7 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
     })
 }
 
-/// Where a request came from. Socket callers are refused the two operations
-/// that would let same-user code arm autonomous uploading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    Socket,
-    LocalTty,
-}
-
-pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> Response {
+pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "hello" => Response::ok(
             req.id,
@@ -369,9 +398,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                 Some(Ok(m)) => m,
                 _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
             };
-            if mode == ProjectMode::AutoUpload && origin == Origin::Socket {
-                return Response::err(req.id, ERR_NOT_AUTHORIZED, "tty-required");
-            }
             let label = req
                 .params
                 .get("label")
@@ -426,9 +452,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                 .get("all")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if all && origin == Origin::Socket {
-                return Response::err(req.id, ERR_NOT_AUTHORIZED, "tty-required");
-            }
             let mut queue = shared.queue.lock().expect("queue lock");
             let ids: Vec<Uuid> = if all {
                 queue.pending().iter().map(|e| e.entry_id).collect()
@@ -510,19 +533,89 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                 None => Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
             }
         }
-        "pause" | "resume" => {
-            let paused = req.method == "pause";
-            shared.paused.store(paused, Ordering::Relaxed);
+        "pause" => {
+            // An optional timed pause, persisted so it survives a restart of
+            // either the daemon or the app that requested it -- an app-side
+            // timer alone would die with the app and silently fail to
+            // resume the daemon.
+            let until = match req.params.get("until").and_then(|v| v.as_str()) {
+                Some(s) => match s.parse::<chrono::DateTime<Utc>>() {
+                    Ok(dt) => Some(dt),
+                    Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "until-invalid"),
+                },
+                None => None,
+            };
+            shared.paused.store(true, Ordering::Relaxed);
             {
                 let mut state = shared.state.lock().expect("state lock");
-                state.paused = paused;
+                state.paused = true;
+                state.paused_until = until;
                 if state.save(&shared.store).is_err() {
                     return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
                 }
             }
             shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
-            Response::ok(req.id, serde_json::json!({ "paused": paused }))
+            Response::ok(
+                req.id,
+                serde_json::json!({ "paused": true, "paused_until": until }),
+            )
         }
+        "resume" => {
+            shared.paused.store(false, Ordering::Relaxed);
+            {
+                let mut state = shared.state.lock().expect("state lock");
+                state.paused = false;
+                state.paused_until = None;
+                if state.save(&shared.store).is_err() {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
+                }
+            }
+            shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            Response::ok(req.id, serde_json::json!({ "paused": false }))
+        }
+        "cancel" => {
+            let id = match parse_entry_id(&req.params) {
+                Ok(id) => id,
+                Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+            };
+            let mut queue = shared.queue.lock().expect("queue lock");
+            if queue.cancel(id).is_err() {
+                return Response::err(req.id, ERR_BAD_PARAMS, "not-cancelable");
+            }
+            if let Err(_e) = queue.save(&shared.store) {
+                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+            }
+            drop(queue);
+            shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+            Response::ok(req.id, serde_json::json!({ "ok": true }))
+        }
+        "list_audit" => match audit::load(&shared.store) {
+            Ok(entries) => Response::ok(req.id, serde_json::json!({ "entries": entries })),
+            Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "audit-read-failed"),
+        },
+        // Why discovered sessions were not offered: a count of the reason
+        // label attached to every queue entry that did not end up
+        // `Pending`/`Approved`/`Uploading` (dismissed, refused, expired,
+        // superseded). These labels are already computed by the queue and
+        // uploader; this is the first surface that rolls them up.
+        "eligibility_reasons" => {
+            let queue = shared.queue.lock().expect("queue lock");
+            let mut counts: std::collections::BTreeMap<&str, u64> =
+                std::collections::BTreeMap::new();
+            for e in queue.all() {
+                if let Some(label) = e.reason_label.as_deref() {
+                    *counts.entry(label).or_insert(0) += 1;
+                }
+            }
+            Response::ok(req.id, serde_json::json!({ "reasons": counts }))
+        }
+        "consent_options" => Response::ok(req.id, enroll::consent_options()),
+        "set_consent_scopes" => enroll::handle_set_consent_scopes(shared, req),
+        "acknowledge_near_ai_notice" => enroll::handle_acknowledge_near_ai_notice(shared, req),
+        // Real network I/O; only handled for real by `handle_request_async`
+        // (via `handle_local`'s `block_on_ipc`, or the socket loop). See the
+        // module doc's "Sync vs. async dispatch" section.
+        "enroll" => Response::err(req.id, ERR_UNAVAILABLE, "enroll-requires-async"),
         "list_history" => {
             let limit = req
                 .params
@@ -597,29 +690,29 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
     }
 }
 
-/// The async counterpart to `handle_request`.
-///
-/// `handle_request` is synchronous because most of the IPC surface (queue
-/// mutation, settings, status) needs no `.await`, and the connection loop
-/// used to call it directly. `"preview"` is the one method that has to run
-/// the real redaction pipeline (`daemon::preview::build_preview`, which
-/// awaits an async redactor) to report the actual bytes and redactions a
-/// contributor is about to consent to.
-///
-/// Rather than block a worker thread on that async work from inside a sync
-/// function (the `block_in_place` route the task brief also offered), this
-/// function intercepts `"preview"` before it reaches `handle_request`, runs
-/// it for real, and delegates every other method unchanged to
-/// `handle_request`. This is the only entry point that resolves `"preview"`
-/// completely; `handle_request` on its own answers `"preview"` with an
-/// honest `preview_requires_async: true` marker rather than a wrong number.
-/// The socket connection loop, already async, calls this function; `preview`
-/// is documented as socket-only for this reason.
+/// The complete dispatcher: answers the async methods (`"preview"`,
+/// `"enroll"`) for real and delegates every other method, unchanged, to the
+/// synchronous `handle_request`. See the module doc's "Sync vs. async
+/// dispatch" section for why this is the only place that decides which
+/// methods are async, and why both real callers (the socket loop and
+/// `handle_local`) always go through this function rather than
+/// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
-    if req.method != "preview" {
-        return handle_request(shared, req, Origin::Socket);
+    match req.method.as_str() {
+        "preview" => handle_preview(shared, req).await,
+        "enroll" => enroll::handle_enroll(shared, req).await,
+        _ => handle_request(shared, req),
     }
+}
 
+/// Run the real, async redaction pipeline for one queue entry and report the
+/// actual bytes and redactions a contributor is about to consent to.
+///
+/// `handle_request` cannot run this (it is synchronous) and answers
+/// `"preview"` on its own with an honest `preview_requires_async: true`
+/// marker rather than a wrong byte count; only `handle_request_async`
+/// resolves it completely.
+async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
@@ -845,33 +938,28 @@ async fn write_json<T: Serialize>(
     Ok(())
 }
 
-/// Convenience for the CLI, which drives the same handlers in-process and is
-/// therefore allowed to arm autonomy.
+/// Convenience for the CLI, which drives the same handlers in-process.
 ///
-/// `"preview"` is special-cased to the real, async preview
-/// (`block_on_preview`) rather than the synchronous `handle_request`'s
-/// `preview_requires_async` stand-in. The CLI is documented as full parity
-/// with the tray/window applications, and every other `daemon` subcommand
-/// (`status`, `pending`, `approve`, ...) already gets a real answer through
-/// this same function, so a CLI contributor asking `daemon preview
-/// <entry_id>` should too.
+/// Every method, not only the async ones, is answered through
+/// `handle_request_async` via `block_on_ipc` -- see the module doc's "Sync
+/// vs. async dispatch" section for why routing everything through the one
+/// real dispatcher, rather than special-casing individual methods here, is
+/// what guarantees a CLI caller and a socket caller can never get different
+/// answers to the same request.
 pub fn handle_local(shared: &DaemonShared, method: &str, params: serde_json::Value) -> Response {
     let req = Request {
         id: 0,
         method: method.to_string(),
         params,
     };
-    if req.method == "preview" {
-        return block_on_preview(shared, &req);
-    }
-    handle_request(shared, &req, Origin::LocalTty)
+    block_on_ipc(shared, &req)
 }
 
-/// Run the real, async preview from a synchronous caller.
+/// Run `handle_request_async` to completion from a synchronous caller.
 ///
 /// The CLI binary is itself async (`#[tokio::main]`, multi-thread flavor),
-/// so `daemon_preview` executes on a tokio worker thread -- but plenty of
-/// test callers of `handle_local` run inside a default (current-thread)
+/// so a call from it executes on a tokio worker thread -- but plenty of test
+/// callers of `handle_local` run inside a default (current-thread)
 /// `#[tokio::test]`, and some might not be inside any runtime at all. Both
 /// `tokio::task::block_in_place` (needs the multi-thread flavor) and
 /// building a second `Runtime` and calling `.block_on()` on the *same*
@@ -881,7 +969,7 @@ pub fn handle_local(shared: &DaemonShared, method: &str, params: serde_json::Val
 /// runtime on it can always `block_on` the real `handle_request_async`, and
 /// `std::thread::scope` lets it borrow `shared`/`req` without requiring
 /// `'static`.
-fn block_on_preview(shared: &DaemonShared, req: &Request) -> Response {
+fn block_on_ipc(shared: &DaemonShared, req: &Request) -> Response {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -895,7 +983,7 @@ fn block_on_preview(shared: &DaemonShared, req: &Request) -> Response {
                 rt.block_on(handle_request_async(shared, req))
             })
             .join()
-            .unwrap_or_else(|_| Response::err(req.id, ERR_UNAVAILABLE, "preview-thread-panicked"))
+            .unwrap_or_else(|_| Response::err(req.id, ERR_UNAVAILABLE, "ipc-thread-panicked"))
     })
 }
 
@@ -922,7 +1010,14 @@ mod tests {
     }
 
     #[test]
-    fn arming_autonomy_over_the_socket_is_refused() {
+    fn arming_autonomy_over_the_socket_is_now_allowed() {
+        // The terminal-only gate is removed: same-user code that can reach
+        // this socket can already read the session files directly and
+        // install its own watcher, so this call grants it neither the read
+        // nor the persistence it would need to exfiltrate anything, and
+        // would in fact be a worse channel for an attacker than doing it
+        // itself (rate-limited, capped, redacted, delivered somewhere it
+        // cannot read back). See the module doc's "Authorization" section.
         let s = shared();
         let r = handle_request(
             &s,
@@ -930,21 +1025,6 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
             ),
-            Origin::Socket,
-        );
-        assert_eq!(r.error.unwrap().code, ERR_NOT_AUTHORIZED);
-    }
-
-    #[test]
-    fn arming_autonomy_from_a_terminal_is_allowed() {
-        let s = shared();
-        let r = handle_request(
-            &s,
-            &req(
-                "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
-            ),
-            Origin::LocalTty,
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(
@@ -955,6 +1035,9 @@ mod tests {
 
     #[test]
     fn arming_autonomy_appends_an_audit_entry() {
+        // The audit log is what replaced the removed gate: not a control,
+        // but a local record a contributor can read to see when autonomy
+        // was granted.
         let s = shared();
         let r = handle_request(
             &s,
@@ -962,28 +1045,12 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
             ),
-            Origin::LocalTty,
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         let entries = audit::load(&s.store).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "armed-auto-upload");
         assert_eq!(entries[0].project_label.as_deref(), Some("p"));
-    }
-
-    #[test]
-    fn a_rejected_arming_call_leaves_the_audit_log_empty() {
-        let s = shared();
-        let r = handle_request(
-            &s,
-            &req(
-                "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
-            ),
-            Origin::Socket,
-        );
-        assert_eq!(r.error.unwrap().code, ERR_NOT_AUTHORIZED);
-        assert!(audit::load(&s.store).unwrap().is_empty());
     }
 
     #[test]
@@ -1004,7 +1071,6 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": "/Users/z/work/api", "mode": "notify_only"}),
             ),
-            Origin::LocalTty,
         );
         let entry_id = uuid::Uuid::new_v4();
         {
@@ -1038,7 +1104,6 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": "/Users/z/client/api", "mode": "ignore"}),
             ),
-            Origin::LocalTty,
         );
         assert!(r.error.is_none(), "{:?}", r.error);
 
@@ -1047,11 +1112,7 @@ mod tests {
             queue.get(entry_id).unwrap().project_label.clone()
         };
 
-        let list = handle_request(
-            &s,
-            &req("list_projects", serde_json::json!({})),
-            Origin::Socket,
-        );
+        let list = handle_request(&s, &req("list_projects", serde_json::json!({})));
         let projects = list.result.unwrap()["projects"].clone();
         let work_row = projects
             .as_array()
@@ -1080,31 +1141,18 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": "/tmp/p", "mode": "notify_only"}),
             ),
-            Origin::Socket,
         );
         assert!(r.error.is_none(), "{:?}", r.error);
     }
 
     #[test]
-    fn bulk_approval_over_the_socket_is_refused() {
+    fn bulk_approval_over_the_socket_is_now_allowed_and_appends_an_audit_entry() {
+        // As with arming autonomy, the terminal-only gate on bulk approval
+        // is removed for the same reason: it restricted nothing an attacker
+        // with same-user code execution did not already have. The audit
+        // entry is the replacement -- visibility, not a control.
         let s = shared();
-        let r = handle_request(
-            &s,
-            &req("approve", serde_json::json!({"all": true})),
-            Origin::Socket,
-        );
-        assert_eq!(r.error.unwrap().code, ERR_NOT_AUTHORIZED);
-        assert!(audit::load(&s.store).unwrap().is_empty());
-    }
-
-    #[test]
-    fn bulk_approval_from_a_terminal_appends_an_audit_entry() {
-        let s = shared();
-        let r = handle_request(
-            &s,
-            &req("approve", serde_json::json!({"all": true})),
-            Origin::LocalTty,
-        );
+        let r = handle_request(&s, &req("approve", serde_json::json!({"all": true})));
         assert!(r.error.is_none(), "{:?}", r.error);
         let entries = audit::load(&s.store).unwrap();
         assert_eq!(entries.len(), 1);
@@ -1148,7 +1196,6 @@ mod tests {
                 "approve",
                 serde_json::json!({"entry_id": entry_id.to_string()}),
             ),
-            Origin::LocalTty,
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(audit::load(&s.store).unwrap().is_empty());
@@ -1163,7 +1210,6 @@ mod tests {
                 "set_project_mode",
                 serde_json::json!({"project_key": UNKNOWN_PROJECT_KEY, "mode": "auto_upload"}),
             ),
-            Origin::LocalTty,
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
@@ -1171,18 +1217,14 @@ mod tests {
     #[test]
     fn an_unknown_method_uses_the_taxonomy() {
         let s = shared();
-        let r = handle_request(
-            &s,
-            &req("no_such_method", serde_json::json!({})),
-            Origin::Socket,
-        );
+        let r = handle_request(&s, &req("no_such_method", serde_json::json!({})));
         assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
     }
 
     #[test]
     fn hello_advertises_the_schema_and_method_set() {
         let s = shared();
-        let r = handle_request(&s, &req("hello", serde_json::json!({})), Origin::Socket);
+        let r = handle_request(&s, &req("hello", serde_json::json!({})));
         let result = r.result.unwrap();
         assert_eq!(result["schema_version"], IPC_SCHEMA);
         assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
@@ -1191,7 +1233,7 @@ mod tests {
     #[test]
     fn status_exposes_every_field_a_tray_needs() {
         let s = shared();
-        let r = handle_request(&s, &req("status", serde_json::json!({})), Origin::Socket);
+        let r = handle_request(&s, &req("status", serde_json::json!({})));
         let v = r.result.unwrap();
         for key in ["logged_in", "paused", "queue_depth", "health"] {
             assert!(!v[key].is_null(), "status missing {key}");
@@ -1202,9 +1244,9 @@ mod tests {
     #[test]
     fn pause_and_resume_round_trip() {
         let s = shared();
-        handle_request(&s, &req("pause", serde_json::json!({})), Origin::Socket);
+        handle_request(&s, &req("pause", serde_json::json!({})));
         assert_eq!(s.status_value()["paused"], true);
-        handle_request(&s, &req("resume", serde_json::json!({})), Origin::Socket);
+        handle_request(&s, &req("resume", serde_json::json!({})));
         assert_eq!(s.status_value()["paused"], false);
     }
 
@@ -1216,11 +1258,7 @@ mod tests {
             base_url: None,
             model: None,
         });
-        let r = handle_request(
-            &s,
-            &req("get_settings", serde_json::json!({})),
-            Origin::Socket,
-        );
+        let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
         let body = serde_json::to_string(&r.result.unwrap()).unwrap();
         assert!(!body.contains("super-secret-key"), "{body}");
         assert!(body.contains("near_ai_configured"));
@@ -1258,7 +1296,6 @@ mod tests {
         let r = handle_request(
             &s,
             &req("dismiss", serde_json::json!({"entry_id": "not-a-uuid"})),
-            Origin::Socket,
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
@@ -1266,11 +1303,203 @@ mod tests {
     #[test]
     fn set_settings_rejects_a_payload_with_nothing_known_in_it() {
         let s = shared();
+        let r = handle_request(&s, &req("set_settings", serde_json::json!({"nonsense": 1})));
+        assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
+        let entry_id = uuid::Uuid::new_v4();
+        let mut queue = s.queue.lock().unwrap();
+        queue
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id,
+                    session_hash: format!("sha256:{entry_id}"),
+                    source: "claude-code".to_string(),
+                    project_key: "/tmp/p".to_string(),
+                    project_label: "p".to_string(),
+                    path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    state: QueueState::Pending,
+                    reason_label: None,
+                    attempts: 0,
+                    retry_after: None,
+                    submission_id: None,
+                },
+                500,
+            )
+            .unwrap();
+        queue.set_state(entry_id, state, None);
+        entry_id
+    }
+
+    fn seed_approved_entry(s: &DaemonShared) -> Uuid {
+        seed_entry_in_state(s, QueueState::Approved)
+    }
+
+    #[test]
+    fn acknowledging_the_near_ai_notice_clears_the_blocking_health_label() {
+        // Without this an app-only contributor (never touching the CLI,
+        // which shows the same notice on stdout) is stuck forever.
+        let s = shared();
+        s.health.lock().unwrap().fail(
+            crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+            Utc::now(),
+        );
         let r = handle_request(
             &s,
-            &req("set_settings", serde_json::json!({"nonsense": 1})),
-            Origin::Socket,
+            &req("acknowledge_near_ai_notice", serde_json::json!({})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(s.store.near_ai_notice_shown());
+        assert!(s.health.lock().unwrap().ok());
+    }
+
+    #[test]
+    fn cancel_returns_an_approved_entry_to_pending() {
+        let s = shared();
+        let id = seed_approved_entry(&s);
+        let r = handle_request(
+            &s,
+            &req("cancel", serde_json::json!({"entry_id": id.to_string()})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Pending
+        );
+    }
+
+    #[test]
+    fn cancel_refuses_once_the_upload_is_in_flight() {
+        let s = shared();
+        let id = seed_entry_in_state(&s, QueueState::Uploading);
+        let r = handle_request(
+            &s,
+            &req("cancel", serde_json::json!({"entry_id": id.to_string()})),
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn cancel_of_an_unknown_entry_is_a_param_error() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "cancel",
+                serde_json::json!({"entry_id": uuid::Uuid::new_v4().to_string()}),
+            ),
+        );
+        assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn a_timed_pause_is_persisted_so_it_survives_a_restart() {
+        // An app-side timer would die with the app and silently un-pause.
+        let s = shared();
+        let until = "2030-01-01T00:00:00Z";
+        handle_request(&s, &req("pause", serde_json::json!({"until": until})));
+        assert_eq!(
+            s.state.lock().unwrap().paused_until.map(|t| t.to_rfc3339()),
+            Some(until.parse::<chrono::DateTime<Utc>>().unwrap().to_rfc3339())
+        );
+    }
+
+    #[test]
+    fn a_timed_pause_lapses_on_its_own() {
+        let s = shared();
+        handle_request(
+            &s,
+            &req(
+                "pause",
+                serde_json::json!({"until": "2020-01-01T00:00:00Z"}),
+            ),
+        );
+        assert_eq!(
+            s.status_value()["paused"],
+            false,
+            "an elapsed pause is not a pause"
+        );
+    }
+
+    #[test]
+    fn an_untimed_pause_never_lapses_on_its_own() {
+        let s = shared();
+        handle_request(&s, &req("pause", serde_json::json!({})));
+        assert_eq!(s.status_value()["paused"], true);
+    }
+
+    #[test]
+    fn an_invalid_until_is_a_param_error() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req("pause", serde_json::json!({"until": "not-a-timestamp"})),
+        );
+        assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn list_audit_reads_back_what_set_project_mode_appended() {
+        let s = shared();
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+            ),
+        );
+        let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
+        let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["action"], "armed-auto-upload");
+    }
+
+    #[test]
+    fn eligibility_reasons_counts_reason_labels_already_on_the_queue() {
+        let s = shared();
+        let id = seed_entry_in_state(&s, QueueState::Pending);
+        s.queue.lock().unwrap().set_state(
+            id,
+            QueueState::Expired,
+            Some("expired-without-decision".to_string()),
+        );
+        let r = handle_request(&s, &req("eligibility_reasons", serde_json::json!({})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["reasons"]["expired-without-decision"], 1);
+    }
+
+    #[test]
+    fn consent_options_is_reachable_over_the_dispatcher() {
+        let s = shared();
+        let r = handle_request(&s, &req("consent_options", serde_json::json!({})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            r.result.unwrap()["scopes"].as_array().unwrap().len(),
+            crate::consent::VALID_SCOPES.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_local_and_handle_request_async_answer_an_async_method_identically() {
+        // Regression guard: an async method must be answered the same way
+        // whether it's reached through the socket path
+        // (`handle_request_async`) or the CLI path (`handle_local`). This
+        // plan already hit the failure mode once, where an async method was
+        // wired into only one of the two dispatchers and a CLI caller
+        // silently got a degraded answer.
+        let s = shared();
+        let via_async = handle_request_async(&s, &req("enroll", serde_json::json!({}))).await;
+        let via_local = handle_local(&s, "enroll", serde_json::json!({}));
+        assert_eq!(
+            via_async.result, via_local.result,
+            "{via_async:?} vs {via_local:?}"
+        );
+        assert_eq!(
+            via_async.error.map(|e| e.code),
+            via_local.error.map(|e| e.code)
+        );
     }
 }

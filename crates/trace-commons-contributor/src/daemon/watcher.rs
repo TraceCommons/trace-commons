@@ -14,8 +14,6 @@
 //! conventional local store to poll, so they stay a deliberate `submit
 //! --trajectory` action.
 
-use std::sync::atomic::Ordering;
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
@@ -43,7 +41,10 @@ pub struct TickReport {
 /// the submit pipeline, which needs an async context and mutable state this
 /// function deliberately does not hold.
 pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
-    if shared.paused.load(Ordering::Relaxed) {
+    // `is_paused` also auto-clears a timed pause that has lapsed, so an
+    // elapsed `pause {until}` resumes ticking on its own rather than needing
+    // an explicit `resume` from whichever app set the timer.
+    if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
 
@@ -261,6 +262,7 @@ mod tests {
     use crate::config::ConfigStore;
     use crate::daemon::policy::ProjectMode;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
@@ -467,6 +469,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lapsed_timed_pause_resumes_ticking_on_its_own() {
+        // An app-side timer dies with the app; the daemon must notice the
+        // pause has lapsed itself rather than waiting for an explicit
+        // `resume` that might never come.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.paused.store(true, Ordering::Relaxed);
+        f.shared.state.lock().unwrap().paused_until = Some(at("2029-12-31T00:00:00Z"));
+        let report = f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(report.queued, 1, "{report:?}");
+        assert!(
+            !f.shared.paused.load(Ordering::Relaxed),
+            "the lapsed pause should have cleared itself"
+        );
+    }
+
+    #[tokio::test]
     async fn sessions_from_several_projects_are_all_offered() {
         let f = WatcherFixture::new();
         f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
@@ -636,7 +655,6 @@ mod tests {
                 method: "list_projects".to_string(),
                 params: serde_json::json!({}),
             },
-            crate::daemon::ipc::Origin::Socket,
         );
         let projects = resp.result.unwrap()["projects"].clone();
         let work_row = projects

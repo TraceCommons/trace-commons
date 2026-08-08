@@ -13,8 +13,8 @@ use tokio::net::UnixStream;
 
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::ipc::{
-    DaemonShared, ERR_BAD_PARAMS, ERR_NOT_AUTHORIZED, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT,
-    IPC_SCHEMA, METHODS, bind, serve,
+    DaemonShared, ERR_BAD_PARAMS, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT, IPC_SCHEMA, METHODS, bind,
+    serve,
 };
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
 use trace_commons_contributor::daemon::settings::DaemonSettings;
@@ -139,9 +139,15 @@ async fn subscribe_sends_a_full_snapshot_before_any_delta() {
 }
 
 #[tokio::test]
-async fn arming_autonomy_over_the_socket_is_refused() {
-    // Same-user code execution must not be able to turn the contributor's own
-    // daemon into a continuous exfiltration channel.
+async fn arming_autonomy_over_the_socket_is_now_allowed() {
+    // The terminal-only gate on this call is removed. Same-user code that
+    // can reach this socket can already read `~/.claude/projects` directly
+    // and install its own persistent watcher, so this call grants it
+    // neither the read nor the persistence it would need to exfiltrate
+    // anything -- and would in fact be a worse channel for an attacker than
+    // doing it directly (rate-limited, capped, redacted, and delivered
+    // somewhere it cannot read back). See `daemon::ipc`'s "Authorization"
+    // section.
     let h = TestDaemon::start().await;
     let mut c = h.connect().await;
     c.send(
@@ -149,8 +155,7 @@ async fn arming_autonomy_over_the_socket_is_refused() {
     )
     .await;
     let resp = c.recv_json().await;
-    assert_eq!(resp["error"]["code"], ERR_NOT_AUTHORIZED);
-    assert_eq!(resp["error"]["message"], "tty-required");
+    assert!(resp["error"].is_null(), "{resp}");
 }
 
 #[tokio::test]
@@ -166,13 +171,16 @@ async fn setting_notify_only_over_the_socket_is_allowed() {
 }
 
 #[tokio::test]
-async fn bulk_approval_over_the_socket_is_refused() {
+async fn bulk_approval_over_the_socket_is_now_allowed() {
+    // Removed for the same reason as arming autonomy above: the restriction
+    // stopped nothing an attacker with same-user code execution did not
+    // already have.
     let h = TestDaemon::start().await;
     let mut c = h.connect().await;
     c.send(r#"{"id":5,"method":"approve","params":{"all":true}}"#)
         .await;
     let resp = c.recv_json().await;
-    assert_eq!(resp["error"]["code"], ERR_NOT_AUTHORIZED);
+    assert!(resp["error"].is_null(), "{resp}");
 }
 
 #[tokio::test]
