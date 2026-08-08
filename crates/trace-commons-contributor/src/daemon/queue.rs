@@ -166,6 +166,16 @@ impl Queue {
         }
     }
 
+    /// Update an entry's display label in place, e.g. when a newly-seen
+    /// project causes a previously-unique basename to start colliding.
+    /// `Queue::upsert` never rewrites an existing entry, so this is the only
+    /// way an already-queued entry's label can change.
+    pub fn set_project_label(&mut self, entry_id: Uuid, label: String) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.project_label = label;
+        }
+    }
+
     pub fn set_submission_id(&mut self, entry_id: Uuid, submission_id: Uuid) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.submission_id = Some(submission_id);

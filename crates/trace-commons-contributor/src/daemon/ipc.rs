@@ -66,7 +66,7 @@ use uuid::Uuid;
 
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
-use super::policy::{ProjectMode, ProjectPolicy};
+use super::policy::{ProjectMode, ProjectPolicy, disambiguated_label, known_keys};
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
 use super::state::DaemonState;
@@ -310,12 +310,14 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
         }
         "list_projects" => {
             let policy = shared.policy.lock().expect("policy lock");
+            let queue = shared.queue.lock().expect("queue lock");
+            let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
             let projects: Vec<serde_json::Value> = policy
                 .projects
                 .iter()
                 .map(|(key, entry)| {
                     serde_json::json!({
-                        "project_label": entry.label,
+                        "project_label": disambiguated_label(key, &known),
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
                     })

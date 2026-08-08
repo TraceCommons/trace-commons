@@ -1569,7 +1569,20 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
     let mode = parse_project_mode(mode)?;
     let shared = daemon_shared(store)?;
     let key = path.to_string_lossy().to_string();
+    // The stored label is always the bare basename; disambiguation happens
+    // at render time (here, and in `daemon projects` / the queue) against
+    // the current known-key set, so a stored label never goes stale when a
+    // colliding project shows up later.
     let label = crate::daemon::policy::project_label_for(&key);
+    let display_label = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        let known = crate::daemon::policy::known_keys(
+            &policy,
+            queue.all().iter().map(|e| e.project_key.clone()),
+        );
+        crate::daemon::policy::disambiguated_label(&key, &known)
+    };
     let resp = handle_local(
         &shared,
         "set_project_mode",
@@ -1577,7 +1590,7 @@ pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bo
     );
     render(resp, json, |_| {
         println!(
-            "{label}: {}",
+            "{display_label}: {}",
             serde_json::to_string(&mode).unwrap_or_default()
         );
     })

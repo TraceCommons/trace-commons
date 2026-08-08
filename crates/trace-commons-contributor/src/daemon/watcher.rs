@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use super::eligibility::{Eligibility, Observation, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
-use super::policy::{ProjectMode, disambiguated_label, project_key_for};
+use super::policy::{ProjectMode, disambiguated_label, known_keys, project_key_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
 use super::state::CwdCacheEntry;
 use crate::source::{SessionRef, TraceSource, all_sources};
@@ -121,18 +121,15 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 
             // Collision detection must see every project the daemon knows
             // about -- both configured policy entries and projects already
-            // sitting in the queue -- so a given project key always renders
-            // the same label regardless of which of two colliding projects
-            // happened to get a queue entry first.
-            let known_keys: Vec<String> = {
+            // sitting in the queue -- so a collision is visible as soon as
+            // either colliding project has a queue entry. The end-of-tick
+            // relabel pass below is what makes this symmetric across the
+            // whole colliding set, since this per-entry snapshot alone can
+            // still miss a project discovered later in the same pass.
+            let known = {
                 let policy = shared.policy.lock().expect("policy lock");
                 let queue = shared.queue.lock().expect("queue lock");
-                policy
-                    .projects
-                    .keys()
-                    .cloned()
-                    .chain(queue.all().iter().map(|e| e.project_key.clone()))
-                    .collect()
+                known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
             };
 
             let entry = QueueEntry {
@@ -140,7 +137,7 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
                 session_hash: transcript.session_hash.clone(),
                 source: session_ref.source.to_string(),
                 project_key: project_key.clone(),
-                project_label: disambiguated_label(&project_key, &known_keys),
+                project_label: disambiguated_label(&project_key, &known),
                 path: obs.path.clone(),
                 size_bytes: obs.size_bytes,
                 discovered_at: now,
@@ -184,6 +181,17 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
         }
     }
 
+    // Relabel pass: `Queue::upsert` never rewrites an existing entry, so a
+    // project that was unique when its entry was first queued would
+    // otherwise keep a bare label forever even after a colliding project
+    // later gets its own entry (or is configured in policy). Recomputing
+    // every entry's label against the final known-key set for this tick
+    // means a collision is always visible on *every* member of the
+    // colliding set, not just whichever was processed second.
+    if relabel_queue(shared) {
+        changed = true;
+    }
+
     if changed {
         {
             let queue = shared.queue.lock().expect("queue lock");
@@ -196,6 +204,38 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
         state.save(&shared.store)?;
     }
     Ok(report)
+}
+
+/// Recompute every queue entry's `project_label` against the final,
+/// end-of-tick known-key set and rewrite any that changed.
+///
+/// `Queue::upsert` deliberately never touches an existing entry, so without
+/// this pass an entry queued while its basename was still unique would keep
+/// a bare label forever, even after a colliding project shows up in a later
+/// tick or gets configured in policy. Returns whether anything changed, so
+/// the caller knows to persist and publish.
+fn relabel_queue(shared: &DaemonShared) -> bool {
+    let mut policy_and_queue = (
+        shared.policy.lock().expect("policy lock"),
+        shared.queue.lock().expect("queue lock"),
+    );
+    let (policy, queue) = (&mut policy_and_queue.0, &mut policy_and_queue.1);
+    let known = known_keys(policy, queue.all().iter().map(|e| e.project_key.clone()));
+
+    let updates: Vec<(uuid::Uuid, String)> = queue
+        .all()
+        .iter()
+        .filter_map(|e| {
+            let fresh = disambiguated_label(&e.project_key, &known);
+            (fresh != e.project_label).then_some((e.entry_id, fresh))
+        })
+        .collect();
+
+    let changed = !updates.is_empty();
+    for (entry_id, label) in updates {
+        queue.set_project_label(entry_id, label);
+    }
+    changed
 }
 
 /// The session's working directory, from cache when the file has not changed.
@@ -323,6 +363,23 @@ mod tests {
                 .set_mode(
                     &format!("/Users/testuser/code/{project}"),
                     project,
+                    mode,
+                    at("2026-08-08T12:00:00Z"),
+                )
+                .unwrap();
+        }
+
+        /// Like `set_mode`, but for an explicit project key rather than one
+        /// derived from `/Users/testuser/code/{project}` -- needed for
+        /// projects written via `write_session_with_cwd`.
+        fn set_mode_for_key(&self, key: &str, mode: ProjectMode) {
+            self.shared
+                .policy
+                .lock()
+                .unwrap()
+                .set_mode(
+                    key,
+                    &crate::daemon::policy::project_label_for(key),
                     mode,
                     at("2026-08-08T12:00:00Z"),
                 )
@@ -464,10 +521,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn colliding_project_basenames_get_distinct_queue_labels() {
+    async fn colliding_project_basenames_both_get_suffixed_in_the_same_tick() {
         // Two different repositories both called `api`; one might be the
-        // client's. tick() must produce distinguishable labels so an
-        // operator can never approve the wrong one from the queue alone.
+        // client's. Both must render suffixed once the collision is known --
+        // not just whichever one happened to be processed second -- or an
+        // operator who has learned "unsuffixed = normal" will misread the
+        // bare one as the safe default roughly half the time.
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
@@ -480,45 +539,143 @@ mod tests {
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        let labels_after_settle: std::collections::BTreeMap<String, String> = {
-            let queue = f.shared.queue.lock().unwrap();
-            assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
-            let by_key: std::collections::BTreeMap<String, String> = queue
-                .all()
-                .iter()
-                .map(|e| (e.project_key.clone(), e.project_label.clone()))
-                .collect();
-            let labels: Vec<&str> = by_key.values().map(String::as_str).collect();
-            assert_ne!(
-                labels[0], labels[1],
-                "colliding projects must render distinct labels: {labels:?}"
-            );
-            for label in &labels {
-                assert!(
-                    !label.contains("work") && !label.contains("client") && !label.contains('/'),
-                    "label must not leak a path segment: {label}"
-                );
-            }
-            by_key
-        };
 
-        // Queue entries are immutable once inserted (`Queue::upsert` is a
-        // no-op for an already-present session hash), so a label computed at
-        // creation time never changes underneath the operator: a further
-        // tick must not perturb either label.
-        tick(&f.shared, at("2030-01-01T00:03:00Z")).await.unwrap();
-        let labels_after_another_tick: std::collections::BTreeMap<String, String> = f
-            .shared
-            .queue
-            .lock()
-            .unwrap()
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+        let by_key: std::collections::BTreeMap<String, String> = queue
             .all()
             .iter()
             .map(|e| (e.project_key.clone(), e.project_label.clone()))
             .collect();
+        let labels: Vec<&str> = by_key.values().map(String::as_str).collect();
+        assert_ne!(
+            labels[0], labels[1],
+            "colliding projects must render distinct labels: {labels:?}"
+        );
+        for label in &labels {
+            assert!(
+                label.starts_with("api ("),
+                "expected every colliding member suffixed, got {label}"
+            );
+            assert!(
+                !label.contains("work") && !label.contains("client") && !label.contains('/'),
+                "label must not leak a path segment: {label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bare_label_is_relabelled_once_a_collision_appears_in_a_later_tick() {
+        // Project queued first, alone, with a unique basename -- correctly
+        // bare. A colliding project only shows up afterwards. Because
+        // `Queue::upsert` never rewrites an existing entry, only the
+        // end-of-tick relabel pass can fix the first entry's now-stale bare
+        // label.
+        let f = WatcherFixture::new();
+        f.write_session_with_cwd(
+            "-Users-testuser-work-api",
+            "/Users/testuser/work/api",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        {
+            let queue = f.shared.queue.lock().unwrap();
+            assert_eq!(queue.all().len(), 1);
+            assert_eq!(queue.all()[0].project_label, "api");
+        }
+
+        // A second, colliding project shows up in a later tick.
+        f.write_session_with_cwd(
+            "-Users-testuser-client-api",
+            "/Users/testuser/client/api",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        f.settle(at("2030-01-01T00:10:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+        let first = queue
+            .all()
+            .iter()
+            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .unwrap();
+        let second = queue
+            .all()
+            .iter()
+            .find(|e| e.project_key == "/Users/testuser/client/api")
+            .unwrap();
+        assert!(
+            first.project_label.starts_with("api ("),
+            "the first-queued entry must be relabelled once it collides, got {}",
+            first.project_label
+        );
+        assert!(second.project_label.starts_with("api ("));
+        assert_ne!(first.project_label, second.project_label);
+    }
+
+    #[tokio::test]
+    async fn a_unique_basename_stays_bare_and_is_untouched_by_the_relabel_pass() {
+        let f = WatcherFixture::new();
+        f.write_session("solo", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        tick(&f.shared, at("2030-01-01T00:03:00Z")).await.unwrap();
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.all().len(), 1);
+        assert_eq!(queue.all()[0].project_label, "solo");
+    }
+
+    #[tokio::test]
+    async fn list_projects_and_the_queue_render_the_same_label_when_a_collision_exists() {
+        let f = WatcherFixture::new();
+        f.write_session_with_cwd(
+            "-Users-testuser-work-api",
+            "/Users/testuser/work/api",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        f.write_session_with_cwd(
+            "-Users-testuser-client-api",
+            "/Users/testuser/client/api",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        // Configure both projects in policy too (with distinct modes so the
+        // `list_projects` rows can be told apart, since that surface
+        // deliberately never echoes the project key).
+        f.set_mode_for_key("/Users/testuser/work/api", ProjectMode::NotifyOnly);
+        f.set_mode_for_key("/Users/testuser/client/api", ProjectMode::Ignore);
+
+        let resp = crate::daemon::ipc::handle_request(
+            &f.shared,
+            &crate::daemon::ipc::Request {
+                id: 1,
+                method: "list_projects".to_string(),
+                params: serde_json::json!({}),
+            },
+            crate::daemon::ipc::Origin::Socket,
+        );
+        let projects = resp.result.unwrap()["projects"].clone();
+        let work_row = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["mode"] == serde_json::json!("notify_only"))
+            .expect("work/api row");
+        let list_label = work_row["project_label"].as_str().unwrap();
+
+        let queue = f.shared.queue.lock().unwrap();
+        let queue_entry = queue
+            .all()
+            .iter()
+            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .unwrap();
         assert_eq!(
-            labels_after_settle, labels_after_another_tick,
-            "labels must be stable once assigned"
+            list_label, queue_entry.project_label,
+            "the same project key must render identically on both surfaces"
+        );
+        assert!(
+            list_label.starts_with("api ("),
+            "expected a collision suffix, got {list_label}"
         );
     }
 

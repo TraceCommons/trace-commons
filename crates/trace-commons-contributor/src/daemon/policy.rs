@@ -148,6 +148,23 @@ pub fn project_label_for(project_key: &str) -> String {
         .unwrap_or_else(|| project_key.to_string())
 }
 
+/// The known-key set every disambiguation call site must agree on: every
+/// configured project plus every project already sitting in the queue.
+/// `queue_project_keys` takes an iterator rather than a `Queue` so this
+/// module does not need to depend on `queue`; call sites pass
+/// `queue.all().iter().map(|e| e.project_key.clone())`.
+pub fn known_keys(
+    policy: &ProjectPolicy,
+    queue_project_keys: impl Iterator<Item = String>,
+) -> Vec<String> {
+    policy
+        .projects
+        .keys()
+        .cloned()
+        .chain(queue_project_keys)
+        .collect()
+}
+
 /// A display label unique within `known_keys`. Adds a short stable hash
 /// suffix only when the basename collides.
 ///
