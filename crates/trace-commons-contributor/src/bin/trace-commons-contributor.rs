@@ -148,11 +148,17 @@ enum Command {
 /// The daemon control surface.
 ///
 /// Deliberately full parity with what the native menu-bar and window
-/// applications can do, so the daemon stays completely usable over SSH and on
-/// a machine with no desktop session. Two operations are available *only*
-/// here and not over the socket -- arming a project for automatic upload, and
-/// approving everything at once -- because a terminal is a capability an
-/// attacker with same-user code execution does not have.
+/// applications can do, so the daemon stays completely usable over SSH and
+/// on a machine with no desktop session. Parity runs in both directions:
+/// there is no terminal-only operation here. Arming a project for automatic
+/// upload and approving everything at once were once refused over the
+/// socket; that gate was removed (it restricted nothing an attacker with
+/// same-user code execution already had -- see the `daemon::ipc` module
+/// doc), and a local audit log replaced it. `daemon audit` reads it.
+///
+/// Every mutating command here is delivered to the *running* daemon over
+/// its socket when one is running, so it takes effect immediately rather
+/// than being overwritten by the daemon's next pass. See `daemon::client`.
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Run the daemon in the foreground; a service manager backgrounds it
@@ -196,6 +202,12 @@ enum DaemonAction {
         /// Ask the daemon to refresh from the server before showing
         #[arg(long)]
         refresh: bool,
+    },
+    /// Read the local audit log: autonomy armed, queue bulk-approved,
+    /// consent scopes changed, NEAR AI notice acknowledged
+    Audit {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
     /// Show or change daemon settings
     Settings {
@@ -335,6 +347,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             DaemonAction::History { limit, refresh } => {
                 commands::daemon_history(&store, limit, refresh, cli.json).await
             }
+            DaemonAction::Audit { limit } => commands::daemon_audit(&store, limit, cli.json),
             DaemonAction::Settings { set } => commands::daemon_settings(&store, &set, cli.json),
             DaemonAction::Install => commands::daemon_install(&store),
             DaemonAction::Uninstall => commands::daemon_uninstall(),

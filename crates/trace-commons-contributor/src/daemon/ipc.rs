@@ -146,19 +146,23 @@ pub struct Request {
     pub params: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcError {
     pub code: String,
     /// A fixed label, never a message body or server response text.
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` as well as `Serialize`: `daemon::client` parses a running
+/// daemon's reply back into this exact type, so the CLI's view of a
+/// response and the socket's wire shape are the same definition rather
+/// than two that can drift.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     pub id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<IpcError>,
 }
 

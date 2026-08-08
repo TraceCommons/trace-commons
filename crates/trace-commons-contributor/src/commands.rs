@@ -1471,23 +1471,51 @@ mod invite_tests {
 // ---------------------------------------------------------------------------
 // Background daemon control
 //
-// These drive the same request handlers the IPC socket exposes, but in-process
-// and marked as coming from a terminal. That is what lets `daemon project
-// --mode auto` work here while the identical call over the socket is refused:
-// a terminal is a capability an attacker with same-user code execution does
-// not have.
+// These drive the same request handlers the IPC socket exposes. When a daemon
+// is running they are sent to *it*, over that socket; only when nothing is
+// running do they fall back to reading and writing the state files in-process.
+// Both paths reach `ipc::handle_request_async`, so a CLI caller and a native
+// application get identical answers to the same request.
+//
+// Every method here is reachable over the socket too. There is no
+// terminal-only carve-out: arming a project for automatic upload and
+// approving the whole queue at once are both available to a socket caller,
+// and both append a local audit entry instead (see `daemon::audit` and the
+// `ipc` module doc's "Authorization" section for why the old gate did not
+// survive scrutiny). `daemon audit` is how a contributor reads that log.
 // ---------------------------------------------------------------------------
 
 use crate::daemon::ipc::{DaemonShared, Response, handle_local};
 use crate::daemon::policy::ProjectMode;
 
-/// Load daemon state for a one-shot command.
+/// Load daemon state for a one-shot command against a *stopped* daemon.
 ///
-/// Reads the same files a running daemon uses. Mutating commands write them
-/// back, and a running daemon picks the change up on its next pass.
+/// Only ever reached through `daemon_call`'s no-daemon-running fallback.
+/// Writing the state files is the right thing to do there -- it primes the
+/// next daemon start -- and is exactly the wrong thing to do while one is
+/// running, which is what `daemon_call` is for. See `daemon::client`.
 fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
     DaemonShared::load(ConfigStore::open(store.dir().to_path_buf())?)
         .context("loading daemon state")
+}
+
+/// Answer one daemon request: from the running daemon over its socket when
+/// there is one, otherwise from the on-disk state directly.
+///
+/// The socket is not an optimization here, it is the only correct path when
+/// a daemon is running: the running daemon holds the authoritative queue,
+/// policy, pause flag and health in memory, re-reads none of them, and
+/// overwrites the files from its own copy on its next pass. See
+/// `daemon::client`'s module doc for the full list of what silently did not
+/// work before this.
+fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> Result<Response> {
+    match crate::daemon::client::try_call(store, method, &params)? {
+        Some(resp) => Ok(resp),
+        None => {
+            let shared = daemon_shared(store)?;
+            Ok(handle_local(&shared, method, params))
+        }
+    }
 }
 
 /// Render an IPC response for a human or for a script.
@@ -1514,9 +1542,16 @@ fn render(resp: Response, json: bool, table: impl FnOnce(&serde_json::Value)) ->
     Ok(())
 }
 
+/// Show what the daemon is doing and whether anything is wrong.
+///
+/// Goes through `daemon_call`, so the health line reports the *running*
+/// daemon's real health. It used to be answered from a fresh
+/// `DaemonShared::load`, whose `HealthState` is always
+/// `HealthState::default()` -- `HealthState` is in-memory only and is never
+/// persisted -- so this command printed `health: ok` unconditionally, even
+/// while the daemon was refusing every upload.
 pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(&shared, "status", serde_json::json!({}));
+    let resp = daemon_call(store, "status", serde_json::json!({}))?;
     render(resp, json, |v| {
         let health = &v["health"];
         println!(
@@ -1539,8 +1574,7 @@ pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
 }
 
 pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(&shared, "list_pending", serde_json::json!({}));
+    let resp = daemon_call(store, "list_pending", serde_json::json!({}))?;
     render(resp, json, |v| {
         let empty = Vec::new();
         let entries = v["pending"].as_array().unwrap_or(&empty);
@@ -1569,12 +1603,11 @@ pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
 }
 
 pub fn daemon_preview(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(
-        &shared,
+    let resp = daemon_call(
+        store,
         "preview",
         serde_json::json!({ "entry_id": entry_id }),
-    );
+    )?;
     render(resp, json, |v| {
         println!(
             "project: {}",
@@ -1598,35 +1631,68 @@ pub fn daemon_approve(
     if !all && entry_id.is_none() {
         anyhow::bail!("give an entry id, or --all");
     }
-    let shared = daemon_shared(store)?;
     let params = if all {
         serde_json::json!({ "all": true })
     } else {
         serde_json::json!({ "entry_id": entry_id })
     };
-    let resp = handle_local(&shared, "approve", params);
+    let resp = daemon_call(store, "approve", params)?;
     render(resp, json, |v| {
         println!("approved {}", v["approved"]);
     })
 }
 
 pub fn daemon_dismiss(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(
-        &shared,
+    let resp = daemon_call(
+        store,
         "dismiss",
         serde_json::json!({ "entry_id": entry_id }),
-    );
+    )?;
     render(resp, json, |_| println!("dismissed"))
 }
 
+/// Read the local audit log: when autonomy was armed, when the queue was
+/// bulk-approved, when consent scopes changed, when the NEAR AI notice was
+/// acknowledged.
+///
+/// This log is the stated replacement for a removed terminal-only
+/// restriction (see `daemon::audit`), and until this command existed it was
+/// reachable only over IPC -- and no native application ships in this
+/// branch. A replacement nobody can read is not a replacement.
+pub fn daemon_audit(store: &ConfigStore, limit: usize, json: bool) -> Result<()> {
+    let resp = daemon_call(store, "list_audit", serde_json::json!({ "limit": limit }))?;
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let entries = v["entries"].as_array().unwrap_or(&empty);
+        if entries.is_empty() {
+            println!("nothing audited yet");
+            return;
+        }
+        let rows: Vec<Vec<String>> = entries
+            .iter()
+            .map(|e| {
+                vec![
+                    e["at"].as_str().unwrap_or("-").to_string(),
+                    e["action"].as_str().unwrap_or("-").to_string(),
+                    e["project_label"].as_str().unwrap_or("-").to_string(),
+                    e["detail"].as_str().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["WHEN", "ACTION", "PROJECT", "DETAIL"],
+            &rows,
+        );
+    })
+}
+
 pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(
-        &shared,
+    let resp = daemon_call(
+        store,
         if pause { "pause" } else { "resume" },
         serde_json::json!({}),
-    );
+    )?;
     render(resp, json, |v| {
         println!(
             "{}",
@@ -1640,8 +1706,7 @@ pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> 
 }
 
 pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(&shared, "list_projects", serde_json::json!({}));
+    let resp = daemon_call(store, "list_projects", serde_json::json!({}))?;
     render(resp, json, |v| {
         let empty = Vec::new();
         let projects = v["projects"].as_array().unwrap_or(&empty);
@@ -1672,34 +1737,95 @@ pub(crate) fn parse_project_mode(s: &str) -> Result<ProjectMode> {
     }
 }
 
+/// Resolve a `daemon project` path argument into a policy key.
+///
+/// The watcher keys policy off the session's *recorded* working directory,
+/// which is always absolute and fully resolved. A relative path, a trailing
+/// slash, a `.`, or a path crossing a symlink produces a key that matches
+/// no session at all -- and the command still printed success. The
+/// dangerous direction is `--mode ignore` silently not applying, so the
+/// path is resolved against the real filesystem here, exactly as
+/// `discover_filtered` already does for `submit --project`.
+///
+/// The locked unknown-cwd bucket is a sentinel, not a path, and is passed
+/// through untouched so `policy::set_mode` can refuse to arm it by name.
+fn resolve_project_key(path: &Path) -> Result<String> {
+    let raw = path.to_string_lossy().to_string();
+    if raw == crate::daemon::policy::UNKNOWN_PROJECT_KEY {
+        return Ok(raw);
+    }
+    let resolved = std::fs::canonicalize(path)
+        .with_context(|| format!("resolving project path {} (does it exist?)", path.display()))?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
 pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
     let mode = parse_project_mode(mode)?;
-    let shared = daemon_shared(store)?;
-    let key = path.to_string_lossy().to_string();
+    let key = resolve_project_key(path)?;
     // The stored label is always the bare basename; disambiguation happens
     // at render time (here, and in `daemon projects` / the queue) against
     // the current known-key set, so a stored label never goes stale when a
     // colliding project shows up later.
     let label = crate::daemon::policy::project_label_for(&key);
-    let display_label = {
-        let policy = shared.policy.lock().expect("policy lock");
-        let queue = shared.queue.lock().expect("queue lock");
-        let known = crate::daemon::policy::known_keys(
-            &policy,
-            queue.all().iter().map(|e| e.project_key.clone()),
-        );
-        crate::daemon::policy::disambiguated_label(&key, &known)
-    };
-    let resp = handle_local(
-        &shared,
+    let resp = daemon_call(
+        store,
         "set_project_mode",
         serde_json::json!({ "project_key": key, "label": label, "mode": mode }),
-    );
+    )?;
+    // Ask the same daemon that just applied the edit what it now knows, so
+    // the label shown is disambiguated against the authoritative known-key
+    // set rather than against a private copy loaded from disk.
+    let known_labels = daemon_call(store, "list_projects", serde_json::json!({}))
+        .ok()
+        .and_then(|r| r.result)
+        .map(|v| {
+            v["projects"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p["project_label"].as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let display_label = known_labels
+        .iter()
+        .find(|l| l.as_str() == label || l.starts_with(&format!("{label} (")))
+        .cloned()
+        .unwrap_or_else(|| label.clone());
+
+    // A key that matches nothing the daemon has ever seen is very likely a
+    // typo, and a typo'd `--mode ignore` reads as "this project is now
+    // silenced" while silencing nothing at all. Say so rather than printing
+    // an unqualified success.
+    let matches_nothing = daemon_call(store, "list_pending", serde_json::json!({}))
+        .ok()
+        .and_then(|r| r.result)
+        .map(|v| {
+            v["pending"]
+                .as_array()
+                .map(|a| {
+                    !a.iter()
+                        .any(|e| e["project_label"].as_str() == Some(display_label.as_str()))
+                })
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
     render(resp, json, |_| {
         println!(
             "{display_label}: {}",
             serde_json::to_string(&mode).unwrap_or_default()
         );
+        if matches_nothing {
+            println!(
+                "note: no session the daemon currently knows about comes from this \
+                 project. If you meant an already-queued project, check `daemon \
+                 pending` -- the mode applies to the session's recorded working \
+                 directory, not to the directory you happen to be standing in."
+            );
+        }
     })
 }
 
@@ -1714,15 +1840,10 @@ pub async fn daemon_history(
         // rather than inside the request handler.
         refresh_history_cache(store).await?;
     }
-    let shared = daemon_shared(store)?;
-    let resp = handle_local(
-        &shared,
-        "list_history",
-        serde_json::json!({ "limit": limit }),
-    );
+    let resp = daemon_call(store, "list_history", serde_json::json!({ "limit": limit }))?;
     if json {
         // Emit history and rollup together so a caller gets one document.
-        let rollup = handle_local(&shared, "history_rollup", serde_json::json!({}));
+        let rollup = daemon_call(store, "history_rollup", serde_json::json!({}))?;
         let out = serde_json::json!({
             "history": resp.result.unwrap_or(serde_json::Value::Null)["history"],
             "rollup": rollup.result.unwrap_or(serde_json::Value::Null),
@@ -1759,7 +1880,7 @@ pub async fn daemon_history(
         );
     })?;
 
-    let rollup = handle_local(&shared, "history_rollup", serde_json::json!({}));
+    let rollup = daemon_call(store, "history_rollup", serde_json::json!({}))?;
     if let Some(v) = rollup.result {
         println!();
         println!(
@@ -1819,9 +1940,8 @@ async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
 }
 
 pub fn daemon_settings(store: &ConfigStore, set: &[String], json: bool) -> Result<()> {
-    let shared = daemon_shared(store)?;
     if set.is_empty() {
-        let resp = handle_local(&shared, "get_settings", serde_json::json!({}));
+        let resp = daemon_call(store, "get_settings", serde_json::json!({}))?;
         return render(resp, json, |v| {
             println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
         });
@@ -1840,7 +1960,7 @@ pub fn daemon_settings(store: &ConfigStore, set: &[String], json: bool) -> Resul
         };
         params.insert(k.to_string(), value);
     }
-    let resp = handle_local(&shared, "set_settings", serde_json::Value::Object(params));
+    let resp = daemon_call(store, "set_settings", serde_json::Value::Object(params))?;
     render(resp, json, |v| {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
     })
@@ -1905,17 +2025,54 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
-        daemon_set_project(
-            &store,
-            std::path::Path::new("/Users/z/code/proj"),
-            "auto",
-            false,
-        )
-        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        daemon_set_project(&store, project.path(), "auto", false).unwrap();
+        let key = std::fs::canonicalize(project.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
+        assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
+    }
+
+    #[test]
+    fn a_project_path_is_canonicalized_before_it_becomes_a_policy_key() {
+        // The watcher keys off the session's recorded cwd, which is always
+        // absolute and resolved. A trailing slash, a `.`, or a symlinked
+        // path produced a key matching no session at all -- and `--mode
+        // ignore` still printed success while silencing nothing.
+        let project = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+
+        let with_trailing_slash =
+            std::path::PathBuf::from(format!("{}/", project.path().display()));
         assert_eq!(
-            policy.resolve("/Users/z/code/proj"),
-            ProjectMode::AutoUpload
+            resolve_project_key(&with_trailing_slash).unwrap(),
+            canonical.to_string_lossy()
+        );
+
+        let with_dot = project.path().join(".");
+        assert_eq!(
+            resolve_project_key(&with_dot).unwrap(),
+            canonical.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn a_project_path_that_does_not_exist_is_an_error_rather_than_a_silent_no_op() {
+        let missing = std::path::Path::new("/nonexistent-trace-commons-project-xyz");
+        let err = resolve_project_key(missing).unwrap_err();
+        assert!(err.to_string().contains("does it exist?"), "{err}");
+    }
+
+    #[test]
+    fn the_unknown_bucket_sentinel_is_not_treated_as_a_filesystem_path() {
+        assert_eq!(
+            resolve_project_key(std::path::Path::new(
+                crate::daemon::policy::UNKNOWN_PROJECT_KEY
+            ))
+            .unwrap(),
+            crate::daemon::policy::UNKNOWN_PROJECT_KEY
         );
     }
 }

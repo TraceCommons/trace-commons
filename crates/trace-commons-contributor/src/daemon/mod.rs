@@ -21,6 +21,7 @@
 //!   never degrades to sending unfiltered text.
 
 pub mod audit;
+pub mod client;
 pub mod eligibility;
 pub mod enroll;
 pub mod health;
