@@ -6,7 +6,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free, tc_last_error,
@@ -21,7 +21,29 @@ fn cstr_str(s: &str) -> CString {
     CString::new(s).unwrap()
 }
 
+/// Point the daemon's session roots at empty tempdirs before starting it,
+/// the way `trace-commons-contributor`'s own watcher tests already do
+/// (`WatcherFixture`). Without this, `tc_daemon_start` -- via the settings
+/// default of `claude_root: None` / `codex_root: None`, meaning "the
+/// conventional per-user location" -- scans the machine owner's *real*
+/// `~/.claude`/`~/.codex` session roots: a real privacy problem for a test
+/// (it reads the developer's actual coding transcripts), and also what made
+/// the reentrant-stop and unsubscribe regression tests flaky under a
+/// single-worker runtime, since a large real session history makes
+/// `watcher::tick`'s filesystem scan slow enough to matter.
 fn start(dir: &Path) -> *mut tc_handle {
+    let claude_root = dir.join("claude-root");
+    let codex_root = dir.join("codex-root");
+    std::fs::create_dir_all(&claude_root).unwrap();
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
+    let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+        claude_root: Some(claude_root),
+        codex_root: Some(codex_root),
+        ..Default::default()
+    };
+    settings.save(&store).unwrap();
+
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
     if h.is_null() {
@@ -287,7 +309,7 @@ fn tc_daemon_stop_from_inside_a_subscribe_callback_does_not_crash() {
 
     // Give the background poll loop (250ms ticks) time to deliver it and
     // run the reentrant `tc_daemon_stop`.
-    for _ in 0..40 {
+    for _ in 0..100 {
         if REENTRANT_STOP_ATTEMPTED.load(Ordering::SeqCst) {
             break;
         }
@@ -330,7 +352,7 @@ fn no_callback_fires_after_tc_unsubscribe_returns() {
     // Trigger at least one delivery and wait for it, so we know the
     // subscription is genuinely live before unsubscribing.
     let _ = call(h, "resume", "{}");
-    for _ in 0..40 {
+    for _ in 0..100 {
         if COUNT.load(Ordering::SeqCst) > 0 {
             break;
         }
@@ -356,6 +378,148 @@ fn no_callback_fires_after_tc_unsubscribe_returns() {
         "a callback fired after tc_unsubscribe returned"
     );
 
+    stop(h);
+}
+
+/// Fix round 2, finding C: the header used to say a subscription lasts
+/// "until tc_unsubscribe or the daemon stops" and that ctx must stay valid
+/// until tc_unsubscribe returns "or the daemon stops, whichever is first."
+/// That is false: `tc_daemon_stop` only sets a flag the subscription's
+/// background task polls at most every 250ms, and does not touch
+/// subscriptions at all -- so a callback invocation already under way (or
+/// working through already-buffered events) can still be running, and
+/// still touching `ctx`, well after `tc_daemon_stop` has returned to its
+/// caller. This test proves that's real behavior, not just a corrected
+/// doc claim, so the two cannot silently drift apart again: it starts a
+/// callback that is provably still executing when `tc_daemon_stop` is
+/// called, and asserts the callback observes that `tc_daemon_stop` had
+/// already returned by the time the callback finished touching its state.
+#[test]
+fn a_callback_can_still_fire_after_tc_daemon_stop_returns() {
+    static CALLBACK_STARTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static STOP_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static FIRED_AFTER_STOP_RETURNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    extern "C" fn slow_cb(_event_json: *const c_char, _ctx: *mut c_void) {
+        CALLBACK_STARTED.store(true, Ordering::SeqCst);
+        // Comfortably longer than tc_daemon_stop's own teardown, so this
+        // invocation is still in flight (and would still be touching a
+        // real host's `ctx`) well after tc_daemon_stop has returned.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if STOP_RETURNED.load(Ordering::SeqCst) {
+            FIRED_AFTER_STOP_RETURNED.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let token = unsafe { tc_subscribe(h, Some(slow_cb), std::ptr::null_mut()) };
+    assert_ne!(token, 0);
+
+    let _ = call(h, "resume", "{}");
+    // Wait until the callback has provably started (and is now inside its
+    // sleep) before stopping, so tc_daemon_stop races a callback that is
+    // definitely still in flight rather than one that hasn't begun yet. A
+    // generous window: under a heavily parallel test run (every test in
+    // this file has its own multi-thread tokio runtime), OS scheduling
+    // alone can push this well past a tight budget.
+    for _ in 0..200 {
+        if CALLBACK_STARTED.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        CALLBACK_STARTED.load(Ordering::SeqCst),
+        "the callback never started -- test did not exercise the path under test"
+    );
+
+    unsafe { tc_daemon_stop(h) };
+    STOP_RETURNED.store(true, Ordering::SeqCst);
+
+    for _ in 0..200 {
+        if FIRED_AFTER_STOP_RETURNED.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        FIRED_AFTER_STOP_RETURNED.load(Ordering::SeqCst),
+        "a subscription callback must be able to still be running (and \
+         still touching ctx) after tc_daemon_stop returns -- tc_daemon_stop \
+         is not a synchronization point for subscriptions, only \
+         tc_unsubscribe is"
+    );
+
+    unsafe { tc_unsubscribe(h, token) };
+    unsafe { tc_handle_free(h) };
+}
+
+/// Fix round 2, finding B: `tc_unsubscribe`, called with its own token from
+/// inside that subscription's own callback, must refuse rather than
+/// deadlock. `abort()` cannot preempt a task that is inside a synchronous
+/// callback invocation, so joining that task's `JoinHandle` from inside the
+/// very callback frame calling `tc_unsubscribe` can only resolve once the
+/// callback returns -- which requires the join to return first. Permanent
+/// hang, without the reentrancy guard this test exercises.
+#[test]
+fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
+    static SELF_UNSUBSCRIBE_ATTEMPTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static REFUSED_CORRECTLY: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static TOKEN: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn self_unsubscribe_cb(_event_json: *const c_char, ctx: *mut c_void) {
+        if SELF_UNSUBSCRIBE_ATTEMPTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let h = ctx as *mut tc_handle;
+        let token = TOKEN.load(Ordering::SeqCst);
+        // The reentrant call under test: this thread is inside the very
+        // subscription callback whose token it's asking to cancel.
+        unsafe { tc_unsubscribe(h, token) };
+        // `tc_last_error` is thread-local, so it must be read here, on the
+        // same (callback) thread that made the reentrant call -- reading
+        // it from the test's own thread afterward would see nothing.
+        let refused = unsafe { CStr::from_ptr(tc_last_error()) }
+            .to_str()
+            .map(|s| s == "unsubscribe-refused-inside-runtime-context")
+            .unwrap_or(false);
+        REFUSED_CORRECTLY.store(refused, Ordering::SeqCst);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let token = unsafe { tc_subscribe(h, Some(self_unsubscribe_cb), h as *mut c_void) };
+    assert_ne!(token, 0);
+    TOKEN.store(token, Ordering::SeqCst);
+
+    let _ = call(h, "resume", "{}");
+    for _ in 0..100 {
+        if SELF_UNSUBSCRIBE_ATTEMPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        SELF_UNSUBSCRIBE_ATTEMPTED.load(Ordering::SeqCst),
+        "the reentrant tc_unsubscribe callback never fired -- test did not \
+         exercise the path under test"
+    );
+
+    // No deadlock: the process reached here. The refusal must have been
+    // recorded rather than silently succeeded.
+    assert!(
+        REFUSED_CORRECTLY.load(Ordering::SeqCst),
+        "the reentrant tc_unsubscribe must refuse with a fixed label, not \
+         silently succeed"
+    );
+
+    // A real (non-reentrant) unsubscribe from a plain thread still works.
+    unsafe { tc_unsubscribe(h, token) };
     stop(h);
 }
 

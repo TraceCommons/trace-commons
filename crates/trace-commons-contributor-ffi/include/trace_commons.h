@@ -38,6 +38,15 @@
  * passed to tc_preview_free) and refuses rather than acting on it --
  * recording a fixed label via tc_last_error and leaking the pointer, which
  * is the only safe response once a raw pointer's type cannot be trusted.
+ *
+ * SUBSCRIPTION LIFETIME: tc_daemon_stop does NOT end a subscription and is
+ * NOT a synchronization point for one -- it only sets a flag a
+ * subscription's background task polls at most every 250ms, and an event
+ * already buffered when tc_daemon_stop was called can still be delivered in
+ * that window. A tc_subscribe callback can be invoked, using ctx, well
+ * after tc_daemon_stop has returned to its caller. tc_unsubscribe is the
+ * ONLY function that guarantees no further callback invocation once it
+ * returns; ctx must remain valid until tc_unsubscribe returns, full stop.
  */
 
 #ifndef TRACE_COMMONS_H
@@ -68,8 +77,15 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other
- * threads. Does NOT free the handle; call tc_handle_free once nothing else
- * will use it again. Safe to call with NULL.
+ * threads, and concurrently with itself / tc_handle_free from another
+ * thread (a second concurrent caller waits for the first caller's teardown
+ * to finish before returning, so "stop returned" is a real barrier no
+ * matter which thread got there first). Does NOT free the handle; call
+ * tc_handle_free once nothing else will use it again. Safe to call with
+ * NULL.
+ *
+ * Is NOT a synchronization point for tc_subscribe callbacks -- see
+ * SUBSCRIPTION LIFETIME above and tc_unsubscribe below.
  */
 void        tc_daemon_stop(tc_handle*);
 
@@ -96,10 +112,11 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
 
 /* Events. cb is invoked on a background thread with a JSON event frame
  * each time the daemon publishes one, until tc_unsubscribe is called with
- * the returned token or the daemon stops. The event_json pointer passed to
- * cb is borrowed for the duration of that one call only; do not retain it.
- * ctx is passed back unchanged and must remain valid until tc_unsubscribe
- * returns (or the daemon stops, whichever is first).
+ * the returned token. The event_json pointer passed to cb is borrowed for
+ * the duration of that one call only; do not retain it. ctx is passed back
+ * unchanged and MUST remain valid until tc_unsubscribe returns -- full
+ * stop; see SUBSCRIPTION LIFETIME above. tc_daemon_stop returning is NOT
+ * sufficient.
  *
  * A gap in delivery (more than 256 events published between polls) is
  * reported to cb as a synthetic `{"event":"lagged","data":{"skipped":N}}`
@@ -113,7 +130,16 @@ uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ct
 
 /* Cancel a subscription returned by tc_subscribe. Blocks until that
  * subscription's callback is guaranteed to no longer fire before
- * returning. A no-op if token is 0 or unknown.
+ * returning -- see SUBSCRIPTION LIFETIME above; this is the only function
+ * with that guarantee. A no-op if token is 0 or unknown.
+ *
+ * MUST be called from a plain thread that is not inside any tokio runtime
+ * context -- in particular, never from a subscription's own callback
+ * unsubscribing itself: that would block joining a task that can only
+ * finish once the very callback frame making the call returns, a permanent
+ * hang. Calling from inside a runtime context refuses (a no-op; the token
+ * remains valid to retry from a plain thread) and records why via
+ * tc_last_error.
  */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 

@@ -40,14 +40,46 @@ pub struct TickReport {
 /// Returns what it saw rather than acting on uploads itself: the caller owns
 /// the submit pipeline, which needs an async context and mutable state this
 /// function deliberately does not hold.
+///
+/// The pass itself (`tick_blocking`) is synchronous filesystem scanning and
+/// hashing with no `.await` point of its own -- `source.discover()`,
+/// `std::fs::metadata`, `source.load()` are all blocking calls. On a
+/// multi-thread runtime with few worker threads (in the limit, one -- the
+/// C ABI's `tc_daemon_start` builds a runtime sized by
+/// `TOKIO_WORKER_THREADS`, which a 1-vCPU host or an explicit override can
+/// set to 1), running that whole pass inline previously monopolized the
+/// sole worker for the scan's entire duration: the socket server, every
+/// `tc_subscribe` delivery, and even a reentrant `tc_daemon_stop`'s own
+/// wait on the supervisor's `JoinHandle` all starved behind it. This
+/// function moves the pass off whichever worker is currently running it via
+/// `tokio::task::block_in_place`, which is only supported (and only
+/// necessary) on a multi-thread runtime -- callers under a `current_thread`
+/// runtime (the default `#[tokio::test]` flavor, which every test in this
+/// module's suite uses) run the pass inline instead, since
+/// `block_in_place` panics there.
 pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
     // `is_paused` also auto-clears a timed pause that has lapsed, so an
     // elapsed `pause {until}` resumes ticking on its own rather than needing
-    // an explicit `resume` from whichever app set the timer.
+    // an explicit `resume` from whichever app set the timer -- cheap enough
+    // to check before deciding whether `block_in_place` is even worth it.
     if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
+    let multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multi_thread {
+        tokio::task::block_in_place(|| tick_blocking(shared, now))
+    } else {
+        tick_blocking(shared, now)
+    }
+}
 
+/// The actual pass; see `tick`'s doc for why it is a plain synchronous
+/// function rather than `async fn` (it never awaited anything -- every step
+/// is a blocking filesystem or lock operation) and why `tick` runs it
+/// through `block_in_place` on a multi-thread runtime.
+fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
     let mut report = TickReport::default();
     let mut changed = false;
 

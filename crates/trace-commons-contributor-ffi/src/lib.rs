@@ -64,7 +64,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::UnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::EmbeddedDaemon;
@@ -217,6 +217,19 @@ struct RunningDaemon {
     supervisor: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
+/// `tc_handle.state`'s three phases. `TearingDown` exists so a *second*
+/// concurrent `tc_daemon_stop`/`tc_handle_free` call -- from another thread,
+/// racing the first -- waits for the first caller's teardown to actually
+/// finish (via `tc_handle::teardown_done`) instead of seeing `None`-shaped
+/// state and returning immediately while teardown is still in progress:
+/// without this phase, "stop returned" would not be a real teardown barrier
+/// for that second caller.
+enum DaemonState {
+    Running(RunningDaemon),
+    TearingDown,
+    Stopped,
+}
+
 /// The daemon handle: an owned tokio runtime plus the running daemon's
 /// shared state and background task handles.
 ///
@@ -226,11 +239,24 @@ struct RunningDaemon {
 /// function that does, and must not race a call still using the handle.
 pub struct tc_handle {
     rt: tokio::runtime::Runtime,
-    // `None` once stopped (by `tc_daemon_stop`, or implicitly when
-    // `tc_handle_free` tears it down before freeing).
-    running: Mutex<Option<RunningDaemon>>,
+    state: Mutex<DaemonState>,
+    /// Signalled once `state` leaves `TearingDown`, so a concurrent stop
+    /// caller can wait for the in-progress teardown to actually finish.
+    teardown_done: Condvar,
     subscriptions: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_subscription: AtomicU64,
+}
+
+/// Borrow the running daemon's shared state, or `None` if it has been
+/// stopped (or is in the process of stopping). The one place `tc_call`,
+/// `tc_preview_open`, and `tc_subscribe` all read `handle.state` from, so
+/// they agree on what "stopped" means.
+fn shared_of(handle: &tc_handle) -> Option<Arc<ipc::DaemonShared>> {
+    let state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+    match &*state {
+        DaemonState::Running(r) => Some(Arc::clone(&r.embedded.shared)),
+        DaemonState::TearingDown | DaemonState::Stopped => None,
+    }
 }
 
 /// Opaque preview handle returned by `tc_preview_open`.
@@ -270,10 +296,11 @@ pub unsafe extern "C" fn tc_daemon_start(
             ));
             Ok(tc_handle {
                 rt,
-                running: Mutex::new(Some(RunningDaemon {
+                state: Mutex::new(DaemonState::Running(RunningDaemon {
                     embedded,
                     supervisor,
                 })),
+                teardown_done: Condvar::new(),
                 subscriptions: Mutex::new(HashMap::new()),
                 next_subscription: AtomicU64::new(1),
             })
@@ -328,14 +355,36 @@ pub unsafe extern "C" fn tc_daemon_start(
 /// driving it (a segfault, reproduced in review). This function never frees
 /// `handle`, so there is nothing for that unwind to corrupt even if the
 /// dedicated thread's own teardown panics.
+///
+/// A second, concurrent caller (from another thread, racing the first) sees
+/// `DaemonState::TearingDown` and blocks on `teardown_done` until the first
+/// caller's teardown actually finishes, rather than seeing `None`-shaped
+/// state and returning immediately -- otherwise "stop returned" would not
+/// be a real teardown barrier for that second caller.
 fn stop_embedded(handle: &tc_handle) {
-    let running = handle
-        .running
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take();
-    let Some(running) = running else {
-        return;
+    let running = {
+        let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+        match &*state {
+            DaemonState::Running(_) => {
+                let DaemonState::Running(running) =
+                    std::mem::replace(&mut *state, DaemonState::TearingDown)
+                else {
+                    unreachable!("just matched Running above");
+                };
+                running
+            }
+            DaemonState::TearingDown => {
+                // Someone else is already tearing down: wait for them
+                // rather than racing ahead, so this call returning really
+                // does mean teardown is complete.
+                let _guard = handle
+                    .teardown_done
+                    .wait_while(state, |s| matches!(s, DaemonState::TearingDown))
+                    .unwrap_or_else(|p| p.into_inner());
+                return;
+            }
+            DaemonState::Stopped => return,
+        }
     };
     let _ = std::thread::spawn(move || {
         let RunningDaemon {
@@ -344,15 +393,28 @@ fn stop_embedded(handle: &tc_handle) {
         } = running;
         embedded.shared.shutdown.store(true, Ordering::Relaxed);
         embedded.shared.shutdown_signal.notify_one();
-        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
-            let _ = rt.block_on(supervisor);
+            Ok(rt) => {
+                let _ = rt.block_on(supervisor);
+            }
+            Err(_) => {
+                // No runtime to join the supervisor on: abort it outright
+                // rather than dropping the `JoinHandle` and leaving it
+                // detached-but-still-running. `JoinHandle::abort` needs no
+                // executor of its own to call.
+                supervisor.abort();
+            }
         }
         embedded.close();
     })
     .join();
+    let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+    *state = DaemonState::Stopped;
+    drop(state);
+    handle.teardown_done.notify_all();
 }
 
 /// Stop the daemon loop. Idempotent, and safe to call from any thread --
@@ -361,9 +423,17 @@ fn stop_embedded(handle: &tc_handle) {
 /// threads: those observe the daemon as stopped
 /// (`{"error":{"code":"unavailable","message":"daemon-stopped"}}` /
 /// `entry-id-invalid`-style failure) rather than dereferencing freed
-/// memory, because this function does **not** free `handle`. Call
-/// `tc_handle_free` once nothing else will use `handle` again to reclaim
-/// it. Safe to call with NULL (no-op).
+/// memory, because this function does **not** free `handle`. A second,
+/// concurrent `tc_daemon_stop`/`tc_handle_free` call waits for the first
+/// caller's teardown to actually finish before returning, so "stop
+/// returned" is a real teardown barrier no matter which thread called it
+/// first. Call `tc_handle_free` once nothing else will use `handle` again
+/// to reclaim it. Safe to call with NULL (no-op).
+///
+/// **Not** a synchronization point for `tc_subscribe` callbacks -- see
+/// `tc_subscribe`'s doc. A callback can still be invoked, using `ctx`,
+/// after this function has returned; only `tc_unsubscribe` guarantees
+/// otherwise.
 ///
 /// # Safety
 /// `handle`, if non-null, must be a pointer previously returned by
@@ -460,12 +530,8 @@ pub unsafe extern "C" fn tc_call(
                 Ok(v) => v,
                 Err(_) => return error_frame(ERR_BAD_PARAMS, "invalid-params-json"),
             };
-            let shared = {
-                let g = handle.running.lock().unwrap_or_else(|p| p.into_inner());
-                match g.as_ref() {
-                    Some(r) => Arc::clone(&r.embedded.shared),
-                    None => return error_frame("unavailable", "daemon-stopped"),
-                }
+            let Some(shared) = shared_of(handle) else {
+                return error_frame("unavailable", "daemon-stopped");
             };
             let response = ipc::handle_local(&shared, method, params);
             serde_json::to_string(&response)
@@ -479,7 +545,18 @@ pub unsafe extern "C" fn tc_call(
 /// Register an event callback, invoked on a background thread with a JSON
 /// event frame each time the daemon publishes one (queue changes, status
 /// changes, digests due, and so on), until `tc_unsubscribe` is called with
-/// the returned token or the daemon stops. `ctx` is passed back unchanged.
+/// the returned token. `ctx` is passed back unchanged.
+///
+/// **`tc_daemon_stop` does *not* end a subscription and is not a
+/// synchronization point for it.** `tc_daemon_stop` only sets a flag this
+/// subscription's background task polls at most every 250ms, and any event
+/// already buffered when it was called can still be delivered in that
+/// window -- a callback invocation can start, and be actively running,
+/// after `tc_daemon_stop` has already returned to its caller. Only
+/// `tc_unsubscribe` is a real barrier. See its doc, and
+/// `tests::a_callback_can_still_fire_after_tc_daemon_stop_returns` in
+/// `tests/abi.rs`, which exists specifically so this claim and the actual
+/// behavior cannot silently drift apart again.
 ///
 /// Subscribing happens synchronously, before this function returns, so an
 /// event published immediately after `tc_subscribe` returns is never missed
@@ -500,8 +577,8 @@ pub unsafe extern "C" fn tc_call(
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `cb` must be a
 /// valid function pointer for the lifetime of the subscription. `ctx`, if
-/// non-null, must remain valid until `tc_unsubscribe` returns (or the
-/// daemon stops, whichever comes first).
+/// non-null, **must remain valid until `tc_unsubscribe` returns -- full
+/// stop.** `tc_daemon_stop` returning is not sufficient; see above.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_subscribe(
     handle: *mut tc_handle,
@@ -516,12 +593,8 @@ pub unsafe extern "C" fn tc_subscribe(
         let Some(cb) = cb else {
             return Ok(0u64);
         };
-        let shared = {
-            let g = handle_ref.running.lock().unwrap_or_else(|p| p.into_inner());
-            match g.as_ref() {
-                Some(r) => Arc::clone(&r.embedded.shared),
-                None => return Ok(0u64),
-            }
+        let Some(shared) = shared_of(handle_ref) else {
+            return Ok(0u64);
         };
         // Raw pointers are not `Send`; `ctx` is a caller-supplied opaque
         // token the caller promised (per this function's safety contract)
@@ -586,8 +659,23 @@ pub unsafe extern "C" fn tc_subscribe(
 /// caller that observes `tc_unsubscribe` return can rely on no further
 /// invocation of that subscription's callback, not on an implementation
 /// detail of how or when `handle`'s runtime happens to be torn down later.
+/// This is the **only** function with that guarantee -- `tc_daemon_stop`
+/// does not synchronize with subscriptions at all (see its doc); a callback
+/// can still fire well after `tc_daemon_stop` has returned. `ctx` must stay
+/// valid until `tc_unsubscribe` returns, full stop.
+///
 /// A no-op if `token` is 0 or unknown (already unsubscribed, or never
 /// valid).
+///
+/// Must be called from a plain thread that is not inside any tokio runtime
+/// context -- in particular, never from inside a `tc_subscribe` callback,
+/// including that subscription's own callback unsubscribing itself. Doing
+/// so blocks joining a task that can only finish by returning from the very
+/// callback frame making this call, which is a permanent hang: `abort()`
+/// cannot preempt a callback already inside its synchronous invocation.
+/// Calling from inside a runtime context refuses instead (a no-op; the
+/// token stays valid, unlike `tc_handle_free`'s deliberate leak, since
+/// nothing here was allocated) and records why via `tc_last_error`.
 ///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start` (or NULL, a
@@ -595,6 +683,21 @@ pub unsafe extern "C" fn tc_subscribe(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     if handle.is_null() || token == 0 {
+        return;
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Refuse without touching `subscriptions`: a callback calling
+        // `tc_unsubscribe` on its own token from inside itself would
+        // otherwise abort() (which cannot preempt a task mid-synchronous-
+        // callback-invocation) and then block joining a task that can only
+        // finish once this very callback frame returns -- a permanent hang
+        // of the calling thread and a runtime worker. Any other thread
+        // still inside some tokio context (this handle's or an unrelated
+        // one elsewhere in the host process) is refused too, conservatively
+        // -- the check cannot tell the two cases apart, and treating both
+        // as "possibly-reentrant" is safe where treating both as "safe to
+        // block" is not.
+        set_last_error("unsubscribe-refused-inside-runtime-context");
         return;
     }
     let _ = guard(|| {
@@ -671,12 +774,8 @@ pub unsafe extern "C" fn tc_preview_open(
         let id = entry_id
             .parse()
             .map_err(|_| anyhow::anyhow!("entry-id-invalid"))?;
-        let shared = {
-            let g = handle.running.lock().unwrap_or_else(|p| p.into_inner());
-            match g.as_ref() {
-                Some(r) => Arc::clone(&r.embedded.shared),
-                None => anyhow::bail!("daemon-stopped"),
-            }
+        let Some(shared) = shared_of(handle) else {
+            anyhow::bail!("daemon-stopped");
         };
         let (summary, body) = handle
             .rt
@@ -687,7 +786,13 @@ pub unsafe extern "C" fn tc_preview_open(
         // `char*` would make preview disagree with what actually gets
         // sent (see the module doc). Fail instead.
         let body = CString::new(body).map_err(|_| anyhow::anyhow!("body-contains-nul"))?;
-        let summary_json = serde_json::to_string(&summary)?;
+        // Mapped to a fixed label rather than propagated via `?`, unlike
+        // the code before this fix round: `guard_forwarding` forwards
+        // whatever `Display` text reaches `guard_with`, and an unmapped
+        // `serde_json::Error` here would not have been one of this
+        // function's audited fixed labels.
+        let summary_json = serde_json::to_string(&summary)
+            .map_err(|_| anyhow::anyhow!("summary-serialize-failed"))?;
         let summary_json =
             CString::new(summary_json).map_err(|_| anyhow::anyhow!("summary-contains-nul"))?;
         Ok(tc_preview { body, summary_json })
