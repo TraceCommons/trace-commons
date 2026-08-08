@@ -225,7 +225,15 @@ pub struct DaemonShared {
 
 impl DaemonShared {
     pub fn load(store: ConfigStore) -> Result<Self> {
-        let queue = Queue::load(&store)?;
+        let mut queue = Queue::load(&store)?;
+        // `Uploading` is a transient, in-pass claim. A daemon that died
+        // mid-upload leaves entries in it, and nothing else would ever move
+        // them out: never uploaded, never offered again. Re-sending is safe
+        // -- the receipts file dedups by session hash, so a session that
+        // did reach the server comes back `AlreadySubmitted`.
+        if queue.release_in_flight() {
+            queue.save(&store)?;
+        }
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
@@ -494,10 +502,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
                 }
             };
+            // The scopes in force right now are part of what is being
+            // approved, and are recorded on the entry so the uploader can
+            // refuse if they move before it sends. An approval with no
+            // readable config records no scopes, which the uploader treats
+            // as "unknown, re-ask" -- fail-closed.
+            let scopes = shared
+                .store
+                .load_config()
+                .ok()
+                .flatten()
+                .map(|c| c.consent_scopes)
+                .unwrap_or_default();
             let mut approved = 0;
             for id in ids {
-                if queue.get(id).map(|e| e.state) == Some(QueueState::Pending) {
-                    queue.set_state(id, QueueState::Approved, None);
+                if queue.approve(id, &scopes) {
                     approved += 1;
                 }
             }
@@ -1218,6 +1237,7 @@ mod tests {
                         attempts: 0,
                         retry_after: None,
                         submission_id: None,
+                        approved_scopes: None,
                     },
                     500,
                 )
@@ -1312,6 +1332,7 @@ mod tests {
                         attempts: 0,
                         retry_after: None,
                         submission_id: None,
+                        approved_scopes: None,
                     },
                     500,
                 )
@@ -1428,6 +1449,7 @@ mod tests {
             attempts: 0,
             retry_after: None,
             submission_id: None,
+            approved_scopes: None,
         };
         let body = serde_json::to_string(&entry_value(&e)).unwrap();
         assert!(
@@ -1473,6 +1495,7 @@ mod tests {
                     attempts: 0,
                     retry_after: None,
                     submission_id: None,
+                    approved_scopes: None,
                 },
                 500,
             )

@@ -125,6 +125,7 @@ mod tests {
             attempts: 0,
             retry_after: None,
             submission_id: None,
+            approved_scopes: None,
         }
     }
 

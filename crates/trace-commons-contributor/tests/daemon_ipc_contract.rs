@@ -335,6 +335,7 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
                 attempts: 0,
                 retry_after: None,
                 submission_id: None,
+                approved_scopes: None,
             },
             100,
         )

@@ -68,6 +68,23 @@ pub struct QueueEntry {
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
     pub submission_id: Option<Uuid>,
+    /// The consent scopes in force at the moment this entry was approved.
+    ///
+    /// Consent scopes live in the contributor config and can be rewritten
+    /// at any time (`set_consent_scopes`), with nothing coupling that
+    /// rewrite to entries already approved. Without this field, a preview
+    /// could show one scope set, the contributor approve on the strength of
+    /// it, someone widen the scopes, and the very same trace upload under
+    /// the wider set. The uploader refuses in that case and returns the
+    /// entry to `Pending`, exactly as the re-hash guard does when the
+    /// *content* moves after approval -- an approval covers a description,
+    /// and the scopes are part of that description.
+    ///
+    /// `None` on entries written before this field existed, and on entries
+    /// that have not been approved yet. `None` on an approved entry is
+    /// treated as "unknown, so re-ask": fail-closed.
+    #[serde(default)]
+    pub approved_scopes: Option<Vec<String>>,
 }
 
 /// A stable id for a queue entry, derived from the session hash so the same
@@ -166,6 +183,81 @@ impl Queue {
         }
     }
 
+    /// Move an entry from `Pending` to `Approved`, recording the consent
+    /// scopes it was approved under. Returns whether anything changed.
+    ///
+    /// This is the only way an entry becomes `Approved`, so an approved
+    /// entry always carries the scopes its approval was given under -- see
+    /// `QueueEntry::approved_scopes`.
+    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String]) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending {
+            return false;
+        }
+        e.state = QueueState::Approved;
+        e.reason_label = None;
+        e.approved_scopes = Some(scopes.to_vec());
+        true
+    }
+
+    /// Claim an approved entry for upload, atomically, under the caller's
+    /// existing lock. Returns false when the entry is no longer `Approved`
+    /// -- because a `cancel` landed after the caller snapshotted the
+    /// approved set, which is precisely the race `cancel` exists to win.
+    ///
+    /// Nothing set `Uploading` in production before this: `drain_approved`
+    /// snapshotted the approved set and left every entry `Approved` for the
+    /// whole upload, so a mid-pass `cancel` returned `ok: true`, set
+    /// `Pending`, and then watched the upload it had just "cancelled"
+    /// proceed from the snapshot and overwrite `Pending` with `Uploaded`.
+    /// The contributor was told an upload was cancelled after it had been
+    /// sent.
+    pub fn claim_for_upload(&mut self, entry_id: Uuid) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Approved {
+            return false;
+        }
+        e.state = QueueState::Uploading;
+        true
+    }
+
+    /// Return every entry still claimed for upload to `Approved`.
+    ///
+    /// `Uploading` is a transient, in-pass state that only `claim_for_upload`
+    /// sets and only a terminal outcome clears. An upload pass that breaks
+    /// early -- a daily cap, a fail-closed precondition -- or a daemon that
+    /// dies mid-pass would otherwise strand entries in a state nothing ever
+    /// moves them out of: never uploaded, never offered again. Called at the
+    /// end of every pass and again at `DaemonShared::load`, so a crash
+    /// recovers on the next start. Returns whether anything changed.
+    pub fn release_in_flight(&mut self) -> bool {
+        let mut changed = false;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Uploading {
+                e.state = QueueState::Approved;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Revoke an approval and put the entry back in front of the
+    /// contributor, because the terms it was approved under no longer hold.
+    /// Returns whether anything changed.
+    pub fn revoke_approval(&mut self, entry_id: Uuid, reason_label: &str) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        e.state = QueueState::Pending;
+        e.reason_label = Some(reason_label.to_string());
+        e.approved_scopes = None;
+        true
+    }
+
     /// Update an entry's display label in place, e.g. when a newly-seen
     /// project causes a previously-unique basename to start colliding.
     /// `Queue::upsert` never rewrites an existing entry, so this is the only
@@ -223,6 +315,9 @@ impl Queue {
             attempts: 0,
             retry_after: None,
             submission_id: None,
+            // Provenance carries over; approval, and the scopes it was
+            // given under, do not.
+            approved_scopes: None,
             ..old
         })
     }
@@ -240,6 +335,7 @@ impl Queue {
         }
         e.state = QueueState::Pending;
         e.reason_label = None;
+        e.approved_scopes = None;
         Ok(())
     }
 
@@ -288,6 +384,7 @@ mod tests {
             attempts: 0,
             retry_after: None,
             submission_id: None,
+            approved_scopes: None,
         }
     }
 

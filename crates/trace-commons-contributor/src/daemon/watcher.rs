@@ -157,6 +157,18 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
             };
 
+            // The scopes an auto-approval is given under, recorded on the
+            // entry so the uploader can refuse if they move before it
+            // sends. See `QueueEntry::approved_scopes`.
+            let consent_scopes = shared
+                .store
+                .load_config()
+                .ok()
+                .flatten()
+                .map(|c| c.consent_scopes)
+                .unwrap_or_default();
+            let armed = mode == ProjectMode::AutoUpload;
+
             let entry = QueueEntry {
                 entry_id: entry_id_for(&transcript.session_hash),
                 session_hash: transcript.session_hash.clone(),
@@ -166,7 +178,7 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 path: obs.path.clone(),
                 size_bytes: obs.size_bytes,
                 discovered_at: now,
-                state: if mode == ProjectMode::AutoUpload {
+                state: if armed {
                     // Opted in, so it needs no decision; the uploader picks it
                     // up on its next pass.
                     QueueState::Approved
@@ -177,14 +189,16 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 attempts: 0,
                 retry_after: None,
                 submission_id: None,
+                approved_scopes: armed.then(|| consent_scopes.clone()),
             };
+            let entry_id = entry.entry_id;
 
             let mut queue = shared.queue.lock().expect("queue lock");
-            let already = queue.get(entry.entry_id).is_some();
+            let already = queue.get(entry_id).is_some();
             match queue.upsert(entry, max_queue_entries) {
                 Ok(()) if !already => {
                     changed = true;
-                    if mode == ProjectMode::AutoUpload {
+                    if armed {
                         report.auto_ready += 1;
                     } else {
                         report.queued += 1;
@@ -194,9 +208,27 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                     health.resolve(health::LABEL_QUEUE_FULL);
                 }
                 Ok(()) => {
-                    // Dedup path: re-observing an already-queued session. Queue::upsert
-                    // returns Ok(()) here BEFORE checking capacity, so this does not
-                    // prove space is available. Do not retract queue-full.
+                    // Dedup path: re-observing an already-queued session.
+                    // `Queue::upsert` deliberately never rewrites an
+                    // existing entry, which used to mean a standing opt-in
+                    // simply stopped applying to an entry that had been put
+                    // back to `Pending` since it was created -- by
+                    // `supersede`, or by the consent-scope guard. The entry
+                    // sat `Pending` until it aged out, in a project the
+                    // contributor had explicitly armed. Re-apply the
+                    // standing decision here, which is the one place that
+                    // knows both the entry and the mode in force.
+                    //
+                    // `Queue::approve` only moves `Pending`, so this can
+                    // never resurrect a dismissed-and-refused, expired, or
+                    // already-uploaded entry.
+                    if armed && queue.approve(entry_id, &consent_scopes) {
+                        changed = true;
+                        report.auto_ready += 1;
+                    }
+                    // Queue::upsert returns Ok(()) here BEFORE checking capacity,
+                    // so this does not prove space is available. Do not retract
+                    // queue-full.
                 }
                 Err(_) => {
                     let mut health = shared.health.lock().expect("health lock");

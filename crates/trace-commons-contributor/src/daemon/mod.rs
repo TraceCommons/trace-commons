@@ -257,6 +257,15 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
 async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) -> Result<()> {
+    // Pause used to be checked only inside `watcher::tick`, so a pause
+    // stopped *discovery* and nothing else: everything already `Approved`
+    // -- including everything an armed project had auto-approved before the
+    // pause -- kept uploading while `status` said paused. Pause has to mean
+    // "nothing leaves this machine", or it means nothing.
+    if shared.is_paused(now) {
+        return Ok(());
+    }
+
     let approved: Vec<queue::QueueEntry> = {
         let q = shared.queue.lock().expect("queue lock");
         q.all()
@@ -314,8 +323,44 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
 
     let sources = crate::source::all_sources(claude_root, codex_root, None);
     let mut changed = false;
+    // A fail-closed precondition (`SubmitPreconditionFailure`) aborts the
+    // pass. It is held here rather than propagated with `?` so the pass's
+    // own mutations -- the entries already resolved, the health label the
+    // uploader just set -- are still persisted before it surfaces. The old
+    // `?` threw all of that away, including the very label that suspends
+    // expiry.
+    let mut aborted: Option<anyhow::Error> = None;
 
     for entry in approved {
+        // Claim the entry, atomically, before anything is read or sent. A
+        // `cancel` that landed between the snapshot above and here wins and
+        // the entry is skipped; from this point `cancel` is refused,
+        // because the upload really is in flight. See
+        // `Queue::claim_for_upload`.
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let Some(current) = q.get(entry.entry_id).cloned() else {
+                continue;
+            };
+            if current.state != queue::QueueState::Approved {
+                continue;
+            }
+            // The approval covers the scopes that were in force when it was
+            // given. `set_consent_scopes` can widen them at any moment with
+            // nothing coupling it to already-approved entries, so an entry
+            // whose scopes have moved is put back in front of the
+            // contributor rather than sent under terms they never saw --
+            // the same rule the re-hash guard applies to content.
+            if current.approved_scopes.as_deref() != Some(cfg.consent_scopes.as_slice()) {
+                q.revoke_approval(entry.entry_id, "consent-scopes-changed-after-approval");
+                changed = true;
+                continue;
+            }
+            if !q.claim_for_upload(entry.entry_id) {
+                continue;
+            }
+        }
+
         // Re-resolve the session through its own adapter, so the uploader can
         // re-read and re-hash the file before sending anything.
         // `find_session` re-scans every source (`source.discover()`), the
@@ -332,7 +377,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             continue;
         };
 
-        let decision = {
+        let result = {
             let mut state = shared.state.lock().expect("state lock").clone();
             let settings = shared.settings.lock().expect("settings lock").clone();
             let mut health = shared.health.lock().expect("health lock").clone();
@@ -343,10 +388,21 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 state: &mut state,
                 health: &mut health,
             };
-            let decision = up.upload_entry(source, &session_ref, &entry, now).await?;
+            let result = up.upload_entry(source, &session_ref, &entry, now).await;
+            // Copied back on the failure path too: the uploader sets the
+            // fail-closed health label (canary, notice, identity) right
+            // before it returns `Err`, and that label is what suspends
+            // queue expiry.
             *shared.state.lock().expect("state lock") = state;
             *shared.health.lock().expect("health lock") = health;
-            decision
+            result
+        };
+        let decision = match result {
+            Ok(d) => d,
+            Err(e) => {
+                aborted = Some(e);
+                break;
+            }
         };
 
         let mut q = shared.queue.lock().expect("queue lock");
@@ -390,6 +446,17 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         changed = true;
     }
 
+    // Nothing may be left claimed. Every entry that reached a decision above
+    // already has a terminal state; anything still `Uploading` is one this
+    // pass broke out on (a daily cap, a fail-closed precondition), and
+    // `Uploading` is a state nothing else would ever move it out of.
+    {
+        let mut q = shared.queue.lock().expect("queue lock");
+        if q.release_in_flight() {
+            changed = true;
+        }
+    }
+
     if changed {
         let q = shared.queue.lock().expect("queue lock");
         q.save(&shared.store)?;
@@ -398,6 +465,9 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         state.save(&shared.store)?;
         drop(state);
         shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    if let Some(e) = aborted {
+        return Err(e);
     }
     Ok(())
 }

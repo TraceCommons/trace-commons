@@ -221,9 +221,28 @@ async fn approving_a_pending_session_uploads_it_on_the_next_pass() {
 
 #[tokio::test]
 async fn a_paused_daemon_uploads_nothing_even_for_an_opted_in_project() {
+    // Pausing *before* anything is queued only proves discovery stops --
+    // the old version of this test asserted `queue.all().is_empty()`, which
+    // gave that away, and it passed while `drain_approved` had no pause
+    // check at all and uploaded everything already approved. So: discover
+    // and auto-approve first, pause second, and assert on the upload.
     let h = Harness::new().await;
     h.opt_in("myproj");
     h.write_session("myproj", "44444444-4444-4444-4444-444444444444");
+
+    let now: chrono::DateTime<chrono::Utc> = "2030-01-01T00:00:00Z".parse().unwrap();
+    trace_commons_contributor::daemon::watcher::tick(&h.shared, now)
+        .await
+        .unwrap();
+    trace_commons_contributor::daemon::watcher::tick(&h.shared, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.states(),
+        vec![QueueState::Approved],
+        "the armed project must have auto-approved before the pause"
+    );
+
     // A real `pause` call sets both together; `DaemonShared::is_paused`
     // trusts `state.paused` once it holds the state lock, so the harness
     // must keep both in sync too.
@@ -232,10 +251,17 @@ async fn a_paused_daemon_uploads_nothing_even_for_an_opted_in_project() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     h.shared.state.lock().unwrap().paused = true;
 
-    h.run_cycle().await;
+    trace_commons_contributor::daemon::drain_approved_for_test(&h.shared, now)
+        .await
+        .unwrap();
 
-    assert_eq!(h.received.lock().unwrap().len(), 0);
-    assert!(h.shared.queue.lock().unwrap().all().is_empty());
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "a pause must stop uploads that were already approved, not only \
+         stop discovering new ones"
+    );
+    assert_eq!(h.states(), vec![QueueState::Approved]);
 }
 
 #[tokio::test]

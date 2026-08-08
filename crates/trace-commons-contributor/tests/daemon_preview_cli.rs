@@ -95,6 +95,7 @@ fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
                 attempts: 0,
                 retry_after: None,
                 submission_id: None,
+                approved_scopes: None,
             },
             100,
         )

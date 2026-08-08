@@ -35,6 +35,39 @@ use crate::source::{SessionRef, TraceSource};
 /// per-session flow instead of re-uploading.
 pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
 
+/// A fail-closed precondition that aborts the whole submit pass rather than
+/// producing an outcome for one session.
+///
+/// `submit_one` returns `Ok(SubmitOutcome::…)` for everything that is a
+/// decision *about a session* and `Err` only for these -- a privacy-filter
+/// canary that did not catch its planted secret, a NEAR AI first-use notice
+/// that could not be recorded, a missing device identity. It carries a
+/// fixed label rather than free text so the daemon's health surface can
+/// name the condition without parsing an error string: before this existed,
+/// a canary failure propagated as an opaque `anyhow::Error`, the daemon
+/// logged a warning and continued, `LABEL_CANARY_FAILED` was never set by
+/// any production code path, and `expire` therefore ran the fourteen-day
+/// clock straight through a filter outage -- discarding pending traces as
+/// "expired-without-decision" when nobody had declined them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubmitPreconditionFailure(pub &'static str);
+
+/// The canary planted a known secret and the configured filter did not
+/// remove it. Nothing may be sent through that filter.
+pub const PRECONDITION_CANARY_FAILED: &str = "privacy-filter-canary-failed";
+/// The NEAR AI first-use notice could not be recorded as shown.
+pub const PRECONDITION_NEAR_AI_NOTICE_UNRECORDED: &str = "near-ai-notice-not-acknowledged";
+/// No usable device identity, so nothing can be signed.
+pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
+
+impl std::fmt::Display for SubmitPreconditionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SubmitPreconditionFailure {}
+
 #[derive(Debug)]
 pub enum SubmitOutcome {
     Submitted {
@@ -328,7 +361,7 @@ impl<'a> SubmitContext<'a> {
         if !self.canary_checked {
             canary_self_test_async(&redactor)
                 .await
-                .context("privacy-filter-canary-failed")?;
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
             self.canary_checked = true;
             self.canary_runs += 1;
         }
@@ -358,7 +391,7 @@ impl<'a> SubmitContext<'a> {
         {
             self.store
                 .ensure_near_ai_notice_shown()
-                .context("recording NEAR AI first-use notice")?;
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED))?;
             self.near_ai_notice_recorded = true;
         }
 
@@ -405,7 +438,7 @@ impl<'a> SubmitContext<'a> {
             let device = self
                 .device
                 .as_ref()
-                .context("device identity unavailable outside unenrolled preview")?;
+                .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
             match mint_claim(&self.issuer, self.cfg, device, now).await {
                 Ok(token) => self.claim = Some(token),
                 Err(e) => {
@@ -444,7 +477,7 @@ impl<'a> SubmitContext<'a> {
         let device = self
             .device
             .as_ref()
-            .context("device identity unavailable outside unenrolled preview")?;
+            .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         match upload_with_retry(
             self.cfg,
             &self.issuer,

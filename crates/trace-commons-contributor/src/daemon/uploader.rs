@@ -20,15 +20,19 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::health::{
-    HealthState, LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED, LABEL_INGEST_UNREACHABLE,
-    LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
+    HealthState, LABEL_CANARY_FAILED, LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED,
+    LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN,
+    LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
 use super::state::DaemonState;
 use crate::config::ConfigStore;
 use crate::source::{SessionRef, TraceSource};
-use crate::submit::{SubmitContext, SubmitOutcome};
+use crate::submit::{
+    PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
+    SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UploadDecision {
@@ -99,6 +103,23 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             _ => Some(LABEL_INGEST_UNREACHABLE),
         },
         _ => None,
+    }
+}
+
+/// The health label for a fail-closed precondition that aborted a submit
+/// pass.
+///
+/// Reads the typed `SubmitPreconditionFailure` rather than matching on
+/// error text. An error that is not one of those cannot currently arise
+/// from `submit_one`, but if one ever does it must still block expiry
+/// rather than silently letting the clock run, so the fallback is the
+/// most conservative blocking label rather than `None`.
+pub fn precondition_health_label(e: &anyhow::Error) -> &'static str {
+    match e.downcast_ref::<SubmitPreconditionFailure>().map(|f| f.0) {
+        Some(PRECONDITION_CANARY_FAILED) => LABEL_CANARY_FAILED,
+        Some(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED) => LABEL_NEAR_AI_NOTICE_PENDING,
+        Some(PRECONDITION_NOT_LOGGED_IN) => LABEL_NOT_LOGGED_IN,
+        _ => LABEL_PII_FILTER_UNAVAILABLE,
     }
 }
 
@@ -183,7 +204,24 @@ impl Uploader<'_, '_> {
             });
         }
 
-        let outcome = self.ctx.submit_one(source, session_ref).await?;
+        // `submit_one` returns `Err` only for a fail-closed precondition
+        // (`SubmitPreconditionFailure`) -- a privacy-filter canary that did
+        // not catch its planted secret, an unrecordable NEAR AI notice, a
+        // missing device identity. Each of those stops the whole pass, and
+        // each must set its health label *before* the error propagates:
+        // `LABEL_CANARY_FAILED` is in `EXPIRY_BLOCKING_LABELS` but was
+        // never set by any production path, so during a filter outage the
+        // daemon reported healthy, `blocks_expiry()` was false, and
+        // `queue.expire` discarded pending traces as
+        // expired-without-decision -- exactly what expiry suspension exists
+        // to prevent.
+        let outcome = match self.ctx.submit_one(source, session_ref).await {
+            Ok(o) => o,
+            Err(e) => {
+                self.health.fail(precondition_health_label(&e), now);
+                return Err(e);
+            }
+        };
         let decision = decision_for(outcome);
 
         match &decision {
@@ -342,6 +380,7 @@ mod tests {
                 attempts: 0,
                 retry_after: None,
                 submission_id: None,
+                approved_scopes: None,
             }
         }
     }
