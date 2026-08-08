@@ -166,6 +166,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
 use trace_commons_server::trace_gate_service::{
@@ -6704,6 +6705,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/v1/account/traces/{submission_id}/content",
             get(account_trace_content_handler),
+        )
+        .route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post(account_trace_withdraw_handler),
         )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
@@ -14195,6 +14200,335 @@ async fn account_trace_content_handler(
         HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// Label recorded on the withdrawal tombstone and returned to the client:
+/// the trace was never in the commons.
+const TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED: &str = "not_distributed";
+/// In the commons, but never published in an export or benchmark.
+const TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED: &str = "commons_not_distributed";
+/// In the commons AND already published. Copies cannot be recalled.
+const TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED: &str = "commons_distributed";
+
+/// Revocation reason recorded for a contributor-initiated withdrawal. Distinct
+/// from `contributor_revocation` so the audit trail separates "I revoked this
+/// submission" from "I withdrew my trace from the commons".
+const TRACE_WITHDRAWAL_REASON: &str = "contributor_withdrawal";
+
+/// Response body for `POST /v1/account/traces/{submission_id}/withdraw`.
+///
+/// The tier is reported explicitly so the client can tell the contributor the
+/// truth rather than a generic success. Nothing here is derived from the
+/// request body; every field comes from auth-derived tenant state.
+#[derive(Debug, Serialize)]
+struct AccountTraceWithdrawalResponse {
+    submission_id: Uuid,
+    withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status held immediately before withdrawal.
+    prior_status: String,
+    /// One of `not_distributed`, `commons_not_distributed`,
+    /// `commons_distributed`.
+    distribution_reach: String,
+    /// True only for `commons_distributed`. When true the content is deleted
+    /// and the trace is excluded going forward, but copies already distributed
+    /// cannot be recalled — and the API says so rather than implying otherwise.
+    already_distributed: bool,
+    /// Always true. Withdrawal is not a punishment: credit already awarded
+    /// stays awarded.
+    credit_retained: bool,
+}
+
+impl AccountTraceWithdrawalResponse {
+    fn from_record(record: StorageTraceWithdrawalRecord) -> Self {
+        let already_distributed =
+            record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
+        Self {
+            submission_id: record.submission_id,
+            withdrawn_at: record.withdrawn_at,
+            prior_status: record.prior_status,
+            distribution_reach: record.distribution_reach,
+            already_distributed,
+            credit_retained: true,
+        }
+    }
+}
+
+/// Wire label for a storage corpus status. Used for the tombstone's
+/// `prior_status`; deliberately independent of the local `TraceCorpusStatus`
+/// projection, which DROPS `received` and would make those traces
+/// un-withdrawable.
+fn storage_corpus_status_label(status: StorageTraceCorpusStatus) -> &'static str {
+    match status {
+        StorageTraceCorpusStatus::Received => "received",
+        StorageTraceCorpusStatus::Accepted => "accepted",
+        StorageTraceCorpusStatus::Quarantined => "quarantined",
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => "awaiting_pii_backstop",
+        StorageTraceCorpusStatus::Rejected => "rejected",
+        StorageTraceCorpusStatus::Revoked => "revoked",
+        StorageTraceCorpusStatus::Expired => "expired",
+        StorageTraceCorpusStatus::Purged => "purged",
+    }
+}
+
+/// Map a stored object-ref artifact kind onto the artifact-store kind carried
+/// on a receipt. Deletion keys on the object key, but the receipt is typed and
+/// the mapping is written out rather than guessed at the call site.
+fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> TraceArtifactKind {
+    match kind {
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+        | StorageTraceObjectArtifactKind::RescrubbedEnvelope => {
+            TraceArtifactKind::ContributionEnvelope
+        }
+        StorageTraceObjectArtifactKind::BenchmarkArtifact => TraceArtifactKind::BenchmarkConversion,
+        StorageTraceObjectArtifactKind::ExportArtifact => TraceArtifactKind::ReplayDatasetExport,
+        StorageTraceObjectArtifactKind::ReviewSnapshot
+        | StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::Other,
+    }
+}
+
+/// Delete every trace object this submission owns: the stored envelope and the
+/// encrypted artifact.
+///
+/// Three sources are swept, because no single one is complete:
+///
+/// 1. the file-side submission record, which is the ONLY place the encrypted
+///    artifact receipt survives (the DB projection drops it);
+/// 2. the `trace_object_refs` rows, so a submission with no file-side record
+///    still gets its encrypted artifact deleted;
+/// 3. every status-derived envelope path, because the object key encodes the
+///    corpus status and a transition may have left bytes at an earlier path.
+///
+/// Errors propagate: withdrawal must not report success while content survives.
+async fn delete_withdrawn_trace_objects(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
+        delete_trace_objects_for_record(state, &record)?;
+    }
+
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    for object_ref in db.list_trace_object_refs(tenant_id, submission_id).await? {
+        if object_ref.deleted_at.is_some() {
+            continue;
+        }
+        if object_ref.object_store == TRACE_COMMONS_FILE_OBJECT_STORE {
+            remove_file_if_exists(&state.root.join(&object_ref.object_key))?;
+        } else if let Some(store) = state.artifact_store.as_ref()
+            && object_ref.object_store == store.object_store_name()
+        {
+            let receipt = EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_ref.clone(),
+                artifact_kind: trace_artifact_kind_from_storage(object_ref.artifact_kind),
+                object_key: object_ref.object_key.clone(),
+                ciphertext_sha256: object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&object_ref.content_sha256)
+                    .to_string(),
+                encrypted_at: Utc::now(),
+            };
+            store.delete_artifact(&tenant_ref, &receipt)?;
+        }
+        db.mark_trace_object_ref_deleted(
+            tenant_id,
+            submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await?;
+    }
+
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
+    }
+    Ok(())
+}
+
+/// Evict a withdrawn trace from every derived surface that would otherwise
+/// keep its content alive in derived form: the vector index (both the DB rows
+/// and the gate service's in-memory ANN index), the dedup clusters, and future
+/// export / benchmark membership.
+async fn evict_withdrawn_trace_from_derived_surfaces(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let vector_entry_ids = db
+        .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
+    // Canonical tenant_storage_ref: it must match the form the gate worker
+    // used at insertion time, or a sharded index routes the delete to the
+    // wrong shard and the embedding survives.
+    let gate_tenant = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    for vector_entry_id in vector_entry_ids {
+        state
+            .gate_service
+            .invalidate_vector_entry(&gate_tenant, vector_entry_id)
+            .context("VectorInvalidationFailed")?;
+    }
+
+    db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
+        .await?;
+
+    db.invalidate_trace_submission_artifacts(
+        tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Revoked,
+    )
+    .await?;
+    db.invalidate_trace_export_manifests_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_export_manifest_items_for_submission(
+        tenant_id,
+        submission_id,
+        StorageTraceExportManifestItemInvalidationReason::Revoked,
+    )
+    .await?;
+    Ok(())
+}
+
+/// `POST /v1/account/traces/{submission_id}/withdraw` — contributor-initiated
+/// withdrawal, authenticated by the ACCOUNT SESSION (the same auth that guards
+/// the content read-back), not the device key: withdrawal is an account-level
+/// act and must survive losing a device.
+///
+/// Contract:
+///
+/// * Tenant-scoped through the auth-derived `AccountCtx`; ownership is checked
+///   against the account's active principal set BEFORE anything is touched.
+///   Not-found and not-owned collapse to the byte-identical `404` the detail
+///   and content handlers use — another tenant's submission id must not be
+///   distinguishable from one that never existed.
+/// * Idempotent. The tombstone is first-writer-wins, so withdrawing twice
+///   returns the same tier and the same `withdrawn_at`. Deletion and eviction
+///   are re-run on every call, so a partial failure converges on retry rather
+///   than leaving content behind under a tombstone that says it is gone.
+/// * Credit is NOT clawed back.
+/// * Fail-closed: any deletion or eviction failure is a generic label-only
+///   `500`. The withdrawal is not reported as complete while content or a
+///   derived copy may survive.
+async fn account_trace_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    // Ownership BEFORE any state change. The storage record is used directly
+    // rather than the local corpus-status projection, which drops `received`
+    // and would leave those traces permanently un-withdrawable.
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        _ => return Err(not_found()),
+    };
+
+    let withdrawal_failed = |error: &anyhow::Error| {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            %submission_id,
+            "Trace Commons trace withdrawal failed; failing closed"
+        );
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+    };
+
+    // Tier. An existing tombstone is authoritative: the reach recorded at the
+    // first withdrawal is the honest answer, and recomputing it against
+    // mutated export state could silently downgrade it.
+    let existing = db
+        .get_trace_withdrawal(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (prior_status, distribution_reach) = match existing.as_ref() {
+        Some(existing) => (
+            existing.prior_status.clone(),
+            existing.distribution_reach.clone(),
+        ),
+        None => {
+            let reach = if record.status != StorageTraceCorpusStatus::Accepted {
+                TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED
+            } else {
+                let memberships = db
+                    .count_trace_export_memberships(&ctx.tenant_id, submission_id)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+                if memberships > 0 {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED
+                } else {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED
+                }
+            };
+            (
+                storage_corpus_status_label(record.status).to_string(),
+                reach.to_string(),
+            )
+        }
+    };
+
+    // Tombstone + status FIRST, bytes second: a crash between the two leaves a
+    // tombstone whose retry deletes the content, never content with no record
+    // that it was withdrawn.
+    let tombstone = db
+        .record_trace_withdrawal(
+            &ctx.tenant_id,
+            submission_id,
+            Utc::now(),
+            &prior_status,
+            &distribution_reach,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+
+    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+
+    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
+    // account-actor ref, never contributor identity.
+    let audit_tenant = account_audit_tenant(&ctx);
+    let audit_event =
+        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
+    if let Err(error) = append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &audit_tenant,
+        audit_event,
+        StorageTraceAuditAction::Revoke,
+        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+    )
+    .await
+    {
+        // The content is already gone and the tombstone is durable; a failed
+        // audit append must not resurrect either. Log hash-only and continue.
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(&error),
+            %submission_id,
+            "Trace Commons withdrawal audit append failed"
+        );
+    }
+
+    Ok(Json(AccountTraceWithdrawalResponse::from_record(tombstone)))
 }
 
 /// Mint a single-use login link for the authenticated device's principal.
