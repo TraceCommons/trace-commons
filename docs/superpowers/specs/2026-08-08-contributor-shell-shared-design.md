@@ -207,11 +207,27 @@ The menu lists what is waiting, per project, with sizes. Those lines are
 armed project exists, a week summary, pause, open window, settings, quit.
 
 Quit is explicit about consequences, because users must not have to guess
-whether closing the window stops contributing:
+whether closing the window stops contributing. **The correct wording depends
+on the platform's process model, and getting it wrong is a lie about whether
+the machine is still watching:**
 
-> The background watcher keeps running and will keep queuing sessions.
-> Nothing will be sent while nobody's approving.
-> [ Quit ]  [ Quit and stop watching ]
+- Where the application HOSTS the daemon in-process (macOS, Windows), quitting
+  the app stops the watcher, because the app *is* it. Say that:
+
+  > Quitting stops Trace Commons watching for finished sessions. Nothing is
+  > queued or sent until you open it again. Anything already waiting stays
+  > waiting.
+  > [ Cancel ]  [ Quit ]
+
+- Where a separate daemon runs under a service manager (Linux with the systemd
+  unit), quitting the window leaves it running. Say that instead:
+
+  > The background watcher keeps running and will keep queuing sessions.
+  > Nothing will be sent while nobody's approving.
+  > [ Quit ]  [ Quit and stop watching ]
+
+An earlier draft of this spec gave only the second wording, which is false on
+the platform the first application was built for.
 
 Pause offers `For 1 hour` / `Until tomorrow morning` / `Until I turn it back
 on`, backed by `pause {until}` so a timed pause survives the app quitting.
@@ -255,12 +271,17 @@ author; a timestamp is not. Then:
 > Would send 84 KB  ·  scrubbed: 12 secrets, 4 tokens, 31 paths
 > Scrubbing is pattern-based. It misses things it hasn't seen before.
 >
-> [ Look inside ]        [ Not this one ]   [ Contribute ]
+> [ Look inside ]                        [ Not this one ]
 
 `Would send` is the **redacted** size from v1.1 preview. The redaction receipt
 proves scrubbing ran and calibrates: `scrubbed: 0` on a session that obviously
 touched a `.env` is a signal the user can act on. The residual-risk line is
 always shown and never hidden.
+
+The row has **no** `Contribute` button. An earlier draft of this spec put one
+there, which contradicts the preview-then-approve rule stated below: approving
+from the row is approving without looking, which is the misclick the rule
+exists to prevent. `Contribute` lives in the preview sheet and nowhere else.
 
 "Not this one" rather than "Dismiss", because dismiss and ignore are different
 decisions and the words must be too. Its tooltip: *"Skips this session only.
