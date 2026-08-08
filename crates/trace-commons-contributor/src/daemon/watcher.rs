@@ -206,36 +206,20 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
     Ok(report)
 }
 
-/// Recompute every queue entry's `project_label` against the final,
-/// end-of-tick known-key set and rewrite any that changed.
+/// End-of-tick pass: recompute every queue entry's `project_label` against
+/// the tick's final known-key set and rewrite any that changed.
 ///
 /// `Queue::upsert` deliberately never touches an existing entry, so without
 /// this pass an entry queued while its basename was still unique would keep
 /// a bare label forever, even after a colliding project shows up in a later
-/// tick or gets configured in policy. Returns whether anything changed, so
-/// the caller knows to persist and publish.
+/// tick. The actual relabeling logic lives in `ipc::relabel_queue_entries`,
+/// which `set_project_mode` also calls (immediately after a policy edit,
+/// rather than waiting for the next poll) -- this wrapper only owns taking
+/// the locks tick() needs anyway.
 fn relabel_queue(shared: &DaemonShared) -> bool {
-    let mut policy_and_queue = (
-        shared.policy.lock().expect("policy lock"),
-        shared.queue.lock().expect("queue lock"),
-    );
-    let (policy, queue) = (&mut policy_and_queue.0, &mut policy_and_queue.1);
-    let known = known_keys(policy, queue.all().iter().map(|e| e.project_key.clone()));
-
-    let updates: Vec<(uuid::Uuid, String)> = queue
-        .all()
-        .iter()
-        .filter_map(|e| {
-            let fresh = disambiguated_label(&e.project_key, &known);
-            (fresh != e.project_label).then_some((e.entry_id, fresh))
-        })
-        .collect();
-
-    let changed = !updates.is_empty();
-    for (entry_id, label) in updates {
-        queue.set_project_label(entry_id, label);
-    }
-    changed
+    let policy = shared.policy.lock().expect("policy lock");
+    let mut queue = shared.queue.lock().expect("queue lock");
+    super::ipc::relabel_queue_entries(&policy, &mut queue)
 }
 
 /// The session's working directory, from cache when the file has not changed.

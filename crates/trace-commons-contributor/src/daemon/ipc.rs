@@ -259,6 +259,36 @@ impl DaemonShared {
     }
 }
 
+/// Recompute every queue entry's `project_label` against the current
+/// known-key set (every configured project plus every project already in
+/// the queue) and rewrite any that changed. Returns whether anything
+/// changed, so the caller knows whether to persist and publish.
+///
+/// This is the single implementation of "what does a project collide
+/// with, and should this entry's label change" -- both `watcher::tick`
+/// (after every poll) and `set_project_mode` (immediately after a policy
+/// edit) call it, so a queue entry's stored label can never be computed by
+/// two different pieces of logic that drift apart. It takes already-locked
+/// guards rather than locking `DaemonShared` itself, since every caller
+/// already holds (or is about to take) both locks at the point it needs
+/// this.
+pub fn relabel_queue_entries(policy: &ProjectPolicy, queue: &mut Queue) -> bool {
+    let known = known_keys(policy, queue.all().iter().map(|e| e.project_key.clone()));
+    let updates: Vec<(Uuid, String)> = queue
+        .all()
+        .iter()
+        .filter_map(|e| {
+            let fresh = disambiguated_label(&e.project_key, &known);
+            (fresh != e.project_label).then_some((e.entry_id, fresh))
+        })
+        .collect();
+    let changed = !updates.is_empty();
+    for (entry_id, label) in updates {
+        queue.set_project_label(entry_id, label);
+    }
+    changed
+}
+
 /// The wire shape of a queue entry.
 ///
 /// `path` and `project_key` are deliberately absent: both are local
@@ -352,6 +382,20 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
             }
             if let Err(_e) = policy.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+            }
+            // A newly-configured project can turn a previously-unique queue
+            // label into a collision (or vice versa) immediately -- e.g.
+            // configuring the client's "api" the moment after "api" was
+            // queued bare from the contributor's own repo. Relabel now
+            // rather than leaving the queue to lag until the next poll,
+            // which would leave two same-basename projects briefly
+            // indistinguishable in the one place uploads are approved from.
+            let mut queue = shared.queue.lock().expect("queue lock");
+            if relabel_queue_entries(&policy, &mut queue) {
+                if let Err(_e) = queue.save(&shared.store) {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+                }
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
@@ -869,6 +913,91 @@ mod tests {
         assert_eq!(
             s.policy.lock().unwrap().resolve("/tmp/p"),
             ProjectMode::AutoUpload
+        );
+    }
+
+    #[test]
+    fn set_project_mode_relabels_the_queue_immediately_with_no_intervening_tick() {
+        // Regression for the round-1 residual: a queue entry's stored label
+        // must not lag a policy edit until the next poll. Everything here
+        // goes through `handle_request` / direct queue seeding -- `tick` is
+        // never called -- so any staleness can only come from
+        // `set_project_mode` itself failing to relabel the queue.
+        let s = shared();
+
+        // "work/api" is configured and already has a queue entry, seeded
+        // directly (as if a session had been queued for it earlier while
+        // its basename was still unique).
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/Users/z/work/api", "mode": "notify_only"}),
+            ),
+            Origin::LocalTty,
+        );
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/Users/z/work/api".to_string(),
+                        project_label: "api".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+
+        // A colliding project shows up via a policy edit -- no tick runs.
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/Users/z/client/api", "mode": "ignore"}),
+            ),
+            Origin::LocalTty,
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let queue_label = {
+            let queue = s.queue.lock().unwrap();
+            queue.get(entry_id).unwrap().project_label.clone()
+        };
+
+        let list = handle_request(
+            &s,
+            &req("list_projects", serde_json::json!({})),
+            Origin::Socket,
+        );
+        let projects = list.result.unwrap()["projects"].clone();
+        let work_row = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["mode"] == serde_json::json!("notify_only"))
+            .expect("work/api row");
+        let list_label = work_row["project_label"].as_str().unwrap().to_string();
+
+        assert_eq!(
+            queue_label, list_label,
+            "queue and list_projects must agree immediately, with no tick in between"
+        );
+        assert!(
+            list_label.starts_with("api ("),
+            "expected a collision suffix, got {list_label}"
         );
     }
 
