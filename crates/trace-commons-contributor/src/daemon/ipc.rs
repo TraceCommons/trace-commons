@@ -39,7 +39,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
 use super::health::HealthState;
@@ -150,6 +150,15 @@ pub struct DaemonShared {
     pub health: Mutex<HealthState>,
     pub paused: AtomicBool,
     pub shutdown: AtomicBool,
+    /// Wakes the supervisor immediately on a shutdown request. Without it the
+    /// daemon would not notice until its next poll, which is a minute away --
+    /// long enough for a logout to give up waiting and leave it running.
+    ///
+    /// Notified with `notify_one`, which stores a permit when nobody is
+    /// waiting yet. `notify_waiters` would drop the request on the floor if it
+    /// arrived while the supervisor was mid-scan, which is exactly when a
+    /// long poll makes it most likely to arrive.
+    pub shutdown_signal: Arc<Notify>,
     pub events: broadcast::Sender<Event>,
 }
 
@@ -170,6 +179,7 @@ impl DaemonShared {
             health: Mutex::new(HealthState::default()),
             paused: AtomicBool::new(paused),
             shutdown: AtomicBool::new(false),
+            shutdown_signal: Arc::new(Notify::new()),
             events,
         })
     }
@@ -467,6 +477,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
         }
         "shutdown" => {
             shared.shutdown.store(true, Ordering::Relaxed);
+            shared.shutdown_signal.notify_one();
             Response::ok(req.id, serde_json::json!({ "stopping": true }))
         }
         // subscribe is handled by the connection loop, which owns the stream.
@@ -509,10 +520,28 @@ fn one_line_label(s: &str) -> String {
         .replace(':', "")
 }
 
+/// The kernel's limit on a unix socket path, conservatively the smallest of
+/// the common values (macOS allows 104 bytes, Linux 108).
+const MAX_SOCKET_PATH_BYTES: usize = 104;
+
 /// Bind the daemon socket, refusing unless the state directory is private.
 pub async fn bind(store: &ConfigStore) -> Result<UnixListener> {
     ensure_private_dir(store.dir())?;
     let path = store.daemon_path(DAEMON_SOCK_FILE);
+
+    // The kernel truncates rather than explains, and the resulting error names
+    // a constant most people have never heard of. Say what is actually wrong
+    // and what to do about it.
+    let len = path.as_os_str().len();
+    if len >= MAX_SOCKET_PATH_BYTES {
+        bail!(
+            "the daemon socket path is {len} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte \
+             kernel limit for unix sockets:\n  {}\nUse a shorter state directory, \
+             e.g. TRACE_COMMONS_CONTRIBUTOR_DIR=~/.config/trace-commons",
+            path.display()
+        );
+    }
+
     // A socket left behind by a crashed daemon would block binding. The
     // single-instance lock, not this file, is what prevents two daemons.
     let _ = std::fs::remove_file(&path);

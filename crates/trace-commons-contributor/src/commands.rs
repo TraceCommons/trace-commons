@@ -217,7 +217,13 @@ pub fn logout(store: &ConfigStore) -> Result<()> {
             // Never block a logout on this: the wipe below removes the device
             // key, and the daemon refuses to upload without one.
             tracing::warn!(error = %e, "could not signal the daemon");
-            println!("warning: could not signal the background daemon; state removed anyway");
+            // Say what is actually true: the credentials are gone either way,
+            // and the daemon refuses to upload without them.
+            println!(
+                "warning: the background daemon did not confirm it stopped. Local \
+                 credentials have been removed regardless, so it cannot upload \
+                 anything; it will exit on its next pass."
+            );
         }
     }
     store.wipe().context("wiping contributor state")?;
@@ -254,7 +260,9 @@ fn stop_running_daemon(store: &ConfigStore) -> Result<bool> {
     // Wait for the lock to be released, which is the daemon actually gone
     // rather than merely acknowledging.
     let lock_path = store.daemon_path(crate::config::DAEMON_LOCK_FILE);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Generous, because the daemon finishes the pass it is in before it
+    // stops, and a large session store makes that pass take a few seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
         if !lock_path.exists() {
             return Ok(true);
@@ -266,7 +274,7 @@ fn stop_running_daemon(store: &ConfigStore) -> Result<bool> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    anyhow::bail!("daemon did not exit within 5s")
+    anyhow::bail!("daemon did not exit within 15s")
 }
 
 /// Operator/dogfood tool: mint an enrollment grant with an instance private

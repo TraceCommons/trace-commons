@@ -58,6 +58,9 @@ pub struct DaemonState {
     /// than living only in a running process's memory.
     #[serde(default)]
     pub paused: bool,
+    /// When history was last refreshed from the server.
+    #[serde(default)]
+    pub last_history_poll_at: Option<DateTime<Utc>>,
 }
 
 impl Default for DaemonState {
@@ -78,6 +81,7 @@ impl DaemonState {
             uploads_today: 0,
             bytes_today: 0,
             paused: false,
+            last_history_poll_at: None,
         }
     }
 

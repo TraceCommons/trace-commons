@@ -256,3 +256,16 @@ async fn two_clients_are_served_independently() {
     assert_eq!(a.recv_json().await["id"], 100);
     assert_eq!(b.recv_json().await["id"], 200);
 }
+
+#[tokio::test]
+async fn an_over_long_socket_path_is_explained_rather_than_truncated() {
+    // The kernel's own error names a constant most people have never heard
+    // of, and does not say what to do about it.
+    let dir = tempfile::tempdir().unwrap();
+    let deep = dir.path().join("a".repeat(120));
+    let store = ConfigStore::open(deep).unwrap();
+    let err = bind(&store).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("kernel limit"), "{msg}");
+    assert!(msg.contains("TRACE_COMMONS_CONTRIBUTOR_DIR"), "{msg}");
+}

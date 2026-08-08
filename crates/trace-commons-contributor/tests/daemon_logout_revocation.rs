@@ -132,3 +132,56 @@ async fn logout_is_not_blocked_by_a_stale_socket_from_a_crashed_daemon() {
     assert!(done.is_ok(), "{done:?}");
     assert!(store.load_config().unwrap().is_none());
 }
+
+#[tokio::test]
+async fn logout_makes_a_real_running_daemon_exit() {
+    // The weaker version of this test asserted only that the shutdown flag
+    // flipped, and passed while the actual daemon kept running: the
+    // supervisor did not wake until its next poll, a minute away, so logout
+    // gave up waiting. Drive the real `run` loop and require it to return.
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("s");
+    let store = enrolled_store(&state_dir);
+    {
+        // Poll rarely, so a daemon that only notices shutdown on its next
+        // tick cannot pass this by accident.
+        // Point the watcher at empty tempdirs. Left unset it would scan the
+        // developer's real session store, which is both slow and none of a
+        // test's business.
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            poll_interval_secs: 3600,
+            claude_root: Some(dir.path().join("empty-claude")),
+            codex_root: Some(dir.path().join("empty-codex")),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+    }
+
+    let run_store = ConfigStore::open(state_dir.clone()).unwrap();
+    let daemon =
+        tokio::spawn(async move { trace_commons_contributor::daemon::run(run_store, true).await });
+
+    // Wait for it to come up.
+    for _ in 0..50 {
+        if store.daemon_path(DAEMON_SOCK_FILE).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        store.daemon_path(DAEMON_SOCK_FILE).exists(),
+        "daemon never bound"
+    );
+
+    let logout_store = ConfigStore::open(state_dir).unwrap();
+    tokio::task::spawn_blocking(move || commands::logout(&logout_store).unwrap())
+        .await
+        .unwrap();
+
+    let exited = tokio::time::timeout(Duration::from_secs(10), daemon).await;
+    assert!(
+        exited.is_ok(),
+        "the daemon must exit on logout, not merely acknowledge it"
+    );
+    exited.unwrap().unwrap().unwrap();
+}
