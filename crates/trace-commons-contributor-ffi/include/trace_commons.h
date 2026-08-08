@@ -14,12 +14,30 @@
  * the handle that owns it (`tc_handle*` or `tc_preview*`) is freed. There
  * is no other lifetime rule anywhere in this API.
  *
+ * tc_daemon_start returns a tc_handle*; tc_daemon_stop tears the running
+ * daemon down but does NOT free that pointer -- a concurrent tc_call /
+ * tc_preview_open / tc_subscribe on another thread stays valid and simply
+ * observes the daemon as stopped, rather than dereferencing freed memory.
+ * tc_handle_free is the only function that reclaims it, and -- like every
+ * free function here -- must not be called concurrently with any other
+ * call still using the same pointer, and must be called from a plain
+ * thread, never from inside a tc_subscribe callback (see its own doc for
+ * why).
+ *
  * Every function here catches Rust panics at the boundary and converts them
  * to an ordinary error; a panic never unwinds into the caller. Every
  * pointer parameter is null-checked; passing NULL produces an error, not a
  * crash. No path, token, URL, or trace content ever appears in a string
  * this library returns -- fixed labels only, the same discipline the
- * daemon's socket already applies.
+ * daemon's socket already applies. Preview content specifically fails
+ * outright, rather than being silently edited, if it cannot be represented
+ * as a NUL-terminated C string.
+ *
+ * Every free function (tc_handle_free, tc_preview_free, tc_string_free)
+ * detects a double free or a pointer of the wrong kind (e.g. a tc_handle*
+ * passed to tc_preview_free) and refuses rather than acting on it --
+ * recording a fixed label via tc_last_error and leaking the pointer, which
+ * is the only safe response once a raw pointer's type cannot be trusted.
  */
 
 #ifndef TRACE_COMMONS_H
@@ -47,8 +65,26 @@ typedef struct tc_preview tc_preview;
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
-/* Stop the daemon loop and free the handle. Safe to call with NULL. */
+/* Stop the daemon loop. Idempotent, and safe to call from any thread --
+ * including from inside a tc_subscribe callback -- and safe to call
+ * concurrently with tc_call / tc_preview_open / tc_subscribe on other
+ * threads. Does NOT free the handle; call tc_handle_free once nothing else
+ * will use it again. Safe to call with NULL.
+ */
 void        tc_daemon_stop(tc_handle*);
+
+/* Free a handle. The only function that reclaims what tc_daemon_start
+ * returned; tears the daemon down first if tc_daemon_stop was not already
+ * called. Safe to call with NULL.
+ *
+ * MUST be called from a plain thread that is not inside any tokio runtime
+ * context -- in particular, never from inside a tc_subscribe callback.
+ * handle owns its own async runtime; freeing it from one of that runtime's
+ * own worker threads is refused (leaking the handle, recorded via
+ * tc_last_error) rather than risking the crash that would otherwise
+ * follow.
+ */
+void        tc_handle_free(tc_handle*);
 
 /* Control. Same request handlers the socket serves, called in-process.
  *
@@ -59,30 +95,56 @@ void        tc_daemon_stop(tc_handle*);
 char*       tc_call(tc_handle*, const char* method, const char* params_json);
 
 /* Events. cb is invoked on a background thread with a JSON event frame
- * each time the daemon publishes one, until the daemon is stopped. The
- * `event_json` pointer passed to cb is borrowed for the duration of that
- * one call only; do not retain it. ctx is passed back unchanged.
+ * each time the daemon publishes one, until tc_unsubscribe is called with
+ * the returned token or the daemon stops. The event_json pointer passed to
+ * cb is borrowed for the duration of that one call only; do not retain it.
+ * ctx is passed back unchanged and must remain valid until tc_unsubscribe
+ * returns (or the daemon stops, whichever is first).
+ *
+ * A gap in delivery (more than 256 events published between polls) is
+ * reported to cb as a synthetic `{"event":"lagged","data":{"skipped":N}}`
+ * frame rather than silently dropped.
+ *
+ * Returns 0 on failure (NULL handle, NULL cb, or a stopped daemon) -- 0 is
+ * never a valid token. On success, returns a nonzero token for
+ * tc_unsubscribe.
  */
-void        tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
+uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
+
+/* Cancel a subscription returned by tc_subscribe. Blocks until that
+ * subscription's callback is guaranteed to no longer fire before
+ * returning. A no-op if token is 0 or unknown.
+ */
+void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.
  *
  * tc_preview_open returns NULL and sets *err (if err is non-NULL) on
- * failure -- most commonly an unknown entry_id. On success, everything
- * returned by the tc_preview_* accessors below is borrowed and valid until
- * tc_preview_free.
+ * failure -- most commonly an unknown entry_id, or (deliberately) a
+ * redacted body that cannot be represented as a NUL-terminated C string.
+ * On success, everything returned by the tc_preview_* accessors below is
+ * borrowed and valid until tc_preview_free.
  */
 tc_preview* tc_preview_open(tc_handle*, const char* entry_id, char** err);
-const char* tc_preview_body(tc_preview*);          /* redacted transcript, UTF-8 */
-const char* tc_preview_summary_json(tc_preview*);  /* counts, sizes, opening prompt */
+const char* tc_preview_body(const tc_preview*);          /* redacted transcript, UTF-8 */
+const char* tc_preview_summary_json(const tc_preview*);  /* counts, sizes, opening prompt */
 
-/* Search the redacted body for needle, a local in-memory scan. Returns the
- * number of matches, or -1 on error. On success, *matches_json is set to
- * an owned JSON array of byte offsets; free with tc_string_free. On error,
- * *matches_json (if non-NULL) is set to NULL -- there is nothing to free.
+/* Search the redacted body for needle, a local in-memory scan. Matches are
+ * non-overlapping, left-to-right, and reported as UTF-8 BYTE offsets (not
+ * character offsets). An empty needle matches nothing.
+ *
+ * Returns the number of matches, or -1 on error (including a match count
+ * that would overflow a 32-bit count -- reported as an error, never
+ * silently truncated). On success, *matches_json is set to an owned JSON
+ * array of byte offsets; free with tc_string_free. On error, *matches_json
+ * (if non-NULL) is set to NULL -- there is nothing to free.
  */
-int32_t     tc_preview_search(tc_preview*, const char* needle, char** matches_json);
+int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matches_json);
 
+/* Free a preview handle. Safe to call with NULL. Invalidates every
+ * const char* previously returned by tc_preview_body /
+ * tc_preview_summary_json for this handle.
+ */
 void        tc_preview_free(tc_preview*);
 
 /* Free a string returned by this library. Safe to call with NULL. This is

@@ -50,32 +50,31 @@ use crate::config::{ConfigStore, DAEMON_LOCK_FILE, DAEMON_SOCK_FILE};
 /// Holds an exclusive lock for its whole life, so a second daemon against the
 /// same state directory fails loudly instead of two of them racing over the
 /// same queue.
+///
+/// `run_supervisor` is awaited *inline* here (not spawned and then joined)
+/// on purpose: if this async fn's own future is itself dropped before
+/// completion -- the ordinary way a caller races the daemon against, say, a
+/// ctrl-C future in a `tokio::select!` -- Rust's structured-concurrency
+/// cancellation stops the supervise loop's execution immediately, as part of
+/// dropping this same stack frame, before `lock` (the file backing
+/// `daemon.lock`) is also dropped and the lock released. An earlier version
+/// of this function spawned the supervise loop as an independent task and
+/// awaited its `JoinHandle` instead; `JoinHandle::drop` does not abort the
+/// task, so dropping `run`'s future left the supervisor detached and still
+/// mutating the queue after the lock had already been released to a second
+/// daemon -- exactly the corruption `daemon.lock` exists to prevent. See
+/// `EmbeddedDaemon`'s and `run_supervisor`'s docs for the embedding case
+/// that still needs the loop to run as a background task.
 pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
-    let embedded = start_embedded(store, dry_run).await?;
-    let EmbeddedDaemon {
-        shared,
-        lock_path,
-        lock,
-        server,
-        supervisor,
-    } = embedded;
-
-    let result = match supervisor.await {
-        Ok(r) => r,
-        Err(e) if e.is_cancelled() => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("supervise task panicked: {e}")),
-    };
-
-    server.abort();
-    let _ = shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
-    drop(lock);
-    let _ = std::fs::remove_file(&lock_path);
+    let embedded = start_embedded(store).await?;
+    let result = run_supervisor(Arc::clone(&embedded.shared), dry_run).await;
+    embedded.close();
     result
 }
 
-/// The pieces of a running daemon loop that a caller who needs direct,
-/// in-process access to `shared` -- rather than only running the loop to
-/// completion the way `run` does -- holds onto.
+/// The pieces of a running daemon that a caller needing direct, in-process
+/// access to `shared` -- rather than only running the loop to completion the
+/// way `run` does -- holds onto.
 ///
 /// This is what `trace-commons-contributor-ffi` embeds: the C ABI's
 /// `tc_daemon_start` calls `start_embedded` instead of `run` so it gets back
@@ -83,46 +82,51 @@ pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
 /// `tc_preview_open` to act on directly via `ipc::handle_local` /
 /// `ipc::open_preview` -- not a second, independently-loaded, and therefore
 /// divergent, view of the on-disk state.
+///
+/// Deliberately does **not** itself run the supervise loop (the periodic
+/// watch/upload/digest/history pass): `run` awaits `run_supervisor` inline
+/// for cancel-safety (see its doc). An embedder that needs the loop running
+/// in the background, independent of any one call's lifetime, spawns
+/// `run_supervisor` itself and keeps the resulting `JoinHandle` for its own
+/// explicit shutdown.
 pub struct EmbeddedDaemon {
     pub shared: Arc<ipc::DaemonShared>,
     lock_path: std::path::PathBuf,
     lock: std::fs::File,
     server: tokio::task::JoinHandle<Result<()>>,
-    supervisor: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl EmbeddedDaemon {
-    /// Ask the loop to stop, wait for both background tasks to finish, and
-    /// release the lock file. Consumes `self`: there is nothing left to hold
-    /// once shutdown has run.
-    pub async fn shutdown(self) -> Result<()> {
-        self.shared.shutdown.store(true, Ordering::Relaxed);
-        self.shared.shutdown_signal.notify_one();
+    /// Stop serving the socket and release the exclusive lock. Does *not*
+    /// touch `shared.shutdown` or stop anything running the supervise loop
+    /// -- `EmbeddedDaemon` no longer owns that task (see the struct doc), so
+    /// a caller that spawned `run_supervisor` itself is responsible for
+    /// signalling and awaiting it before (or after; order does not matter
+    /// for correctness, only for how long the loop keeps working past the
+    /// request) calling this.
+    pub fn close(self) {
         self.server.abort();
-        let result = match self.supervisor.await {
-            Ok(r) => r,
-            Err(e) if e.is_cancelled() => Ok(()),
-            Err(e) => Err(anyhow::anyhow!("supervise task panicked: {e}")),
-        };
         let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
         drop(self.lock);
         let _ = std::fs::remove_file(&self.lock_path);
-        result
     }
 }
 
-/// Take the daemon's exclusive lock, build the shared state, bind the
-/// socket, and spawn the socket server and the supervise loop as background
-/// tasks -- everything `run` does, except it returns the pieces instead of
-/// blocking on them, so an embedder gets a live `Arc<DaemonShared>` to drive
-/// directly.
+/// Take the daemon's exclusive lock, build the shared state, and bind and
+/// spawn the socket server -- everything `run` does before it starts the
+/// supervise loop, returned as pieces instead of run to completion.
 ///
-/// Locking happens exactly once per call, the same as `run`: this function
-/// (not `run`) is now the one place that takes `daemon.lock`, so a second
-/// `start_embedded` -- or a second `run` -- against the same state directory
-/// still fails loudly on the `try_lock`, whether or not the caller is the
-/// same process.
-pub async fn start_embedded(store: ConfigStore, dry_run: bool) -> Result<EmbeddedDaemon> {
+/// Locking happens exactly once per call, the same as `run` used to: this
+/// function (not `run`) is now the one place that takes `daemon.lock`, so a
+/// second `start_embedded` -- or a second `run` -- against the same state
+/// directory still fails loudly on the `try_lock`, whether or not the caller
+/// is the same process. The failure is a plain `anyhow::Error` built with
+/// `bail!`, not a structured variant, so a caller that needs to distinguish
+/// "lock held by another daemon" from other failures (a state-directory
+/// permissions problem, a socket bind failure) has to match on the message
+/// text; see `tests::a_second_start_embedded_fails_specifically_on_the_lock`
+/// for the exact text this asserts.
+pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -143,16 +147,23 @@ pub async fn start_embedded(store: ConfigStore, dry_run: bool) -> Result<Embedde
     let serve_shared = Arc::clone(&shared);
     let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
 
-    let supervise_shared = Arc::clone(&shared);
-    let supervisor = tokio::spawn(async move { supervise(supervise_shared, dry_run).await });
-
     Ok(EmbeddedDaemon {
         shared,
         lock_path,
         lock,
         server,
-        supervisor,
     })
+}
+
+/// Run the periodic watch/upload/digest/history pass to completion -- i.e.,
+/// until `shared`'s shutdown flag or signal fires. This is `supervise`,
+/// exposed under a stable name so a caller holding only an
+/// `Arc<DaemonShared>` (`supervise` itself is private) can run it -- either
+/// awaited inline, as `run` does for cancel-safety, or `tokio::spawn`ed as
+/// its own background task by an embedder that needs the loop running
+/// independent of any one call's lifetime (see `EmbeddedDaemon`'s doc).
+pub async fn run_supervisor(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+    supervise(shared, dry_run).await
 }
 
 /// The periodic work: watch, expire, and decide about digests, until asked to
@@ -537,5 +548,35 @@ mod tests {
                 .clone()
         };
         assert_eq!(label.as_deref(), Some(health::LABEL_INGEST_UNREACHABLE));
+    }
+
+    /// `trace-commons-contributor-ffi`'s own lock-contention test
+    /// (`a_second_start_against_the_same_directory_fails_on_the_lock`)
+    /// only asserts that `tc_daemon_start` returns NULL with a non-null
+    /// `*err` -- which `tc_daemon_start` would also do if the *second*
+    /// start failed for an unrelated reason (a socket-bind failure, a
+    /// `ConfigStore::open` permissions error), since it collapses every
+    /// failure into one fixed label before crossing the FFI boundary (see
+    /// that crate's module doc on why). This test, against
+    /// `start_embedded` directly rather than through the FFI, is the one
+    /// that actually proves the second failure is the lock, not something
+    /// else: it asserts on `anyhow::Error`'s `Display` text.
+    #[tokio::test]
+    async fn a_second_start_embedded_fails_specifically_on_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_a = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let embedded = start_embedded(store_a).await.unwrap();
+
+        let store_b = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let err = match start_embedded(store_b).await {
+            Ok(_) => panic!("a second start_embedded against a locked directory must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("already running"),
+            "expected a lock-contention message, got: {err:#}"
+        );
+
+        embedded.close();
     }
 }

@@ -163,7 +163,14 @@ pub struct Response {
 }
 
 impl Response {
-    pub(crate) fn ok(id: u64, result: serde_json::Value) -> Self {
+    /// `pub`, not `pub(crate)`: `trace-commons-contributor-ffi` builds
+    /// error frames for failures it must synthesize itself (a malformed
+    /// `params_json`, a null pointer) rather than ones `handle_local`
+    /// produces, and needs the exact wire shape a real dispatcher response
+    /// serializes to -- constructing it this way, rather than hand-rolling
+    /// an equivalent `serde_json::json!`, is what keeps the two from
+    /// drifting apart.
+    pub fn ok(id: u64, result: serde_json::Value) -> Self {
         Self {
             id,
             result: Some(result),
@@ -171,7 +178,8 @@ impl Response {
         }
     }
 
-    pub(crate) fn err(id: u64, code: &str, message: &str) -> Self {
+    /// See `ok`'s doc comment on why this is `pub`.
+    pub fn err(id: u64, code: &str, message: &str) -> Self {
         Self {
             id,
             result: None,
