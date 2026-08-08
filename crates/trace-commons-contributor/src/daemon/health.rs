@@ -80,9 +80,9 @@ impl HealthState {
     /// rather than how recently it was retried.
     ///
     /// When the incoming label has worse (higher) precedence than the current
-    /// one, the current label is kept. This ensures actionable conditions
-    /// (like "not logged in") outrank transient ones (like "ingest unreachable")
-    /// in the menu bar.
+    /// one, this call is a complete no-op and neither the label nor its `since`
+    /// is updated. This ensures actionable conditions (like "not logged in")
+    /// outrank transient ones (like "ingest unreachable") in the menu bar.
     pub fn fail(&mut self, label: &str, now: DateTime<Utc>) {
         let current_label = self.last_error_label.as_deref();
 
@@ -106,6 +106,16 @@ impl HealthState {
                 self.since = Some(now);
             }
             self.last_error_label = Some(label.to_string());
+        }
+    }
+
+    /// Clear this specific condition if it is the one currently shown.
+    /// A precondition that now passes must retract its own label, or a
+    /// resolved condition would mask every lower-precedence one forever.
+    pub fn resolve(&mut self, label: &str) {
+        if self.last_error_label.as_deref() == Some(label) {
+            self.last_error_label = None;
+            self.since = None;
         }
     }
 
@@ -225,5 +235,46 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn logging_back_in_retracts_not_logged_in_even_though_nothing_was_uploaded() {
+        // When a contributor logs in while not-logged-in is set, a resolve()
+        // call clears that condition so lower-precedence failures can show up.
+        let mut h = HealthState::default();
+        h.fail(LABEL_NOT_LOGGED_IN, at("2026-08-08T12:00:00Z"));
+        assert!(!h.ok());
+        h.resolve(LABEL_NOT_LOGGED_IN);
+        assert!(h.ok());
+        assert_eq!(h.last_error_label, None);
+        assert_eq!(h.since, None);
+    }
+
+    #[test]
+    fn after_retraction_a_later_lower_precedence_failure_is_shown_rather_than_suppressed() {
+        // After retract-ing not-logged-in, a subsequent ingest-unreachable
+        // failure can replace it rather than being suppressed.
+        let mut h = HealthState::default();
+        h.fail(LABEL_NOT_LOGGED_IN, at("2026-08-08T12:00:00Z"));
+        h.resolve(LABEL_NOT_LOGGED_IN);
+        h.fail(LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:01:00Z"));
+        assert_eq!(
+            h.last_error_label.as_deref(),
+            Some(LABEL_INGEST_UNREACHABLE)
+        );
+    }
+
+    #[test]
+    fn resolve_on_a_label_that_is_not_currently_shown_leaves_the_current_label_untouched() {
+        // resolve() is idempotent: attempting to resolve a label that is not
+        // currently active does nothing.
+        let mut h = HealthState::default();
+        h.fail(LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:00:00Z"));
+        h.resolve(LABEL_NOT_LOGGED_IN);
+        assert_eq!(
+            h.last_error_label.as_deref(),
+            Some(LABEL_INGEST_UNREACHABLE)
+        );
+        assert_eq!(h.since, Some(at("2026-08-08T12:00:00Z")));
     }
 }

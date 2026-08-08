@@ -137,6 +137,8 @@ impl Uploader<'_, '_> {
                 reason_label: LABEL_NOT_LOGGED_IN.to_string(),
             });
         }
+        // Enrollment is live, so retract the not-logged-in condition if it was set.
+        self.health.resolve(LABEL_NOT_LOGGED_IN);
 
         if self.settings.near_ai.is_some() && !self.store.near_ai_notice_shown() {
             // The one-time notice is delivered interactively. Under a service
@@ -148,12 +150,17 @@ impl Uploader<'_, '_> {
                 reason_label: LABEL_NEAR_AI_NOTICE_PENDING.to_string(),
             });
         }
+        // Near-AI notice requirement is met (either not configured or already shown),
+        // so retract the notice-pending condition if it was set.
+        self.health.resolve(LABEL_NEAR_AI_NOTICE_PENDING);
 
         self.state.roll_day(now);
         if !cap_check(self.state, entry.size_bytes, self.settings) {
             self.health.fail(LABEL_DAILY_CAP_REACHED, now);
             return Ok(UploadDecision::CapReached);
         }
+        // Cap check passed, so retract the daily-cap-reached condition if it was set.
+        self.health.resolve(LABEL_DAILY_CAP_REACHED);
 
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
