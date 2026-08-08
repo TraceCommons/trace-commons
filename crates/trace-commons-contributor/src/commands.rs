@@ -206,9 +206,67 @@ pub fn whoami(store: &ConfigStore, json: bool) -> Result<()> {
 
 /// Delete all local contributor state (config, device key, receipts).
 pub fn logout(store: &ConfigStore) -> Result<()> {
+    // Stop a running daemon first. It holds a minted claim that stays valid
+    // for minutes, so wiping the state out from under it would leave it
+    // uploading against an enrollment the contributor has just revoked, into
+    // a receipts file that no longer exists.
+    match stop_running_daemon(store) {
+        Ok(true) => println!("stopped the background daemon"),
+        Ok(false) => {}
+        Err(e) => {
+            // Never block a logout on this: the wipe below removes the device
+            // key, and the daemon refuses to upload without one.
+            tracing::warn!(error = %e, "could not signal the daemon");
+            println!("warning: could not signal the background daemon; state removed anyway");
+        }
+    }
     store.wipe().context("wiping contributor state")?;
+    let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
+    let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);
     println!("logged out; local state removed");
     Ok(())
+}
+
+/// Ask a running daemon to stop, and wait briefly for it to let go of its
+/// lock. Returns whether a daemon was there to stop.
+fn stop_running_daemon(store: &ConfigStore) -> Result<bool> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let sock = store.daemon_path(crate::config::DAEMON_SOCK_FILE);
+    if !sock.exists() {
+        return Ok(false);
+    }
+    let mut stream = match std::os::unix::net::UnixStream::connect(&sock) {
+        Ok(s) => s,
+        // A stale socket from a crashed daemon: nothing is running.
+        Err(_) => return Ok(false),
+    };
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    stream
+        .write_all(b"{\"id\":0,\"method\":\"shutdown\"}\n")
+        .context("sending shutdown")?;
+    stream.flush().ok();
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).ok();
+
+    // Wait for the lock to be released, which is the daemon actually gone
+    // rather than merely acknowledging.
+    let lock_path = store.daemon_path(crate::config::DAEMON_LOCK_FILE);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !lock_path.exists() {
+            return Ok(true);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
+            if f.try_lock().is_ok() {
+                return Ok(true);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    anyhow::bail!("daemon did not exit within 5s")
 }
 
 /// Operator/dogfood tool: mint an enrollment grant with an instance private
