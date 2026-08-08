@@ -133,8 +133,12 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         .create(true)
         .truncate(false)
         .write(true)
+        // A fixed label, not `format!("opening {}", path.display())`: this
+        // error reaches a service-manager journal, and the state-directory
+        // path there carries the OS username. The caller already knows
+        // which state directory it asked for.
         .open(&lock_path)
-        .with_context(|| format!("opening {}", lock_path.display()))?;
+        .context("opening the daemon lock file in the state directory")?;
     if lock.try_lock().is_err() {
         bail!(
             "another trace-commons-contributor daemon is already running for \
@@ -223,18 +227,34 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
             }
             _ = ticker.tick() => {
                 let now = Utc::now();
-                if let Err(e) = watcher::tick(&shared, now).await {
-                    tracing::warn!(error = %e, "watch tick failed");
+                // Fixed labels, never `error = %e`. These errors are
+                // `anyhow::Error`s whose outermost context routinely embeds
+                // a filesystem path -- `write_atomic_0600`'s "creating temp
+                // file <dir>/...", `ConfigStore::open`'s state-directory
+                // context, `load_receipts`' "reading <path>". Under a
+                // service manager these land in the journal, where the path
+                // carries the OS username. The condition worth logging is
+                // *which pass* failed, and health carries the rest.
+                if watcher::tick(&shared, now).await.is_err() {
+                    tracing::warn!(pass = "watch", "daemon pass failed");
                 }
                 expire_and_digest(&shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
                 if !dry_run {
                     if let Err(e) = drain_approved(&shared, now).await {
-                        tracing::warn!(error = %e, "upload pass failed");
+                        // The one detail that is safe and load-bearing: a
+                        // fail-closed precondition is a fixed label by
+                        // construction (`SubmitPreconditionFailure`), and
+                        // it is what suspends queue expiry.
+                        tracing::warn!(
+                            pass = "upload",
+                            reason = uploader::precondition_health_label(&e),
+                            "daemon pass failed"
+                        );
                     }
-                    if let Err(e) = refresh_history(&shared, now).await {
-                        tracing::warn!(error = %e, "history refresh failed");
+                    if refresh_history(&shared, now).await.is_err() {
+                        tracing::warn!(pass = "history", "daemon pass failed");
                     }
                 }
             }

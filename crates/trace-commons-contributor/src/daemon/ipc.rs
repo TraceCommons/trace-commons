@@ -947,20 +947,24 @@ pub async fn bind(store: &ConfigStore) -> Result<UnixListener> {
     // The kernel truncates rather than explains, and the resulting error names
     // a constant most people have never heard of. Say what is actually wrong
     // and what to do about it.
+    // The message names the length and the fix, but not the path: this
+    // error is returned to `daemon run`, which under a service manager
+    // writes it to the journal, and a state-directory path there carries
+    // the OS username. The length plus the file name is enough to act on.
     let len = path.as_os_str().len();
     if len >= MAX_SOCKET_PATH_BYTES {
         bail!(
             "the daemon socket path is {len} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte \
-             kernel limit for unix sockets:\n  {}\nUse a shorter state directory, \
-             e.g. TRACE_COMMONS_CONTRIBUTOR_DIR=~/.config/trace-commons",
-            path.display()
+             kernel limit for unix sockets (the path is your state directory plus \
+             {DAEMON_SOCK_FILE}). Use a shorter state directory, \
+             e.g. TRACE_COMMONS_CONTRIBUTOR_DIR=~/.config/trace-commons"
         );
     }
 
     // A socket left behind by a crashed daemon would block binding. The
     // single-instance lock, not this file, is what prevents two daemons.
     let _ = std::fs::remove_file(&path);
-    UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))
+    UnixListener::bind(&path).context("binding the daemon socket in the state directory")
 }
 
 /// The 0700 directory is the access control for the socket, because
@@ -972,8 +976,8 @@ pub async fn bind(store: &ConfigStore) -> Result<UnixListener> {
 #[cfg(unix)]
 fn ensure_private_dir(dir: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(dir)
-        .with_context(|| format!("reading permissions of {}", dir.display()))?;
+    let meta =
+        std::fs::metadata(dir).context("reading permissions of the daemon state directory")?;
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o700 {
         bail!(
@@ -1360,6 +1364,38 @@ mod tests {
             ),
         );
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn a_bind_failure_never_names_a_local_path() {
+        // These errors are returned to `daemon run`, which under a service
+        // manager writes them to the journal -- where a state-directory
+        // path carries the OS username.
+        let deep = std::env::temp_dir().join("a".repeat(120));
+        std::fs::create_dir_all(&deep).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&deep, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = ConfigStore::open(deep.clone()).unwrap();
+        let err = bind(&store).await.unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains(&*deep.to_string_lossy()), "{text}");
+        assert!(
+            text.contains("kernel limit"),
+            "the message must still say what to do: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&deep);
+    }
+
+    #[test]
+    fn a_state_directory_permissions_failure_never_names_a_local_path() {
+        let missing = std::env::temp_dir().join("trace-commons-no-such-dir-xyz");
+        let _ = std::fs::remove_dir_all(&missing);
+        let err = ensure_private_dir(&missing).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(!text.contains("trace-commons-no-such-dir-xyz"), "{text}");
     }
 
     #[test]

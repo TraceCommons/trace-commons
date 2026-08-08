@@ -107,11 +107,33 @@ mod tests {
 
     #[test]
     fn an_audit_entry_never_carries_a_path() {
+        // The fixture used to be the hand-written literal "proj", which
+        // could not have caught a `project_label` that had degenerated into
+        // a full local path -- the test passed because its own input was
+        // already clean. Every label written here now comes from
+        // `policy::project_label_for`, including the degenerate working
+        // directories whose basename `Path::file_name` cannot produce (`/`,
+        // anything ending in `..`, the empty string), which used to fall
+        // back to the raw key.
         let (_d, store) = crate::config::tests_support::temp_store();
-        append(&store, &entry("armed-auto-upload", Some("proj"))).unwrap();
+        for cwd in [
+            "/Users/z/code/secret-client-project",
+            "/",
+            "/Users/z/code/..",
+            "..",
+            "",
+        ] {
+            let key = crate::daemon::policy::project_key_for(Some(cwd));
+            let label = crate::daemon::policy::project_label_for(&key);
+            append(&store, &entry("armed-auto-upload", Some(&label))).unwrap();
+        }
         let raw = store.read_daemon_file(DAEMON_AUDIT_FILE).unwrap().unwrap();
         let text = String::from_utf8(raw).unwrap();
         assert!(!text.contains('/'), "audit must be label-only: {text}");
+        assert!(
+            !text.contains("secret-client-project/") && !text.contains("Users"),
+            "audit must be label-only: {text}"
+        );
     }
 
     #[test]

@@ -127,25 +127,54 @@ impl ProjectPolicy {
     }
 }
 
+/// Whether a working directory yields a usable display label -- i.e. has a
+/// final path segment at all.
+///
+/// `Path::file_name` returns `None` for `/`, for anything ending in `..`,
+/// and for the empty string. Every one of those is a real cwd a coding
+/// agent can record.
+fn has_usable_basename(cwd: &str) -> bool {
+    std::path::Path::new(cwd)
+        .file_name()
+        .is_some_and(|n| !n.is_empty())
+}
+
 /// The policy key for a session: its true working directory, or the locked
 /// unknown bucket. Never falls back to a basename heuristic.
+///
+/// A cwd with no usable final path segment goes to the unknown bucket
+/// rather than becoming a key of its own. Such a key has no label but
+/// itself, and `project_label` crosses the socket, lands in
+/// `daemon-audit.jsonl`, in OS notification text, and in `HistoryRecord` --
+/// so the fallback turned a full local path into every one of those, in
+/// direct violation of the invariant `audit`'s own
+/// `an_audit_entry_never_carries_a_path` test asserts. It can also never be
+/// armed, which is the right answer for a directory the daemon cannot even
+/// name.
 pub fn project_key_for(cwd: Option<&str>) -> String {
     match cwd {
-        Some(cwd) if !cwd.trim().is_empty() => cwd.to_string(),
+        Some(cwd) if !cwd.trim().is_empty() && has_usable_basename(cwd) => cwd.to_string(),
         _ => UNKNOWN_PROJECT_KEY.to_string(),
     }
 }
 
 /// A display label for a project key: the final path segment, or the bucket
 /// name. Consumers render this instead of the key, which is a local path.
+///
+/// A key with no final path segment reports the bucket name rather than
+/// echoing the key. `project_key_for` already prevents such a key from
+/// being created, so this is the second line of defence -- it covers a
+/// hand-edited or older `daemon-projects.json`, whose keys reach here
+/// having never gone through `project_key_for` at all. Under no
+/// circumstances does a raw path leave this function.
 pub fn project_label_for(project_key: &str) -> String {
-    if project_key == UNKNOWN_PROJECT_KEY {
+    if project_key == UNKNOWN_PROJECT_KEY || !has_usable_basename(project_key) {
         return UNKNOWN_PROJECT_KEY.to_string();
     }
     std::path::Path::new(project_key)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_key.to_string())
+        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string())
 }
 
 /// The known-key set every disambiguation call site must agree on: every
@@ -280,6 +309,60 @@ mod tests {
     fn labels_are_basenames_so_consumers_never_need_the_path() {
         assert_eq!(project_label_for("/Users/z/code/my-proj"), "my-proj");
         assert_eq!(project_label_for(UNKNOWN_PROJECT_KEY), UNKNOWN_PROJECT_KEY);
+    }
+
+    #[test]
+    fn a_cwd_with_no_usable_basename_goes_to_the_unknown_bucket() {
+        // `Path::file_name` is None for every one of these, and each is a
+        // real cwd an agent can record. Before this, the key became the raw
+        // path and so did the label -- which then crossed the socket,
+        // landed in daemon-audit.jsonl, in OS notification text, and in
+        // HistoryRecord.
+        for cwd in ["/", "/Users/z/code/..", "..", ""] {
+            assert_eq!(
+                project_key_for(Some(cwd)),
+                UNKNOWN_PROJECT_KEY,
+                "cwd {cwd:?} must not become a policy key of its own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_key_never_renders_as_a_raw_path() {
+        // Second line of defence: a hand-edited or older
+        // daemon-projects.json can hold such a key without it ever having
+        // gone through `project_key_for`.
+        for key in ["/", "/Users/z/secret-client/..", ".."] {
+            let label = project_label_for(key);
+            assert_eq!(label, UNKNOWN_PROJECT_KEY, "key {key:?} leaked as {label}");
+            assert!(!label.contains('/'), "key {key:?} leaked as {label}");
+        }
+    }
+
+    #[test]
+    fn a_degenerate_key_is_never_suffixed_into_a_path_either() {
+        // `disambiguated_label` only suffixes a hash, but it starts from
+        // `project_label_for`, so a leak there would leak through here too.
+        let keys = vec!["/".to_string(), "/Users/z/client/..".to_string()];
+        for key in &keys {
+            let label = disambiguated_label(key, &keys);
+            assert!(!label.contains('/'), "{key} leaked as {label}");
+        }
+    }
+
+    #[test]
+    fn a_degenerate_key_cannot_be_armed() {
+        // It resolves to the locked bucket, which `resolve` refuses to
+        // report as AutoUpload however the file was written.
+        let mut p = ProjectPolicy::new();
+        assert!(
+            p.set_mode("/", "/", ProjectMode::AutoUpload, now()).is_ok(),
+            "the key itself is not the sentinel, so set_mode does not refuse it"
+        );
+        // But no session can ever resolve to it: every cwd with no usable
+        // basename is bucketed before policy is consulted.
+        assert_eq!(project_key_for(Some("/")), UNKNOWN_PROJECT_KEY);
+        assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
     }
 
     #[test]

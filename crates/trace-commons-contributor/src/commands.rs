@@ -272,12 +272,29 @@ pub fn logout(store: &ConfigStore) -> Result<()> {
     // uploading against an enrollment the contributor has just revoked, into
     // a receipts file that no longer exists.
     match stop_running_daemon(store) {
-        Ok(true) => println!("stopped the background daemon"),
-        Ok(false) => {}
-        Err(e) => {
+        Ok(DaemonStopOutcome::NotRunning) => {}
+        Ok(DaemonStopOutcome::Stopped) => println!("stopped the background daemon"),
+        Ok(DaemonStopOutcome::AcknowledgedButStillHoldingTheLock) => {
+            // Not a failure, and not worth an alarming warning. An
+            // FFI-hosted daemon releases `daemon.lock` only in
+            // `tc_handle_free` / `tc_daemon_stop`, never on the socket's
+            // `"shutdown"` -- so the supervise loop really has stopped, the
+            // lock is simply still held by the hosting application. Logout
+            // against an embedded daemon therefore *always* waited out the
+            // full deadline and then printed a warning about a stop that
+            // had in fact happened.
+            println!(
+                "the background daemon stopped its upload loop; the application \
+                 hosting it still holds the state directory and will release it \
+                 when it exits."
+            );
+        }
+        Err(_e) => {
             // Never block a logout on this: the wipe below removes the device
-            // key, and the daemon refuses to upload without one.
-            tracing::warn!(error = %e, "could not signal the daemon");
+            // key, and the daemon refuses to upload without one. A fixed
+            // label, not the error text, which can carry a state-directory
+            // path.
+            tracing::warn!("could not signal the daemon");
             // Say what is actually true: the credentials are gone either way,
             // and the daemon refuses to upload without them.
             println!(
@@ -294,19 +311,39 @@ pub fn logout(store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
+/// What actually happened when logout asked a running daemon to stop.
+///
+/// The distinction that matters is the last variant. A daemon embedded in a
+/// native application via the C ABI releases `daemon.lock` only in
+/// `tc_handle_free` / `tc_daemon_stop` -- never in response to the socket's
+/// `"shutdown"`, which stops the supervise loop and nothing else. Treating
+/// a still-held lock as "did not confirm it stopped" made logout against an
+/// FFI-hosted daemon wait out the full deadline every single time and then
+/// print an alarming warning about a stop that had in fact happened.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DaemonStopOutcome {
+    /// No socket, or a stale one from a crashed daemon.
+    NotRunning,
+    /// It acknowledged and released its lock: fully gone.
+    Stopped,
+    /// It acknowledged the stop -- so its upload loop has stopped -- but
+    /// the lock is still held, which is what an embedded daemon looks like.
+    AcknowledgedButStillHoldingTheLock,
+}
+
 /// Ask a running daemon to stop, and wait briefly for it to let go of its
-/// lock. Returns whether a daemon was there to stop.
-fn stop_running_daemon(store: &ConfigStore) -> Result<bool> {
+/// lock. Reports which of the three things above happened.
+fn stop_running_daemon(store: &ConfigStore) -> Result<DaemonStopOutcome> {
     use std::io::{BufRead, BufReader, Write};
 
     let sock = store.daemon_path(crate::config::DAEMON_SOCK_FILE);
     if !sock.exists() {
-        return Ok(false);
+        return Ok(DaemonStopOutcome::NotRunning);
     }
     let mut stream = match std::os::unix::net::UnixStream::connect(&sock) {
         Ok(s) => s,
         // A stale socket from a crashed daemon: nothing is running.
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(DaemonStopOutcome::NotRunning),
     };
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -317,23 +354,30 @@ fn stop_running_daemon(store: &ConfigStore) -> Result<bool> {
     stream.flush().ok();
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply).ok();
+    let acknowledged = serde_json::from_str::<crate::daemon::ipc::Response>(reply.trim())
+        .map(|r| r.error.is_none())
+        .unwrap_or(false);
 
     // Wait for the lock to be released, which is the daemon actually gone
     // rather than merely acknowledging.
     let lock_path = store.daemon_path(crate::config::DAEMON_LOCK_FILE);
-    // Generous, because the daemon finishes the pass it is in before it
-    // stops, and a large session store makes that pass take a few seconds.
+    // Generous, because a standalone daemon finishes the pass it is in
+    // before it stops, and a large session store makes that pass take a few
+    // seconds.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
         if !lock_path.exists() {
-            return Ok(true);
+            return Ok(DaemonStopOutcome::Stopped);
         }
         if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
             if f.try_lock().is_ok() {
-                return Ok(true);
+                return Ok(DaemonStopOutcome::Stopped);
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if acknowledged {
+        return Ok(DaemonStopOutcome::AcknowledgedButStillHoldingTheLock);
     }
     anyhow::bail!("daemon did not exit within 15s")
 }
@@ -2063,6 +2107,53 @@ mod daemon_command_tests {
         let missing = std::path::Path::new("/nonexistent-trace-commons-project-xyz");
         let err = resolve_project_key(missing).unwrap_err();
         assert!(err.to_string().contains("does it exist?"), "{err}");
+    }
+
+    #[test]
+    fn logout_distinguishes_an_embedded_daemon_from_one_that_never_answered() {
+        // `start_embedded` is exactly the shape the C ABI hosts: it takes
+        // the lock and serves the socket, and the socket's `"shutdown"`
+        // stops the supervise loop without releasing that lock (only
+        // `tc_handle_free` / `tc_daemon_stop` do). Logout used to read that
+        // as "did not confirm it stopped", waiting out the full deadline
+        // and then printing an alarming warning about a stop that had in
+        // fact happened.
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let embedded = rt
+            .block_on(crate::daemon::start_embedded(
+                ConfigStore::open(dir.path().to_path_buf()).unwrap(),
+            ))
+            .unwrap();
+
+        let outcome = stop_running_daemon(&store).unwrap();
+        assert_eq!(
+            outcome,
+            DaemonStopOutcome::AcknowledgedButStillHoldingTheLock,
+            "an embedded daemon acknowledges and keeps its lock; that is not \
+             a failure to stop"
+        );
+        assert!(
+            embedded
+                .shared
+                .shutdown
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "and it really did receive the stop request"
+        );
+        embedded.close();
+    }
+
+    #[test]
+    fn logout_reports_no_daemon_when_none_is_running() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        assert_eq!(
+            stop_running_daemon(&store).unwrap(),
+            DaemonStopOutcome::NotRunning
+        );
     }
 
     #[test]
