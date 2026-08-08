@@ -78,7 +78,16 @@ What replaces the restriction is **visibility, not gatekeeping**:
 
 - Every autonomy change (`set_project_mode: "auto_upload"`) and every bulk
   approval (`approve: {"all": true}`) appends a local, hash-only audit entry,
-  readable via `list_audit`.
+  readable via `list_audit`. So do `set_consent_scopes` and
+  `acknowledge_near_ai_notice`.
+- The action and its audit entry are **one fail-closed unit**. If the entry
+  cannot be persisted -- disk full, permissions, a corrupt log -- the action
+  is rolled back and the call returns `audit-write-failed`. It does not
+  succeed with a warning: an unrecorded change is exactly what removing the
+  terminal-only restriction was not supposed to make possible.
+- The durable log is capped and rotates oldest-first, so it cannot grow
+  until appending to it starts failing. Capping `list_audit`'s output alone
+  would not have bounded the file.
 - Applications are expected to show armed (`auto_upload`) projects
   persistently in their UI, never collapsed away, so a contributor always
   knows what is armed.

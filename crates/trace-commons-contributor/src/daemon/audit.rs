@@ -16,8 +16,20 @@
 //! acknowledgment).
 //!
 //! This is **user-facing visibility, not a security control**. It does not
-//! gate, authorize, or prevent anything; it is written after the fact so a
-//! contributor auditing their own machine has something to look at.
+//! gate, authorize, or prevent anything; a contributor auditing their own
+//! machine has something to look at, and that is all.
+//!
+//! It is nonetheless written **fail-closed**. Every call site treats an
+//! append failure as fatal to the action it was recording and rolls that
+//! action back (or, where there is nothing to roll back to, records first
+//! and acts second). Best-effort appending reduced a disk-full or
+//! permissions failure to a log warning while the call still returned
+//! success -- which silently defeats the one mechanism a deliberately
+//! removed terminal-only restriction was replaced with. Being "not a
+//! security control" is a statement about what the log can prove, not a
+//! licence to skip writing it.
+//!
+//! The log is capped at `MAX_AUDIT_ENTRIES` and rotates oldest-first.
 //!
 //! Entries are label-only, matching the rest of this crate's audit and
 //! logging conventions: no filesystem path, no `project_key` (a full local
@@ -42,11 +54,36 @@ pub struct AuditEntry {
     pub detail: Option<String>,
 }
 
+/// The durable log's hard ceiling, in entries.
+///
+/// `append` is a whole-file read-modify-write (the shape `queue` and
+/// `history` use), so an unbounded file makes every subsequent append
+/// slower and likelier to fail -- and an append failure now *refuses* the
+/// action it was recording, so an unbounded file eventually starts breaking
+/// the very calls it audits. Capping `list_audit`'s output does nothing
+/// about that; only capping the file does.
+///
+/// Rotation drops the oldest entries. This is a local visibility record,
+/// not evidence: a contributor asking "what was armed, and when" is asking
+/// about recent history, and losing a year-old entry is a far better
+/// outcome than an append that fails and blocks a legitimate change.
+pub const MAX_AUDIT_ENTRIES: usize = 5_000;
+
 /// Append one entry to the log via a whole-file read-modify-write through
 /// `write_daemon_file`, matching the shape used by `queue` and `history`.
+///
+/// Rotates to the newest `MAX_AUDIT_ENTRIES` on the way out. Callers must
+/// treat an `Err` as fatal to whatever they were doing: every call site
+/// rolls its own change back rather than letting a change stand with no
+/// record of it. The audit log is not a security control, but it is the
+/// stated replacement for a removed terminal-only restriction, and a
+/// silently-skipped append defeats exactly that.
 pub fn append(store: &ConfigStore, entry: &AuditEntry) -> Result<()> {
     let mut entries = load(store)?;
     entries.push(entry.clone());
+    if entries.len() > MAX_AUDIT_ENTRIES {
+        entries.drain(..entries.len() - MAX_AUDIT_ENTRIES);
+    }
     save(store, &entries)
 }
 
@@ -144,6 +181,30 @@ mod tests {
         raw.extend_from_slice(b"not json\n");
         store.write_daemon_file(DAEMON_AUDIT_FILE, &raw).unwrap();
         assert_eq!(load(&store).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_log_is_capped_and_keeps_the_newest_entries() {
+        // Without a cap the file grows forever, and since an append failure
+        // now refuses the action it was recording, an unbounded file
+        // eventually breaks the calls it audits.
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let mut entries = Vec::new();
+        for i in 0..MAX_AUDIT_ENTRIES + 10 {
+            let mut e = entry("armed-auto-upload", Some("proj"));
+            e.detail = Some(i.to_string());
+            entries.push(e);
+        }
+        save(&store, &entries).unwrap();
+        let mut last = entry("bulk-approved", None);
+        last.detail = Some("last".to_string());
+        append(&store, &last).unwrap();
+
+        let all = load(&store).unwrap();
+        assert_eq!(all.len(), MAX_AUDIT_ENTRIES);
+        assert_eq!(all.last().unwrap().detail.as_deref(), Some("last"));
+        // The oldest entries are the ones dropped.
+        assert_eq!(all.first().unwrap().detail.as_deref(), Some("11"));
     }
 
     #[test]

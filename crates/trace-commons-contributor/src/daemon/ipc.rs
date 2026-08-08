@@ -459,6 +459,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             if !admissible {
                 return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
             }
+            // Kept so the whole change can be rolled back if its audit
+            // entry cannot be persisted: arming autonomy and recording that
+            // it was armed are one unit. The terminal-only restriction this
+            // call replaced was itself a visibility mechanism, and a change
+            // that stands with no record of it is exactly the outcome the
+            // replacement was supposed to prevent.
+            let previous_policy = policy.clone();
             if let Err(e) = policy.set_mode(key, mode, Utc::now()) {
                 return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
             }
@@ -481,11 +488,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             if mode == ProjectMode::AutoUpload {
                 // A local, label-only record that autonomy was armed for
                 // this project. This is visibility, not a security control
-                // -- see `daemon::audit`.
+                // -- see `daemon::audit` -- but it is the *only* visibility
+                // there is here, so it is fail-closed: if it cannot be
+                // persisted (disk full, permissions, a corrupt log), the
+                // arming is rolled back and the call reports an error
+                // rather than leaving autonomy silently armed.
                 let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
                 let audit_label = disambiguated_label(key, &known);
-                drop(queue);
-                drop(policy);
                 if let Err(_e) = audit::append(
                     &shared.store,
                     &AuditEntry {
@@ -495,8 +504,22 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         detail: None,
                     },
                 ) {
-                    tracing::warn!("failed to append daemon audit entry");
+                    *policy = previous_policy;
+                    // Best effort, and deliberately not allowed to mask the
+                    // audit failure: the in-memory policy is authoritative
+                    // for every decision this process makes, and it has
+                    // already been restored above.
+                    let _ = policy.save(&shared.store);
+                    if relabel_queue_entries(&policy, &mut queue) {
+                        let _ = queue.save(&shared.store);
+                    }
+                    drop(queue);
+                    drop(policy);
+                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
                 }
+                drop(queue);
+                drop(policy);
             }
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
@@ -527,21 +550,23 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 .flatten()
                 .map(|c| c.consent_scopes)
                 .unwrap_or_default();
-            let mut approved = 0;
+            let mut approved_ids = Vec::new();
             for id in ids {
                 if queue.approve(id, &scopes) {
-                    approved += 1;
+                    approved_ids.push(id);
                 }
             }
+            let approved = approved_ids.len();
             if let Err(_e) = queue.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
             }
-            drop(queue);
-            shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             if all {
                 // A local, label-only record that the whole queue was
                 // bulk-approved. This is visibility, not a security control
-                // -- see `daemon::audit`.
+                // -- see `daemon::audit` -- but it is the only visibility
+                // there is for a call that used to require a terminal, so
+                // it is fail-closed: an audit entry that cannot be
+                // persisted takes the approvals down with it.
                 if let Err(_e) = audit::append(
                     &shared.store,
                     &AuditEntry {
@@ -551,9 +576,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         detail: Some(approved.to_string()),
                     },
                 ) {
-                    tracing::warn!("failed to append daemon audit entry");
+                    for id in approved_ids {
+                        // `cancel` refuses anything past `Approved`; these
+                        // were all set `Approved` a few lines ago under this
+                        // same lock, and no upload pass can have claimed one
+                        // without taking it.
+                        let _ = queue.cancel(id);
+                    }
+                    let _ = queue.save(&shared.store);
+                    drop(queue);
+                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
                 }
             }
+            drop(queue);
+            shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             Response::ok(req.id, serde_json::json!({ "approved": approved }))
         }
         "dismiss" => {
@@ -1430,6 +1467,105 @@ mod tests {
         assert_eq!(
             audit::load(&s.store).unwrap()[0].project_label.as_deref(),
             Some("myproj")
+        );
+    }
+
+    /// Make the audit log unappendable: `audit::load` reads the file as
+    /// UTF-8 and fails on bytes that are not, so every subsequent `append`
+    /// fails too. Stands in for a disk-full, permissions, or corruption
+    /// failure without needing any of those.
+    fn break_the_audit_log(store: &ConfigStore) {
+        store
+            .write_daemon_file(crate::config::DAEMON_AUDIT_FILE, &[0xff, 0xfe, 0xff])
+            .unwrap();
+    }
+
+    #[test]
+    fn arming_autonomy_is_rolled_back_when_its_audit_entry_cannot_be_written() {
+        // The audit entry is the stated replacement for a removed
+        // terminal-only restriction. A best-effort append reduced a
+        // disk-full or permissions failure to a warning while the call
+        // still returned success, silently defeating the whole replacement.
+        let s = shared();
+        let key = tmp_project("p");
+        break_the_audit_log(&s.store);
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": key, "mode": "auto_upload"}),
+            ),
+        );
+        let err = r.error.expect("an unwritable audit log must fail the call");
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "audit-write-failed");
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&key),
+            ProjectMode::NotifyOnly,
+            "autonomy must not stand without a record of it"
+        );
+        // And the rollback is durable, not only in memory.
+        let on_disk = ProjectPolicy::load(&s.store).unwrap();
+        assert_eq!(on_disk.resolve(&key), ProjectMode::NotifyOnly);
+    }
+
+    #[test]
+    fn a_notify_only_change_still_succeeds_with_an_unwritable_audit_log() {
+        // Only the consequential actions are audited, so only they are
+        // gated on the audit succeeding. Setting notify_only writes no
+        // entry and must not be collateral damage.
+        let s = shared();
+        let key = tmp_project("p");
+        break_the_audit_log(&s.store);
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": key, "mode": "notify_only"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+    }
+
+    #[test]
+    fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
+        let s = shared();
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+        break_the_audit_log(&s.store);
+
+        let r = handle_request(&s, &req("approve", serde_json::json!({"all": true})));
+        let err = r.error.expect("an unwritable audit log must fail the call");
+        assert_eq!(err.message, "audit-write-failed");
+        let state = s.queue.lock().unwrap().get(entry_id).unwrap().state;
+        assert_eq!(
+            state,
+            QueueState::Pending,
+            "an unrecorded bulk approval must not stand"
         );
     }
 

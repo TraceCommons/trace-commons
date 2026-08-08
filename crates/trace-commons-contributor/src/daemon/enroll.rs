@@ -166,12 +166,18 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
     let Ok(Some(mut cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
     };
+    let previous_cfg = cfg.clone();
     cfg.consent_scopes = scopes.clone();
     if shared.store.save_config(&cfg).is_err() {
         return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
     }
     // Label data, not secret: these are wire-name scope identifiers, the
     // same ones already returned in this very response and in `status`.
+    //
+    // Fail-closed, like the other audited socket actions: a widening of
+    // consent that leaves no record of itself is the exact outcome this
+    // entry exists to prevent, so an append failure rolls the scope change
+    // back and reports an error.
     if let Err(_e) = audit::append(
         &shared.store,
         &AuditEntry {
@@ -181,7 +187,8 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
             detail: Some(scopes.join(",")),
         },
     ) {
-        tracing::warn!("failed to append daemon audit entry");
+        let _ = shared.store.save_config(&previous_cfg);
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
     }
     Response::ok(req.id, json!({ "consent_scopes": scopes }))
 }
@@ -198,6 +205,24 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
 /// recoverable: traces may already have gone out under the false
 /// acknowledgment before anyone notices.
 pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Request) -> Response {
+    // The audit entry goes down FIRST, before the marker exists. There is
+    // no "un-acknowledge" operation to roll back to, so ordering is what
+    // makes this fail-closed: if the record cannot be persisted, the gate
+    // is never cleared and traces cannot go out under an acknowledgment
+    // nobody can see. The reverse order would leave the gate cleared with
+    // no record of who cleared it, which is precisely the failure this
+    // entry exists to prevent.
+    if let Err(_e) = audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "near-ai-notice-acknowledged".to_string(),
+            project_label: None,
+            detail: None,
+        },
+    ) {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
     match shared.store.ensure_near_ai_notice_shown() {
         Ok(_created) => {
             shared
@@ -205,17 +230,6 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
                 .lock()
                 .expect("health lock")
                 .resolve(LABEL_NEAR_AI_NOTICE_PENDING);
-            if let Err(_e) = audit::append(
-                &shared.store,
-                &AuditEntry {
-                    at: Utc::now(),
-                    action: "near-ai-notice-acknowledged".to_string(),
-                    project_label: None,
-                    detail: None,
-                },
-            ) {
-                tracing::warn!("failed to append daemon audit entry");
-            }
             Response::ok(req.id, json!({ "acknowledged": true }))
         }
         Err(_e) => Response::err(req.id, ERR_UNAVAILABLE, "notice-write-failed"),
@@ -479,5 +493,50 @@ mod tests {
         let entries = audit::load(&s.store).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "near-ai-notice-acknowledged");
+    }
+
+    /// Make the audit log unappendable: `audit::load` reads it as UTF-8 and
+    /// fails on bytes that are not, so every subsequent `append` fails.
+    fn break_the_audit_log(store: &crate::config::ConfigStore) {
+        store
+            .write_daemon_file(crate::config::DAEMON_AUDIT_FILE, &[0xff, 0xfe, 0xff])
+            .unwrap();
+    }
+
+    #[test]
+    fn widening_consent_is_rolled_back_when_its_audit_entry_cannot_be_written() {
+        // A consent widening that leaves no record of itself is the exact
+        // outcome the entry exists to prevent, so it is fail-closed like
+        // the other audited socket actions rather than best-effort.
+        let s = enrolled_shared();
+        break_the_audit_log(&s.store);
+        let r = handle_set_consent_scopes(
+            &s,
+            &req("set_consent_scopes", json!({"scopes": ["model_training"]})),
+        );
+        let err = r.error.expect("an unwritable audit log must fail the call");
+        assert_eq!(err.message, "audit-write-failed");
+        assert_eq!(
+            s.store.load_config().unwrap().unwrap().consent_scopes,
+            vec!["debugging_evaluation".to_string()],
+            "the widening must not stand without a record of it"
+        );
+    }
+
+    #[test]
+    fn the_near_ai_notice_gate_stays_closed_when_its_audit_entry_cannot_be_written() {
+        // There is no un-acknowledge operation to roll back to, so the
+        // record goes down before the marker: a failure leaves the gate
+        // closed rather than cleared-and-unrecorded.
+        let s = shared();
+        break_the_audit_log(&s.store);
+        let r =
+            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
+        let err = r.error.expect("an unwritable audit log must fail the call");
+        assert_eq!(err.message, "audit-write-failed");
+        assert!(
+            !s.store.near_ai_notice_shown(),
+            "the gate must not be cleared without a record of who cleared it"
+        );
     }
 }
