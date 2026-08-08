@@ -64,6 +64,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
+use super::audit::{self, AuditEntry};
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
 use super::policy::{ProjectMode, ProjectPolicy, disambiguated_label, known_keys};
@@ -397,6 +398,26 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                 }
                 shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
+            if mode == ProjectMode::AutoUpload {
+                // A local, label-only record that autonomy was armed for
+                // this project. This is visibility, not a security control
+                // -- see `daemon::audit`.
+                let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+                let audit_label = disambiguated_label(key, &known);
+                drop(queue);
+                drop(policy);
+                if let Err(_e) = audit::append(
+                    &shared.store,
+                    &AuditEntry {
+                        at: Utc::now(),
+                        action: "armed-auto-upload".to_string(),
+                        project_label: Some(audit_label),
+                        detail: None,
+                    },
+                ) {
+                    tracing::warn!("failed to append daemon audit entry");
+                }
+            }
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
         "approve" => {
@@ -429,6 +450,22 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
             }
             drop(queue);
             shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+            if all {
+                // A local, label-only record that the whole queue was
+                // bulk-approved. This is visibility, not a security control
+                // -- see `daemon::audit`.
+                if let Err(_e) = audit::append(
+                    &shared.store,
+                    &AuditEntry {
+                        at: Utc::now(),
+                        action: "bulk-approved".to_string(),
+                        project_label: None,
+                        detail: Some(approved.to_string()),
+                    },
+                ) {
+                    tracing::warn!("failed to append daemon audit entry");
+                }
+            }
             Response::ok(req.id, serde_json::json!({ "approved": approved }))
         }
         "dismiss" => {
@@ -917,6 +954,39 @@ mod tests {
     }
 
     #[test]
+    fn arming_autonomy_appends_an_audit_entry() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+            ),
+            Origin::LocalTty,
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "armed-auto-upload");
+        assert_eq!(entries[0].project_label.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn a_rejected_arming_call_leaves_the_audit_log_empty() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+            ),
+            Origin::Socket,
+        );
+        assert_eq!(r.error.unwrap().code, ERR_NOT_AUTHORIZED);
+        assert!(audit::load(&s.store).unwrap().is_empty());
+    }
+
+    #[test]
     fn set_project_mode_relabels_the_queue_immediately_with_no_intervening_tick() {
         // Regression for the round-1 residual: a queue entry's stored label
         // must not lag a policy edit until the next poll. Everything here
@@ -1024,6 +1094,64 @@ mod tests {
             Origin::Socket,
         );
         assert_eq!(r.error.unwrap().code, ERR_NOT_AUTHORIZED);
+        assert!(audit::load(&s.store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bulk_approval_from_a_terminal_appends_an_audit_entry() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req("approve", serde_json::json!({"all": true})),
+            Origin::LocalTty,
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "bulk-approved");
+        assert_eq!(entries[0].project_label, None);
+    }
+
+    #[test]
+    fn a_single_entry_approval_leaves_the_audit_log_empty() {
+        // Only the "approve all" bulk action is consequential enough to
+        // audit; approving one entry at a time is the default, always-was
+        // path and does not need a new log entry per click.
+        let s = shared();
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+        let r = handle_request(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({"entry_id": entry_id.to_string()}),
+            ),
+            Origin::LocalTty,
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(audit::load(&s.store).unwrap().is_empty());
     }
 
     #[test]

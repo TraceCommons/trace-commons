@@ -29,6 +29,10 @@ pub const DAEMON_STATE_FILE: &str = "daemon-state.json";
 pub const DAEMON_PROJECTS_FILE: &str = "daemon-projects.json";
 pub const DAEMON_QUEUE_FILE: &str = "daemon-queue.jsonl";
 pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
+/// Local, label-only record of consequential autonomy changes (arming
+/// auto-upload, bulk-approving). This is user-facing visibility, not a
+/// security control -- see `daemon::audit`.
+pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
 pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
@@ -283,6 +287,7 @@ impl ConfigStore {
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
+            DAEMON_AUDIT_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -300,6 +305,7 @@ impl ConfigStore {
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
+            DAEMON_AUDIT_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -489,6 +495,7 @@ mod tests {
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
+            DAEMON_AUDIT_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
