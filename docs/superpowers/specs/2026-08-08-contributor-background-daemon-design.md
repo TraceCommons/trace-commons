@@ -112,7 +112,7 @@ filter bill repeatedly over the same text and create near-identical envelopes
 that server-side simhash clustering collapses with `dup_pen = 1/size`,
 diluting the contributor's own credit. A grown session re-queues only when:
 
-- growth is material — `>= 2x` bytes **or** `>= 50` new events (both
+- growth is material — `>= 2x` bytes **or** `>= 64 KiB` of new bytes (both
   configurable), **and**
 - the session has been uploaded fewer than `max_reuploads` times (default 3).
 
@@ -277,13 +277,15 @@ until the notice was delivered interactively.
 
 ### PII filter configuration
 
-The filter is configured purely from process env (`envelope.rs:55`;
-`trace-commons-protocol/src/privacy_filter_near_ai.rs:77`). A systemd user
-unit inherits none of the user's shell env, so every entry would fail
-`pii-filter-unavailable` (`submit.rs:167`) and silently expire.
+The CLI reads filter settings from process env via `near_ai_settings_from_env`
+(`envelope.rs:55`). A systemd user unit inherits none of the user's shell env,
+so every entry would fail `pii-filter-unavailable` and silently expire.
 
-The daemon resolves filter settings from `daemon-settings.json` (0600), not
-ambient env. `daemon install` fails loudly when `pii_filter == Some("near-ai")`
+The seam already exists: `build_redactor_with` (`envelope.rs:87`) takes
+`near_ai: Option<NearAiSettings>` explicitly rather than reading the
+environment, precisely so callers can supply settings. The daemon resolves
+them from `daemon-settings.json` (0600) and passes them in; no refactor of the
+redactor path is required. `daemon install` fails loudly when `pii_filter == Some("near-ai")`
 and no persisted key exists.
 
 `canary_self_test_async` (`submit.rs:184`) currently fails the whole batch
