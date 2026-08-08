@@ -150,8 +150,15 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
                     } else {
                         report.queued += 1;
                     }
+                    // Upsert succeeded, so there is space in the queue.
+                    let mut health = shared.health.lock().expect("health lock");
+                    health.resolve(super::health::LABEL_QUEUE_FULL);
                 }
-                Ok(()) => {}
+                Ok(()) => {
+                    // Upsert succeeded (updating existing entry), so there is space in the queue.
+                    let mut health = shared.health.lock().expect("health lock");
+                    health.resolve(super::health::LABEL_QUEUE_FULL);
+                }
                 Err(_) => {
                     let mut health = shared.health.lock().expect("health lock");
                     health.fail(super::health::LABEL_QUEUE_FULL, now);

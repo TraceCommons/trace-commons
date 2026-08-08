@@ -147,13 +147,18 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             .collect()
     };
     if approved.is_empty() {
-        // Re-check enrollment even when the queue is empty, so a stale
-        // not-logged-in condition gets retracted if the contributor has logged
-        // back in and there is nothing to upload. Without this, an empty queue
-        // skips all health evaluation.
+        // Re-check enrollment and retract upload-failure labels when the queue
+        // is empty, since nothing is failing to upload anymore.
         if uploader::enrollment_is_live(&shared.store) {
             let mut health = shared.health.lock().expect("health lock");
             health.resolve(health::LABEL_NOT_LOGGED_IN);
+        }
+        // An empty approved queue means there is nothing failing to upload,
+        // so stale upload-failure labels no longer describe reality.
+        {
+            let mut health = shared.health.lock().expect("health lock");
+            health.resolve(health::LABEL_CLAIM_MINT_FAILED);
+            health.resolve(health::LABEL_INGEST_UNREACHABLE);
         }
         return Ok(());
     }

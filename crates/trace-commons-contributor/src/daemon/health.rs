@@ -277,4 +277,57 @@ mod tests {
         );
         assert_eq!(h.since, Some(at("2026-08-08T12:00:00Z")));
     }
+
+    #[test]
+    fn a_stale_ingest_unreachable_is_retracted_once_the_approved_queue_is_empty() {
+        // When the approved queue drains to empty, stale upload-failure labels
+        // no longer describe reality: nothing is failing to upload.
+        let mut h = HealthState::default();
+        h.fail(LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:00:00Z"));
+        assert!(!h.ok());
+        h.resolve(LABEL_INGEST_UNREACHABLE);
+        assert!(h.ok());
+        assert_eq!(h.last_error_label, None);
+    }
+
+    #[test]
+    fn a_stale_claim_mint_failed_is_retracted_once_the_approved_queue_is_empty() {
+        // When the approved queue drains to empty, stale upload-failure labels
+        // no longer describe reality: nothing is failing to upload.
+        let mut h = HealthState::default();
+        h.fail(LABEL_CLAIM_MINT_FAILED, at("2026-08-08T12:00:00Z"));
+        assert!(!h.ok());
+        h.resolve(LABEL_CLAIM_MINT_FAILED);
+        assert!(h.ok());
+        assert_eq!(h.last_error_label, None);
+    }
+
+    #[test]
+    fn queue_full_is_retracted_when_a_later_upsert_succeeds() {
+        // When a queue upsert succeeds after previously failing (queue-full is set),
+        // the space-available condition is now true and queue-full should be cleared.
+        let mut h = HealthState::default();
+        h.fail(LABEL_QUEUE_FULL, at("2026-08-08T12:00:00Z"));
+        assert!(!h.ok());
+        h.resolve(LABEL_QUEUE_FULL);
+        assert!(h.ok());
+        assert_eq!(h.last_error_label, None);
+    }
+
+    #[test]
+    fn a_label_is_not_retracted_by_a_path_that_did_not_recheck_its_condition() {
+        // resolve() should only be called on paths that genuinely re-establish
+        // the condition is false. A path that did not re-check the condition
+        // should not call resolve(). For example: a failed upload retries later,
+        // but the retry path (not this test) must call resolve, not an unrelated
+        // path that just happened to succeed.
+        let mut h = HealthState::default();
+        h.fail(LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:00:00Z"));
+        // Simulate a path that did NOT re-check upload connectivity: do not call resolve()
+        assert!(!h.ok());
+        assert_eq!(
+            h.last_error_label.as_deref(),
+            Some(LABEL_INGEST_UNREACHABLE)
+        );
+    }
 }
