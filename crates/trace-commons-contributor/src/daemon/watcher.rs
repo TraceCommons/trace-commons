@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use super::eligibility::{Eligibility, Observation, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
-use super::policy::{ProjectMode, project_key_for, project_label_for};
+use super::policy::{ProjectMode, disambiguated_label, project_key_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
 use super::state::CwdCacheEntry;
 use crate::source::{SessionRef, TraceSource, all_sources};
@@ -119,12 +119,28 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
                 continue;
             };
 
+            // Collision detection must see every project the daemon knows
+            // about -- both configured policy entries and projects already
+            // sitting in the queue -- so a given project key always renders
+            // the same label regardless of which of two colliding projects
+            // happened to get a queue entry first.
+            let known_keys: Vec<String> = {
+                let policy = shared.policy.lock().expect("policy lock");
+                let queue = shared.queue.lock().expect("queue lock");
+                policy
+                    .projects
+                    .keys()
+                    .cloned()
+                    .chain(queue.all().iter().map(|e| e.project_key.clone()))
+                    .collect()
+            };
+
             let entry = QueueEntry {
                 entry_id: entry_id_for(&transcript.session_hash),
                 session_hash: transcript.session_hash.clone(),
                 source: session_ref.source.to_string(),
                 project_key: project_key.clone(),
-                project_label: project_label_for(&project_key),
+                project_label: disambiguated_label(&project_key, &known_keys),
                 path: obs.path.clone(),
                 size_bytes: obs.size_bytes,
                 discovered_at: now,
@@ -280,6 +296,25 @@ mod tests {
             path
         }
 
+        /// Like `write_session`, but the session's cwd is an explicit full
+        /// path rather than derived from `project`. Used to simulate two
+        /// distinct projects that happen to share a basename (e.g. two
+        /// checkouts both named `api`), which `write_session` alone cannot
+        /// produce since it always uses the same parent directory.
+        fn write_session_with_cwd(&self, dir_name: &str, cwd: &str, name: &str) -> PathBuf {
+            let project_dir = self.claude_root.join(dir_name);
+            std::fs::create_dir_all(&project_dir).unwrap();
+            let path = project_dir.join(format!("{name}.jsonl"));
+            let body = format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
+                 \"cwd\":\"{cwd}\",\
+                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
+            );
+            std::fs::write(&path, body).unwrap();
+            path
+        }
+
         fn set_mode(&self, project: &str, mode: ProjectMode) {
             self.shared
                 .policy
@@ -426,6 +461,65 @@ mod tests {
         assert!(e.session_hash.starts_with("sha256:"));
         assert_eq!(e.source, "claude-code");
         assert!(e.size_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn colliding_project_basenames_get_distinct_queue_labels() {
+        // Two different repositories both called `api`; one might be the
+        // client's. tick() must produce distinguishable labels so an
+        // operator can never approve the wrong one from the queue alone.
+        let f = WatcherFixture::new();
+        f.write_session_with_cwd(
+            "-Users-testuser-work-api",
+            "/Users/testuser/work/api",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        f.write_session_with_cwd(
+            "-Users-testuser-client-api",
+            "/Users/testuser/client/api",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let labels_after_settle: std::collections::BTreeMap<String, String> = {
+            let queue = f.shared.queue.lock().unwrap();
+            assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+            let by_key: std::collections::BTreeMap<String, String> = queue
+                .all()
+                .iter()
+                .map(|e| (e.project_key.clone(), e.project_label.clone()))
+                .collect();
+            let labels: Vec<&str> = by_key.values().map(String::as_str).collect();
+            assert_ne!(
+                labels[0], labels[1],
+                "colliding projects must render distinct labels: {labels:?}"
+            );
+            for label in &labels {
+                assert!(
+                    !label.contains("work") && !label.contains("client") && !label.contains('/'),
+                    "label must not leak a path segment: {label}"
+                );
+            }
+            by_key
+        };
+
+        // Queue entries are immutable once inserted (`Queue::upsert` is a
+        // no-op for an already-present session hash), so a label computed at
+        // creation time never changes underneath the operator: a further
+        // tick must not perturb either label.
+        tick(&f.shared, at("2030-01-01T00:03:00Z")).await.unwrap();
+        let labels_after_another_tick: std::collections::BTreeMap<String, String> = f
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .map(|e| (e.project_key.clone(), e.project_label.clone()))
+            .collect();
+        assert_eq!(
+            labels_after_settle, labels_after_another_tick,
+            "labels must be stable once assigned"
+        );
     }
 
     #[tokio::test]

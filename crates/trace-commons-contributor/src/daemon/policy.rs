@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, DAEMON_PROJECTS_FILE};
 
@@ -147,6 +148,39 @@ pub fn project_label_for(project_key: &str) -> String {
         .unwrap_or_else(|| project_key.to_string())
 }
 
+/// A display label unique within `known_keys`. Adds a short stable hash
+/// suffix only when the basename collides.
+///
+/// The suffix is derived from `sha256(project_key)`, never from any path
+/// segment: labels cross the IPC socket and must never leak which directory
+/// a colliding project lives in.
+pub fn disambiguated_label(project_key: &str, known_keys: &[String]) -> String {
+    let label = project_label_for(project_key);
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return label;
+    }
+
+    let collides = known_keys
+        .iter()
+        .any(|other| other != project_key && project_label_for(other) == label);
+    if !collides {
+        return label;
+    }
+
+    let digest = Sha256::digest(project_key.as_bytes());
+    let suffix = hex_prefix(&digest, 4);
+    format!("{label} ({suffix})")
+}
+
+fn hex_prefix(bytes: &[u8], chars: usize) -> String {
+    bytes
+        .iter()
+        .flat_map(|b| [b >> 4, b & 0x0f])
+        .take(chars)
+        .map(|nibble| char::from_digit(nibble as u32, 16).expect("nibble is < 16"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +279,52 @@ mod tests {
     fn policy_defaults_when_the_file_is_absent() {
         let (_d, store) = temp_store();
         assert_eq!(ProjectPolicy::load(&store).unwrap(), ProjectPolicy::new());
+    }
+
+    #[test]
+    fn a_unique_basename_is_left_alone() {
+        let keys = vec![
+            "/Users/z/code/alpha".to_string(),
+            "/Users/z/code/beta".to_string(),
+        ];
+        assert_eq!(disambiguated_label("/Users/z/code/alpha", &keys), "alpha");
+    }
+
+    #[test]
+    fn colliding_basenames_get_distinct_stable_suffixes() {
+        // The dangerous case: one of these is the client's repo.
+        let keys = vec![
+            "/Users/z/work/api".to_string(),
+            "/Users/z/client/api".to_string(),
+        ];
+        let a = disambiguated_label("/Users/z/work/api", &keys);
+        let b = disambiguated_label("/Users/z/client/api", &keys);
+        assert_ne!(a, b, "colliding projects must be distinguishable");
+        assert!(a.starts_with("api ("), "got {a}");
+        assert_eq!(
+            a,
+            disambiguated_label("/Users/z/work/api", &keys),
+            "must be stable"
+        );
+    }
+
+    #[test]
+    fn a_suffix_never_contains_a_path_segment() {
+        // The suffix is a hash, not a directory name: paths never cross the wire.
+        let keys = vec![
+            "/Users/z/work/api".to_string(),
+            "/Users/z/client/api".to_string(),
+        ];
+        let a = disambiguated_label("/Users/z/work/api", &keys);
+        assert!(!a.contains("work") && !a.contains('/'), "got {a}");
+    }
+
+    #[test]
+    fn the_unknown_bucket_is_never_suffixed() {
+        let keys = vec![UNKNOWN_PROJECT_KEY.to_string()];
+        assert_eq!(
+            disambiguated_label(UNKNOWN_PROJECT_KEY, &keys),
+            UNKNOWN_PROJECT_KEY
+        );
     }
 }
