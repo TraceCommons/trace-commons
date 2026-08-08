@@ -241,9 +241,24 @@ pub struct tc_handle {
 /// stopped (or has been claimed for teardown by a concurrent stop). The one
 /// place `tc_call`, `tc_preview_open`, and `tc_subscribe` all read
 /// `handle.running` from, so they agree on what "stopped" means.
+///
+/// `shared.shutdown` counts as stopped too, not only `running == None`.
+/// A host can reach the daemon's own `"shutdown"` method through
+/// `tc_call(h, "shutdown", "{}")`, which sets that flag and ends the
+/// supervise loop but never touches `handle.running` -- so without this
+/// check the handle stayed "running" over a daemon that was not: a
+/// subsequent `tc_subscribe` returned a nonzero, documented-as-success
+/// token for a task that exits on its very first poll, and `status` kept
+/// reporting a healthy daemon. An undetectable zombie. Reading the flag
+/// here, rather than special-casing `"shutdown"` in `tc_call`, keeps one
+/// definition of "stopped" for all three entry points.
 fn shared_of(handle: &tc_handle) -> Option<Arc<ipc::DaemonShared>> {
     let running = handle.running.lock().unwrap_or_else(|p| p.into_inner());
-    running.as_ref().map(|r| Arc::clone(&r.embedded.shared))
+    let shared = running.as_ref().map(|r| Arc::clone(&r.embedded.shared))?;
+    if shared.shutdown.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(shared)
 }
 
 /// Opaque preview handle returned by `tc_preview_open`.
@@ -272,7 +287,24 @@ pub unsafe extern "C" fn tc_daemon_start(
         let result: anyhow::Result<tc_handle> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
             let store = ConfigStore::open(std::path::PathBuf::from(dir))?;
+            // A floor of two workers, not tokio's default of "available
+            // parallelism, or whatever TOKIO_WORKER_THREADS says". With
+            // exactly one worker, `stop_embedded`'s join-on-the-supervisor
+            // and an in-flight `tc_subscribe` callback are mutually
+            // exclusive demands on that single worker -- and
+            // `tc_daemon_stop` is documented as callable from inside a
+            // callback, which makes that a circular wait. It has not hung
+            // in practice only because `watcher::tick` runs its scan under
+            // `block_in_place`, which makes tokio spin up a transient
+            // replacement worker; whether one happens to exist at that
+            // instant is a coin flip, not a guarantee. Two is the smallest
+            // number that makes it one.
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .max(2);
             let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
                 .enable_all()
                 .build()?;
             let embedded = rt.block_on(trace_commons_contributor::daemon::start_embedded(store))?;
@@ -774,10 +806,28 @@ pub unsafe extern "C" fn tc_preview_open(
         let Some(shared) = shared_of(handle) else {
             anyhow::bail!("daemon-stopped");
         };
-        let (summary, body) = handle
-            .rt
-            .block_on(ipc::open_preview(&shared, id))
-            .map_err(|label| anyhow::anyhow!("{label}"))?;
+        // A dedicated OS thread with its own runtime, exactly as
+        // `stop_embedded` and `tc_unsubscribe` use, and never
+        // `handle.rt.block_on(..)` on the calling thread. This was the last
+        // remaining reentrant `block_on` in the crate -- the same hazard
+        // already fixed for `tc_daemon_stop`, and reproduced from a C host:
+        // calling `tc_preview_open` from inside a `tc_subscribe` callback
+        // (the most natural GUI flow there is -- receive `queue_changed`,
+        // open the preview) runs on one of `handle.rt`'s own workers, where
+        // tokio panics with "Cannot start a runtime from within a runtime".
+        // `guard_forwarding` caught it and returned `err = "panic"`,
+        // indistinguishable from a real internal panic, after tokio had
+        // already dumped a backtrace to a signed menu-bar app's stderr.
+        let preview = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "runtime-unavailable")?;
+            rt.block_on(ipc::open_preview(&shared, id))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("preview-thread-panicked"))?;
+        let (summary, body) = preview.map_err(|label| anyhow::anyhow!("{label}"))?;
         // The body is content the contributor is being asked to approve
         // for upload; silently stripping a byte that cannot cross as
         // `char*` would make preview disagree with what actually gets

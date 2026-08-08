@@ -406,20 +406,16 @@ fn no_callback_fires_after_tc_unsubscribe_returns() {
 /// callback that is provably still executing when `tc_daemon_stop` is
 /// called, and asserts the callback observes that `tc_daemon_stop` had
 /// already returned by the time the callback finished touching its state.
-/// How many worker threads `tc_daemon_start`'s runtime will actually have:
-/// it builds `Builder::new_multi_thread()` without calling
-/// `.worker_threads(..)`, so tokio honors `TOKIO_WORKER_THREADS` and
-/// otherwise defaults to the available parallelism.
+/// How many worker threads `tc_daemon_start`'s runtime will actually have.
+/// It calls `.worker_threads(..)` explicitly with a floor of two, which
+/// overrides `TOKIO_WORKER_THREADS` -- so this mirrors that floor rather
+/// than reading the environment. Kept as a function, and asserted on
+/// below, so the test and the floor cannot drift apart.
 fn daemon_worker_threads() -> usize {
-    match std::env::var("TOKIO_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-    {
-        Some(n) if n > 0 => n,
-        _ => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
-    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2)
 }
 
 /// The in-flight window is bounded by an explicit release signal, not by a
@@ -435,42 +431,34 @@ fn daemon_worker_threads() -> usize {
 /// scheduler picks, the callback is provably still in flight across the
 /// whole of `tc_daemon_stop`.
 ///
-/// # Why this needs at least two daemon worker threads, and is skipped below that
+/// # Why this needs at least two daemon worker threads
 ///
 /// A `tc_subscribe` callback is a synchronous C function invoked from the
 /// subscription's tokio task, so an in-flight callback occupies a worker
 /// thread for its whole duration. `tc_daemon_stop` finishes by joining the
 /// supervisor task, which also needs a worker. With exactly one worker
-/// those two demands are mutually exclusive, so at
-/// `TOKIO_WORKER_THREADS=1` the scenario is not merely slow to arrange --
-/// it is unsatisfiable: `tc_daemon_stop` cannot return while a blocking
-/// callback is in flight, which is precisely what this test needs it to
-/// do. (The old sleep-based version appeared to pass at one worker only by
-/// accident: `watcher::tick` runs its scan under `block_in_place`, which
-/// makes tokio spin up a transient replacement worker, and whether one
-/// happened to exist at that instant was the coin flip. Making the window
-/// signal-bounded converts that coin flip into a hard hang, verified: a
-/// signal-bounded run at one worker hung outright on 1 of 10 attempts.)
+/// those two demands are mutually exclusive, so at one worker the scenario
+/// is not merely slow to arrange -- it is unsatisfiable, and this test used
+/// to skip itself loudly whenever `TOKIO_WORKER_THREADS=1`.
 ///
-/// So the test is deterministic where the property is achievable and
-/// explicitly, loudly skipped where it is not, rather than being an
-/// unconditional `#[ignore]` that would give up the coverage in the
-/// default configuration -- where it is both meaningful and reliable.
+/// The skip is gone because the condition is: `tc_daemon_start` now sets
+/// `.worker_threads(..)` with a floor of two, which overrides
+/// `TOKIO_WORKER_THREADS` outright. That floor exists for the production
+/// hazard, not for this test -- at one worker, `stop_embedded`'s join and a
+/// callback holding the sole worker are a circular wait, and
+/// `tc_daemon_stop` is documented as callable from inside a callback -- but
+/// it also makes this scenario satisfiable in every configuration, so the
+/// test runs unconditionally. It asserts the floor rather than assuming it.
 #[test]
 fn a_callback_can_still_fire_after_tc_daemon_stop_returns() {
     use std::sync::atomic::AtomicBool;
 
-    let workers = daemon_worker_threads();
-    if workers < 2 {
-        eprintln!(
-            "SKIP a_callback_can_still_fire_after_tc_daemon_stop_returns: the \
-             daemon runtime has {workers} worker thread(s); an in-flight \
-             blocking callback and tc_daemon_stop's supervisor join cannot \
-             both hold the only worker, so the scenario is unsatisfiable \
-             here rather than merely flaky. See this test's doc comment."
-        );
-        return;
-    }
+    assert!(
+        daemon_worker_threads() >= 2,
+        "tc_daemon_start must floor its runtime at two workers; below that \
+         an in-flight callback and tc_daemon_stop's supervisor join are a \
+         circular wait, in production as well as here"
+    );
 
     static CALLBACK_STARTED: AtomicBool = AtomicBool::new(false);
     /// Set by the test thread only after `tc_daemon_stop` has returned.
@@ -731,5 +719,121 @@ fn tc_subscribe_null_cb_returns_zero() {
     let h = start(dir.path());
     let token = unsafe { tc_subscribe(h, None, std::ptr::null_mut()) };
     assert_eq!(token, 0);
+    stop(h);
+}
+
+// --- Shutdown must not leave an undetectable zombie ---------------------
+
+/// `tc_call(h, "shutdown", "{}")` reaches the daemon's own shutdown method,
+/// which stops the supervise loop but never touches `handle.running`. The
+/// handle therefore kept reporting a running daemon over a stopped one:
+/// `tc_subscribe` returned a nonzero -- documented as success -- token for
+/// a task that exits on its first poll, and `status` kept answering as if
+/// all were well. `shared_of` now consults `shared.shutdown`, so all three
+/// entry points agree on what "stopped" means.
+#[test]
+fn tc_call_shutdown_leaves_the_handle_reporting_a_stopped_daemon() {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+
+    let before = call(h, "status", "{}");
+    assert!(before.contains("queue_depth"), "{before}");
+
+    let shutdown = call(h, "shutdown", "{}");
+    assert!(shutdown.contains("stopping"), "{shutdown}");
+
+    let after = call(h, "status", "{}");
+    assert!(
+        after.contains("daemon-stopped"),
+        "status must report the daemon as stopped, not answer as if it \
+         were running: {after}"
+    );
+
+    let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "subscribing to a stopped daemon must fail, not hand back a \
+         success token for a task that exits immediately"
+    );
+
+    stop(h);
+}
+
+// --- tc_preview_open must not panic from inside a callback --------------
+
+/// The most natural GUI flow there is: receive `queue_changed` on the
+/// subscription callback, and open the preview for what changed.
+/// `tc_preview_open` used to run `handle.rt.block_on(..)` on the calling
+/// thread, which -- inside a callback, running on one of that same
+/// runtime's workers -- panics with "Cannot start a runtime from within a
+/// runtime". `guard_forwarding` turned that into `err = "panic"`,
+/// indistinguishable from a real internal panic, after tokio had already
+/// written a backtrace to a signed menu-bar app's stderr.
+///
+/// The entry id here is deliberately unknown, so the *expected* answer is
+/// the fixed label `unknown-entry-id`. That is the whole point: the
+/// distinction under test is a clean, specific error versus a panic.
+#[test]
+fn tc_preview_open_from_inside_a_subscribe_callback_reports_an_error_not_a_panic() {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    static DONE: AtomicBool = AtomicBool::new(false);
+    static HANDLE: AtomicU64 = AtomicU64::new(0);
+    static OBSERVED: Mutex<Option<String>> = Mutex::new(None);
+
+    extern "C" fn preview_cb(_event_json: *const c_char, _ctx: *mut c_void) {
+        if DONE.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let h = HANDLE.load(Ordering::SeqCst) as *mut tc_handle;
+        let id = cstr_str("00000000-0000-0000-0000-000000000000");
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let p = unsafe { tc_preview_open(h, id.as_ptr(), &mut err) };
+        assert!(p.is_null(), "an unknown entry id has no preview");
+        let msg = if err.is_null() {
+            String::new()
+        } else {
+            let s = unsafe { CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { tc_string_free(err) };
+            s
+        };
+        *OBSERVED.lock().unwrap() = Some(msg);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    HANDLE.store(h as u64, Ordering::SeqCst);
+    let token = unsafe { tc_subscribe(h, Some(preview_cb), std::ptr::null_mut()) };
+    assert_ne!(token, 0);
+
+    // Any published event will do; `pause` publishes status_changed.
+    let _ = call(h, "pause", "{}");
+    for _ in 0..400 {
+        if DONE.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        DONE.load(Ordering::SeqCst),
+        "the callback never fired -- test did not exercise the path under test"
+    );
+    unsafe { tc_unsubscribe(h, token) };
+
+    let observed = OBSERVED.lock().unwrap().clone().unwrap();
+    assert_ne!(
+        observed, "panic",
+        "tc_preview_open must not panic from inside a subscribe callback"
+    );
+    assert_eq!(
+        observed, "unknown-entry-id",
+        "the caller must get the real, fixed label"
+    );
+
     stop(h);
 }

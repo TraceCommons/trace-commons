@@ -85,6 +85,12 @@ typedef struct tc_preview tc_preview;
  * config_dir. A second tc_daemon_start against the same directory must
  * fail rather than let two loops race the same on-disk queue. *err, on
  * failure, is an owned string; free it with tc_string_free.
+ *
+ * The daemon's runtime is sized at no fewer than two worker threads, and
+ * that floor overrides TOKIO_WORKER_THREADS. It is not a tuning choice: at
+ * one worker, an in-flight tc_subscribe callback and tc_daemon_stop's join
+ * on the supervisor are mutually exclusive demands on the only worker, and
+ * tc_daemon_stop is documented as callable from inside a callback.
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
@@ -123,6 +129,13 @@ void        tc_handle_free(tc_handle*);
  * Returns a NUL-terminated JSON response; free with tc_string_free. Never
  * returns NULL: a bad handle, method, or params_json produces a JSON error
  * frame (`{"error":{"code":"bad_params",...}}`) rather than a null pointer.
+ *
+ * tc_call(h, "shutdown", "{}") stops the daemon loop. It is equivalent to
+ * tc_daemon_stop for the daemon's own state -- afterwards every call on
+ * this handle reports `{"error":{"code":"unavailable","message":
+ * "daemon-stopped"}}` and tc_subscribe returns 0 -- but it does NOT
+ * release the state directory or the handle's resources. Call
+ * tc_daemon_stop and then tc_handle_free to do that.
  */
 char*       tc_call(tc_handle*, const char* method, const char* params_json);
 
@@ -179,6 +192,12 @@ void        tc_unsubscribe(tc_handle*, uint64_t token);
  * redacted body that cannot be represented as a NUL-terminated C string.
  * On success, everything returned by the tc_preview_* accessors below is
  * borrowed and valid until tc_preview_free.
+ *
+ * Safe to call from inside a tc_subscribe callback -- the natural flow of
+ * receiving queue_changed and opening the preview for what changed. It
+ * blocks the calling thread for the duration of the redaction pass, so a
+ * host that must keep its callback short should hand the entry_id to its
+ * own thread instead.
  */
 tc_preview* tc_preview_open(tc_handle*, const char* entry_id, char** err);
 const char* tc_preview_body(const tc_preview*);          /* redacted transcript, UTF-8 */
