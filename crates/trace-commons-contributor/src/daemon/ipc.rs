@@ -839,34 +839,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_settings" => {
             let mut settings = shared.settings.lock().expect("settings lock");
-            let mut changed = false;
-            if let Some(v) = req.params.get("quiescence_secs").and_then(|v| v.as_u64()) {
-                settings.quiescence_secs = v;
-                changed = true;
+            // `apply_settings_object` is the same validation
+            // `tc_daemon_start_with_settings` (the C ABI's pre-start
+            // settings override) uses, so there is one definition of "a
+            // valid settings object" for both. See its doc for why an
+            // unrecognized key is rejected rather than ignored.
+            match super::settings::apply_settings_object(&mut settings, &req.params) {
+                Ok(false) => Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied"),
+                Ok(true) => {
+                    if let Err(_e) = settings.save(&shared.store) {
+                        return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+                    }
+                    Response::ok(req.id, redacted_settings(&settings))
+                }
+                Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
             }
-            if let Some(v) = req
-                .params
-                .get("digest_interval_secs")
-                .and_then(|v| v.as_u64())
-            {
-                settings.digest_interval_secs = v;
-                changed = true;
-            }
-            if let Some(v) = req
-                .params
-                .get("local_notifications")
-                .and_then(|v| v.as_bool())
-            {
-                settings.local_notifications = v;
-                changed = true;
-            }
-            if !changed {
-                return Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied");
-            }
-            if let Err(_e) = settings.save(&shared.store) {
-                return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
-            }
-            Response::ok(req.id, redacted_settings(&settings))
         }
         "shutdown" => {
             shared.shutdown.store(true, Ordering::Relaxed);

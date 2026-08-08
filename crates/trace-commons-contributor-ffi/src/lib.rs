@@ -99,6 +99,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::EmbeddedDaemon;
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
+use trace_commons_contributor::daemon::settings::{DaemonSettings, apply_settings_object};
 
 /// Catches a panic; on an ordinary `Err`, returns a fixed, content-free
 /// label rather than forwarding the underlying `anyhow::Error`'s `Display`
@@ -328,6 +329,72 @@ pub struct tc_preview {
     summary_json: CString,
 }
 
+/// Build a running `tc_handle` from an already-open `ConfigStore` -- the
+/// common tail shared by `tc_daemon_start` and
+/// `tc_daemon_start_with_settings` once each has finished its own preamble
+/// (nothing, for the former; applying `settings_json`, for the latter). Kept
+/// as one function so the two entry points cannot drift on how the runtime,
+/// `start_embedded`, and the supervisor task get wired together.
+fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
+    // A floor of two workers, not tokio's default of "available
+    // parallelism, or whatever TOKIO_WORKER_THREADS says". With exactly one
+    // worker, `stop_embedded`'s join-on-the-supervisor and an in-flight
+    // `tc_subscribe` callback are mutually exclusive demands on that single
+    // worker -- and `tc_daemon_stop` is documented as callable from inside a
+    // callback, which makes that a circular wait. It has not hung in
+    // practice only because `watcher::tick` runs its scan under
+    // `block_in_place`, which makes tokio spin up a transient replacement
+    // worker; whether one happens to exist at that instant is a coin flip,
+    // not a guarantee. Two is the smallest number that makes it one.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?;
+    let embedded = rt.block_on(trace_commons_contributor::daemon::start_embedded(store))?;
+    let supervisor_shared = Arc::clone(&embedded.shared);
+    let supervisor = rt.spawn(trace_commons_contributor::daemon::run_supervisor(
+        supervisor_shared,
+        false,
+    ));
+    Ok(tc_handle {
+        rt,
+        running: Mutex::new(Some(RunningDaemon {
+            embedded,
+            supervisor,
+        })),
+        subscriptions: Mutex::new(HashMap::new()),
+        next_subscription: AtomicU64::new(1),
+    })
+}
+
+/// Turn a successful/failed `tc_handle` build into the out-param + return
+/// value shape every `tc_daemon_start*` entry point reports, so the two
+/// cannot drift on it. Never forwards `result`'s underlying anyhow text:
+/// both `ConfigStore::open` and `daemon::start_embedded` embed the
+/// state-directory / lock-file path in their error context for
+/// CLI/local-stderr consumption, and that must not cross this boundary. See
+/// the module doc.
+fn finish_daemon_start(result: anyhow::Result<tc_handle>, err: *mut *mut c_char) -> *mut tc_handle {
+    match result {
+        Ok(handle) => {
+            let ptr = Box::into_raw(Box::new(handle));
+            registry_insert(ptr as usize, AllocKind::Handle);
+            ptr
+        }
+        Err(_) => {
+            set_last_error(ERR_DAEMON_START_FAILED);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(ERR_DAEMON_START_FAILED) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Runs the daemon loop on its own thread with its own runtime.
 ///
 /// Returns NULL and sets `*err` (if `err` is non-null) on failure -- most
@@ -348,72 +415,170 @@ pub unsafe extern "C" fn tc_daemon_start(
         let result: anyhow::Result<tc_handle> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
             let store = ConfigStore::open(std::path::PathBuf::from(dir))?;
-            // A floor of two workers, not tokio's default of "available
-            // parallelism, or whatever TOKIO_WORKER_THREADS says". With
-            // exactly one worker, `stop_embedded`'s join-on-the-supervisor
-            // and an in-flight `tc_subscribe` callback are mutually
-            // exclusive demands on that single worker -- and
-            // `tc_daemon_stop` is documented as callable from inside a
-            // callback, which makes that a circular wait. It has not hung
-            // in practice only because `watcher::tick` runs its scan under
-            // `block_in_place`, which makes tokio spin up a transient
-            // replacement worker; whether one happens to exist at that
-            // instant is a coin flip, not a guarantee. Two is the smallest
-            // number that makes it one.
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2)
-                .max(2);
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(workers)
-                .enable_all()
-                .build()?;
-            let embedded = rt.block_on(trace_commons_contributor::daemon::start_embedded(store))?;
-            let supervisor_shared = Arc::clone(&embedded.shared);
-            let supervisor = rt.spawn(trace_commons_contributor::daemon::run_supervisor(
-                supervisor_shared,
-                false,
-            ));
-            Ok(tc_handle {
-                rt,
-                running: Mutex::new(Some(RunningDaemon {
-                    embedded,
-                    supervisor,
-                })),
-                subscriptions: Mutex::new(HashMap::new()),
-                next_subscription: AtomicU64::new(1),
-            })
+            start_daemon_handle(store)
         })();
         // Everything from here on, including turning a failure into the
         // out-param the caller sees, stays inside `guard`'s catch_unwind:
         // `set_last_error` and `to_owned_cstring` are audited not to panic
         // themselves (see their doc comments), so nothing here can escape
         // it either.
-        match result {
-            Ok(handle) => {
-                let ptr = Box::into_raw(Box::new(handle));
-                registry_insert(ptr as usize, AllocKind::Handle);
-                Ok(ptr)
-            }
-            Err(_) => {
-                // Never forward the underlying anyhow text here: both
-                // `ConfigStore::open` and `daemon::start_embedded` embed
-                // the state-directory / lock-file path in their error
-                // context for CLI/local-stderr consumption, and that must
-                // not cross this boundary. See the module doc.
-                set_last_error(ERR_DAEMON_START_FAILED);
-                if !err.is_null() {
-                    unsafe { *err = to_owned_cstring(ERR_DAEMON_START_FAILED) };
-                }
-                Ok(std::ptr::null_mut())
-            }
-        }
+        Ok(finish_daemon_start(result, err))
     });
     outcome.unwrap_or_else(|_| {
         // A genuine caught panic (not a business-logic error, which the
         // closure above always converts to `Ok` and never lets reach
         // here). `set_last_error`/`to_owned_cstring` are audited not to
         // panic (see their doc comments), so this cannot recurse.
+        set_last_error("panic");
+        if !err.is_null() {
+            unsafe { *err = to_owned_cstring("panic") };
+        }
+        std::ptr::null_mut()
+    })
+}
+
+/// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
+/// `tc_last_error` for a failure specific to `settings_json`, distinct from
+/// `ERR_DAEMON_START_FAILED` (which stays opaque for the reason stated on
+/// `finish_daemon_start`). These are safe to surface verbatim: every one is
+/// already a fixed, content-free label by construction, either synthesized
+/// here or produced by `daemon::settings::apply_settings_object` (see its
+/// doc for why *that* function's labels never carry a value, only ever one
+/// of a small fixed set of field names).
+const ERR_SETTINGS_INVALID_ENCODING: &str = "settings-invalid-encoding";
+const ERR_SETTINGS_INVALID_JSON: &str = "settings-invalid-json";
+const ERR_SETTINGS_LOAD_FAILED: &str = "settings-load-failed";
+const ERR_SETTINGS_WRITE_FAILED: &str = "settings-write-failed";
+
+/// Apply `settings_json` (if any) onto the settings persisted in `store`,
+/// before `tc_daemon_start_with_settings` calls `start_daemon_handle` --
+/// see that function's doc for why this ordering is the entire point: the
+/// supervisor's first tick fires immediately on start, so anything this
+/// crate wants in effect for that first tick must already be on disk before
+/// `start_embedded` (via `DaemonShared::load` -> `DaemonSettings::load`)
+/// reads it.
+///
+/// A NULL `settings_json`, or one that is empty after trimming ASCII
+/// whitespace, is a no-op: identical to `tc_daemon_start`, by design.
+///
+/// # Safety
+/// `settings_json`, if non-null, must be a valid, NUL-terminated C string.
+unsafe fn apply_pre_start_settings(
+    store: &ConfigStore,
+    settings_json: *const c_char,
+) -> Result<(), &'static str> {
+    if settings_json.is_null() {
+        return Ok(());
+    }
+    let text = unsafe { borrow_str(settings_json) }.map_err(|_| ERR_SETTINGS_INVALID_ENCODING)?;
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| ERR_SETTINGS_INVALID_JSON)?;
+    let mut settings = DaemonSettings::load(store).map_err(|_| ERR_SETTINGS_LOAD_FAILED)?;
+    let changed = apply_settings_object(&mut settings, &value)?;
+    if changed {
+        settings
+            .save(store)
+            .map_err(|_| ERR_SETTINGS_WRITE_FAILED)?;
+    }
+    Ok(())
+}
+
+/// Like `tc_daemon_start`, but applies `settings_json` -- a JSON object of
+/// `DaemonSettings` fields -- to the persisted settings *before* starting
+/// the daemon, so the supervisor's first tick (which fires immediately on
+/// start; see `daemon::run_supervisor`) already observes the overridden
+/// `claude_root` / `codex_root` rather than whatever was previously
+/// persisted, or the conventional per-user default.
+///
+/// This closes a real gap: `tc_call(handle, "set_settings", ...)` only
+/// works on an already-running daemon, by which point the first tick has
+/// already scanned whatever was on disk before this call. A host that needs
+/// the watcher to scan a non-default location from the very first pass --
+/// most importantly a native application that wants to watch a relocated
+/// session store, or a test harness that must never scan the real
+/// `~/.claude` / `~/.codex` -- had no way to do that through this ABI
+/// before this function existed, short of writing `daemon-settings.json`
+/// onto disk by hand in the format `DaemonSettings::save` happens to use
+/// today -- undocumented, unstable, and exactly the kind of thing a C ABI
+/// exists to make unnecessary.
+///
+/// `settings_json` accepts exactly the fields `tc_call(handle,
+/// "set_settings", ...)` does -- `quiescence_secs`, `digest_interval_secs`,
+/// `local_notifications`, `claude_root`, `codex_root` -- validated by the
+/// same function (`daemon::settings::apply_settings_object`), so there is
+/// one definition of "a valid settings object", not two that can drift. An
+/// unrecognized top-level key, or a recognized key holding the wrong JSON
+/// type, is rejected with a fixed label rather than silently ignored: a
+/// misspelled `claude_root` that was silently ignored would leave the
+/// daemon watching the wrong directory with no signal to the host that
+/// anything went wrong, which is precisely the failure mode this function
+/// exists to close off.
+///
+/// `settings_json` may be NULL, or (after trimming ASCII whitespace) empty,
+/// meaning "use whatever is currently persisted" -- identical to
+/// `tc_daemon_start`. It is not otherwise optional: malformed JSON is a
+/// fixed error label, never a panic.
+///
+/// Returns NULL and sets `*err` (if non-null) on failure. A `settings_json`
+/// problem reports one of the fixed, content-free labels documented on
+/// `apply_pre_start_settings` and `daemon::settings::apply_settings_object`
+/// -- deliberately never `settings_json`'s own text, since it is the one
+/// input to this function that may itself contain a filesystem path, which
+/// is exactly the content this boundary must never echo back. Any other
+/// failure (an unavailable `config_dir`, another daemon already holding the
+/// lock) reports the same opaque `"daemon-start-failed"` `tc_daemon_start`
+/// does, for the same reason.
+///
+/// The returned handle, on success, is exactly a `tc_daemon_start` handle:
+/// it is freed the same way, by `tc_handle_free`, after `tc_daemon_stop`.
+///
+/// # Safety
+/// `config_dir` and `settings_json` must each be a valid, NUL-terminated
+/// UTF-8 C string, or NULL. `err`, if non-null, must point to writable
+/// `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_daemon_start_with_settings(
+    config_dir: *const c_char,
+    settings_json: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut tc_handle {
+    let outcome = guard(|| {
+        let store_result: anyhow::Result<ConfigStore> = (|| {
+            let dir = unsafe { borrow_str(config_dir) }?;
+            ConfigStore::open(std::path::PathBuf::from(dir))
+        })();
+        let store = match store_result {
+            Ok(store) => store,
+            Err(_) => {
+                return Ok(finish_daemon_start(
+                    Err(anyhow::anyhow!("open-failed")),
+                    err,
+                ));
+            }
+        };
+
+        // Applied, and durably saved, BEFORE `start_daemon_handle` calls
+        // `start_embedded`: `DaemonShared::load` reads settings from disk
+        // at that point, and the supervisor's first tick -- which fires
+        // immediately, not after the first poll interval -- reads them
+        // from `DaemonShared`. There is no ordering in which applying this
+        // in memory only, or after `start_embedded`, would still beat that
+        // first tick.
+        if let Err(label) = unsafe { apply_pre_start_settings(&store, settings_json) } {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            return Ok(std::ptr::null_mut());
+        }
+
+        let result = start_daemon_handle(store);
+        Ok(finish_daemon_start(result, err))
+    });
+    outcome.unwrap_or_else(|_| {
         set_last_error("panic");
         if !err.is_null() {
             unsafe { *err = to_owned_cstring("panic") };

@@ -9,9 +9,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    tc_call, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free, tc_last_error, tc_preview,
-    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free,
-    tc_subscribe, tc_unsubscribe,
+    tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_handle,
+    tc_handle_free, tc_last_error, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
+    tc_preview_summary_json, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -907,4 +907,220 @@ fn tc_preview_open_from_inside_a_subscribe_callback_reports_an_error_not_a_panic
     );
 
     stop(h);
+}
+
+// --- tc_daemon_start_with_settings: closes the gap where a host had no way
+// to set claude_root/codex_root before the daemon's first supervisor tick,
+// which fires immediately on start (see the function's own doc). The Swift
+// demo worked around this by hand-writing daemon-settings.json in the shape
+// DaemonSettings::save happens to use today; these tests exist so that
+// workaround, and the gap behind it, cannot come back unnoticed. ---
+
+/// Write a minimal Claude Code session file in the on-disk shape
+/// `ClaudeCodeSource::discover` expects: a project directory whose name
+/// encodes the cwd (`/`s become `-`s), containing one `.jsonl` file whose
+/// first line names that same cwd. Mirrors
+/// `trace-commons-contributor`'s own `WatcherFixture::write_session`.
+fn write_claude_session(claude_root: &Path, project: &str, name: &str) -> std::path::PathBuf {
+    let project_dir = claude_root.join(format!("-Users-testuser-code-{project}"));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let path = project_dir.join(format!("{name}.jsonl"));
+    let body = format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
+         \"cwd\":\"/Users/testuser/code/{project}\",\
+         \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+         \"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
+    );
+    std::fs::write(&path, &body).unwrap();
+    path
+}
+
+/// Pre-record `path` at its current size in `daemon-state.json`, so the
+/// very first supervisor tick already has a "previous poll" to compare
+/// against and can find the session immediately size-stable
+/// (`Eligibility::Eligible`) rather than needing a second tick
+/// (`Eligibility::Unstable` on first sighting; see
+/// `daemon::eligibility::evaluate`). Without this, proving "the override
+/// took effect before the first tick" would require waiting out a real
+/// `poll_interval_secs`, which is not something this test controls.
+fn preseed_stable_observation(config_dir: &Path, path: &std::path::Path) {
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(config_dir.to_path_buf()).unwrap();
+    let size = std::fs::metadata(path).unwrap().len();
+    let mut state = trace_commons_contributor::daemon::state::DaemonState::new();
+    state.observe(path, size);
+    state.save(&store).unwrap();
+}
+
+#[test]
+fn a_claude_root_override_is_scanned_from_the_first_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_root = dir.path().join("claude-root");
+    let codex_root = dir.path().join("codex-root");
+    std::fs::create_dir_all(&claude_root).unwrap();
+    std::fs::create_dir_all(&codex_root).unwrap();
+
+    let session_path = write_claude_session(&claude_root, "project1", "s1");
+    preseed_stable_observation(dir.path(), &session_path);
+
+    let settings_json = serde_json::json!({
+        "claude_root": claude_root.to_str().unwrap(),
+        "codex_root": codex_root.to_str().unwrap(),
+        // Backdated to a fixed past timestamp above; a real-time quiescence
+        // window would otherwise race this test against the clock.
+        "quiescence_secs": 0,
+    })
+    .to_string();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(
+        !h.is_null(),
+        "tc_daemon_start_with_settings failed: {:?}",
+        last_error()
+    );
+
+    let mut seen = false;
+    for _ in 0..200 {
+        let out = call(h, "list_pending", "{}");
+        if out.contains("project1") {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        seen,
+        "the watcher never queued a session from the claude_root override -- \
+         the pre-start settings override did not take effect before the \
+         first tick"
+    );
+
+    stop(h);
+}
+
+#[test]
+fn an_unknown_settings_field_is_rejected_not_silently_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings_json = cstr_str(r#"{"claude_root_typo":"/tmp/whatever"}"#);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(cstr(dir.path()).as_ptr(), settings_json.as_ptr(), &mut err)
+    };
+    assert!(
+        h.is_null(),
+        "an unrecognized settings field must not silently start the daemon"
+    );
+    assert!(!err.is_null(), "a failure must set the error out-param");
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert_eq!(msg, "settings-unknown-field", "{msg}");
+}
+
+#[test]
+fn null_settings_json_behaves_exactly_like_tc_daemon_start() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tempdir_session_roots(dir.path());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(cstr(dir.path()).as_ptr(), std::ptr::null(), &mut err)
+    };
+    assert!(
+        !h.is_null(),
+        "a null settings_json must behave exactly like tc_daemon_start"
+    );
+    let out = call(h, "get_settings", "{}");
+    assert!(
+        out.contains("\"claude_root_configured\":true"),
+        "a null settings_json must leave whatever was already persisted alone: {out}"
+    );
+    stop(h);
+}
+
+#[test]
+fn empty_settings_json_behaves_exactly_like_tc_daemon_start() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tempdir_session_roots(dir.path());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(cstr(dir.path()).as_ptr(), cstr_str("").as_ptr(), &mut err)
+    };
+    assert!(
+        !h.is_null(),
+        "an empty settings_json must behave exactly like tc_daemon_start"
+    );
+    let out = call(h, "get_settings", "{}");
+    assert!(
+        out.contains("\"claude_root_configured\":true"),
+        "an empty settings_json must leave whatever was already persisted alone: {out}"
+    );
+    stop(h);
+}
+
+#[test]
+fn malformed_settings_json_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str("{not json").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(h.is_null());
+    assert!(!err.is_null(), "a failure must set the error out-param");
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert_eq!(msg, "settings-invalid-json", "{msg}");
+}
+
+#[test]
+fn a_bad_claude_root_value_never_echoes_the_path_in_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "/Users/zzz/very/secret/project-name";
+    // claude_root must be a JSON string or null; an array is the wrong
+    // type, but it still carries the path-shaped value inside it, and the
+    // resulting error must never echo that value back -- only the field
+    // name (which is one of a small, fixed, known set) may appear.
+    let settings_json = serde_json::json!({ "claude_root": [secret] }).to_string();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(h.is_null());
+    assert!(!err.is_null(), "a failure must set the error out-param");
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(!msg.contains(secret), "path leaked into the error: {msg}");
+    assert_eq!(msg, "settings-invalid-value", "{msg}");
+}
+
+#[test]
+fn tc_daemon_start_with_settings_null_config_dir_is_an_error() {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(std::ptr::null(), cstr_str("{}").as_ptr(), &mut err)
+    };
+    assert!(h.is_null());
+    assert!(!err.is_null());
+    unsafe { tc_string_free(err) };
 }

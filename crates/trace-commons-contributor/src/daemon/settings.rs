@@ -114,6 +114,88 @@ impl DaemonSettings {
     }
 }
 
+/// A partial-settings object held nothing this function recognizes.
+pub const ERR_SETTINGS_NOT_OBJECT: &str = "settings-not-object";
+/// A partial-settings object had a top-level key this function does not
+/// recognize.
+pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
+/// A recognized key held a value of the wrong JSON type (or, for
+/// `claude_root`/`codex_root`, a JSON type other than string/null).
+pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+
+/// Apply a partial settings object -- the shape `tc_call(handle,
+/// "set_settings", ...)` takes over the socket, and the shape
+/// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
+/// first supervisor tick -- onto `settings` in place. One function, so
+/// both callers share one definition of "a valid settings object" rather
+/// than two that can drift.
+///
+/// Every top-level key must be one this function recognizes; an
+/// unrecognized key is rejected outright (`Err(ERR_SETTINGS_UNKNOWN_FIELD)`)
+/// rather than silently ignored. Silently ignoring a misspelled
+/// `claude_root` is exactly the bug this exists to prevent: a caller that
+/// meant to redirect the watcher and typo'd the key would otherwise get no
+/// signal at all, and the daemon would quietly go on scanning wherever it
+/// was already pointed.
+///
+/// Every error is a fixed, content-free `&'static str` label. In
+/// particular, a bad `claude_root`/`codex_root` value never appears in the
+/// label -- only the recognized field name distinguishes one failure from
+/// another, and the field *names* are a small, fixed, known set, never
+/// caller-supplied text. The values themselves (which is where a
+/// filesystem path lives) never cross into an error string.
+///
+/// Returns whether anything was applied. An empty object (or one holding
+/// only keys whose values happen to match the current setting) still
+/// reports `true` for any key present and accepted -- this always applies
+/// every key it accepts, so `Ok(false)` only ever means "the object had no
+/// keys at all". Callers that require at least one recognized field (as
+/// `set_settings` does, to catch an empty or accidental call) check that
+/// themselves; `tc_daemon_start_with_settings` does not, since "nothing to
+/// override" is its documented no-op case.
+pub fn apply_settings_object(
+    settings: &mut DaemonSettings,
+    params: &serde_json::Value,
+) -> std::result::Result<bool, &'static str> {
+    let obj = params.as_object().ok_or(ERR_SETTINGS_NOT_OBJECT)?;
+    let mut changed = false;
+    for (key, value) in obj {
+        match key.as_str() {
+            "quiescence_secs" => {
+                settings.quiescence_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "digest_interval_secs" => {
+                settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "local_notifications" => {
+                settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "claude_root" => {
+                settings.claude_root = parse_optional_root(value)?;
+            }
+            "codex_root" => {
+                settings.codex_root = parse_optional_root(value)?;
+            }
+            _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// `null` clears the override (falls back to the conventional per-user
+/// location); a string sets it; anything else is a type error. Never
+/// formats `value` into the error -- see `apply_settings_object`'s doc.
+fn parse_optional_root(
+    value: &serde_json::Value,
+) -> std::result::Result<Option<PathBuf>, &'static str> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(PathBuf::from(s))),
+        _ => Err(ERR_SETTINGS_INVALID_VALUE),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

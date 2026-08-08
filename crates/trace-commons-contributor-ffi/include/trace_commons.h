@@ -119,6 +119,43 @@ typedef struct tc_preview tc_preview;
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
+/* Like tc_daemon_start, but applies settings_json -- a JSON object of
+ * DaemonSettings fields -- BEFORE starting the daemon, so its first
+ * supervisor tick (which fires immediately on start, not after the first
+ * poll interval) already observes it. This is the ONLY way through this
+ * ABI to set claude_root / codex_root before the daemon has already scanned
+ * the previously-persisted (or default per-user) session roots once:
+ * tc_call(handle, "set_settings", ...) only works on an already-running
+ * daemon, by which point that first scan has already happened.
+ *
+ * settings_json accepts exactly the fields tc_call(handle, "set_settings",
+ * ...) does: quiescence_secs, digest_interval_secs, local_notifications,
+ * claude_root, codex_root -- one shared validation, so there is one
+ * definition of "a valid settings object" for both entry points. An
+ * unrecognized top-level key, or a recognized key holding the wrong JSON
+ * type, is rejected with a fixed error label rather than silently ignored
+ * -- silently ignoring a misspelled claude_root would leave the daemon
+ * watching the wrong directory with no signal that anything was wrong.
+ *
+ * settings_json may be NULL, or empty (after trimming ASCII whitespace),
+ * meaning "use whatever is currently persisted" -- identical to
+ * tc_daemon_start. It is not otherwise optional: malformed JSON is a fixed
+ * error label, never a panic.
+ *
+ * Returns NULL and sets *err (if err is non-NULL) on failure, exactly like
+ * tc_daemon_start -- *err, on failure, is an owned string; free it with
+ * tc_string_free. A settings_json problem reports one of its own fixed
+ * labels (never settings_json's own text, since it is the one input here
+ * that may itself contain a filesystem path); any other failure (a bad
+ * config_dir, another daemon already holding the lock) reports the same
+ * opaque "daemon-start-failed" tc_daemon_start does.
+ *
+ * The returned handle, on success, is exactly a tc_daemon_start handle --
+ * every rule above about tc_daemon_start's return value, and everything
+ * below about tc_daemon_stop / tc_handle_free, applies to it unchanged.
+ */
+tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
+
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other

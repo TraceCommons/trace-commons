@@ -209,7 +209,7 @@ history record, audit entry, notification text, or IPC response.
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `local_notifications` | updated settings | |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `local_notifications`, `claude_root`, `codex_root` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -340,6 +340,32 @@ non-eligible verdict or an `Ignore`-mode project. Do not present this
 method's output as covering that case; a future method may be added for it,
 and this name was deliberately chosen to leave room for that without another
 contract break.
+
+### `set_settings`
+
+Takes a JSON object of settings to change. Every top-level key must be one
+of `quiescence_secs`, `digest_interval_secs`, `local_notifications`,
+`claude_root`, `codex_root` -- a key this method does not recognize is
+refused outright (`bad_params` / `settings-unknown-field`), not silently
+ignored, so a caller that mistypes a key gets a definite signal rather than
+a daemon that quietly kept the old value. A recognized key holding the
+wrong JSON type is refused the same way (`bad_params` /
+`settings-invalid-value`). An object with no keys at all is refused
+(`bad_params` / `no-known-setting-supplied`).
+
+`claude_root` and `codex_root` each take a JSON string (a filesystem path)
+or `null` (clear the override, falling back to the conventional per-user
+location). Setting either here only takes effect from the daemon's *next*
+supervisor tick onward -- the tick already scheduled or in flight when this
+call returns has already read the old value. A caller that needs the
+watcher to scan a non-default location from the very first tick -- most
+importantly a native host embedding the daemon via the C ABI, or a test
+harness that must never scan the real `~/.claude`/`~/.codex` -- cannot get
+that through `set_settings`, since it only works on an already-running
+daemon and the first tick fires immediately on start. That is what the C
+ABI's `tc_daemon_start_with_settings` is for: it applies the same object
+this method validates, but before starting the daemon, so the first tick
+already observes the override. See `include/trace_commons.h`.
 
 ### `history_rollup`
 
