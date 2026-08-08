@@ -16,6 +16,11 @@ use trace_commons_contributor::daemon::ipc::{
     DaemonShared, ERR_BAD_PARAMS, ERR_NOT_AUTHORIZED, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT,
     IPC_SCHEMA, METHODS, bind, serve,
 };
+use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
+use trace_commons_contributor::daemon::settings::DaemonSettings;
+use trace_commons_contributor::identity::DeviceIdentity;
+use trace_commons_contributor::source::TraceSource;
+use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 
 struct TestDaemon {
     _dir: tempfile::TempDir,
@@ -255,6 +260,156 @@ async fn two_clients_are_served_independently() {
     b.send(r#"{"id":200,"method":"status"}"#).await;
     assert_eq!(a.recv_json().await["id"], 100);
     assert_eq!(b.recv_json().await["id"], 200);
+}
+
+#[tokio::test]
+async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
+    // The regression this whole task exists to fix: `preview` used to
+    // report `entry.size_bytes` (the raw session file on disk) instead of
+    // the size of what redaction actually produces.
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    // A fixture session with a planted secret, so redaction has something
+    // to do and the sizes cannot coincidentally match.
+    let sessions_root = dir.path().join("sessions/projects");
+    let project = sessions_root.join("-Users-testuser-code-myproj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+         \"content\":\"deploy with key sk-fake-fixture-secret-1234\"},\
+         \"cwd\":\"/Users/testuser/code/myproj\",\
+         \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+         \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\
+         \"uuid\":\"a1\"}\n",
+    )
+    .unwrap();
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let session_ref = TraceSource::discover(&src).unwrap().remove(0);
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_root = Some(sessions_root.clone());
+    settings.save(&store).unwrap();
+
+    let entry_id = entry_id_for("preview-test-hash");
+    let mut queue = Queue::new();
+    queue
+        .upsert(
+            QueueEntry {
+                entry_id,
+                session_hash: "preview-test-hash".into(),
+                source: "claude-code".into(),
+                project_key: "/Users/testuser/code/myproj".into(),
+                project_label: "myproj".into(),
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                discovered_at: chrono::Utc::now(),
+                state: QueueState::Pending,
+                reason_label: None,
+                attempts: 0,
+                retry_after: None,
+                submission_id: None,
+            },
+            100,
+        )
+        .unwrap();
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+
+    let stream = UnixStream::connect(store_dir.join("daemon.sock"))
+        .await
+        .unwrap();
+    let (r, w) = stream.into_split();
+    let mut c = Client {
+        reader: BufReader::new(r),
+        writer: w,
+    };
+    c.send(&format!(
+        r#"{{"id":1,"method":"preview","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    let result = &resp["result"];
+    assert!(resp["error"].is_null(), "{resp}");
+
+    let would_send = result["would_send_bytes"]
+        .as_u64()
+        .expect("would_send_bytes present");
+    let raw = result["raw_session_bytes"]
+        .as_u64()
+        .expect("raw_session_bytes present");
+    // The regression: the old code returned `entry.size_bytes` (the raw file
+    // size) verbatim as `would_send_bytes`. A redacted envelope carries its
+    // own schema/consent/privacy/trace-card metadata on top of the (mostly
+    // redaction-shortened) content, so for this fixture it comes out larger
+    // than the raw file, not smaller -- the point is that it must be the
+    // real, independently-computed envelope size, not a copy of the raw
+    // size, in either direction.
+    assert_ne!(
+        would_send, raw,
+        "would_send_bytes must not just echo raw_session_bytes"
+    );
+
+    // Recompute the envelope size independently through the same pipeline
+    // `submit_one` and `build_preview` use, and check the daemon reported
+    // exactly that -- not merely *some* different number.
+    let transcript = TraceSource::load(&src, &session_ref).unwrap();
+    let redactor = trace_commons_contributor::envelope::build_redactor_with(
+        &cfg,
+        transcript.cwd.as_deref(),
+        None,
+    )
+    .unwrap();
+    let raw_contribution = trace_commons_contributor::envelope::build_raw_contribution(
+        &transcript,
+        &cfg,
+        chrono::Utc::now(),
+    );
+    let envelope =
+        trace_commons_contributor::envelope::redact_to_envelope(&redactor, raw_contribution)
+            .await
+            .unwrap();
+    let expected_would_send =
+        trace_commons_contributor::envelope::envelope_size(&envelope).unwrap() as u64;
+    assert_eq!(
+        would_send, expected_would_send,
+        "would_send_bytes must equal the real redacted envelope's serialized size"
+    );
+
+    let redactions = result["redactions"]
+        .as_object()
+        .expect("redactions present");
+    let total: u64 = redactions.values().filter_map(|v| v.as_u64()).sum();
+    assert!(
+        total > 0,
+        "the planted secret should show up in the redaction counts: {redactions:?}"
+    );
+
+    let body = resp.to_string();
+    assert!(!body.contains("sk-fake-fixture-secret-1234"));
 }
 
 #[tokio::test]

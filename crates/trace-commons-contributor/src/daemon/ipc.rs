@@ -30,6 +30,20 @@
 //! `UnixListener::bind` does not portably set the socket mode, so the 0700
 //! state directory is the enforcing control; the daemon refuses to serve from
 //! a directory that is not 0700.
+//!
+//! # Sync vs. async dispatch
+//!
+//! `handle_request` answers every method synchronously except `"preview"`,
+//! which it can only answer partially (see its arm). `handle_request_async`
+//! is the real entry point for `"preview"`: it runs the actual redaction
+//! pipeline and delegates every other method straight through to
+//! `handle_request`. The socket connection loop (`serve_connection`), which
+//! is already async, calls `handle_request_async` exclusively so a socket
+//! client always gets the real preview. `handle_local` (the in-process CLI
+//! path) still calls the synchronous `handle_request`, so a CLI caller that
+//! asks for `"preview"` gets the honest-but-incomplete
+//! `preview_requires_async` marker rather than a wrong byte count; nothing in
+//! this codebase currently drives `"preview"` through `handle_local`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -382,7 +396,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
         "preview" => {
-            // The size and shape of what would be sent, without sending it.
+            // Synchronous callers cannot run the redaction pipeline (it is
+            // async), so this arm reports only the entry itself, honestly
+            // flagged as incomplete, rather than the raw file size the old
+            // code returned. `handle_request_async` is the real preview path
+            // -- see its doc comment.
             let id = match parse_entry_id(&req.params) {
                 Ok(id) => id,
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
@@ -393,7 +411,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                     req.id,
                     serde_json::json!({
                         "entry": entry_value(e),
-                        "would_send_bytes": e.size_bytes,
+                        "preview_requires_async": true,
                     }),
                 ),
                 None => Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
@@ -483,6 +501,75 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
         // subscribe is handled by the connection loop, which owns the stream.
         "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
         _ => Response::err(req.id, ERR_UNKNOWN_METHOD, "unknown-method"),
+    }
+}
+
+/// The async counterpart to `handle_request`.
+///
+/// `handle_request` is synchronous because most of the IPC surface (queue
+/// mutation, settings, status) needs no `.await`, and the connection loop
+/// used to call it directly. `"preview"` is the one method that has to run
+/// the real redaction pipeline (`daemon::preview::build_preview`, which
+/// awaits an async redactor) to report the actual bytes and redactions a
+/// contributor is about to consent to.
+///
+/// Rather than block a worker thread on that async work from inside a sync
+/// function (the `block_in_place` route the task brief also offered), this
+/// function intercepts `"preview"` before it reaches `handle_request`, runs
+/// it for real, and delegates every other method unchanged to
+/// `handle_request`. This is the only entry point that resolves `"preview"`
+/// completely; `handle_request` on its own answers `"preview"` with an
+/// honest `preview_requires_async: true` marker rather than a wrong number.
+/// The socket connection loop, already async, calls this function; `preview`
+/// is documented as socket-only for this reason.
+pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
+    if req.method != "preview" {
+        return handle_request(shared, req, Origin::Socket);
+    }
+
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        match queue.get(id) {
+            Some(e) => e.clone(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
+        }
+    };
+    let Ok(Some(cfg)) = shared.store.load_config() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
+    };
+    let (near_ai, claude_root, codex_root) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (
+            s.near_ai.clone(),
+            s.claude_root.clone(),
+            s.codex_root.clone(),
+        )
+    };
+    let sources = crate::source::all_sources(claude_root, codex_root, None);
+    let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
+    };
+
+    match super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref).await {
+        Ok((summary, _body)) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "entry": entry_value(&entry),
+                "would_send_bytes": summary.would_send_bytes,
+                "raw_session_bytes": summary.raw_session_bytes,
+                "event_count": summary.event_count,
+                "opening_prompt": summary.opening_prompt,
+                "redactions": summary.redactions,
+                "pii_labels_present": summary.pii_labels_present,
+                "consent_scopes": summary.consent_scopes,
+                "residual_risk": summary.residual_risk,
+            }),
+        ),
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
     }
 }
 
@@ -618,7 +705,7 @@ pub async fn serve_connection(stream: UnixStream, shared: Arc<DaemonShared>) -> 
                     }
                 };
                 let is_subscribe = req.method == "subscribe";
-                let resp = handle_request(&shared, &req, Origin::Socket);
+                let resp = handle_request_async(&shared, &req).await;
                 write_json(&mut write_half, &resp).await?;
                 if is_subscribe && resp.error.is_none() {
                     // Snapshot first, so an application never has to race the

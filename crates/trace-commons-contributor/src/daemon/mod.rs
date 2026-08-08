@@ -27,6 +27,7 @@ pub mod install;
 pub mod ipc;
 pub mod notify;
 pub mod policy;
+pub mod preview;
 pub mod queue;
 pub mod settings;
 pub mod state;
