@@ -26,6 +26,23 @@ Shells 2–4 are pure clients of the IPC contract frozen at the end of this
 sub-project, and can be built in parallel afterwards. They are out of scope
 here.
 
+### Surfaces each shell presents
+
+Every shell presents **two** surfaces, which is what the contract must serve:
+
+- **Menu bar / tray — glance and act.** Pending count badge, the few ready
+  traces with one-click approve, pause/resume, open-window. Served by
+  `status`, `list_pending`, `approve`, `pause`/`resume`, and the `subscribe`
+  stream.
+- **Main window — manage and review.** Full queue with `preview`, contribution
+  history and credit rollup, per-project auto-upload settings, health and login
+  state. Served by `list_history`, `history_rollup`, `list_projects`,
+  `set_project_mode`, `get_settings`/`set_settings`.
+
+The window uses strictly more of the contract than the tray; no method exists
+solely for one surface. This split is recorded here so the v1 freeze is not
+made against the tray alone.
+
 ## Decisions already fixed
 
 - Three native shells over one shared Rust daemon.
@@ -138,6 +155,34 @@ design's central consent property.
 `max_queue_entries` (default 500). Hitting a cap sets a health state and
 pauses uploads until the window rolls; it never drops entries.
 
+### History poller
+
+A contributor who lets the daemon upload while they are away needs to see what
+went out and what it earned. The server already returns everything needed:
+`status`, `consent_scopes`, `credit_points_pending`, `credit_points_final`,
+`explanation`, and `delayed_credit_explanations` per submission
+(`commands.rs:629`, via `submit::status`).
+
+The daemon polls that endpoint on a timer (default 30 min, and once shortly
+after each upload), joins the result with local receipts, and caches to
+`daemon-history.jsonl`. One poller serves all surfaces rather than three shells
+each polling the server, and history stays readable offline.
+
+A history record holds: `submission_id`, `submitted_at`, `project_label`,
+`source`, `session_hash`, `status`, `consent_scopes`,
+`credit_points_pending`, `credit_points_final`, `explanations`,
+`last_refreshed_at`. It carries **no** local `path` — history is the surface
+most likely to be screenshotted or shared.
+
+The rollup is computed from that cache: counts by status for this week, this
+month, and all time; credit pending versus final; and a quarantined count
+surfaced explicitly, since quarantine means "held for operator privacy review",
+not "rejected" (`commands.rs:650`) and a contributor who sees only the word
+reads it as failure.
+
+Poll failures are non-fatal: the cache is served with its `last_refreshed_at`
+so a shell can show staleness rather than an empty table.
+
 ### Notifier
 
 The daemon owns the **batching policy** — at most one digest per
@@ -159,6 +204,7 @@ writer.
 |---|---|
 | `daemon-projects.json` | project key -> mode, added_at |
 | `daemon-queue.jsonl` | queue entries (below) |
+| `daemon-history.jsonl` | cached contribution history joined from receipts + server status |
 | `daemon-state.json` | watcher cursors, cwd cache, path->last-upload index, last digest time, daily counters |
 | `daemon-settings.json` | quiescence window, digest interval, TTL, caps, PII filter settings, local_notifications |
 | `daemon.sock` | unix socket (Windows: named pipe) |
@@ -206,7 +252,9 @@ user re-enrolling on the same machine inherits the previous user's
 
 Required:
 
-- `wipe()` deletes all six daemon state files.
+- `wipe()` deletes all seven daemon state files, `daemon-history.jsonl`
+  included — contribution history is per-identity and must not survive a
+  logout into someone else's session.
 - `wipe()` signals the daemon (connect to the socket, send `shutdown`; fall
   back to a revocation marker) and blocks until the lock is released.
 - The daemon re-checks `contributor.json` and `device_key_path().exists()`
@@ -261,8 +309,8 @@ pipelined requests out of order.
 
 **Methods.** `hello` (capabilities + schema version), `status`, `list_pending`,
 `preview`, `approve`, `dismiss`, `pause`, `resume`, `list_projects`,
-`set_project_mode`, `list_receipts`, `get_settings`, `set_settings`,
-`subscribe`, `shutdown`.
+`set_project_mode`, `list_history`, `history_rollup`, `refresh_history`,
+`get_settings`, `set_settings`, `subscribe`, `shutdown`.
 
 - `status` returns `{logged_in, tenant_id, consent_scopes, paused, queue_depth,
   next_digest_at, health: {last_error_label, since}}`. "Not logged in", "claim
@@ -273,6 +321,11 @@ pipelined requests out of order.
   (`submit.rs:61`) already produces this. For an app that autonomously uploads
   real coding sessions, "show me what would be sent" is the core consent
   affordance.
+- `list_history` is paginated (`before`, `limit`) and returns records with
+  `last_refreshed_at` so a shell can render staleness. `history_rollup` returns
+  the week/month/all-time counts, pending-vs-final credit, and quarantined
+  count. `refresh_history` forces a poll, for a window's pull-to-refresh; it is
+  rate-limited and returns `busy` rather than queueing.
 - `subscribe` sends a full snapshot first (so a tray never races
   `list_pending` against the stream), then deltas, plus `resync` after daemon
   restart. Slow clients get drop-oldest and a `resync_required` event.
@@ -305,6 +358,7 @@ daemon dismiss <entry_id>
 daemon pause | resume
 daemon projects
 daemon project <path> --mode auto|notify|ignore
+daemon history [--limit N] [--refresh]
 daemon settings [--set key=value]
 daemon install | uninstall
 ```
@@ -368,6 +422,10 @@ Unit:
   failure, supersede-on-hash-mismatch
 - digest batching interval
 - volume caps
+- history join: receipts joined with server status updates, rollup counts and
+  pending-vs-final credit arithmetic, quarantined surfaced separately, stale
+  cache served with `last_refreshed_at` when a poll fails, no `path` in any
+  history record
 
 Integration:
 - IPC round-trip over a tempdir socket: framing, id correlation, subscribe
