@@ -9,8 +9,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    tc_call, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free, tc_last_error,
-    tc_preview_open, tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_call, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free, tc_last_error, tc_preview,
+    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free,
+    tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -566,10 +567,17 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
         // `tc_last_error` is thread-local, so it must be read here, on the
         // same (callback) thread that made the reentrant call -- reading
         // it from the test's own thread afterward would see nothing.
-        let refused = unsafe { CStr::from_ptr(tc_last_error()) }
-            .to_str()
-            .map(|s| s == "unsubscribe-refused-inside-runtime-context")
-            .unwrap_or(false);
+        // Null-checked before `CStr::from_ptr`: a null return (nothing
+        // recorded on this thread yet, or thread-local storage already torn
+        // down) is a clean "not refused", not undefined behaviour. Passing
+        // null straight to `from_ptr` was UB, and this assertion failed
+        // once in 26 runs.
+        let last = tc_last_error();
+        let refused = !last.is_null()
+            && unsafe { CStr::from_ptr(last) }
+                .to_str()
+                .map(|s| s == "unsubscribe-refused-inside-runtime-context")
+                .unwrap_or(false);
         REFUSED_CORRECTLY.store(refused, Ordering::SeqCst);
     }
 
@@ -692,6 +700,69 @@ fn cross_type_free_of_a_preview_as_a_string_is_refused_not_ub() {
     );
     // The handle itself must still be intact: freeing it for real still
     // works.
+    stop(h);
+}
+
+// --- Preview accessors must consult the registry before dereferencing ---
+//
+// The registry detected invalid *frees*, but the three borrowing accessors
+// dereferenced whatever pointer they were given. A stale or cross-type
+// pointer was therefore a use-after-free or a type confusion rather than
+// the fixed error the rest of this ABI promises.
+
+#[test]
+fn preview_body_refuses_a_pointer_that_is_not_a_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    // A live `tc_handle*` deliberately passed where a `tc_preview*` is
+    // expected -- the exact mistake `OpaquePointer`/`IntPtr` callers make,
+    // and the one the free functions already refuse.
+    let p = unsafe { tc_preview_body(h as *const tc_preview) };
+    assert!(
+        p.is_null(),
+        "a non-preview pointer must not be dereferenced"
+    );
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-preview-pointer"))
+            .unwrap_or(false),
+        "{:?}",
+        last_error()
+    );
+    // The handle is untouched by the refusal and still usable.
+    let out = call(h, "status", "{}");
+    assert!(out.contains("\"logged_in\""), "{out}");
+    stop(h);
+}
+
+#[test]
+fn preview_summary_json_refuses_a_pointer_that_is_not_a_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let p = unsafe { tc_preview_summary_json(h as *const tc_preview) };
+    assert!(p.is_null());
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-preview-pointer"))
+            .unwrap_or(false)
+    );
+    stop(h);
+}
+
+#[test]
+fn preview_search_refuses_a_pointer_that_is_not_a_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let needle = cstr_str("anything");
+    let mut matches: *mut c_char = std::ptr::null_mut();
+    let n = unsafe { tc_preview_search(h as *const tc_preview, needle.as_ptr(), &mut matches) };
+    assert_eq!(n, -1);
+    assert!(matches.is_null(), "nothing to free on the error path");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-preview-pointer"))
+            .unwrap_or(false)
+    );
     stop(h);
 }
 

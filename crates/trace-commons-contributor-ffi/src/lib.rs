@@ -47,13 +47,32 @@
 //! documented-per-call-site opt-in for a closure every one of whose error
 //! paths is already known to produce a fixed, safe label.
 //!
-//! Preview content specifically (the redacted transcript body) is held to a
-//! stricter rule than "no *raw* path/token": [`tc_preview_open`] fails
-//! outright, rather than silently editing the text, if the body contains a
-//! byte that cannot cross the boundary as `char*` (a NUL) -- preview exists
-//! precisely so it can never disagree with what an upload sends, and a
-//! silently-truncated-or-stripped body would violate that guarantee without
-//! telling anyone.
+//! ## The preview exemption
+//!
+//! [`tc_preview_body`] **is** trace content, and that is deliberate. It is
+//! the single exemption to the rule above, and it exists because a
+//! contributor cannot consent to sending something they cannot see -- an
+//! approval given against a size and a project name is not an informed one.
+//! The exemption is bounded, and the bounds are the whole point:
+//!
+//! * **Post-redaction only.** The body is whatever the real redaction
+//!   pipeline produced; raw session text never reaches this boundary.
+//! * **Only for an entry the caller already holds.** It is reachable only
+//!   through a `tc_preview*` the caller opened for a specific `entry_id`;
+//!   there is no bulk or ambient content read.
+//! * **Never onward.** It is never written to a log line, an audit entry, a
+//!   history record, notification text, or a receipt. Nothing in this crate
+//!   or the daemon copies it into any of those.
+//!
+//! Everywhere else the rule remains absolute: no path, token, URL, or trace
+//! content in any other returned string, on any error path, at any time.
+//!
+//! Preview content is also held to a stricter rule than "no *raw*
+//! path/token": [`tc_preview_open`] fails outright, rather than silently
+//! editing the text, if the body contains a byte that cannot cross the
+//! boundary as `char*` (a NUL) -- preview exists precisely so it can never
+//! disagree with what an upload sends, and a silently-truncated-or-stripped
+//! body would violate that guarantee without telling anyone.
 
 // `tc_handle` / `tc_preview` are named to match the C header
 // (`include/trace_commons.h`) and the Swift/C# callers that bind to it
@@ -201,6 +220,37 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
         Some(_) => Err("cross-type-free"),
         None => Err("double-free-or-unknown-pointer"),
     }
+}
+
+/// Whether `ptr` is currently registered under `kind`, without removing it.
+///
+/// This is what the borrowing accessors (`tc_preview_body`,
+/// `tc_preview_summary_json`, `tc_preview_search`) consult before they
+/// dereference. Without it they trusted the caller's pointer outright, so a
+/// stale (already-freed) or cross-type pointer was a use-after-free or a
+/// type confusion rather than the fixed error the rest of this ABI
+/// promises.
+///
+/// What this can and cannot guarantee, stated honestly:
+///
+/// * It **can** reject a pointer this crate never allocated, one already
+///   passed to its free function, and one allocated as a different kind.
+/// * It **cannot** make a concurrent free safe. Between this check and the
+///   dereference that follows, another thread calling `tc_preview_free` can
+///   deallocate the object; the registry entry is a `usize`, not shared
+///   ownership of the allocation. The ABI contract is therefore unchanged:
+///   a `tc_preview*` must not be freed while another thread is inside an
+///   accessor for it. The registry narrows accidental misuse to a clean
+///   error; it does not replace the caller's ownership discipline.
+/// * A freed address can also be *reused* by a later allocation of the same
+///   kind, in which case the check passes for a pointer whose original
+///   object is gone. That is inherent to address-keyed bookkeeping.
+fn registry_is(ptr: usize, kind: AllocKind) -> bool {
+    let r = match REGISTRY.lock() {
+        Ok(r) => r,
+        Err(p) => p.into_inner(),
+    };
+    r.get(&ptr) == Some(&kind)
 }
 
 /// A fixed, safe label for any failure whose underlying `anyhow::Error`
@@ -860,17 +910,50 @@ pub unsafe extern "C" fn tc_preview_open(
     }
 }
 
+/// The fixed label the borrowing preview accessors report for a pointer
+/// that is not a live `tc_preview*`.
+const ERR_INVALID_PREVIEW_POINTER: &str = "invalid-preview-pointer";
+
+/// Validate a borrowed `tc_preview*` before any dereference, recording the
+/// fixed label itself.
+///
+/// This runs *outside* [`guard`] on purpose: `guard` deliberately discards
+/// the underlying error text and substitutes `"operation-failed"`, which
+/// would hide the one label a host needs here to tell a bad pointer from an
+/// ordinary failure. It performs no dereference and cannot panic (the
+/// registry mutex is poison-tolerant), so nothing is given up by running it
+/// before the panic guard.
+fn preview_pointer_is_live(preview: *const tc_preview) -> bool {
+    if registry_is(preview as usize, AllocKind::Preview) {
+        return true;
+    }
+    set_last_error(ERR_INVALID_PREVIEW_POINTER);
+    false
+}
+
 /// The redacted transcript, UTF-8. Borrowed: valid until `tc_preview_free`.
+///
+/// This is the one accessor in this ABI that deliberately carries trace
+/// content, post-redaction, for an entry the caller already holds a preview
+/// for. See the module doc's "The preview exemption" section.
+///
+/// Returns NULL and records a fixed `tc_last_error` label for a pointer
+/// that is not a live `tc_preview*` (already freed, never ours, or another
+/// kind of handle) -- see `registry_is` for what that check does and does
+/// not guarantee.
 ///
 /// # Safety
 /// `preview` must be a live pointer from `tc_preview_open` (or NULL, which
-/// returns NULL).
+/// returns NULL), and must not be freed concurrently by another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_preview_body(preview: *const tc_preview) -> *const c_char {
+    if preview.is_null() {
+        return std::ptr::null();
+    }
+    if !preview_pointer_is_live(preview) {
+        return std::ptr::null();
+    }
     let outcome = guard(|| {
-        if preview.is_null() {
-            return Ok(std::ptr::null());
-        }
         let preview = unsafe { &*preview };
         Ok(preview.body.as_ptr())
     });
@@ -883,15 +966,21 @@ pub unsafe extern "C" fn tc_preview_body(preview: *const tc_preview) -> *const c
 /// Counts, sizes, and the opening prompt, as JSON. Borrowed: valid until
 /// `tc_preview_free`.
 ///
+/// Returns NULL and records a fixed `tc_last_error` label for a pointer
+/// that is not a live `tc_preview*` -- see `registry_is`.
+///
 /// # Safety
 /// `preview` must be a live pointer from `tc_preview_open` (or NULL, which
-/// returns NULL).
+/// returns NULL), and must not be freed concurrently by another thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_preview_summary_json(preview: *const tc_preview) -> *const c_char {
+    if preview.is_null() {
+        return std::ptr::null();
+    }
+    if !preview_pointer_is_live(preview) {
+        return std::ptr::null();
+    }
     let outcome = guard(|| {
-        if preview.is_null() {
-            return Ok(std::ptr::null());
-        }
         let preview = unsafe { &*preview };
         Ok(preview.summary_json.as_ptr())
     });
@@ -915,16 +1004,26 @@ pub unsafe extern "C" fn tc_preview_summary_json(preview: *const tc_preview) -> 
 /// `*matches_json` (if non-null) is set to NULL -- there is nothing to
 /// free.
 ///
+/// Returns -1 and records a fixed `tc_last_error` label for a pointer that
+/// is not a live `tc_preview*` -- see `registry_is`.
+///
 /// # Safety
-/// `preview` must be a live pointer from `tc_preview_open`. `needle` must be
-/// a valid NUL-terminated C string. `matches_json`, if non-null, must point
-/// to writable `*mut c_char` storage.
+/// `preview` must be a live pointer from `tc_preview_open`, and must not be
+/// freed concurrently by another thread. `needle` must be a valid
+/// NUL-terminated C string. `matches_json`, if non-null, must point to
+/// writable `*mut c_char` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_preview_search(
     preview: *const tc_preview,
     needle: *const c_char,
     matches_json: *mut *mut c_char,
 ) -> i32 {
+    if !preview.is_null() && !preview_pointer_is_live(preview) {
+        if !matches_json.is_null() {
+            unsafe { *matches_json = std::ptr::null_mut() };
+        }
+        return -1;
+    }
     let outcome = guard(|| {
         if preview.is_null() {
             anyhow::bail!("null-preview");

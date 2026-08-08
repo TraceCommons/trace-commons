@@ -43,15 +43,34 @@
  * pointer parameter is null-checked; passing NULL produces an error, not a
  * crash. No path, token, URL, or trace content ever appears in a string
  * this library returns -- fixed labels only, the same discipline the
- * daemon's socket already applies. Preview content specifically fails
- * outright, rather than being silently edited, if it cannot be represented
- * as a NUL-terminated C string.
+ * daemon's socket already applies.
+ *
+ * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
+ * that deliberately carries trace content, and the rule above is absolute
+ * everywhere else. A contributor cannot consent to sending something they
+ * cannot see, so the exemption exists -- bounded to post-redaction content
+ * only, only for an entry the caller already opened a preview for, and
+ * never in a log line, an audit entry, a history record, notification text,
+ * or a receipt. Preview content fails outright, rather than being silently
+ * edited, if it cannot be represented as a NUL-terminated C string.
  *
  * Every free function (tc_handle_free, tc_preview_free, tc_string_free)
  * detects a double free or a pointer of the wrong kind (e.g. a tc_handle*
  * passed to tc_preview_free) and refuses rather than acting on it --
  * recording a fixed label via tc_last_error and leaking the pointer, which
  * is the only safe response once a raw pointer's type cannot be trusted.
+ *
+ * The tc_preview_* ACCESSORS run that same check before they dereference:
+ * a pointer that is not currently a live tc_preview* yields NULL (or -1
+ * from tc_preview_search) plus the fixed tc_last_error label
+ * "invalid-preview-pointer", rather than reading freed or wrongly-typed
+ * memory. Be clear on the limits of that check: it is keyed on the pointer
+ * VALUE, not on shared ownership of the allocation. It cannot make a
+ * concurrent tc_preview_free safe -- the object can be freed between the
+ * check and the read -- and a freed address later reused by another
+ * tc_preview allocation will pass it. Do not free a tc_preview* while
+ * another thread is inside an accessor for it; the check narrows accidental
+ * misuse to a clean error, it does not replace ownership discipline.
  *
  * SUBSCRIPTION LIFETIME: tc_daemon_stop does NOT end a subscription and is
  * NOT a synchronization point for one -- it only sets a flag a
