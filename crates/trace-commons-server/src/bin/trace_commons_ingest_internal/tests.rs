@@ -27866,8 +27866,10 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    assert!(propagation_items.iter().any(|item| {
-        item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+    // The canary trace had settled credit, and revocation left it settled: the
+    // drill proves the deletion effects landed without a clawback item.
+    assert!(propagation_items.iter().all(|item| {
+        item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
     }));
     assert!(propagation_items.iter().any(|item| {
         item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
@@ -27893,7 +27895,7 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     )
     .await
     .expect("revocation worker applies canary effects");
-    assert!(worker.completed >= 7);
+    assert!(worker.completed >= 6);
     assert_eq!(worker.failed, 0);
 
     let response = app(state.clone())
@@ -27928,8 +27930,12 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     );
     assert_eq!(value["object_deletion_refs_ready"], serde_json::json!(true));
     assert_eq!(value["blocking_gaps"], serde_json::json!([]));
-    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
-    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
+    // Zero is the ready state now: revocation does not claw back settled
+    // credit, so there is no reversal item, no reversal credit event, and no
+    // NEAR reverse receipt to verify.
+    assert_eq!(value["credit_reversal_item_count"], serde_json::json!(0));
+    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(0));
+    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(0));
     assert_eq!(value["object_delete_item_count"], serde_json::json!(6));
     assert_eq!(value["object_delete_done_count"], serde_json::json!(6));
     assert_eq!(value["deleted_object_ref_count"], serde_json::json!(6));
@@ -52620,7 +52626,7 @@ fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
+async fn revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -52693,58 +52699,55 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
     .expect("contributor can revoke settled trace");
     assert_eq!(revoke_status, StatusCode::NO_CONTENT);
 
+    // Settled credit is NOT clawed back when the contributor withdraws the
+    // trace. Revocation removes the trace from the commons and deletes its
+    // content; it does not reach back onto the chain. No reversal propagation
+    // item is enqueued, so the worker has nothing to reverse, no negative
+    // credit event appears, and no `reverse_credit_receipt` NEAR outbox row is
+    // written.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(reversal_items[0].source_submission_id, submission_id);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: event.event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a settled-credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_settled_credit_for_revocation".to_string()),
+            purpose: Some("drain_revocation_propagation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
         .expect("DB credit events read");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!("revocation_credit_reversal:{}", event.event_id))
-        })
-        .expect("reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
+                != Some(&format!("revocation_credit_reversal:{}", event.event_id))
+        }),
+        "revocation must not mirror a reversal credit event"
     );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
+    let settled_event = db_credit_events
+        .iter()
+        .find(|record| record.credit_event_id == event.event_id)
+        .expect("the settled credit event survives revocation");
+    assert_eq!(
+        settled_event.settlement_state,
+        StorageTraceCreditSettlementState::Final
+    );
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -52759,29 +52762,18 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
             .iter()
             .any(|item| item.near_call.method_name == "settle_credit_receipt")
     );
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
-    );
-    assert_eq!(
-        reverse_items[0].status,
-        StorageTraceCreditSettlementNearStatus::Pending
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and_near_receipt() {
+async fn revocation_leaves_settled_benchmark_conversion_credit_intact() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -52873,63 +52865,46 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
     .await
     .expect("contributor can revoke settled benchmark source");
 
+    // A settled benchmark-conversion credit survives the contributor
+    // withdrawing the source trace: no reversal item, no negative credit event,
+    // no NEAR reverse receipt, and the contributor's settled balance is intact.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: benchmark_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a benchmark credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_benchmark_credit_for_revocation".to_string()),
+            purpose: Some("drain_benchmark_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled benchmark credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after benchmark credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after benchmark revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{benchmark_credit_event_id}"
                 ))
-        })
-        .expect("benchmark conversion reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::BenchmarkConversion
+        }),
+        "revocation must not mirror a benchmark reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-2.0000");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -52939,39 +52914,26 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(2_000_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[benchmark_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 2.0);
 
     let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects benchmark reversal");
-    assert_eq!(credit.credit_points_settled, 0.0);
-    assert_eq!(credit.credit_points_reversed, 2.0);
-    assert_eq!(credit.credit_points_total, 0.0);
+        .expect("credit summary keeps settled benchmark credit");
+    assert_eq!(credit.credit_points_settled, 2.0);
+    assert_eq!(credit.credit_points_reversed, 0.0);
+    assert_eq!(credit.credit_points_total, 2.0);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near_receipt() {
+async fn revocation_leaves_settled_ranking_utility_credit_intact() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -53083,63 +53045,45 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
     .await
     .expect("contributor can revoke settled ranking source");
 
+    // Settled ranking-utility credit is likewise untouched by a contributor
+    // withdrawing the source trace.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", prediction.submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: ranking_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a ranking credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_ranking_credit_for_revocation".to_string()),
+            purpose: Some("drain_ranking_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled ranking credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after ranking credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after ranking revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{ranking_credit_event_id}"
                 ))
-        })
-        .expect("ranking utility reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, prediction.submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::RankingUtility
+        }),
+        "revocation must not mirror a ranking reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -53149,33 +53093,20 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[ranking_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 1.25);
 
     let Json(credit_summary) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects ranking reversal");
-    assert_eq!(credit_summary.credit_points_settled, 0.0);
-    assert_eq!(credit_summary.credit_points_reversed, 1.25);
-    assert_eq!(credit_summary.credit_points_total, 0.0);
+        .expect("credit summary keeps settled ranking credit");
+    assert_eq!(credit_summary.credit_points_settled, 1.25);
+    assert_eq!(credit_summary.credit_points_reversed, 0.0);
+    assert_eq!(credit_summary.credit_points_total, 1.25);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }

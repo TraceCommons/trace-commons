@@ -183,3 +183,188 @@ consistently would need a DB-side write path that does not currently exist, so i
 was reported rather than half-fixed. It also feeds a dedup candidate filter
 (`!candidate.canonical_summary.trim().is_empty()`), so clearing it has behavioural
 reach beyond storage hygiene.
+
+---
+
+# Part 2: stop reversing settled credit on revocation
+
+Project-owner decision: **credit already earned and settled stays earned.**
+Revocation removes the trace from the commons and deletes its content, but does
+not reach back onto the chain. A contributor who is uneasy about a trace must
+not be financially penalised for pulling it back, or the trace stays in place.
+
+## What triggered the reversal, and what does now
+
+`mirror_revocation_to_db` called `enqueue_credit_settlement_reversal_items_for_revocation`,
+which walked the tenant's `Finalized` settlement batches and enqueued one
+`ReverseCreditSettlement` propagation item per settled credit event bound to the
+revoked submission. The worker then wrote a negative credit event and, when the
+original settlement carried a NEAR contract id, a `reverse_credit_receipt`
+outbox row.
+
+The enqueue call and the function are removed. Nothing on any revocation path
+enqueues a reversal item any more.
+
+## Flows changed
+
+All three callers of `mirror_revocation_to_db` are revocation, and all three
+stop clawing back:
+
+1. `revoke_submission` — the contributor/reviewer `DELETE` route. The act the
+   decision is about.
+2. `run_maintenance`, the two revoked-record arms — a record already marked
+   revoked in the file store, and a record reconciled against an existing
+   tombstone. Both are the same act arriving late, not a separate policy.
+3. `backfill_tenant_to_db`, the `record.is_revoked()` arm — re-mirroring an
+   already-revoked record. Enqueuing a clawback from a *backfill* was the
+   sharpest edge of the old behaviour.
+
+## Flows deliberately left alone
+
+- **Retention expiry.** `run_maintenance`'s `record.is_expired_at(now)` arm goes
+  through `mirror_expiration_to_db`, which is a separate function and never
+  enqueued credit reversals in the first place. Expiry is the operator's
+  retention clock, not a contributor withdrawing; it was not touched and did not
+  need to be.
+- **Purge.** Same — no credit reversal on that path, before or after.
+- **Review reject.** `credit_points_final = Some(0.0)` on rejection stands.
+  Credit was never awarded there, so nothing is being clawed back.
+
+## Reversal callers that survive
+
+- `reverse_credit_settlement_for_revocation_propagation` — the worker that
+  executes a `ReverseCreditSettlement` item. **Kept, unchanged.**
+- `ensure_near_credit_reversal_outbox_item_for_revocation` — the NEAR reverse
+  receipt it writes. **Kept, unchanged.**
+- The `ReverseCreditSettlement` propagation action, its target variant, its
+  `CreditSettlementReversalFailed` error class, and the `credit_points_reversed`
+  netting in the contributor credit summary. **All kept.**
+
+Keeping them matters for two reasons. It preserves the only mechanism by which
+an operator can reverse a fraudulent or mistakenly settled credit — removing
+that while removing the automatic clawback would be a worse outcome than doing
+nothing. And any item enqueued before this change (the pilot may hold some)
+still drains deterministically instead of becoming permanently unprocessable.
+
+There is no API route that enqueues a `ReverseCreditSettlement` item; the
+removed function was the only producer. An operator correction is therefore
+currently an out-of-band row insert. Worth knowing; not worth inventing a route
+inside this change.
+
+## Reconciliation invariants checked
+
+- **`reconcile_db_mirror` / `db_reconciliation_drill`** compare the file store
+  against the DB mirror, symmetrically. With no reversal events written on
+  either side, nothing drifts. Unaffected.
+- **Contributor credit summary** (`TraceCommonsTenantCreditResponse`) sums
+  settled credit from `Finalized` settlement line items, which are keyed by
+  credit account and event id, not by submission status. A revoked trace's
+  settled credit therefore stays counted — which is exactly the intended
+  outcome. `credit_points_reversed` simply reads 0 unless an operator raised a
+  reversal. No invariant assumed the two would move together.
+- **No on-chain-versus-in-corpus reconciliation exists.** Nothing reconciles
+  NEAR settlement totals against the set of traces currently in the corpus, so
+  the scenario the decision worried about (settled credit for a trace no longer
+  in the corpus) has no checker to break.
+- **`revocation-effects-drill` did assume the clawback**, and this is the one
+  place that needed a call. `delayed_credit_reversal_ready` required
+  `credit_reversal_item_count > 0`, so with the clawback gone the check would
+  have gone permanently red and blocked the rollout-smoke required check. The
+  `> 0` requirement is dropped: zero reversal items is now the ready state, and
+  the check reads as "the withdrawing contributor was not charged". It is not
+  vacuous — any reversal item that *does* exist (operator correction, or an item
+  enqueued before this change) must still be fully drained, with its reversal
+  credit event and NEAR reverse receipt present, before the check goes green.
+
+## Documentation and copy
+
+- `docs/trace-commons.md` — worker description, revocation-effects-drill row,
+  and both Phase-status table rows.
+- `docs/trace-commons-storage.md` — effects-drill contract, propagation-item
+  description, drill runbook line, propagation-completeness line, test-coverage
+  line, and the "after revocation" acceptance line ("credit finalizes or
+  reverses according to policy" was the sentence most directly contradicted).
+- `docs/trace-commons-roadmap.md` — Phase A capability list.
+- `docs/operator/troubleshooting.md`, `hash-only-logging.md`,
+  `operational-summary.md` — `CreditSettlementReversalFailed` is now labelled as
+  an operator-raised correction, with an explicit note that revocation never
+  raises one.
+- `crates/trace-commons-contributor/src/consent.rs` — the consent prompt now
+  reads "you can revoke submitted traces later; credit you have already earned
+  is kept". This is the promise the code now actually keeps.
+
+## Tests
+
+Three PG-backed tests were inverted and renamed. Each seeds real settled credit
+(delayed training credit, benchmark-conversion credit, ranking-utility credit),
+revokes, drains the propagation worker, and proves no clawback:
+
+- `revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt`
+- `revocation_leaves_settled_benchmark_conversion_credit_intact`
+- `revocation_leaves_settled_ranking_utility_credit_intact`
+
+Each asserts: no `ReverseCreditSettlement` propagation item, no
+`revocation_credit_reversal:*` credit event, no `reverse_credit_receipt` NEAR
+outbox row, and — for the latter two — that the contributor's
+`credit_points_settled` is unchanged and `credit_points_reversed` is zero.
+
+`revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence`
+was updated for the new drill semantics (zero reversal items, drill still green).
+
+### PostgreSQL baseline
+
+`--test-threads=1`, `TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://localhost/trace_commons_test`.
+
+| | passed | failed | ignored |
+|---|---|---|---|
+| Baseline (7c575ea, Part 1 committed) | 805 | 99 | 1 |
+| After Part 2 | 808 | 96 | 1 |
+
+Failure sets compared by name. **Zero new failures.** The three that left the
+failure set are exactly the three inverted tests, under their old names — they
+were failing at baseline (they asserted the clawback against a store whose
+settlement path is part of the known pre-existing PG breakage) and pass under
+their new names and new assertions. The remaining 96 are the known pre-existing
+PG failures CI never runs.
+
+`revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence`
+fails in both runs. Its `worker.failed` count dropped from 2 to 1 — the credit
+reversal item that used to fail is simply no longer created; the remaining
+failure is the pre-existing remote-object-delete one.
+
+Also clean: `RUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins`,
+`RUSTFLAGS='-D warnings' cargo test -p trace-commons-server --no-run`,
+`cargo fmt --all`, clippy with the repo allow-list (same two pre-existing
+`partialeq_to_none` warnings in an unrelated community-snapshot test).
+
+## Still open: `canonical_summary` survives revocation
+
+Not closed in this change. It is not a one-line fix, and here is precisely what
+it needs.
+
+The natural-language `canonical_summary` derived from the trace body survives
+revocation in both the file derived record and the mirrored DB row; only
+`status` is flipped. Closing it requires all four of:
+
+1. **File record.** `TraceCommonsDerivedRecord.canonical_summary` is a
+   non-optional `String`, so "cleared" has to mean empty string, and empty
+   string already carries meaning elsewhere — the dedup candidate filter tests
+   `!candidate.canonical_summary.trim().is_empty()`. Either the field becomes
+   `Option<String>` (a serde-compatibility change across every stored derived
+   record) or every consumer of the empty case is audited.
+2. **DB row.** `invalidate_trace_submission_artifacts` already runs an `UPDATE
+   trace_derived_records SET status = $3`, so the write path exists — but it is
+   shared by six callers including the retention-expiry path. Nulling
+   `canonical_summary` there must be conditional on the derived status being
+   `Revoked`, or expiry silently inherits a content-deletion behaviour the owner
+   explicitly separated from withdrawal.
+3. **Backfill ordering.** `backfill_tenant_to_db` re-mirrors the derived record
+   from the file store. If the file copy still holds the summary, a backfill
+   re-populates the DB column after it was cleared. The file-side clear must
+   land first and be durable.
+4. **Tombstone invariant.** `canonical_summary_hash` must keep flowing into the
+   tombstone. It is read from the derived record before the clear, so the
+   ordering that Part 1 established for `redaction_hash` has to be extended to
+   cover it.
+
+Scoped as its own piece of work.
