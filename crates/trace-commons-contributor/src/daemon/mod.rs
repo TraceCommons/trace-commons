@@ -22,6 +22,7 @@
 
 pub mod audit;
 pub mod eligibility;
+pub mod enroll;
 pub mod health;
 pub mod history;
 pub mod install;
