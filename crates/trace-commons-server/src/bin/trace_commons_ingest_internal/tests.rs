@@ -7076,8 +7076,12 @@ fn community_snapshot_interval_defaults_to_admin_triggered_only() {
     // worker existed, so it has to remain reachable without deleting the
     // config line.
     assert!(
-        parse_community_snapshot_interval("").expect("empty parses").is_none()
-            && parse_community_snapshot_interval("0").expect("zero parses").is_none()
+        parse_community_snapshot_interval("")
+            .expect("empty parses")
+            .is_none()
+            && parse_community_snapshot_interval("0")
+                .expect("zero parses")
+                .is_none()
     );
 }
 
