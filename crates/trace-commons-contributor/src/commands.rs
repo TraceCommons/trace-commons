@@ -1294,3 +1294,442 @@ mod invite_tests {
         assert!(parse_invite("file:///etc/passwd#CODE").is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Background daemon control
+//
+// These drive the same request handlers the IPC socket exposes, but in-process
+// and marked as coming from a terminal. That is what lets `daemon project
+// --mode auto` work here while the identical call over the socket is refused:
+// a terminal is a capability an attacker with same-user code execution does
+// not have.
+// ---------------------------------------------------------------------------
+
+use crate::daemon::ipc::{DaemonShared, Response, handle_local};
+use crate::daemon::policy::ProjectMode;
+
+/// Load daemon state for a one-shot command.
+///
+/// Reads the same files a running daemon uses. Mutating commands write them
+/// back, and a running daemon picks the change up on its next pass.
+fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
+    DaemonShared::load(ConfigStore::open(store.dir().to_path_buf())?)
+        .context("loading daemon state")
+}
+
+/// Render an IPC response for a human or for a script.
+fn render(resp: Response, json: bool, table: impl FnOnce(&serde_json::Value)) -> Result<()> {
+    if let Some(err) = resp.error {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "trace_commons.cli_error.v1",
+                    "error": err.code,
+                    "detail": err.message,
+                }))?
+            );
+        }
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    let result = resp.result.unwrap_or(serde_json::Value::Null);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        table(&result);
+    }
+    Ok(())
+}
+
+pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(&shared, "status", serde_json::json!({}));
+    render(resp, json, |v| {
+        let health = &v["health"];
+        println!(
+            "logged in:   {}",
+            if v["logged_in"] == true { "yes" } else { "no" }
+        );
+        println!(
+            "paused:      {}",
+            if v["paused"] == true { "yes" } else { "no" }
+        );
+        println!("pending:     {}", v["queue_depth"]);
+        match health["last_error_label"].as_str() {
+            Some(label) => println!(
+                "health:      {label} (since {})",
+                health["since"].as_str().unwrap_or("unknown")
+            ),
+            None => println!("health:      ok"),
+        }
+    })
+}
+
+pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(&shared, "list_pending", serde_json::json!({}));
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let entries = v["pending"].as_array().unwrap_or(&empty);
+        if entries.is_empty() {
+            println!("nothing waiting");
+            return;
+        }
+        let rows: Vec<Vec<String>> = entries
+            .iter()
+            .map(|e| {
+                vec![
+                    e["entry_id"].as_str().unwrap_or("-").to_string(),
+                    e["project_label"].as_str().unwrap_or("-").to_string(),
+                    e["source"].as_str().unwrap_or("-").to_string(),
+                    format!("{}", e["size_bytes"].as_u64().unwrap_or(0)),
+                    e["discovered_at"].as_str().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["ENTRY", "PROJECT", "SOURCE", "BYTES", "READY SINCE"],
+            &rows,
+        );
+    })
+}
+
+pub fn daemon_preview(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(
+        &shared,
+        "preview",
+        serde_json::json!({ "entry_id": entry_id }),
+    );
+    render(resp, json, |v| {
+        println!(
+            "project: {}",
+            v["entry"]["project_label"].as_str().unwrap_or("-")
+        );
+        println!("source:  {}", v["entry"]["source"].as_str().unwrap_or("-"));
+        println!("bytes:   {}", v["would_send_bytes"]);
+        println!(
+            "hash:    {}",
+            v["entry"]["session_hash"].as_str().unwrap_or("-")
+        );
+    })
+}
+
+pub fn daemon_approve(
+    store: &ConfigStore,
+    entry_id: Option<&str>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
+    if !all && entry_id.is_none() {
+        anyhow::bail!("give an entry id, or --all");
+    }
+    let shared = daemon_shared(store)?;
+    let params = if all {
+        serde_json::json!({ "all": true })
+    } else {
+        serde_json::json!({ "entry_id": entry_id })
+    };
+    let resp = handle_local(&shared, "approve", params);
+    render(resp, json, |v| {
+        println!("approved {}", v["approved"]);
+    })
+}
+
+pub fn daemon_dismiss(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(
+        &shared,
+        "dismiss",
+        serde_json::json!({ "entry_id": entry_id }),
+    );
+    render(resp, json, |_| println!("dismissed"))
+}
+
+pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(
+        &shared,
+        if pause { "pause" } else { "resume" },
+        serde_json::json!({}),
+    );
+    render(resp, json, |v| {
+        println!(
+            "{}",
+            if v["paused"] == true {
+                "paused"
+            } else {
+                "running"
+            }
+        );
+    })
+}
+
+pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(&shared, "list_projects", serde_json::json!({}));
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let projects = v["projects"].as_array().unwrap_or(&empty);
+        if projects.is_empty() {
+            println!("no projects configured; everything defaults to notify-only");
+            return;
+        }
+        let rows: Vec<Vec<String>> = projects
+            .iter()
+            .map(|p| {
+                vec![
+                    p["project_label"].as_str().unwrap_or("-").to_string(),
+                    p["mode"].as_str().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        let _ = print_table(&mut std::io::stdout(), &["PROJECT", "MODE"], &rows);
+    })
+}
+
+/// Parse the CLI's short mode words into policy modes.
+pub(crate) fn parse_project_mode(s: &str) -> Result<ProjectMode> {
+    match s {
+        "auto" | "auto_upload" => Ok(ProjectMode::AutoUpload),
+        "notify" | "notify_only" => Ok(ProjectMode::NotifyOnly),
+        "ignore" => Ok(ProjectMode::Ignore),
+        other => anyhow::bail!("unknown mode {other}: expected auto, notify, or ignore"),
+    }
+}
+
+pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
+    let mode = parse_project_mode(mode)?;
+    let shared = daemon_shared(store)?;
+    let key = path.to_string_lossy().to_string();
+    let label = crate::daemon::policy::project_label_for(&key);
+    let resp = handle_local(
+        &shared,
+        "set_project_mode",
+        serde_json::json!({ "project_key": key, "label": label, "mode": mode }),
+    );
+    render(resp, json, |_| {
+        println!(
+            "{label}: {}",
+            serde_json::to_string(&mode).unwrap_or_default()
+        );
+    })
+}
+
+pub async fn daemon_history(
+    store: &ConfigStore,
+    limit: usize,
+    refresh: bool,
+    json: bool,
+) -> Result<()> {
+    if refresh {
+        // Refreshing needs the network and an enrollment, so it happens here
+        // rather than inside the request handler.
+        refresh_history_cache(store).await?;
+    }
+    let shared = daemon_shared(store)?;
+    let resp = handle_local(
+        &shared,
+        "list_history",
+        serde_json::json!({ "limit": limit }),
+    );
+    if json {
+        // Emit history and rollup together so a caller gets one document.
+        let rollup = handle_local(&shared, "history_rollup", serde_json::json!({}));
+        let out = serde_json::json!({
+            "history": resp.result.unwrap_or(serde_json::Value::Null)["history"],
+            "rollup": rollup.result.unwrap_or(serde_json::Value::Null),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    render(resp, false, |v| {
+        let empty = Vec::new();
+        let records = v["history"].as_array().unwrap_or(&empty);
+        if records.is_empty() {
+            println!("no contributions yet");
+            return;
+        }
+        let rows: Vec<Vec<String>> = records
+            .iter()
+            .map(|r| {
+                vec![
+                    r["submitted_at"].as_str().unwrap_or("-").to_string(),
+                    r["project_label"].as_str().unwrap_or("-").to_string(),
+                    r["status"].as_str().unwrap_or("-").to_string(),
+                    format!("{:.2}", r["credit_points_pending"].as_f64().unwrap_or(0.0)),
+                    r["credit_points_final"]
+                        .as_f64()
+                        .map(|f| format!("{f:.2}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["WHEN", "PROJECT", "STATUS", "PENDING", "FINAL"],
+            &rows,
+        );
+    })?;
+
+    let rollup = handle_local(&shared, "history_rollup", serde_json::json!({}));
+    if let Some(v) = rollup.result {
+        println!();
+        println!(
+            "this week: {} | this month: {} | all time: {}",
+            v["week"]["accepted"].as_u64().unwrap_or(0)
+                + v["week"]["submitted"].as_u64().unwrap_or(0)
+                + v["week"]["quarantined"].as_u64().unwrap_or(0),
+            v["month"]["accepted"].as_u64().unwrap_or(0)
+                + v["month"]["submitted"].as_u64().unwrap_or(0)
+                + v["month"]["quarantined"].as_u64().unwrap_or(0),
+            v["all_time"]["accepted"].as_u64().unwrap_or(0)
+                + v["all_time"]["submitted"].as_u64().unwrap_or(0)
+                + v["all_time"]["quarantined"].as_u64().unwrap_or(0),
+        );
+        println!(
+            "credit: {:.2} pending, {:.2} final",
+            v["credit_pending"].as_f64().unwrap_or(0.0),
+            v["credit_final"].as_f64().unwrap_or(0.0),
+        );
+        let quarantined = v["quarantined"].as_u64().unwrap_or(0);
+        if quarantined > 0 {
+            // Quarantine is "held for operator privacy review", not rejected.
+            println!(
+                "{quarantined} held for privacy review (not rejected; an operator \
+                 has to look at these)"
+            );
+        }
+        if let Some(t) = v["last_refreshed_at"].as_str() {
+            println!("last refreshed {t}");
+        } else {
+            println!("never refreshed from the server; run with --refresh");
+        }
+    }
+    Ok(())
+}
+
+/// Poll the server for submission status and rewrite the history cache.
+async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+    let updates = submit::status(store, &cfg).await?;
+    let receipts = store.load_receipts().context("loading receipts")?;
+    let labels = {
+        let queue = crate::daemon::queue::Queue::load(store)?;
+        let mut m = std::collections::BTreeMap::new();
+        for e in queue.all() {
+            if let Some(id) = e.submission_id {
+                m.insert(id, e.project_label.clone());
+            }
+        }
+        m
+    };
+    let records = crate::daemon::history::join(&receipts, &updates, &labels, Utc::now());
+    crate::daemon::history::HistoryCache::save(store, &records)
+}
+
+pub fn daemon_settings(store: &ConfigStore, set: &[String], json: bool) -> Result<()> {
+    let shared = daemon_shared(store)?;
+    if set.is_empty() {
+        let resp = handle_local(&shared, "get_settings", serde_json::json!({}));
+        return render(resp, json, |v| {
+            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        });
+    }
+    let mut params = serde_json::Map::new();
+    for pair in set {
+        let (k, v) = pair
+            .split_once('=')
+            .with_context(|| format!("expected KEY=VALUE, got {pair}"))?;
+        let value = if let Ok(b) = v.parse::<bool>() {
+            serde_json::Value::Bool(b)
+        } else if let Ok(n) = v.parse::<u64>() {
+            serde_json::Value::from(n)
+        } else {
+            serde_json::Value::String(v.to_string())
+        };
+        params.insert(k.to_string(), value);
+    }
+    let resp = handle_local(&shared, "set_settings", serde_json::Value::Object(params));
+    render(resp, json, |v| {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    })
+}
+
+pub fn daemon_install(store: &ConfigStore) -> Result<()> {
+    crate::daemon::install::install(store)
+}
+
+pub fn daemon_uninstall() -> Result<()> {
+    crate::daemon::install::uninstall()
+}
+
+#[cfg(test)]
+mod daemon_command_tests {
+    use super::*;
+
+    #[test]
+    fn project_mode_words_parse_to_policy_modes() {
+        assert_eq!(parse_project_mode("auto").unwrap(), ProjectMode::AutoUpload);
+        assert_eq!(
+            parse_project_mode("auto_upload").unwrap(),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(
+            parse_project_mode("notify").unwrap(),
+            ProjectMode::NotifyOnly
+        );
+        assert_eq!(parse_project_mode("ignore").unwrap(), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn an_unknown_mode_word_is_rejected_with_the_valid_ones_named() {
+        let err = parse_project_mode("yolo").unwrap_err();
+        assert!(err.to_string().contains("auto"), "{err}");
+        assert!(err.to_string().contains("notify"), "{err}");
+        assert!(err.to_string().contains("ignore"), "{err}");
+    }
+
+    #[test]
+    fn arming_the_unknown_bucket_is_refused_from_the_cli_too() {
+        // The terminal carve-out grants autonomy over real projects, not over
+        // sessions whose project could not be identified.
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let err = daemon_set_project(
+            &store,
+            std::path::Path::new(crate::daemon::policy::UNKNOWN_PROJECT_KEY),
+            "auto",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown-project"), "{err}");
+    }
+
+    #[test]
+    fn approving_with_neither_an_id_nor_all_is_an_error() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let err = daemon_approve(&store, None, false, false).unwrap_err();
+        assert!(err.to_string().contains("--all"), "{err}");
+    }
+
+    #[test]
+    fn setting_a_project_to_auto_from_the_cli_is_persisted() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        daemon_set_project(
+            &store,
+            std::path::Path::new("/Users/z/code/proj"),
+            "auto",
+            false,
+        )
+        .unwrap();
+        let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
+        assert_eq!(
+            policy.resolve("/Users/z/code/proj"),
+            ProjectMode::AutoUpload
+        );
+    }
+}

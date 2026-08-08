@@ -53,6 +53,11 @@ pub struct DaemonState {
     pub day_bucket: Option<String>,
     pub uploads_today: u32,
     pub bytes_today: u64,
+    /// Whether the contributor has paused the daemon. Persisted, so a pause
+    /// survives a restart and is visible to a one-shot CLI invocation rather
+    /// than living only in a running process's memory.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl Default for DaemonState {
@@ -72,6 +77,7 @@ impl DaemonState {
             day_bucket: None,
             uploads_today: 0,
             bytes_today: 0,
+            paused: false,
         }
     }
 
@@ -223,6 +229,17 @@ mod tests {
         s.save(&store).unwrap();
         let loaded = DaemonState::load(&store).unwrap();
         assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn a_pause_survives_a_round_trip_through_the_store() {
+        // Otherwise `daemon pause` would appear to work and then be forgotten
+        // by the next command, and by the daemon on restart.
+        let (_d, store) = temp_store();
+        let mut s = DaemonState::new();
+        s.paused = true;
+        s.save(&store).unwrap();
+        assert!(DaemonState::load(&store).unwrap().paused);
     }
 
     #[test]

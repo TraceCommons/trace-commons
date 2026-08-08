@@ -23,6 +23,7 @@
 pub mod eligibility;
 pub mod health;
 pub mod history;
+pub mod install;
 pub mod ipc;
 pub mod notify;
 pub mod policy;

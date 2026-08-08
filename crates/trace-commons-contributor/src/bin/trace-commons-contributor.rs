@@ -120,6 +120,11 @@ enum Command {
     Whoami,
     /// Delete local keystore, config, and receipts
     Logout,
+    /// Run and control the background upload daemon
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
     /// Operator/dogfood tool: mint an enrollment grant with an instance private key
     MintGrant {
         #[arg(long)]
@@ -138,6 +143,69 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         ttl_seconds: i64,
     },
+}
+
+/// The daemon control surface.
+///
+/// Deliberately full parity with what the native menu-bar and window
+/// applications can do, so the daemon stays completely usable over SSH and on
+/// a machine with no desktop session. Two operations are available *only*
+/// here and not over the socket -- arming a project for automatic upload, and
+/// approving everything at once -- because a terminal is a capability an
+/// attacker with same-user code execution does not have.
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Run the daemon in the foreground; a service manager backgrounds it
+    Run {
+        /// Watch and queue as normal, but upload nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show what the daemon is doing and whether anything is wrong
+    Status,
+    /// List sessions waiting for a decision
+    Pending,
+    /// Show what would be sent for one queued session
+    Preview { entry_id: String },
+    /// Approve one queued session, or all of them
+    Approve {
+        entry_id: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Decline one queued session
+    Dismiss { entry_id: String },
+    /// Stop queueing and uploading until resumed
+    Pause,
+    /// Resume after a pause
+    Resume,
+    /// List projects and their upload modes
+    Projects,
+    /// Set a project's upload mode
+    Project {
+        /// The project's working directory
+        path: PathBuf,
+        /// auto | notify | ignore
+        #[arg(long)]
+        mode: String,
+    },
+    /// Show contribution history and the credit rollup
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Ask the daemon to refresh from the server before showing
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Show or change daemon settings
+    Settings {
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+    },
+    /// Install the systemd user unit (Linux)
+    Install,
+    /// Remove the systemd user unit (Linux)
+    Uninstall,
 }
 
 #[tokio::main]
@@ -243,6 +311,34 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
+        Command::Daemon { action } => match action {
+            DaemonAction::Run { dry_run } => {
+                trace_commons_contributor::daemon::run(store, dry_run).await
+            }
+            DaemonAction::Status => commands::daemon_status(&store, cli.json),
+            DaemonAction::Pending => commands::daemon_pending(&store, cli.json),
+            DaemonAction::Preview { entry_id } => {
+                commands::daemon_preview(&store, &entry_id, cli.json)
+            }
+            DaemonAction::Approve { entry_id, all } => {
+                commands::daemon_approve(&store, entry_id.as_deref(), all, cli.json)
+            }
+            DaemonAction::Dismiss { entry_id } => {
+                commands::daemon_dismiss(&store, &entry_id, cli.json)
+            }
+            DaemonAction::Pause => commands::daemon_pause(&store, true, cli.json),
+            DaemonAction::Resume => commands::daemon_pause(&store, false, cli.json),
+            DaemonAction::Projects => commands::daemon_projects(&store, cli.json),
+            DaemonAction::Project { path, mode } => {
+                commands::daemon_set_project(&store, &path, &mode, cli.json)
+            }
+            DaemonAction::History { limit, refresh } => {
+                commands::daemon_history(&store, limit, refresh, cli.json).await
+            }
+            DaemonAction::Settings { set } => commands::daemon_settings(&store, &set, cli.json),
+            DaemonAction::Install => commands::daemon_install(&store),
+            DaemonAction::Uninstall => commands::daemon_uninstall(),
+        },
         Command::MintGrant {
             instance_key_pem,
             instance_id,

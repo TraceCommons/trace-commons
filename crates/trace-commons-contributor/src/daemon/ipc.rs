@@ -160,6 +160,7 @@ impl DaemonShared {
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
         let (events, _) = broadcast::channel(256);
+        let paused = state.paused;
         Ok(Self {
             store,
             queue: Mutex::new(queue),
@@ -167,7 +168,7 @@ impl DaemonShared {
             state: Mutex::new(state),
             settings: Mutex::new(settings),
             health: Mutex::new(HealthState::default()),
-            paused: AtomicBool::new(false),
+            paused: AtomicBool::new(paused),
             shutdown: AtomicBool::new(false),
             events,
         })
@@ -388,15 +389,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
                 None => Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
             }
         }
-        "pause" => {
-            shared.paused.store(true, Ordering::Relaxed);
+        "pause" | "resume" => {
+            let paused = req.method == "pause";
+            shared.paused.store(paused, Ordering::Relaxed);
+            {
+                let mut state = shared.state.lock().expect("state lock");
+                state.paused = paused;
+                if state.save(&shared.store).is_err() {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
+                }
+            }
             shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
-            Response::ok(req.id, serde_json::json!({ "paused": true }))
-        }
-        "resume" => {
-            shared.paused.store(false, Ordering::Relaxed);
-            shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
-            Response::ok(req.id, serde_json::json!({ "paused": false }))
+            Response::ok(req.id, serde_json::json!({ "paused": paused }))
         }
         "list_history" => {
             let limit = req
