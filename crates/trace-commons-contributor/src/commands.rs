@@ -119,6 +119,22 @@ pub(crate) async fn enroll_core(
         });
     };
 
+    // Refuse to overwrite an existing enrollment, exactly like the invite
+    // path. `enroll` is now socket-reachable on a continuously-uploading
+    // daemon, so without this check a single call could repoint a running
+    // daemon's issuer/ingest/tenant out from under it. There is no
+    // legitimate re-enrollment flow that needs this to silently overwrite;
+    // `logout` first if re-enrolling is actually intended.
+    if store
+        .load_config()
+        .context("loading contributor config")?
+        .is_some()
+    {
+        anyhow::bail!(
+            "this device is already enrolled; run `logout` first if you intend to re-enroll"
+        );
+    }
+
     let grant = EnrollmentGrant::decode(grant_b64).context("decoding enrollment grant")?;
     let req = build_enroll_request(&grant, &device).context("building enroll request")?;
 
@@ -1036,6 +1052,56 @@ mod tests {
         assert!(msg.contains("not on the allowed-hosts list"), "{msg}");
         // No config was persisted.
         assert!(store.load_config().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_grant_enrollment_refuses_to_overwrite_an_existing_one() {
+        // `enroll` is socket-reachable on a continuously-uploading daemon
+        // now; without this check, one call could repoint a running
+        // daemon's issuer/ingest/tenant out from under it. The grant path
+        // used to overwrite silently while the invite path already refused
+        // -- this closes that gap.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let existing = ContributorConfig {
+            schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.original.invalid".to_string(),
+            ingest_url: "https://ingest.original.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-original".to_string(),
+            instance_id: "instance-original".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        store.save_config(&existing).unwrap();
+
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let grant = mint_grant(
+            doc.as_ref(),
+            "https://issuer.attacker.invalid",
+            "instance-attacker",
+            "alice",
+            "aud",
+            &device.device_key_id,
+            300,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let err = login(&store, Some(&grant.encode()), None, None, None)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("already enrolled"), "{msg}");
+        // The original config must survive untouched: no repointing to a
+        // different issuer/ingest/tenant.
+        let cfg = store.load_config().unwrap().unwrap();
+        assert_eq!(cfg.issuer_url, "https://issuer.original.invalid");
+        assert_eq!(cfg.tenant_id, "tenant-original");
     }
 
     #[test]

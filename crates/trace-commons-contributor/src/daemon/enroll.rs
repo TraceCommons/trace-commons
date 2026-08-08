@@ -12,8 +12,10 @@
 //! already-public `tenant_id` / `device_key_id` identifiers (the same ones
 //! `whoami` prints).
 
+use chrono::Utc;
 use serde_json::json;
 
+use super::audit::{self, AuditEntry};
 use super::health::LABEL_NEAR_AI_NOTICE_PENDING;
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::commands::{EnrollOutcome, enroll_core};
@@ -92,6 +94,15 @@ fn parse_scope_names(params: &serde_json::Value) -> Result<Vec<String>, &'static
 /// Enroll this device: an invite link or an instance-signed grant, plus the
 /// chosen consent scopes, exactly as `login` does for a terminal caller.
 ///
+/// Deliberately does NOT accept `allowed_hosts` from the caller, unlike the
+/// CLI's `--allowed-hosts` flag. `config::allowlist_for` gives a
+/// caller-supplied CSV precedence over the `TRACE_COMMONS_ALLOWED_HOSTS` env
+/// var, and an empty CSV degrades to permissive -- so a socket caller could
+/// otherwise neutralize an operator's env-configured allowlist and have that
+/// neutralization persisted into `contributor.json` for every later command.
+/// A native application has no legitimate reason to override host
+/// enforcement; only always pass `None` here so the env setting governs.
+///
 /// This performs a real network call (registering the device with the
 /// issuer), so it is async; it is reached only through
 /// `handle_request_async` and `handle_local`, never through the synchronous
@@ -99,7 +110,6 @@ fn parse_scope_names(params: &serde_json::Value) -> Result<Vec<String>, &'static
 pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Response {
     let grant = req.params.get("grant").and_then(|v| v.as_str());
     let invite = req.params.get("invite").and_then(|v| v.as_str());
-    let allowed_hosts = req.params.get("allowed_hosts").and_then(|v| v.as_str());
 
     if grant.is_some() && invite.is_some() {
         return Response::err(
@@ -118,7 +128,7 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
         Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "scopes-invalid"),
     };
 
-    match enroll_core(&shared.store, grant, invite, allowed_hosts, consent_scopes).await {
+    match enroll_core(&shared.store, grant, invite, None, consent_scopes).await {
         Ok(EnrollOutcome::AwaitingGrant { device_key_id }) => Response::ok(
             req.id,
             json!({ "enrolled": false, "device_key_id": device_key_id }),
@@ -141,6 +151,9 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
 /// Change consent scopes after enrollment, as the consent prompt at login
 /// already promises. Purely a local config write -- no network call -- so
 /// this stays on the synchronous `handle_request` path.
+///
+/// Audited (`consent-scopes-changed`): this can silently widen consent to
+/// e.g. `model_training`, at least as consequential as arming auto-upload.
 pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) -> Response {
     let scope_names = match parse_scope_names(&req.params) {
         Ok(names) => names,
@@ -157,6 +170,19 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
     if shared.store.save_config(&cfg).is_err() {
         return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
     }
+    // Label data, not secret: these are wire-name scope identifiers, the
+    // same ones already returned in this very response and in `status`.
+    if let Err(_e) = audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "consent-scopes-changed".to_string(),
+            project_label: None,
+            detail: Some(scopes.join(",")),
+        },
+    ) {
+        tracing::warn!("failed to append daemon audit entry");
+    }
     Response::ok(req.id, json!({ "consent_scopes": scopes }))
 }
 
@@ -164,6 +190,13 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
 /// the health label blocking on it. This is the only way an app-only
 /// contributor (never touching the CLI, which shows the same notice on
 /// stdout) can become unstuck.
+///
+/// Audited (`near-ai-notice-acknowledged`): this asserts, on the socket
+/// caller's unverified word, that a third-party-scan disclosure was shown to
+/// someone. A notice nobody actually saw is not a notice, so defeating this
+/// gate is at least as consequential as arming auto-upload, and less
+/// recoverable: traces may already have gone out under the false
+/// acknowledgment before anyone notices.
 pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Request) -> Response {
     match shared.store.ensure_near_ai_notice_shown() {
         Ok(_created) => {
@@ -172,6 +205,17 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
                 .lock()
                 .expect("health lock")
                 .resolve(LABEL_NEAR_AI_NOTICE_PENDING);
+            if let Err(_e) = audit::append(
+                &shared.store,
+                &AuditEntry {
+                    at: Utc::now(),
+                    action: "near-ai-notice-acknowledged".to_string(),
+                    project_label: None,
+                    detail: None,
+                },
+            ) {
+                tracing::warn!("failed to append daemon audit entry");
+            }
             Response::ok(req.id, json!({ "acknowledged": true }))
         }
         Err(_e) => Response::err(req.id, ERR_UNAVAILABLE, "notice-write-failed"),
@@ -277,6 +321,71 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    /// Start a real `/v1/onboard` responder on an ephemeral `127.0.0.1` port
+    /// and return its base URL.
+    async fn spawn_onboard_mock() -> String {
+        use axum::{Json, Router, routing::post};
+        let router = Router::new().route(
+            "/v1/onboard",
+            post(|| async move {
+                Json(serde_json::json!({
+                    "schema_version": "trace_commons.onboard_response.v1",
+                    "tenant_id": "tenant-mock",
+                    "ingest_url": "https://ingest.invalid",
+                    "issuer_url": "https://issuer.invalid",
+                    "audience": "trace-commons-upload",
+                    "device_key_id": "sha256:mockdevice",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn enroll_ignores_a_caller_supplied_allowed_hosts_and_the_env_allowlist_still_governs() {
+        // Regression for a real vulnerability: `config::allowlist_for` gives
+        // a caller-supplied CSV precedence over TRACE_COMMONS_ALLOWED_HOSTS,
+        // and an empty CSV degrades to permissive. Before the fix,
+        // `handle_enroll` forwarded a socket-supplied `allowed_hosts`
+        // straight into `enroll_core`, so a socket caller could pass a CSV
+        // that excludes the real target host and have the request refused
+        // by an allowlist mismatch it invented, or (worse) pass an empty
+        // string and have that persisted into `contributor.json`. Since the
+        // fix drops the parameter entirely, a mock issuer running on a real
+        // `127.0.0.1` port must be reachable regardless of what a caller
+        // puts in `allowed_hosts` -- the request must not be pre-refused by
+        // a host list the caller invented.
+        let base = spawn_onboard_mock().await;
+        let s = shared();
+        let r = handle_enroll(
+            &s,
+            &req(
+                "enroll",
+                json!({
+                    "invite": format!("{base}/onboard#SOME-CODE"),
+                    // An attacker-controlled value that, if honored, would
+                    // make the allowlist either permissive (empty string) or
+                    // would exclude the real host -- neither must have any
+                    // effect now that the parameter does not exist on the
+                    // wire contract.
+                    "allowed_hosts": "",
+                }),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["enrolled"], true);
+        // The caller's "allowed_hosts" value must never reach the saved
+        // config either: enroll_core is always called with `None`, and the
+        // invite path itself never persists `allowed_hosts` (only the grant
+        // path's `login --allowed-hosts` flag does).
+        let cfg = s.store.load_config().unwrap().unwrap();
+        assert_eq!(cfg.allowed_hosts, None);
+    }
+
     #[test]
     fn set_consent_scopes_refuses_when_not_enrolled() {
         let s = shared();
@@ -312,5 +421,63 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(s.store.near_ai_notice_shown());
         assert!(s.health.lock().unwrap().ok());
+    }
+
+    fn enrolled_shared() -> DaemonShared {
+        let s = shared();
+        s.store
+            .save_config(&crate::config::ContributorConfig {
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.invalid".to_string(),
+                ingest_url: "https://ingest.invalid".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: None,
+            })
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn set_consent_scopes_appends_an_audit_entry() {
+        // A socket caller widening its own consent (e.g. to model_training)
+        // is at least as consequential as arming auto-upload, and gets the
+        // same visibility.
+        let s = enrolled_shared();
+        let r = handle_set_consent_scopes(
+            &s,
+            &req("set_consent_scopes", json!({"scopes": ["model_training"]})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "consent-scopes-changed");
+        assert!(
+            entries[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("model_training")
+        );
+    }
+
+    #[test]
+    fn acknowledging_the_near_ai_notice_appends_an_audit_entry() {
+        // The caller asserts, on its own unverified word, that a
+        // third-party disclosure was shown to someone -- exactly the kind
+        // of consequential-and-otherwise-invisible action this log exists
+        // for.
+        let s = shared();
+        let r =
+            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let entries = audit::load(&s.store).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "near-ai-notice-acknowledged");
     }
 }
