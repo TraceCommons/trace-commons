@@ -813,6 +813,46 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+/// Full preview -- summary *and* redacted body -- for one queue entry, for a
+/// caller that already holds `shared` directly rather than issuing a
+/// request/response frame. This is what the C ABI's `tc_preview_open` uses.
+///
+/// The socket's `"preview"` (`handle_preview`, above) returns the summary
+/// only and never the body: per the design's "preview is a local operation,
+/// not daemon state" section, a body only ever needs to leave this process
+/// through a return value a caller who is already inside it can hold a
+/// pointer to, never through the 1 MiB-capped socket. Errors are fixed
+/// labels, matching every other surface at this boundary -- no path, no
+/// entry content.
+pub async fn open_preview(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+) -> Result<(super::preview::PreviewSummary, String), &'static str> {
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue.get(entry_id).cloned().ok_or("unknown-entry-id")?
+    };
+    let cfg = shared
+        .store
+        .load_config()
+        .map_err(|_| "not-logged-in")?
+        .ok_or("not-logged-in")?;
+    let (near_ai, claude_root, codex_root) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (
+            s.near_ai.clone(),
+            s.claude_root.clone(),
+            s.codex_root.clone(),
+        )
+    };
+    let sources = crate::source::all_sources(claude_root, codex_root, None);
+    let (source, session_ref) =
+        super::find_session(&sources, &entry).ok_or("session-file-vanished")?;
+    super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref)
+        .await
+        .map_err(|_| "preview-failed")
+}
+
 /// Settings as returned over IPC: the privacy-filter credential is reported
 /// as present or absent, never echoed.
 fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {

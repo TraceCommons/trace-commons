@@ -51,6 +51,78 @@ use crate::config::{ConfigStore, DAEMON_LOCK_FILE, DAEMON_SOCK_FILE};
 /// same state directory fails loudly instead of two of them racing over the
 /// same queue.
 pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
+    let embedded = start_embedded(store, dry_run).await?;
+    let EmbeddedDaemon {
+        shared,
+        lock_path,
+        lock,
+        server,
+        supervisor,
+    } = embedded;
+
+    let result = match supervisor.await {
+        Ok(r) => r,
+        Err(e) if e.is_cancelled() => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("supervise task panicked: {e}")),
+    };
+
+    server.abort();
+    let _ = shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
+    drop(lock);
+    let _ = std::fs::remove_file(&lock_path);
+    result
+}
+
+/// The pieces of a running daemon loop that a caller who needs direct,
+/// in-process access to `shared` -- rather than only running the loop to
+/// completion the way `run` does -- holds onto.
+///
+/// This is what `trace-commons-contributor-ffi` embeds: the C ABI's
+/// `tc_daemon_start` calls `start_embedded` instead of `run` so it gets back
+/// the same `Arc<DaemonShared>` the loop is mutating, for `tc_call` and
+/// `tc_preview_open` to act on directly via `ipc::handle_local` /
+/// `ipc::open_preview` -- not a second, independently-loaded, and therefore
+/// divergent, view of the on-disk state.
+pub struct EmbeddedDaemon {
+    pub shared: Arc<ipc::DaemonShared>,
+    lock_path: std::path::PathBuf,
+    lock: std::fs::File,
+    server: tokio::task::JoinHandle<Result<()>>,
+    supervisor: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl EmbeddedDaemon {
+    /// Ask the loop to stop, wait for both background tasks to finish, and
+    /// release the lock file. Consumes `self`: there is nothing left to hold
+    /// once shutdown has run.
+    pub async fn shutdown(self) -> Result<()> {
+        self.shared.shutdown.store(true, Ordering::Relaxed);
+        self.shared.shutdown_signal.notify_one();
+        self.server.abort();
+        let result = match self.supervisor.await {
+            Ok(r) => r,
+            Err(e) if e.is_cancelled() => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("supervise task panicked: {e}")),
+        };
+        let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
+        drop(self.lock);
+        let _ = std::fs::remove_file(&self.lock_path);
+        result
+    }
+}
+
+/// Take the daemon's exclusive lock, build the shared state, bind the
+/// socket, and spawn the socket server and the supervise loop as background
+/// tasks -- everything `run` does, except it returns the pieces instead of
+/// blocking on them, so an embedder gets a live `Arc<DaemonShared>` to drive
+/// directly.
+///
+/// Locking happens exactly once per call, the same as `run`: this function
+/// (not `run`) is now the one place that takes `daemon.lock`, so a second
+/// `start_embedded` -- or a second `run` -- against the same state directory
+/// still fails loudly on the `try_lock`, whether or not the caller is the
+/// same process.
+pub async fn start_embedded(store: ConfigStore, dry_run: bool) -> Result<EmbeddedDaemon> {
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -71,13 +143,16 @@ pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
     let serve_shared = Arc::clone(&shared);
     let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
 
-    let result = supervise(Arc::clone(&shared), dry_run).await;
+    let supervise_shared = Arc::clone(&shared);
+    let supervisor = tokio::spawn(async move { supervise(supervise_shared, dry_run).await });
 
-    server.abort();
-    let _ = shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
-    drop(lock);
-    let _ = std::fs::remove_file(&lock_path);
-    result
+    Ok(EmbeddedDaemon {
+        shared,
+        lock_path,
+        lock,
+        server,
+        supervisor,
+    })
 }
 
 /// The periodic work: watch, expire, and decide about digests, until asked to

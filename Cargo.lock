@@ -7151,6 +7151,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-contributor-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "trace-commons-contributor",
+]
+
+[[package]]
 name = "trace-commons-gate-api"
 version = "0.1.0"
 dependencies = [
