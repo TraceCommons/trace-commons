@@ -72,43 +72,51 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
 #[error("one or more sessions were refused or failed")]
 pub struct RenderedSubmitFailure;
 
-/// Enroll this device with an instance-signed grant, or (with no grant)
-/// print this device's key id so an instance operator can mint one.
+/// The result of a non-interactive enrollment attempt.
+///
+/// The grant path can be run with no grant in hand yet, in which case it
+/// only records this device's identity so an instance operator can vouch
+/// for it; every other path produces a saved, usable config.
+pub(crate) enum EnrollOutcome {
+    Enrolled(Box<ContributorConfig>),
+    AwaitingGrant { device_key_id: String },
+}
+
+/// Enroll this device with an instance-signed grant or an invite link, with
+/// no interaction: `consent_scopes` must already be resolved, since nothing
+/// here can prompt a terminal.
+///
+/// This is the single enrollment implementation shared by the interactive
+/// `login` command and the daemon's `enroll` IPC method, so a socket caller
+/// (a native application) and a terminal caller enrol identically rather
+/// than through two hand-maintained copies of the same network calls.
 ///
 /// When `allowed_hosts` is provided it takes precedence over the
 /// `TRACE_COMMONS_ALLOWED_HOSTS` env fallback and is persisted into the
 /// saved config so every later command enforces it.
-///
-/// `scopes` (a CSV of wire-name consent scopes) is validated before any
-/// network call. When absent, an interactive terminal prompts for consent
-/// choices; a non-interactive session falls back to the
-/// `debugging_evaluation` floor only.
-pub async fn login(
+pub(crate) async fn enroll_core(
     store: &ConfigStore,
     grant_b64: Option<&str>,
     invite: Option<&str>,
     allowed_hosts: Option<&str>,
-    scopes: Option<&str>,
-) -> Result<()> {
+    consent_scopes: Vec<String>,
+) -> Result<EnrollOutcome> {
     if grant_b64.is_some() && invite.is_some() {
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
     }
-    let consent_scopes = resolve_consent_scopes(scopes)?;
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
 
     if let Some(invite) = invite {
-        return login_with_invite(store, invite, allowed_hosts, &device, consent_scopes).await;
+        let cfg =
+            enroll_with_invite_core(store, invite, allowed_hosts, &device, consent_scopes).await?;
+        return Ok(EnrollOutcome::Enrolled(Box::new(cfg)));
     }
 
     let Some(grant_b64) = grant_b64 else {
-        println!("device_key_id: {}", device.device_key_id);
-        println!(
-            "give this to your instance to mint an enrollment grant, then re-run \
-             `login --grant <grant>` -- or, if you were handed an invite link, run \
-             `login --invite <url>`"
-        );
-        return Ok(());
+        return Ok(EnrollOutcome::AwaitingGrant {
+            device_key_id: device.device_key_id,
+        });
     };
 
     let grant = EnrollmentGrant::decode(grant_b64).context("decoding enrollment grant")?;
@@ -129,22 +137,59 @@ pub async fn login(
         instance_id: grant.attestation.instance_id.clone(),
         user_subject: grant.attestation.user_subject.clone(),
         device_key_id: response.device_key_id,
-        consent_scopes: consent_scopes.clone(),
+        consent_scopes,
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
     };
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
+    Ok(EnrollOutcome::Enrolled(Box::new(cfg)))
+}
 
-    println!("enrolled: tenant_id={}", cfg.tenant_id);
-    println!(
-        "Traces you submit carry the {} consent scope(s); secrets are removed locally \
-         (including tool payloads), and the server re-applies the same deterministic \
-         redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
-         message text only.",
-        consent_scopes.join(", ")
-    );
+/// Enroll this device with an instance-signed grant, or (with no grant)
+/// print this device's key id so an instance operator can mint one.
+///
+/// `scopes` (a CSV of wire-name consent scopes) is validated before any
+/// network call. When absent, an interactive terminal prompts for consent
+/// choices; a non-interactive session falls back to the
+/// `debugging_evaluation` floor only.
+pub async fn login(
+    store: &ConfigStore,
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    allowed_hosts: Option<&str>,
+    scopes: Option<&str>,
+) -> Result<()> {
+    let consent_scopes = resolve_consent_scopes(scopes)?;
+    let used_invite = invite.is_some();
+    match enroll_core(store, grant_b64, invite, allowed_hosts, consent_scopes).await? {
+        EnrollOutcome::AwaitingGrant { device_key_id } => {
+            println!("device_key_id: {device_key_id}");
+            println!(
+                "give this to your instance to mint an enrollment grant, then re-run \
+                 `login --grant <grant>` -- or, if you were handed an invite link, run \
+                 `login --invite <url>`"
+            );
+        }
+        EnrollOutcome::Enrolled(cfg) if used_invite => {
+            println!("enrolled: tenant_id={}", cfg.tenant_id);
+            println!("this invite use is now spent");
+            println!(
+                "run `whoami` to confirm, then `submit --dry-run` before contributing anything"
+            );
+        }
+        EnrollOutcome::Enrolled(cfg) => {
+            println!("enrolled: tenant_id={}", cfg.tenant_id);
+            println!(
+                "Traces you submit carry the {} consent scope(s); secrets are removed locally \
+                 (including tool payloads), and the server re-applies the same deterministic \
+                 redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
+                 message text only.",
+                cfg.consent_scopes.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1176,13 +1221,13 @@ mod project_filter_tests {
 /// base64 a raw Ed25519 public key, and then know that the response has to be
 /// persisted. Every one of those was a step contributors got wrong by reading
 /// the source instead of a document.
-async fn login_with_invite(
+async fn enroll_with_invite_core(
     store: &ConfigStore,
     invite: &str,
     allowed_hosts: Option<&str>,
     device: &DeviceIdentity,
     consent_scopes: Vec<String>,
-) -> Result<()> {
+) -> Result<ContributorConfig> {
     let parsed = parse_invite(invite)?;
 
     // Redeeming spends one use of the invite whether or not the config write
@@ -1233,11 +1278,7 @@ async fn login_with_invite(
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
-
-    println!("enrolled: tenant_id={}", cfg.tenant_id);
-    println!("this invite use is now spent");
-    println!("run `whoami` to confirm, then `submit --dry-run` before contributing anything");
-    Ok(())
+    Ok(cfg)
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores and
