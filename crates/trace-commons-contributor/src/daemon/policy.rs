@@ -167,9 +167,20 @@ pub const ERR_PROJECT_KEY_UNRECOGNIZED: &str = "project-key-unrecognized";
 ///   `ignore` (or armed) before its first session is ever seen, which is
 ///   the whole point of that CLI flow.
 ///
-/// Everything else is refused with `ERR_PROJECT_KEY_UNRECOGNIZED`. A caller
-/// can therefore still choose *which* local directory it names, but it can
-/// no longer conjure a label out of an arbitrary string.
+/// Everything else is refused with `ERR_PROJECT_KEY_UNRECOGNIZED`.
+///
+/// What this does and does not buy, stated precisely, because an earlier
+/// version of this comment claimed more than the code delivers. It does not
+/// make an arbitrary label impossible: same-user code can `mkdir
+/// /tmp/<any-string>` and then name that directory, and the basename
+/// becomes a label in `list_projects` and `daemon-audit.jsonl`. What it
+/// buys is that the string must first exist as a real directory on this
+/// machine, which bounds it to what a filesystem will accept -- no `/`, no
+/// NUL, at most 255 bytes -- and leaves it visible on disk. That is a
+/// narrowing, not a seal, and the same surface is already reachable by
+/// writing a session file with an arbitrary `cwd`. `MAX_PROJECT_LABEL_CHARS`
+/// bounds the length independently at the render sinks, since a filesystem
+/// limit is not a promise this crate makes.
 pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bool {
     if project_key == UNKNOWN_PROJECT_KEY {
         return true;
@@ -231,10 +242,31 @@ pub fn project_label_for(project_key: &str) -> String {
     if project_key == UNKNOWN_PROJECT_KEY || !has_usable_basename(project_key) {
         return UNKNOWN_PROJECT_KEY.to_string();
     }
-    std::path::Path::new(project_key)
+    let label = std::path::Path::new(project_key)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string())
+        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string());
+    truncate_label(&label)
+}
+
+/// The ceiling on a rendered project label, in characters.
+///
+/// The label crosses the socket, lands in `daemon-audit.jsonl`, and goes
+/// into OS notification text. Nothing bounded its length: a directory name
+/// can be up to 255 bytes on every filesystem this runs on, and
+/// `project_key_is_admissible` accepts any real directory, so a caller
+/// willing to `mkdir` could put 255 bytes of chosen text into all three
+/// sinks. That is not a leak of anything the caller did not already know,
+/// but a label is a display name and it should be bounded here rather than
+/// by whatever the filesystem happened to allow.
+pub const MAX_PROJECT_LABEL_CHARS: usize = 64;
+
+/// Truncate on a character boundary, never mid-codepoint.
+fn truncate_label(label: &str) -> String {
+    if label.chars().count() <= MAX_PROJECT_LABEL_CHARS {
+        return label.to_string();
+    }
+    label.chars().take(MAX_PROJECT_LABEL_CHARS).collect()
 }
 
 /// The known-key set every disambiguation call site must agree on: every
@@ -392,6 +424,30 @@ mod tests {
             assert_eq!(label, UNKNOWN_PROJECT_KEY, "key {key:?} leaked as {label}");
             assert!(!label.contains('/'), "key {key:?} leaked as {label}");
         }
+    }
+
+    #[test]
+    fn a_label_is_length_bounded_at_the_sink() {
+        // `project_key_is_admissible` accepts any real directory, and a
+        // directory name can be 255 bytes. The label crosses the socket,
+        // lands in daemon-audit.jsonl, and goes into notification text, so
+        // it is bounded here rather than by whatever the filesystem allowed.
+        let long = "n".repeat(255);
+        let label = project_label_for(&format!("/Users/z/code/{long}"));
+        assert_eq!(label.chars().count(), MAX_PROJECT_LABEL_CHARS);
+    }
+
+    #[test]
+    fn a_multibyte_label_is_truncated_on_a_character_boundary() {
+        let long = "\u{e9}".repeat(200);
+        let label = project_label_for(&format!("/Users/z/code/{long}"));
+        assert_eq!(label.chars().count(), MAX_PROJECT_LABEL_CHARS);
+        assert!(label.chars().all(|c| c == '\u{e9}'));
+    }
+
+    #[test]
+    fn a_short_label_is_left_exactly_as_it_is() {
+        assert_eq!(project_label_for("/Users/z/code/my-proj"), "my-proj");
     }
 
     #[test]
