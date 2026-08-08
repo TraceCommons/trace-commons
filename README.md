@@ -104,9 +104,9 @@ Authoritative contracts to read before changing anything substantive:
   contract
 - [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md) — phased
   open work and "Production Gap Queue"
-- [`docs/contributor-daemon-ipc-v1.md`](docs/contributor-daemon-ipc-v1.md) —
-  frozen IPC contract between the contributor background daemon and the
-  native menu-bar and window applications
+- [`docs/contributor-daemon-ipc-v1_1.md`](docs/contributor-daemon-ipc-v1_1.md) —
+  IPC contract between the contributor background daemon and the native
+  menu-bar and window applications
 
 ## Repository Layout
 

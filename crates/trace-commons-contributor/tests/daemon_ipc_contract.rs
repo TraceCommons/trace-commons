@@ -1,6 +1,6 @@
 //! The daemon IPC contract, exercised over a real unix socket.
 //!
-//! These tests are the executable half of `docs/contributor-daemon-ipc-v1.md`.
+//! These tests are the executable half of `docs/contributor-daemon-ipc-v1_1.md`.
 //! Three native applications will be written against this framing, so the
 //! properties asserted here -- id correlation, snapshot-before-delta, the
 //! authorization carve-out, and behaviour on malformed input -- are the ones
@@ -418,6 +418,25 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
 
     let body = resp.to_string();
     assert!(!body.contains("sk-fake-fixture-secret-1234"));
+}
+
+#[tokio::test]
+async fn hello_reports_v1_1_and_still_claims_v1_compatibility() {
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"hello"}"#).await;
+    let r = c.recv_json().await;
+    assert_eq!(r["result"]["schema_version"], "trace_commons.daemon.v1_1");
+    let supported: Vec<String> = r["result"]["supported_versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        supported.contains(&"trace_commons.daemon.v1".to_string()),
+        "a v1 client must still be told it is supported"
+    );
 }
 
 #[tokio::test]

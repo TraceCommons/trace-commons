@@ -1,4 +1,5 @@
-//! The IPC contract: `trace_commons.daemon.v1`.
+//! The IPC contract: `trace_commons.daemon.v1_1` (v1 clients remain
+//! supported; see `SUPPORTED_VERSIONS`).
 //!
 //! This is the surface the native menu-bar and window applications are built
 //! against, so it is versioned and frozen rather than allowed to drift. It
@@ -85,7 +86,13 @@ use super::settings::DaemonSettings;
 use super::state::DaemonState;
 use crate::config::{ConfigStore, DAEMON_SOCK_FILE};
 
-pub const IPC_SCHEMA: &str = "trace_commons.daemon.v1";
+pub const IPC_SCHEMA: &str = "trace_commons.daemon.v1_1";
+/// Every schema version a client may declare compatibility with. `hello`
+/// reports this so a v1 client (built before the seven methods below existed
+/// and before the terminal-only gate was dropped) can keep talking to this
+/// daemon: every v1 method keeps its v1 request and response shape, so a v1
+/// client that ignores unfamiliar methods and fields works unmodified.
+pub const SUPPORTED_VERSIONS: [&str; 2] = ["trace_commons.daemon.v1", "trace_commons.daemon.v1_1"];
 /// Longest accepted request line. Anything larger is a malformed client, not a
 /// real request.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -98,19 +105,26 @@ pub const ERR_UNAVAILABLE: &str = "unavailable";
 
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 17] = [
+pub const METHODS: [&str; 24] = [
+    "acknowledge_near_ai_notice",
     "approve",
+    "cancel",
+    "consent_options",
     "dismiss",
+    "enroll",
     "get_settings",
     "hello",
     "history_rollup",
+    "list_audit",
     "list_history",
     "list_pending",
     "list_projects",
     "pause",
     "preview",
+    "queue_outcome_counts",
     "refresh_history",
     "resume",
+    "set_consent_scopes",
     "set_project_mode",
     "set_settings",
     "shutdown",
@@ -359,6 +373,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             req.id,
             serde_json::json!({
                 "schema_version": IPC_SCHEMA,
+                "supported_versions": SUPPORTED_VERSIONS,
                 "methods": METHODS,
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
