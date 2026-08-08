@@ -37,16 +37,25 @@ use crate::config::allowlist_for;
 /// trace already inside a published export or benchmark cannot be recalled
 /// from copies already distributed, and the UI must say so rather than
 /// implying otherwise.
+/// The wire names are the SERVER's, not this crate's. They were written on
+/// both sides in parallel against the design doc and did not agree: this
+/// client expected `in_commons`/`distributed` while the server sends
+/// `commons_not_distributed`/`commons_distributed`, so the two
+/// already-accepted tiers -- exactly the ones whose message a contributor most
+/// needs to be true -- failed to deserialize. The server owns this format;
+/// the explicit renames below pin it, and `wire_names_match_the_server`
+/// fails if either side moves again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum DistributionReach {
-    /// `submitted` or `quarantined`: never entered the commons. Nothing was
-    /// distributed.
+    /// Never entered the commons. Nothing was distributed.
+    #[serde(rename = "not_distributed")]
     NotDistributed,
     /// `accepted`, not yet used in any published export or benchmark.
+    #[serde(rename = "commons_not_distributed")]
     InCommons,
     /// `accepted` and already included in a published export or benchmark.
     /// Copies already distributed cannot be recalled.
+    #[serde(rename = "commons_distributed")]
     Distributed,
 }
 
@@ -181,6 +190,26 @@ fn classify(e: &OcError) -> WithdrawError {
 
 #[cfg(test)]
 mod tests {
+    /// The server's constants, copied verbatim from
+    /// `trace-commons-ingest.rs` (TRACE_WITHDRAWAL_REACH_*). If either side
+    /// renames a tier, this fails rather than a contributor being told the
+    /// wrong thing about whether their trace can still be recalled.
+    #[test]
+    fn wire_names_match_the_server() {
+        use super::DistributionReach::*;
+        for (variant, wire) in [
+            (NotDistributed, "\"not_distributed\""),
+            (InCommons, "\"commons_not_distributed\""),
+            (Distributed, "\"commons_distributed\""),
+        ] {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<super::DistributionReach>(wire).unwrap(),
+                variant
+            );
+        }
+    }
+
     use super::*;
     use axum::{Json, Router, extract::Path, http::HeaderMap, routing::post};
     use std::sync::{Arc, Mutex};
