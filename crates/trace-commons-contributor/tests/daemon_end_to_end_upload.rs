@@ -224,9 +224,13 @@ async fn a_paused_daemon_uploads_nothing_even_for_an_opted_in_project() {
     let h = Harness::new().await;
     h.opt_in("myproj");
     h.write_session("myproj", "44444444-4444-4444-4444-444444444444");
+    // A real `pause` call sets both together; `DaemonShared::is_paused`
+    // trusts `state.paused` once it holds the state lock, so the harness
+    // must keep both in sync too.
     h.shared
         .paused
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    h.shared.state.lock().unwrap().paused = true;
 
     h.run_cycle().await;
 

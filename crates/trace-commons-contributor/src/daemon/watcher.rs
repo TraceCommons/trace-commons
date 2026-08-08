@@ -462,7 +462,13 @@ mod tests {
     async fn a_paused_daemon_does_no_work_at_all() {
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        // A real `pause` call always sets both together; `is_paused` trusts
+        // `state.paused` once it has taken the state lock (needed so it can
+        // return a non-stale answer to a reader that loses a race against a
+        // lapsing timed pause -- see `DaemonShared::is_paused`), so the
+        // fixture must keep both in sync too.
         f.shared.paused.store(true, Ordering::Relaxed);
+        f.shared.state.lock().unwrap().paused = true;
         let report = f.settle(at("2030-01-01T00:00:00Z")).await;
         assert_eq!(report, TickReport::default());
         assert_eq!(f.queue_len(), 0);
