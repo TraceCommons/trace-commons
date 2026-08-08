@@ -1,14 +1,17 @@
 //! Covers the exact regression a fix-round review caught: `daemon preview
 //! <entry_id>` is the CLI's entry point onto `handle_local(&shared,
 //! "preview", ...)` (wired in `src/bin/trace-commons-contributor.rs`), which
-//! resolves through the *synchronous* `handle_request`. Before this test
-//! existed, nothing exercised that path end to end, so a change that made
-//! the synchronous `"preview"` arm stop returning `would_send_bytes` (it now
-//! returns an honest `preview_requires_async` marker instead, for callers
-//! that truly cannot run async code) silently turned `daemon preview`'s
-//! output from "a wrong number" into "no number at all" -- `bytes: null` in
-//! the human-readable renderer, no `would_send_bytes` key at all in `--json`
-//! output -- with no test noticing.
+//! now runs every method -- `"preview"` included -- through the real async
+//! dispatcher (`handle_request_async`, via a generic `block_on_ipc`), not the
+//! synchronous `handle_request`. The synchronous `handle_request` answers
+//! `"preview"` with an honest `preview_requires_async` marker instead of
+//! `would_send_bytes`, precisely because it *cannot* run the async redaction
+//! pipeline -- but no real caller reaches it for this method. Before this
+//! test existed, nothing exercised the real CLI-to-daemon path end to end, so
+//! a change that accidentally routed `"preview"` to the synchronous arm would
+//! silently turn `daemon preview`'s output from "a wrong number" into "no
+//! number at all" -- `bytes: null` in the human-readable renderer, no
+//! `would_send_bytes` key at all in `--json` output -- with no test noticing.
 //!
 //! This spawns the real compiled binary (matching the pattern in
 //! `preflight.rs`), because the bug lives in `commands::daemon_preview`'s
