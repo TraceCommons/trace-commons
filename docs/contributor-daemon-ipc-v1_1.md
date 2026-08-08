@@ -89,6 +89,29 @@ It does not prevent anything; it only lets a contributor later see that
 something happened. Do not build a security argument, a permission gate, or
 any enforcement logic on top of `list_audit` -- it is a record, not a guard.
 
+## Project keys and labels
+
+`project_label` is **always derived by the daemon** from `project_key`. A
+client cannot choose one. `set_project_mode` still accepts a `label`
+parameter for compatibility with older clients, and ignores it: a
+caller-supplied string used to be stored verbatim and then returned by
+`list_projects` and written into `daemon-audit.jsonl`, which made both of
+those -- the two surfaces the label-only rule exists to protect -- writable
+by any socket client with an arbitrary path, token, or transcript fragment.
+
+`project_key` itself is validated. It must be one of:
+
+- the locked unknown-cwd sentinel (`unknown-project`), which can never be
+  armed;
+- a key the daemon already knows -- discovered on a queued session, or
+  already present in the project policy;
+- an absolute path that exists on this machine as a directory and
+  canonicalizes to itself.
+
+Anything else is refused with the fixed label `project-key-unrecognized`
+and nothing is recorded. This keeps the label the daemon derives anchored to
+something it can corroborate, rather than to a string a client invented.
+
 ## Privacy rules binding on clients
 
 - Queue entries on the wire carry `project_label`, never `project_key` or
@@ -125,7 +148,7 @@ any enforcement logic on top of `list_audit` -- it is a record, not a guard.
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_label, mode, added_at}` | |
-| `set_project_mode` | `project_key`, `label`, `mode` | `ok: true` | `auto_upload` no longer requires a terminal |
+| `set_project_mode` | `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | `auto_upload` no longer requires a terminal; see "Project keys and labels" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `refresh_history` | — | `requested: true` | |

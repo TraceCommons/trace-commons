@@ -404,7 +404,6 @@ mod tests {
                 .unwrap()
                 .set_mode(
                     &format!("/Users/testuser/code/{project}"),
-                    project,
                     mode,
                     at("2026-08-08T12:00:00Z"),
                 )
@@ -419,12 +418,7 @@ mod tests {
                 .policy
                 .lock()
                 .unwrap()
-                .set_mode(
-                    key,
-                    &crate::daemon::policy::project_label_for(key),
-                    mode,
-                    at("2026-08-08T12:00:00Z"),
-                )
+                .set_mode(key, mode, at("2026-08-08T12:00:00Z"))
                 .unwrap();
         }
 

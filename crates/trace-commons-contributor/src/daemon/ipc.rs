@@ -80,7 +80,10 @@ use super::audit::{self, AuditEntry};
 use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
-use super::policy::{ProjectMode, ProjectPolicy, disambiguated_label, known_keys};
+use super::policy::{
+    ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy, disambiguated_label, known_keys,
+    project_key_is_admissible,
+};
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
 use super::state::DaemonState;
@@ -439,13 +442,24 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Some(Ok(m)) => m,
                 _ => return Response::err(req.id, ERR_BAD_PARAMS, "mode-invalid"),
             };
-            let label = req
-                .params
-                .get("label")
-                .and_then(|v| v.as_str())
-                .unwrap_or(key);
+            // A `label` param is accepted on the wire for compatibility with
+            // older clients and then IGNORED. It used to be stored verbatim
+            // and echoed back by `list_projects` and written into
+            // `daemon-audit.jsonl`, so any socket client could inject a
+            // path, a token, or a transcript fragment into both of the
+            // sinks this crate's label-only rule exists to protect. The
+            // label is now derived from the key inside `set_mode`.
             let mut policy = shared.policy.lock().expect("policy lock");
-            if let Err(e) = policy.set_mode(key, label, mode, Utc::now()) {
+            let mut queue = shared.queue.lock().expect("queue lock");
+            // Lock order is policy before queue, as everywhere else.
+            let admissible = {
+                let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+                project_key_is_admissible(key, &known)
+            };
+            if !admissible {
+                return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+            }
+            if let Err(e) = policy.set_mode(key, mode, Utc::now()) {
                 return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
             }
             if let Err(_e) = policy.save(&shared.store) {
@@ -458,7 +472,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // rather than leaving the queue to lag until the next poll,
             // which would leave two same-basename projects briefly
             // indistinguishable in the one place uploads are approved from.
-            let mut queue = shared.queue.lock().expect("queue lock");
             if relabel_queue_entries(&policy, &mut queue) {
                 if let Err(_e) = queue.save(&shared.store) {
                     return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
@@ -1159,6 +1172,25 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// A real directory on this machine whose canonical path is an
+    /// admissible project key. `set_project_mode` no longer accepts a key
+    /// the daemon cannot corroborate, so tests name directories that exist
+    /// -- exactly as the CLI's `daemon project <path>` does.
+    ///
+    /// The tempdir is leaked for the lifetime of the test process: the key
+    /// must stay resolvable for as long as the daemon under test might
+    /// re-validate it.
+    fn tmp_project(basename: &str) -> String {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(basename);
+        std::fs::create_dir_all(&p).unwrap();
+        std::mem::forget(d);
+        std::fs::canonicalize(&p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn arming_autonomy_over_the_socket_is_now_allowed() {
         // The terminal-only gate is removed: same-user code that can reach
@@ -1169,16 +1201,17 @@ mod tests {
         // itself (rate-limited, capped, redacted, delivered somewhere it
         // cannot read back). See the module doc's "Authorization" section.
         let s = shared();
+        let key = tmp_project("p");
         let r = handle_request(
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+                serde_json::json!({"project_key": key, "mode": "auto_upload"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(
-            s.policy.lock().unwrap().resolve("/tmp/p"),
+            s.policy.lock().unwrap().resolve(&key),
             ProjectMode::AutoUpload
         );
     }
@@ -1193,7 +1226,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+                serde_json::json!({"project_key": tmp_project("p"), "mode": "auto_upload"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
@@ -1215,11 +1248,13 @@ mod tests {
         // "work/api" is configured and already has a queue entry, seeded
         // directly (as if a session had been queued for it earlier while
         // its basename was still unique).
+        let work_api = tmp_project("api");
+        let client_api = tmp_project("api");
         handle_request(
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/Users/z/work/api", "mode": "notify_only"}),
+                serde_json::json!({"project_key": work_api, "mode": "notify_only"}),
             ),
         );
         let entry_id = uuid::Uuid::new_v4();
@@ -1231,7 +1266,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
-                        project_key: "/Users/z/work/api".to_string(),
+                        project_key: work_api.clone(),
                         project_label: "api".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
                         size_bytes: 1,
@@ -1253,7 +1288,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/Users/z/client/api", "mode": "ignore"}),
+                serde_json::json!({"project_key": client_api, "mode": "ignore"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
@@ -1290,7 +1325,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "notify_only"}),
+                serde_json::json!({"project_key": tmp_project("p"), "mode": "notify_only"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
@@ -1351,6 +1386,121 @@ mod tests {
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(audit::load(&s.store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_caller_supplied_label_never_reaches_list_projects_or_the_audit_log() {
+        // `set_project_mode` used to store whatever `label` a socket client
+        // sent and hand it straight to `list_projects` and to
+        // `daemon-audit.jsonl` -- the two sinks the label-only rule exists
+        // to protect. The label is now derived from the key; the param is
+        // accepted and ignored.
+        let s = shared();
+        let key = tmp_project("myproj");
+        let injected = "ghp_fakeinjectedtoken/and/a/path";
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_key": key,
+                    "label": injected,
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let list = handle_request(&s, &req("list_projects", serde_json::json!({})));
+        let projects = serde_json::to_string(&list.result.unwrap()).unwrap();
+        assert!(
+            !projects.contains("ghp_fakeinjectedtoken"),
+            "a caller-supplied label reached list_projects: {projects}"
+        );
+        assert!(
+            projects.contains("\"myproj\""),
+            "the label must be derived from the key: {projects}"
+        );
+
+        let audit_text = serde_json::to_string(&audit::load(&s.store).unwrap()).unwrap();
+        assert!(
+            !audit_text.contains("ghp_fakeinjectedtoken"),
+            "a caller-supplied label reached the audit log: {audit_text}"
+        );
+        assert_eq!(
+            audit::load(&s.store).unwrap()[0].project_label.as_deref(),
+            Some("myproj")
+        );
+    }
+
+    #[test]
+    fn a_project_key_the_daemon_cannot_corroborate_is_refused() {
+        // Deriving the label from the key is not enough on its own: the
+        // basename of an attacker-chosen key is still an attacker-chosen
+        // string. A key must be the unknown-cwd sentinel, one the daemon
+        // already knows, or a real local directory.
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_key": "/nonexistent-xyz/ghp_fakeinjectedtoken",
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        let err = r.error.expect("an unrecognized key must be refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, ERR_PROJECT_KEY_UNRECOGNIZED);
+        assert!(
+            s.policy.lock().unwrap().projects.is_empty(),
+            "a refused key must not be recorded"
+        );
+        assert!(audit::load(&s.store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_key_already_known_to_the_daemon_stays_settable() {
+        // A project the daemon discovered on a queued session must remain
+        // configurable even if its directory has since been deleted --
+        // otherwise the contributor loses the ability to say "ignore this"
+        // about exactly the sessions already sitting in their queue.
+        let s = shared();
+        let gone = "/nonexistent-xyz/oldproj";
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id: uuid::Uuid::new_v4(),
+                        session_hash: "sha256:known".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: gone.to_string(),
+                        project_label: "oldproj".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": gone, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(gone), ProjectMode::Ignore);
     }
 
     #[test]
@@ -1691,7 +1841,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+                serde_json::json!({"project_key": tmp_project("p"), "mode": "auto_upload"}),
             ),
         );
         let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
@@ -1705,7 +1855,7 @@ mod tests {
         // The log is append-by-whole-file-rewrite and otherwise unbounded,
         // same reason list_history caps.
         let s = shared();
-        for key in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+        for key in [tmp_project("a"), tmp_project("b"), tmp_project("c")] {
             handle_request(
                 &s,
                 &req(
@@ -1729,7 +1879,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": "/tmp/p", "mode": "auto_upload"}),
+                serde_json::json!({"project_key": tmp_project("p"), "mode": "auto_upload"}),
             ),
         );
         let r = handle_request(

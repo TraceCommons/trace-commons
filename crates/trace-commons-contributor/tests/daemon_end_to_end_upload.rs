@@ -129,7 +129,6 @@ impl Harness {
             .unwrap()
             .set_mode(
                 &format!("/Users/testuser/code/{project}"),
-                project,
                 ProjectMode::AutoUpload,
                 chrono::Utc::now(),
             )

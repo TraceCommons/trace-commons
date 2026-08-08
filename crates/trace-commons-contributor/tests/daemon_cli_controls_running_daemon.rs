@@ -177,7 +177,7 @@ async fn disarming_auto_upload_from_the_cli_takes_effect_immediately() {
         .policy
         .lock()
         .unwrap()
-        .set_mode(&key, "proj", ProjectMode::AutoUpload, Utc::now())
+        .set_mode(&key, ProjectMode::AutoUpload, Utc::now())
         .unwrap();
     assert_eq!(
         h.shared.policy.lock().unwrap().resolve(&key),

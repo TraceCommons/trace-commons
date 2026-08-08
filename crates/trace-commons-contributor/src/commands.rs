@@ -1806,15 +1806,18 @@ fn resolve_project_key(path: &Path) -> Result<String> {
 pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
     let mode = parse_project_mode(mode)?;
     let key = resolve_project_key(path)?;
-    // The stored label is always the bare basename; disambiguation happens
-    // at render time (here, and in `daemon projects` / the queue) against
-    // the current known-key set, so a stored label never goes stale when a
-    // colliding project shows up later.
+    // No `label` is sent. The daemon derives it from the key -- it ignores
+    // any label a client supplies, because a caller-chosen string reaching
+    // `list_projects` and `daemon-audit.jsonl` was an injection path into
+    // both. This is the same bare basename the daemon will store;
+    // disambiguation happens at render time (here, and in `daemon projects`
+    // / the queue) against the current known-key set, so a stored label
+    // never goes stale when a colliding project shows up later.
     let label = crate::daemon::policy::project_label_for(&key);
     let resp = daemon_call(
         store,
         "set_project_mode",
-        serde_json::json!({ "project_key": key, "label": label, "mode": mode }),
+        serde_json::json!({ "project_key": key, "mode": mode }),
     )?;
     // Ask the same daemon that just applied the edit what it now knows, so
     // the label shown is disambiguated against the authoritative known-key

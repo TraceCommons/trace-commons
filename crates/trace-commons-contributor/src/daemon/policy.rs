@@ -101,10 +101,24 @@ impl ProjectPolicy {
         stored
     }
 
+    /// Record a mode for `project_key`.
+    ///
+    /// The label is **derived here**, from the key, and is never a caller
+    /// argument. It used to be one, and `set_project_mode` passed straight
+    /// through whatever a socket client sent -- so any client could write
+    /// an arbitrary string (a full filesystem path, a token, a fragment of
+    /// somebody's transcript) into `list_projects` output and into
+    /// `daemon-audit.jsonl`, the two sinks this crate's label-only rule
+    /// exists to protect. Deriving it removes the injection path by
+    /// construction rather than by validation.
+    ///
+    /// The stored label is the bare basename (`project_label_for`);
+    /// disambiguation against colliding basenames happens at render time,
+    /// so a stored label never goes stale when a colliding project appears
+    /// later.
     pub fn set_mode(
         &mut self,
         project_key: &str,
-        label: &str,
         mode: ProjectMode,
         now: DateTime<Utc>,
     ) -> Result<()> {
@@ -120,10 +134,56 @@ impl ProjectPolicy {
             ProjectEntry {
                 mode,
                 added_at: now,
-                label: label.to_string(),
+                label: project_label_for(project_key),
             },
         );
         Ok(())
+    }
+}
+
+/// The fixed label `set_project_mode` refuses an unrecognized key with.
+pub const ERR_PROJECT_KEY_UNRECOGNIZED: &str = "project-key-unrecognized";
+
+/// Whether the daemon will accept `project_key` from a socket client.
+///
+/// A socket client used to be able to name any key at all. The key is not
+/// itself echoed anywhere, but its *basename* becomes the project label --
+/// which crosses the socket in `list_projects` and lands in
+/// `daemon-audit.jsonl` -- so `"/x/ghp_realtokenvalue"` put a token into
+/// both sinks with one call.
+///
+/// A key is admissible when it is one of:
+///
+/// * the locked unknown-cwd sentinel (which `set_mode` still refuses to
+///   arm, and whose label is the sentinel name, not a path segment);
+/// * a key the daemon already knows -- one it has discovered on a queued
+///   session, or one already in the policy file, so its label is one the
+///   daemon itself derived;
+/// * an absolute path that exists on this machine as a directory and
+///   canonicalizes to itself. This is the only admissible *new* key, and it
+///   is exactly what both producers of keys emit: the watcher takes the
+///   cwd an agent recorded, and `daemon project <path>` canonicalizes an
+///   existing directory. Keeping it means a project can still be set to
+///   `ignore` (or armed) before its first session is ever seen, which is
+///   the whole point of that CLI flow.
+///
+/// Everything else is refused with `ERR_PROJECT_KEY_UNRECOGNIZED`. A caller
+/// can therefore still choose *which* local directory it names, but it can
+/// no longer conjure a label out of an arbitrary string.
+pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bool {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return true;
+    }
+    if known_keys.iter().any(|k| k == project_key) {
+        return true;
+    }
+    let path = std::path::Path::new(project_key);
+    if !path.is_absolute() {
+        return false;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved.is_dir() && resolved.as_os_str() == path.as_os_str(),
+        Err(_) => false,
     }
 }
 
@@ -259,12 +319,7 @@ mod tests {
     fn the_unknown_bucket_cannot_be_set_to_auto_upload() {
         let mut p = ProjectPolicy::new();
         let err = p
-            .set_mode(
-                UNKNOWN_PROJECT_KEY,
-                "unknown",
-                ProjectMode::AutoUpload,
-                now(),
-            )
+            .set_mode(UNKNOWN_PROJECT_KEY, ProjectMode::AutoUpload, now())
             .unwrap_err();
         assert!(err.to_string().contains("unknown-project"));
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -289,7 +344,7 @@ mod tests {
     fn the_unknown_bucket_may_still_be_ignored() {
         // Refusing autonomy is not the same as refusing to be silenced.
         let mut p = ProjectPolicy::new();
-        p.set_mode(UNKNOWN_PROJECT_KEY, "unknown", ProjectMode::Ignore, now())
+        p.set_mode(UNKNOWN_PROJECT_KEY, ProjectMode::Ignore, now())
             .unwrap();
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::Ignore);
     }
@@ -297,10 +352,10 @@ mod tests {
     #[test]
     fn set_and_resolve_round_trip_for_a_real_project() {
         let mut p = ProjectPolicy::new();
-        p.set_mode("/Users/z/code/proj", "proj", ProjectMode::AutoUpload, now())
+        p.set_mode("/Users/z/code/proj", ProjectMode::AutoUpload, now())
             .unwrap();
         assert_eq!(p.resolve("/Users/z/code/proj"), ProjectMode::AutoUpload);
-        p.set_mode("/Users/z/code/proj", "proj", ProjectMode::Ignore, now())
+        p.set_mode("/Users/z/code/proj", ProjectMode::Ignore, now())
             .unwrap();
         assert_eq!(p.resolve("/Users/z/code/proj"), ProjectMode::Ignore);
     }
@@ -356,7 +411,7 @@ mod tests {
         // report as AutoUpload however the file was written.
         let mut p = ProjectPolicy::new();
         assert!(
-            p.set_mode("/", "/", ProjectMode::AutoUpload, now()).is_ok(),
+            p.set_mode("/", ProjectMode::AutoUpload, now()).is_ok(),
             "the key itself is not the sentinel, so set_mode does not refuse it"
         );
         // But no session can ever resolve to it: every cwd with no usable
@@ -369,7 +424,7 @@ mod tests {
     fn policy_round_trips_through_the_store() {
         let (_d, store) = temp_store();
         let mut p = ProjectPolicy::new();
-        p.set_mode("/Users/z/code/proj", "proj", ProjectMode::AutoUpload, now())
+        p.set_mode("/Users/z/code/proj", ProjectMode::AutoUpload, now())
             .unwrap();
         p.save(&store).unwrap();
         assert_eq!(ProjectPolicy::load(&store).unwrap(), p);

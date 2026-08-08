@@ -150,9 +150,16 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
     // section.
     let h = TestDaemon::start().await;
     let mut c = h.connect().await;
-    c.send(
-        r#"{"id":3,"method":"set_project_mode","params":{"project_key":"/tmp/p","label":"p","mode":"auto_upload"}}"#,
-    )
+    // A real local directory: the daemon no longer accepts a project key it
+    // cannot corroborate, because the key's basename becomes the label that
+    // crosses this socket and lands in the audit log. The `label` param is
+    // still sent here, and is deliberately ignored.
+    let dir = tempfile::tempdir().unwrap();
+    let key = std::fs::canonicalize(dir.path()).unwrap();
+    let key = key.to_string_lossy();
+    c.send(&format!(
+        r#"{{"id":3,"method":"set_project_mode","params":{{"project_key":"{key}","label":"p","mode":"auto_upload"}}}}"#,
+    ))
     .await;
     let resp = c.recv_json().await;
     assert!(resp["error"].is_null(), "{resp}");
@@ -162,9 +169,12 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
 async fn setting_notify_only_over_the_socket_is_allowed() {
     let h = TestDaemon::start().await;
     let mut c = h.connect().await;
-    c.send(
-        r#"{"id":4,"method":"set_project_mode","params":{"project_key":"/tmp/p","label":"p","mode":"notify_only"}}"#,
-    )
+    let dir = tempfile::tempdir().unwrap();
+    let key = std::fs::canonicalize(dir.path()).unwrap();
+    let key = key.to_string_lossy();
+    c.send(&format!(
+        r#"{{"id":4,"method":"set_project_mode","params":{{"project_key":"{key}","label":"p","mode":"notify_only"}}}}"#,
+    ))
     .await;
     let resp = c.recv_json().await;
     assert!(resp["error"].is_null(), "{resp}");

@@ -56,7 +56,6 @@ async fn logout_stops_a_running_daemon_and_removes_all_of_its_state() {
         .unwrap()
         .set_mode(
             "/Users/z/code/proj",
-            "proj",
             ProjectMode::AutoUpload,
             chrono::Utc::now(),
         )

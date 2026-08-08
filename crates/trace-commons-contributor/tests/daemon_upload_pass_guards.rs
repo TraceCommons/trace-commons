@@ -177,7 +177,6 @@ impl Harness {
             .unwrap()
             .set_mode(
                 &format!("/Users/testuser/code/{project}"),
-                project,
                 ProjectMode::AutoUpload,
                 Utc::now(),
             )
@@ -408,7 +407,6 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
         .unwrap()
         .set_mode(
             "/Users/testuser/code/myproj",
-            "myproj",
             ProjectMode::AutoUpload,
             Utc::now(),
         )
