@@ -34,16 +34,24 @@
 //! # Sync vs. async dispatch
 //!
 //! `handle_request` answers every method synchronously except `"preview"`,
-//! which it can only answer partially (see its arm). `handle_request_async`
-//! is the real entry point for `"preview"`: it runs the actual redaction
-//! pipeline and delegates every other method straight through to
-//! `handle_request`. The socket connection loop (`serve_connection`), which
-//! is already async, calls `handle_request_async` exclusively so a socket
-//! client always gets the real preview. `handle_local` (the in-process CLI
-//! path) still calls the synchronous `handle_request`, so a CLI caller that
-//! asks for `"preview"` gets the honest-but-incomplete
-//! `preview_requires_async` marker rather than a wrong byte count; nothing in
-//! this codebase currently drives `"preview"` through `handle_local`.
+//! which it can only answer partially (see its arm) -- it has no way to run
+//! the async redaction pipeline, so it returns the entry plus a
+//! `preview_requires_async: true` marker rather than a wrong byte count.
+//! Both real callers of `"preview"` get the full answer instead:
+//!
+//! - The socket connection loop (`serve_connection`), already async, calls
+//!   `handle_request_async` directly.
+//! - `handle_local` (the in-process CLI path -- `trace-commons-contributor
+//!   daemon preview <entry_id>`, wired in
+//!   `src/bin/trace-commons-contributor.rs`) special-cases `"preview"` to
+//!   `block_on_preview`, a scoped-OS-thread blocking wrapper around
+//!   `handle_request_async`, since the CLI's own call sites are synchronous
+//!   `fn`s. Every other method still goes through the synchronous
+//!   `handle_request`.
+//!
+//! `handle_request_async` itself delegates every non-`"preview"` method
+//! straight through to `handle_request`, so the two dispatchers cannot
+//! answer the same method two different ways.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -396,11 +404,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request, origin: Origin) -> R
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
         "preview" => {
-            // Synchronous callers cannot run the redaction pipeline (it is
-            // async), so this arm reports only the entry itself, honestly
-            // flagged as incomplete, rather than the raw file size the old
-            // code returned. `handle_request_async` is the real preview path
-            // -- see its doc comment.
+            // This synchronous handler cannot run the redaction pipeline (it
+            // is async), so this arm reports only the entry itself,
+            // honestly flagged as incomplete, rather than the raw file size
+            // the old code returned. Real callers never see this: the
+            // socket loop calls `handle_request_async` and the CLI's
+            // `handle_local` special-cases `"preview"` to `block_on_preview`
+            // -- see the module doc comment.
             let id = match parse_entry_id(&req.params) {
                 Ok(id) => id,
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
@@ -754,13 +764,56 @@ async fn write_json<T: Serialize>(
 
 /// Convenience for the CLI, which drives the same handlers in-process and is
 /// therefore allowed to arm autonomy.
+///
+/// `"preview"` is special-cased to the real, async preview
+/// (`block_on_preview`) rather than the synchronous `handle_request`'s
+/// `preview_requires_async` stand-in. The CLI is documented as full parity
+/// with the tray/window applications, and every other `daemon` subcommand
+/// (`status`, `pending`, `approve`, ...) already gets a real answer through
+/// this same function, so a CLI contributor asking `daemon preview
+/// <entry_id>` should too.
 pub fn handle_local(shared: &DaemonShared, method: &str, params: serde_json::Value) -> Response {
     let req = Request {
         id: 0,
         method: method.to_string(),
         params,
     };
+    if req.method == "preview" {
+        return block_on_preview(shared, &req);
+    }
     handle_request(shared, &req, Origin::LocalTty)
+}
+
+/// Run the real, async preview from a synchronous caller.
+///
+/// The CLI binary is itself async (`#[tokio::main]`, multi-thread flavor),
+/// so `daemon_preview` executes on a tokio worker thread -- but plenty of
+/// test callers of `handle_local` run inside a default (current-thread)
+/// `#[tokio::test]`, and some might not be inside any runtime at all. Both
+/// `tokio::task::block_in_place` (needs the multi-thread flavor) and
+/// building a second `Runtime` and calling `.block_on()` on the *same*
+/// thread (tokio refuses to re-enter a runtime context on one thread) would
+/// panic in one of those cases. A scoped OS thread sidesteps all of it: it
+/// carries no tokio context of its own, so a throwaway current-thread
+/// runtime on it can always `block_on` the real `handle_request_async`, and
+/// `std::thread::scope` lets it borrow `shared`/`req` without requiring
+/// `'static`.
+fn block_on_preview(shared: &DaemonShared, req: &Request) -> Response {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "runtime-unavailable"),
+                };
+                rt.block_on(handle_request_async(shared, req))
+            })
+            .join()
+            .unwrap_or_else(|_| Response::err(req.id, ERR_UNAVAILABLE, "preview-thread-panicked"))
+    })
 }
 
 #[cfg(test)]
