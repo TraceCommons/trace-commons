@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 
 // Milestone demo: prove trace-commons-contributor-ffi's C ABI is callable
 // end to end from Swift. Starts the daemon against a throwaway temp
