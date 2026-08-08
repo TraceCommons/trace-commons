@@ -22,5 +22,6 @@
 
 pub mod eligibility;
 pub mod policy;
+pub mod queue;
 pub mod settings;
 pub mod state;
