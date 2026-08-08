@@ -23,6 +23,7 @@
 pub mod eligibility;
 pub mod health;
 pub mod history;
+pub mod ipc;
 pub mod policy;
 pub mod queue;
 pub mod settings;
