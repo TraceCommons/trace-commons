@@ -151,7 +151,9 @@ mod tests {
     #[tokio::test]
     async fn preview_reports_the_redacted_size_not_the_raw_size() {
         // The defect this task exists to fix: the old code returned the raw
-        // file size, which overstates what actually leaves the machine.
+        // file size. Measured, the redacted envelope is substantially LARGER
+        // than the session file it came from -- envelope metadata dominates --
+        // so the old number understated what actually leaves the machine.
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);

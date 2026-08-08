@@ -13,10 +13,18 @@ cannot support, one of which is a defect in what shipped.
 1. **`preview` does not do what it claims.** The v1 contract documents
    `would_send_bytes`, and `ipc.rs` returns `entry.size_bytes` — the raw
    session file size taken off the queue entry. No dry run is executed. There
-   is no event count, no redaction count, and no body. The number is not
-   merely incomplete, it overstates what actually goes out, because redaction
-   shrinks the payload. Preview is the entire consent surface of the product,
-   and it currently has nothing truthful to render.
+   is no event count, no redaction count, and no body.
+
+   The number is not merely incomplete, it is wrong, and wrong in the
+   dangerous direction. Measured on the repository's own fixture, a session
+   file of 1615 bytes produces a 4160-byte envelope: envelope metadata
+   dominates, so the redacted payload is roughly **2.6x larger** than the file
+   it came from. The old preview therefore *understated* what leaves the
+   machine. An earlier draft of this spec asserted the opposite on the
+   assumption that redaction shrinks the payload; it does not.
+
+   Preview is the entire consent surface of the product, and it currently has
+   nothing truthful to render.
 
 2. **A GUI-only contributor can get permanently stuck.** Choosing the NEAR AI
    scan sets `near-ai-notice-not-acknowledged`, which the daemon clears only
@@ -113,7 +121,9 @@ entry and returns:
 }
 ```
 
-- `would_send_bytes` is the **redacted envelope** size. This is the correction.
+- `would_send_bytes` is the **redacted envelope** size — normally larger than
+  `raw_session_bytes`, not smaller. Both are reported so a contributor can see
+  the relationship rather than having to assume one.
 - `opening_prompt` is the first user message, redacted and truncated to 200
   characters. It is what identifies a session to its author; a timestamp does
   not.
