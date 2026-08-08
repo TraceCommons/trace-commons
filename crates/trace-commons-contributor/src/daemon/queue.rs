@@ -105,16 +105,22 @@ pub struct QueueEntry {
     /// shown (`preview::envelope_digest`), recorded when a preview is run
     /// for this entry and carried through an approval.
     ///
-    /// Checked against the envelope the pipeline is about to send. This
-    /// catches what no fingerprint of the inputs can: a redaction service
-    /// that returns different spans for the same text with the same
-    /// configuration.
+    /// `Some` means **the envelope itself is on disk** under
+    /// `daemon::approved_envelope`, and the upload sends precisely those
+    /// bytes rather than building a second envelope. The digest identifies
+    /// that file; it is never compared against a rebuild, because a
+    /// rebuild through an LLM-backed privacy filter legitimately differs
+    /// and comparing made previewed entries permanently unuploadable.
+    ///
+    /// If the stored bytes are missing or unusable when the upload comes to
+    /// read them, the approval is revoked and the entry re-offered. The
+    /// daemon does not fall back to rebuilding.
     ///
     /// `None` when the entry was never previewed -- an armed auto-upload
     /// project, or an approve-all. Those are approvals given without seeing
-    /// the artifact in the first place, so there is nothing to compare
-    /// against and this check does not apply to them; the input
-    /// fingerprint still does.
+    /// the artifact in the first place, so there is nothing stored to send
+    /// and the pipeline builds the envelope as it always did; the input
+    /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
 }
@@ -227,7 +233,11 @@ impl Queue {
     /// Any envelope digest already recorded from a preview of this entry is
     /// left in place: it is what the contributor was shown, and the
     /// approval is an approval of exactly that.
-    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String], inputs: &str) -> bool {
+    /// `inputs` is `None` when the fingerprint could not be derived at all
+    /// (no readable config). Every call site expresses "unknown" the same
+    /// way -- `None`, never `Some("")` -- so the uploader's fail-closed
+    /// check has exactly one shape to recognize.
+    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String], inputs: Option<&str>) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
@@ -237,13 +247,38 @@ impl Queue {
         e.state = QueueState::Approved;
         e.reason_label = None;
         e.approved_scopes = Some(scopes.to_vec());
-        e.approved_inputs = Some(inputs.to_string());
+        e.approved_inputs = inputs.map(str::to_string);
         true
+    }
+
+    /// Every entry that still needs its stored preview envelope kept on
+    /// disk: live (not yet resolved) and still pinned to a preview.
+    ///
+    /// `daemon::approved_envelope::sweep` deletes everything else. An entry
+    /// that reached a terminal state, or whose approval was revoked (which
+    /// clears the pin), leaves no redacted trace content behind.
+    pub fn pinned_entry_ids(&self) -> std::collections::HashSet<Uuid> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.previewed_envelope_digest.is_some()
+                    && matches!(
+                        e.state,
+                        QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                    )
+            })
+            .map(|e| e.entry_id)
+            .collect()
     }
 
     /// Record the digest of the redacted envelope a preview just showed for
     /// this entry, so an approval that follows is pinned to that exact
     /// artifact. Returns whether the entry exists.
+    ///
+    /// Callers must have persisted the envelope itself first
+    /// (`daemon::approved_envelope::save`): "digest recorded" is what the
+    /// uploader reads as "the bytes are on disk", and recording one without
+    /// the other turns an ordinary upload into a fail-closed re-offer.
     ///
     /// Only meaningful while the entry is still `Pending`: an entry already
     /// approved has had its terms fixed, and a later preview must not

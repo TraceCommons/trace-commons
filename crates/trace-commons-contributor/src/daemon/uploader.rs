@@ -18,11 +18,16 @@
 //!    and the redaction service's own output -- could move between the
 //!    preview and the send with the session hash unchanged, and the guard
 //!    stayed silent. So the approval also pins an input fingerprint
-//!    (`preview::input_fingerprint`), re-derived here before every upload,
-//!    and, for a previewed entry, the digest of the envelope that was
-//!    shown, checked by `submit_loaded` against the envelope it is about to
-//!    send. Either mismatch re-offers the entry instead of uploading it.
-//!    This is the central consent property of the whole daemon.
+//!    (`preview::input_fingerprint`), re-derived here before every upload;
+//!    a mismatch re-offers the entry instead of uploading it.
+//!
+//!    For a previewed entry the artifact is not re-derived at all: the
+//!    envelope the contributor was shown was written to disk
+//!    (`daemon::approved_envelope`) and `submit_loaded` sends precisely
+//!    those bytes. This replaced a digest comparison that was correct and
+//!    unusable -- an LLM-backed privacy filter does not reproduce its own
+//!    spans, so every previewed entry was refused forever. Together these
+//!    are the central consent property of the whole daemon.
 //! 2. **Revocation checks.** A cached claim stays valid for minutes after a
 //!    logout, so enrollment is re-checked immediately before every upload
 //!    rather than once at startup.
@@ -47,6 +52,7 @@ use crate::submit::{
     PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
     SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
 };
+use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UploadDecision {
@@ -165,6 +171,37 @@ pub struct Uploader<'a, 'ctx> {
 }
 
 impl Uploader<'_, '_> {
+    /// The exact redacted envelope this entry was approved as, if it was
+    /// previewed at all.
+    ///
+    /// `Ok(None)` -- never previewed (armed auto-upload, approve-all), so
+    /// the pipeline builds the envelope as it always has.
+    /// `Ok(Some(_))` -- previewed; send these bytes.
+    /// `Err(label)` -- previewed, but the bytes are gone, unreadable, or
+    /// not the ones the entry is pinned to. Fail-closed: the approval is
+    /// revoked and the entry re-offered rather than rebuilt.
+    ///
+    /// The digest re-check is a consistency check on this crate's own
+    /// storage -- a truncated file, a file crossed over from another entry
+    /// -- not a check on redaction. Redaction is not re-run here at all.
+    fn approved_envelope_for(
+        &self,
+        entry: &QueueEntry,
+    ) -> Result<Option<TraceContributionEnvelope>, String> {
+        let Some(pinned) = entry.previewed_envelope_digest.as_deref() else {
+            return Ok(None);
+        };
+        let stored = super::approved_envelope::load(self.store, entry.entry_id)
+            .map_err(|_| super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE.to_string())?
+            .ok_or_else(|| super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE.to_string())?;
+        let actual = super::preview::envelope_digest(&stored)
+            .map_err(|_| super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE.to_string())?;
+        if actual != pinned {
+            return Err(super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE.to_string());
+        }
+        Ok(Some(stored))
+    }
+
     /// Upload one queue entry, or explain why not.
     pub async fn upload_entry(
         &mut self,
@@ -239,16 +276,24 @@ impl Uploader<'_, '_> {
             });
         }
 
-        // The artifact half. Handed to the pipeline rather than checked
-        // here, because the pipeline is what builds the envelope that gets
-        // sent: comparing against a rebuild would compare against a second
-        // envelope nobody uploads, and would cost an extra redaction pass
-        // (a second privacy-filter round trip, for a NEAR AI backend).
-        // `None` for an entry that was never previewed -- an armed
-        // auto-upload, an approve-all -- where there is no shown artifact
-        // to hold the upload to.
-        self.ctx
-            .expect_envelope_digest(entry.previewed_envelope_digest.clone());
+        // The artifact half. A previewed entry carries the envelope it was
+        // previewed as, on disk; the pipeline sends exactly those bytes.
+        // Nothing rebuilds and compares -- see
+        // `SubmitContext::use_approved_envelope` and
+        // `daemon::approved_envelope` for why a comparison cannot work
+        // against an LLM-backed privacy filter.
+        //
+        // Fail-closed on anything unexpected: an entry pinned to a preview
+        // whose bytes are gone, unreadable, or not the ones that were
+        // pinned goes back in front of the contributor. It is never
+        // silently rebuilt, because rebuilding is precisely how a
+        // contributor ends up sending something they were never shown.
+        match self.approved_envelope_for(entry) {
+            Ok(approved) => self.ctx.use_approved_envelope(approved),
+            Err(reason_label) => {
+                return Ok(UploadDecision::ApprovalStale { reason_label });
+            }
+        }
 
         // `submit_one` returns `Err` only for a fail-closed precondition
         // (`SubmitPreconditionFailure`) -- a privacy-filter canary that did
@@ -274,17 +319,7 @@ impl Uploader<'_, '_> {
                 return Err(e);
             }
         };
-        let mut decision = decision_for(outcome);
-        // The pipeline reports a digest mismatch as an ordinary refusal;
-        // the daemon treats it as a stale approval, so the entry is
-        // re-offered rather than recorded as refused forever.
-        if let UploadDecision::Refused { reason_label } = &decision {
-            if reason_label == super::preview::REASON_ENVELOPE_CHANGED {
-                decision = UploadDecision::ApprovalStale {
-                    reason_label: reason_label.clone(),
-                };
-            }
-        }
+        let decision = decision_for(outcome);
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -662,17 +697,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_refuses_when_the_envelope_is_not_the_one_that_was_previewed() {
-        // The other half: every input is identical and the raw bytes are
-        // identical, but the entry is pinned to an envelope digest that is
-        // not what the pipeline builds -- which is what a redaction service
-        // returning different spans for the same text looks like from here.
+    async fn upload_refuses_when_the_approved_envelope_bytes_are_gone() {
+        // An entry pinned to a preview whose stored bytes are missing. The
+        // daemon must NOT quietly rebuild the envelope -- rebuilding is
+        // exactly what the stored bytes exist to avoid -- so it revokes the
+        // approval and re-offers instead.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
         let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
         let entry = QueueEntry {
-            previewed_envelope_digest: Some("sha256:not-what-the-pipeline-builds".to_string()),
+            previewed_envelope_digest: Some("sha256:pinned-but-never-stored".to_string()),
             ..session.entry_for(&session.current_hash(), &cfg)
         };
 
@@ -701,22 +736,24 @@ mod tests {
         assert_eq!(
             decision,
             UploadDecision::ApprovalStale {
-                reason_label: crate::daemon::preview::REASON_ENVELOPE_CHANGED.to_string(),
+                reason_label: crate::daemon::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE
+                    .to_string(),
             }
         );
         assert_eq!(state.uploads_today, 0);
     }
 
     #[tokio::test]
-    async fn an_entry_pinned_to_the_envelope_the_pipeline_builds_uploads_normally() {
-        // The guard must not refuse the ordinary case: a preview ran, the
-        // contributor approved what it showed, nothing moved.
+    async fn upload_refuses_stored_bytes_that_are_not_the_ones_pinned() {
+        // A consistency check on this crate's own storage, not on redaction:
+        // a truncated file, or one crossed over from another entry, must not
+        // be sent as though it were what the contributor approved.
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
         let cfg = fixture_cfg(&store);
         store.save_config(&cfg).unwrap();
 
-        let (summary, _body) = crate::daemon::preview::build_preview(
+        let (_summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
             &cfg,
             None,
@@ -726,9 +763,76 @@ mod tests {
         .await
         .unwrap();
         let entry = QueueEntry {
-            previewed_envelope_digest: Some(summary.envelope_digest.clone()),
+            previewed_envelope_digest: Some("sha256:some-other-artifact".to_string()),
             ..session.entry_for(&session.current_hash(), &cfg)
         };
+        crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            UploadDecision::ApprovalStale {
+                reason_label: crate::daemon::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE
+                    .to_string(),
+            }
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
+    #[tokio::test]
+    async fn an_entry_uploads_the_stored_envelope_even_when_a_rebuild_would_differ() {
+        // The case the previous design could not do at all. The stored
+        // envelope deliberately is NOT what a rebuild produces -- one
+        // redacted event body has been altered, which is precisely the shape
+        // of an LLM-backed filter returning different spans the second time
+        // -- and the upload must still go out, carrying those bytes. The
+        // digest-comparison design refused this forever.
+        //
+        // `daemon_nondeterministic_filter.rs` drives the same property end
+        // to end against a filter service that really does move.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let (_summary, _body, mut envelope) = crate::daemon::preview::build_preview(
+            &store,
+            &cfg,
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .unwrap();
+        envelope.events[0].redacted_content =
+            Some("a redaction only this run produced".to_string());
+        let pinned = crate::daemon::preview::envelope_digest(&envelope).unwrap();
+        let entry = QueueEntry {
+            previewed_envelope_digest: Some(pinned),
+            ..session.entry_for(&session.current_hash(), &cfg)
+        };
+        crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
@@ -754,8 +858,61 @@ mod tests {
 
         assert!(
             matches!(decision, UploadDecision::Uploaded { .. }),
-            "a digest built by the same pipeline from the same inputs must \
-             match: got {decision:?}"
+            "a previewed entry must upload even though a rebuild would not \
+             reproduce its envelope: got {decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    #[tokio::test]
+    async fn an_entry_pinned_to_its_stored_envelope_uploads_normally() {
+        // The ordinary case: a preview ran, its bytes were stored, the
+        // contributor approved what it showed, nothing moved.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let (summary, _body, envelope) = crate::daemon::preview::build_preview(
+            &store,
+            &cfg,
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .unwrap();
+        let entry = QueueEntry {
+            previewed_envelope_digest: Some(summary.envelope_digest.clone()),
+            ..session.entry_for(&session.current_hash(), &cfg)
+        };
+        crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
         );
         assert_eq!(state.uploads_today, 1);
     }

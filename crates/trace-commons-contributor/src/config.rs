@@ -33,6 +33,10 @@ pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
 /// auto-upload, bulk-approving). This is user-facing visibility, not a
 /// security control -- see `daemon::audit`.
 pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
+/// Name prefix of the per-entry redacted envelope files
+/// (`daemon::approved_envelope`). One file per previewed-and-approved queue
+/// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
+pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
 pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
@@ -321,9 +325,17 @@ impl ConfigStore {
             let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if tmp_prefixes
-                .iter()
-                .any(|prefix| file_name.starts_with(prefix))
+            // Stored approved envelopes are one file per queue entry, so they
+            // cannot be named in the fixed list above. They are redacted trace
+            // content at rest and must not outlive the enrollment that
+            // produced them -- see `daemon::approved_envelope`. Their temp
+            // files share the same prefix and are swept by the same test.
+            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
+            if is_approved_envelope
+                || tmp_prefixes
+                    .iter()
+                    .any(|prefix| file_name.starts_with(prefix))
             {
                 let path = entry.path();
                 std::fs::remove_file(&path)

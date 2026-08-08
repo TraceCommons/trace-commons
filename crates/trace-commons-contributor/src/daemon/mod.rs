@@ -20,6 +20,7 @@
 //! - A configured privacy filter that is unavailable stops the pipeline. It
 //!   never degrades to sending unfiltered text.
 
+pub mod approved_envelope;
 pub mod audit;
 pub mod client;
 pub mod eligibility;
@@ -324,6 +325,20 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             s.codex_root.clone(),
         )
     };
+    // These options are envelope-determining and are NOT covered by
+    // `preview::input_fingerprint`, which fingerprints the config. They are
+    // safe only because every one of them is a constant here.
+    //
+    // `no_reasoning` in particular: `submit_loaded` calls `strip_reasoning`
+    // when it is set and `build_preview` never does, so the moment this
+    // stops being a hardcoded `false` -- a daemon setting, a per-project
+    // option -- a previewed entry and its upload describe different
+    // content. A previewed entry would still be safe (its bytes are stored
+    // and sent verbatim, so the preview would simply have shown reasoning
+    // that then went out anyway), but an armed auto-upload entry would
+    // silently change what it sends with nothing to notice. Whoever makes
+    // it a setting must either fold it into `input_fingerprint` or make
+    // `build_preview` honour it -- preferably both.
     let opts = crate::submit::SubmitOptions {
         dry_run: false,
         pii_filter: cfg.pii_filter.clone(),
@@ -497,6 +512,13 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     if changed {
         let q = shared.queue.lock().expect("queue lock");
         q.save(&shared.store)?;
+        // Redacted trace content does not outlive the entry that needed it.
+        // Everything this pass resolved -- uploaded, refused, failed,
+        // superseded -- and everything whose approval it revoked has lost
+        // its pin, so its stored envelope goes now rather than sitting in
+        // the state directory. Best-effort: a file that cannot be removed
+        // must not fail an upload pass that already succeeded.
+        let _ = approved_envelope::sweep(&shared.store, &q.pinned_entry_ids());
         drop(q);
         let state = shared.state.lock().expect("state lock");
         state.save(&shared.store)?;

@@ -11,7 +11,7 @@
 //!
 //! Running the same *code* is not the same as producing the same
 //! *artifact*, and this module used to claim it was ("so preview and upload
-//! can never disagree"). It could not have been: preview kept no digest of
+//! can never disagree"). It could not have been: preview kept nothing of
 //! the envelope it built, and the uploader's guard re-hashed the raw
 //! transcript only. Redaction-service output, privacy-filter
 //! configuration, daemon settings, contributor config, and timestamps can
@@ -19,22 +19,34 @@
 //! unchanged, and the guard stayed silent through every one of them --
 //! because it verified the input, not the artifact.
 //!
-//! [`envelope_digest`] and [`input_fingerprint`] close that. A preview
-//! records a digest of the envelope it actually showed and a fingerprint of
-//! the inputs that determine one; the fingerprint is re-derived immediately
-//! before every upload, and the envelope the pipeline is about to send is
-//! digested and compared against the one that was approved. Either
-//! mismatch revokes the approval and re-offers the entry, the same way a
-//! changed session hash does.
+//! Two things close that, and they close different halves of it.
+//!
+//! [`input_fingerprint`] covers the *inputs*: the whole contributor config,
+//! the privacy-filter backend and model, and the redaction ruleset version.
+//! It is recorded on every approval, including approvals given without a
+//! preview (armed auto-upload), and re-derived immediately before every
+//! upload. A mismatch revokes the approval and re-offers the entry, the
+//! same way a changed session hash does.
+//!
+//! The *artifact* is not re-derived and compared at all. It is stored.
+//! [`build_preview`] hands back the envelope it built, the caller persists
+//! it (`daemon::approved_envelope`), and the upload sends exactly those
+//! bytes. An earlier round compared a digest instead, and that comparison
+//! made the whole feature unusable with `pii_filter = "near-ai"`: an
+//! LLM-backed filter does not return identical spans for identical text,
+//! so every previewed entry was refused and re-offered forever. See
+//! `daemon::approved_envelope` for the full account.
 //!
 //! **Preview is the one interface in this crate that deliberately carries
-//! trace content** (`PreviewSummary::opening_prompt` over the socket, and
-//! the redacted body over the C ABI). A contributor cannot consent to
-//! sending something they cannot see, so the exemption exists -- bounded to
+//! trace content** (`PreviewSummary::opening_prompt` over the socket, the
+//! redacted body over the C ABI, and now the stored envelope at rest under
+//! the 0700 state directory). A contributor cannot consent to sending
+//! something they cannot see, so the exemption exists -- bounded to
 //! post-redaction content, only for an entry the caller already asked
-//! about, and never onward into a log line, an audit entry, a history
-//! record, notification text, or a receipt. Everywhere else in this crate
-//! the no-trace-content rule is absolute.
+//! about, deleted as soon as the entry is resolved, and never onward into a
+//! log line, an audit entry, a history record, notification text, or a
+//! receipt. Everywhere else in this crate the no-trace-content rule is
+//! absolute.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -82,11 +94,22 @@ const VOLATILE_ENVELOPE_FIELDS: &[&str] = &[
 
 /// A content-addressed digest of the redacted envelope a contributor was
 /// shown, stable across two builds of the same envelope from the same
-/// inputs.
+/// inputs *when the redaction step is deterministic*.
 ///
-/// This is the *artifact* half of the approval guard. The raw session hash
-/// covers the input; this covers what redaction, configuration, and the
-/// privacy-filter backend actually turned that input into.
+/// Nothing compares this against a rebuild any more, and nothing may start
+/// doing so: with an LLM-backed privacy filter a rebuild legitimately
+/// differs, and a comparison makes previewed entries permanently
+/// unuploadable. Its two remaining jobs are both local:
+///
+/// * it is the marker that says "this entry was previewed, and the bytes
+///   that were shown are on disk" (`QueueEntry::previewed_envelope_digest`);
+/// * it is a self-consistency check on this crate's own storage -- the
+///   uploader re-digests the file it read back and refuses if it is not the
+///   one that was pinned, which catches a corrupted or crossed-over file
+///   rather than a jittery filter.
+///
+/// It is also returned over IPC so an app can confirm the entry it approves
+/// is the one it displayed.
 pub fn envelope_digest(envelope: &TraceContributionEnvelope) -> Result<String> {
     let mut value = serde_json::to_value(envelope)
         .map_err(|_| anyhow::anyhow!("envelope-digest-serialize-failed"))?;
@@ -117,26 +140,56 @@ fn strip_volatile(value: &mut serde_json::Value) {
     }
 }
 
+/// The redaction ruleset this build implements.
+///
+/// The deterministic redactor's patterns, the categories it accepts from a
+/// privacy-filter backend, and the shape of the envelope it produces are
+/// all compiled in. An in-place upgrade of the daemon binary between an
+/// approval and the upload therefore changes what gets redacted with no
+/// config change to show for it, and a fingerprint built from config alone
+/// cannot see that. Previewed entries are covered anyway (their bytes are
+/// stored), but an **armed auto-upload entry is covered by nothing else**,
+/// so the version goes into the fingerprint.
+///
+/// Bump this whenever the redaction rules, the accepted filter categories,
+/// or the envelope layout change in a way that alters output for unchanged
+/// input. The crate version is hashed in alongside it, so an ordinary
+/// release bump moves the fingerprint even if nobody remembers to touch
+/// this constant; this exists for the case where the rules move without a
+/// version bump.
+pub const REDACTION_RULESET_VERSION: &str = "1";
+
 /// A fingerprint of everything outside the session file that determines the
 /// envelope: the whole contributor config (consent scopes, PII filter
 /// selection, tenant/instance/subject/device identity, audience, endpoints,
-/// host allowlist) plus the presence and identity of the NEAR AI
-/// privacy-filter backend.
+/// host allowlist), the presence and identity of the NEAR AI
+/// privacy-filter backend, and the redaction ruleset/build this daemon is
+/// running.
 ///
 /// Cheap -- no redaction pass, no network -- so it is recorded on every
 /// approval and re-derived before every upload, including for entries that
 /// were never previewed and for armed auto-upload.
 ///
-/// The NEAR AI **API key is never hashed in**: rotating a credential does
-/// not change what the filter does, and hashing a secret into a value that
-/// is stored on disk is the kind of thing this crate does not do. The base
-/// URL and model are hashed in, because both change what comes back.
+/// The NEAR AI **API key is deliberately never hashed in**, and that is a
+/// decision rather than an omission: rotating a credential does not change
+/// what the filter does to a trace, so hashing it in would revoke every
+/// standing approval on a routine rotation for no consent-relevant reason
+/// -- and hashing a live secret into a value this crate writes to disk is
+/// not something it does. The base URL and model *are* hashed in, because
+/// both change what comes back.
+///
+/// One envelope-determining input is still outside this: `SubmitOptions`.
+/// See the note at the daemon's construction site in `daemon::drain_approved`.
 pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSettings>) -> String {
     let mut h = Sha256::new();
     // Serialized rather than field-by-field so a field added to
     // `ContributorConfig` later is covered without anyone remembering to
     // come back here.
     h.update(serde_json::to_vec(cfg).unwrap_or_default().as_slice());
+    h.update(b"\x00redactor\x00");
+    h.update(REDACTION_RULESET_VERSION.as_bytes());
+    h.update(b"\x00");
+    h.update(env!("CARGO_PKG_VERSION").as_bytes());
     h.update(b"\x00near_ai\x00");
     match near_ai {
         None => h.update(b"absent"),
@@ -150,9 +203,14 @@ pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSetting
     format!("sha256:{:x}", h.finalize())
 }
 
-/// The fixed reason label an entry is re-offered under when the envelope
-/// that would be sent no longer matches the one that was approved.
-pub const REASON_ENVELOPE_CHANGED: &str = "envelope-changed-after-approval";
+/// The fixed reason label an entry is re-offered under when it was pinned
+/// to a previewed envelope but those bytes are missing or unusable at
+/// upload time.
+///
+/// Fail-closed: the daemon does **not** quietly rebuild the envelope in
+/// that case. Rebuilding is exactly what stored bytes exist to avoid, and a
+/// silent rebuild would send something the contributor never saw.
+pub const REASON_APPROVED_ENVELOPE_UNAVAILABLE: &str = "approved-envelope-unavailable";
 
 /// The fixed reason label an entry is re-offered under when an
 /// envelope-determining input changed between approval and upload.
@@ -192,17 +250,22 @@ pub struct PreviewSummary {
     /// Digest of the redacted envelope this summary describes, and a
     /// fingerprint of the inputs that produced it. Hashes, never content.
     ///
-    /// Recorded on the queue entry when an approval is given, and checked
-    /// again immediately before the upload: the pipeline digests the
-    /// envelope it is about to send and refuses if it is not this one. This
-    /// is what makes preview and upload actually agree, rather than merely
-    /// running the same code -- see the module doc.
+    /// The digest is recorded on the queue entry alongside the envelope
+    /// itself, and identifies the file the upload will send. It is not
+    /// compared against a rebuild -- see [`envelope_digest`] and the module
+    /// doc for why a comparison cannot work here.
     pub envelope_digest: String,
     pub input_fingerprint: String,
 }
 
 /// Redact one session without uploading and describe exactly what would be
 /// sent. Same redaction path the uploader uses.
+///
+/// Returns the summary, the redacted body for display, **and the envelope
+/// itself**. The envelope is the artifact the upload will send verbatim:
+/// the caller persists it (`daemon::approved_envelope`) so nothing has to
+/// rebuild it, which is what makes preview and upload agree under a
+/// non-deterministic privacy filter.
 ///
 /// `store` is accepted for signature parity with the other entry points that
 /// build a redactor/envelope (`submit_one`); preview does not itself read or
@@ -214,7 +277,7 @@ pub async fn build_preview(
     near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
-) -> Result<(PreviewSummary, String)> {
+) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
     let transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
 
@@ -223,10 +286,10 @@ pub async fn build_preview(
         .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
     let raw = build_raw_contribution(&transcript, cfg, Utc::now());
     let envelope = redact_to_envelope(&redactor, raw).await?;
-    // Digested here, at exactly the point `submit_loaded` digests the
+    // Digested here, at exactly the point `submit_loaded` takes over the
     // envelope it is about to send: after redaction, before the granted
-    // scopes the issuer echoes back are stamped on. Comparing at any other
-    // point would compare two different things.
+    // scopes the issuer echoes back are stamped on. This identifies the
+    // stored artifact; it is not re-derived from a second build anywhere.
     let digest = envelope_digest(&envelope)?;
     let would_send_bytes = envelope_size(&envelope)?;
 
@@ -264,6 +327,7 @@ pub async fn build_preview(
             input_fingerprint: fingerprint,
         },
         body,
+        envelope,
     ))
 }
 
@@ -334,7 +398,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         assert!(summary.raw_session_bytes > 0);
         assert!(summary.would_send_bytes > 0);
         assert_ne!(
@@ -348,7 +413,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         let total: u32 = summary.redactions.values().sum();
         assert!(
             total > 0,
@@ -363,7 +429,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (_summary, body) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (_summary, body, _envelope) =
+            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         assert!(
             !body.contains("sk-fake-fixture-secret-1234"),
             "secret survived into the preview body"
@@ -375,7 +442,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         assert_eq!(summary.event_count, 1);
         assert!(!summary.opening_prompt.is_empty());
         assert!(
@@ -408,7 +476,8 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) =
+            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         assert!(summary.opening_prompt.chars().count() <= 200);
     }
 
@@ -419,8 +488,8 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
-        let (b, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (a, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (b, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
         assert_eq!(a.envelope_digest, b.envelope_digest);
         assert!(a.envelope_digest.starts_with("sha256:"));
     }
@@ -552,11 +621,11 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (a, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
 
         let mut widened = cfg.clone();
         widened.consent_scopes = vec!["model_training".into()];
-        let (b, _) = build_preview(&store, &widened, None, &src, &r)
+        let (b, _, _) = build_preview(&store, &widened, None, &src, &r)
             .await
             .unwrap();
         assert_ne!(a.envelope_digest, b.envelope_digest);

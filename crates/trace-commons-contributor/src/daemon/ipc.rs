@@ -258,6 +258,11 @@ impl DaemonShared {
         if queue.release_in_flight() {
             queue.save(&store)?;
         }
+        // Sweep stored preview envelopes on the way up. A daemon that died
+        // between resolving an entry and sweeping, or one whose queue file
+        // was replaced underneath it, would otherwise leave redacted trace
+        // content on disk with no entry that needs it.
+        let _ = super::approved_envelope::sweep(&store, &queue.pinned_entry_ids());
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
@@ -565,18 +570,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 .as_ref()
                 .map(|c| c.consent_scopes.clone())
                 .unwrap_or_default();
-            let inputs = cfg
-                .as_ref()
-                .map(|c| {
-                    let near_ai = shared
-                        .settings
-                        .lock()
-                        .expect("settings lock")
-                        .near_ai
-                        .clone();
-                    super::preview::input_fingerprint(c, near_ai.as_ref())
-                })
-                .unwrap_or_default();
+            // `None`, not `Some("")`, when there is no readable config:
+            // every call site expresses "unknown" the same way, and the
+            // uploader treats it as "re-ask" -- fail-closed.
+            let inputs = cfg.as_ref().map(|c| {
+                let near_ai = shared
+                    .settings
+                    .lock()
+                    .expect("settings lock")
+                    .near_ai
+                    .clone();
+                super::preview::input_fingerprint(c, near_ai.as_ref())
+            });
             let mut queue = shared.queue.lock().expect("queue lock");
             let ids: Vec<Uuid> = if all {
                 queue.pending().iter().map(|e| e.entry_id).collect()
@@ -588,7 +593,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             };
             let mut approved_ids = Vec::new();
             for id in ids {
-                if queue.approve(id, &scopes, &inputs) {
+                if queue.approve(id, &scopes, inputs.as_deref()) {
                     approved_ids.push(id);
                 }
             }
@@ -912,19 +917,8 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     };
 
     match super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref).await {
-        Ok((summary, _body)) => {
-            // Pin the entry to the artifact just shown, so an approval that
-            // follows is an approval of exactly this envelope and not of
-            // whatever the pipeline happens to build at upload time. Best
-            // effort against the queue file: a failure to persist means the
-            // upload falls back to the input-fingerprint check, which is
-            // still fail-closed, never to no check at all.
-            {
-                let mut queue = shared.queue.lock().expect("queue lock");
-                if queue.record_previewed_envelope(id, &summary.envelope_digest) {
-                    let _ = queue.save(&shared.store);
-                }
-            }
+        Ok((summary, _body, envelope)) => {
+            pin_previewed_envelope(shared, id, &summary, &envelope);
             Response::ok(
                 req.id,
                 serde_json::json!({
@@ -985,20 +979,58 @@ pub async fn open_preview(
     let sources = crate::source::all_sources(claude_root, codex_root, None);
     let (source, session_ref) =
         super::find_session(&sources, &entry).ok_or("session-file-vanished")?;
-    let (summary, body) =
+    let (summary, body, envelope) =
         super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref)
             .await
             .map_err(|_| "preview-failed")?;
-    // Same pinning as the socket's `"preview"`: the entry now records the
-    // digest of the artifact this caller was shown, so an approval that
-    // follows covers that artifact and nothing else.
-    {
-        let mut queue = shared.queue.lock().expect("queue lock");
-        if queue.record_previewed_envelope(entry_id, &summary.envelope_digest) {
-            let _ = queue.save(&shared.store);
-        }
-    }
+    // Same pinning as the socket's `"preview"`: the entry now holds the
+    // artifact this caller was shown, so an approval that follows covers
+    // that artifact and nothing else.
+    pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     Ok((summary, body))
+}
+
+/// Store the redacted envelope a preview just built and pin the entry to
+/// it, so an upload that follows sends exactly those bytes rather than
+/// building a second envelope.
+///
+/// The order matters and is the whole contract: the bytes go down first,
+/// and the entry is only pinned once they are on disk. "Pinned" is what the
+/// uploader reads as "the approved bytes exist"; a pin recorded without
+/// them turns an ordinary upload into a fail-closed re-offer.
+///
+/// Best effort, deliberately. A preview is a read, and a state directory
+/// that cannot take the write should still let the contributor *see* what
+/// would be sent. An unpinned entry falls back to the pipeline building the
+/// envelope at upload time under the input fingerprint the approval
+/// records -- which is where every entry stood before any of this existed,
+/// and is still fail-closed. It is never no check at all.
+///
+/// The queue lock is held across both writes so an entry cannot change
+/// state underneath them. Previewing an entry that is no longer `Pending`
+/// must not touch the stored bytes at all: an already-approved entry is
+/// pinned to the artifact it was approved as, and overwriting or deleting
+/// that would revoke a live approval for no reason.
+fn pin_previewed_envelope(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    summary: &super::preview::PreviewSummary,
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) {
+    let mut queue = shared.queue.lock().expect("queue lock");
+    if queue.get(entry_id).map(|e| e.state) != Some(QueueState::Pending) {
+        return;
+    }
+    if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
+        return;
+    }
+    if queue.record_previewed_envelope(entry_id, &summary.envelope_digest) {
+        // A failed queue write leaves the pin in memory and the bytes on
+        // disk -- consistent with each other, and the next queue save
+        // persists it. Nothing is removed here: the bytes are what the
+        // in-memory pin refers to.
+        let _ = queue.save(&shared.store);
+    }
 }
 
 /// Settings as returned over IPC: the privacy-filter credential is reported

@@ -64,6 +64,17 @@
 //!   history record, notification text, or a receipt. Nothing in this crate
 //!   or the daemon copies it into any of those.
 //!
+//! Opening a preview also has a **side effect at rest**: the daemon writes
+//! the redacted envelope it just built into the contributor's own 0700
+//! state directory (0600, atomic) and the upload then sends exactly those
+//! bytes, so that what was shown here and what leaves the machine cannot
+//! diverge through a privacy filter that does not reproduce its own output.
+//! Those bytes are post-redaction, one file per previewed entry, capped by
+//! the envelope size limit, deleted as soon as the entry resolves, and
+//! removed on logout. They never come back across this ABI: the only
+//! content this boundary serves is the body returned to the caller who
+//! asked for it.
+//!
 //! Everywhere else the rule remains absolute: no path, token, URL, or trace
 //! content in any other returned string, on any error path, at any time.
 //!

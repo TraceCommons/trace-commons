@@ -607,18 +607,19 @@ async fn an_envelope_determining_change_after_approval_revokes_the_approval() {
 }
 
 #[tokio::test]
-async fn an_approval_pinned_to_a_different_envelope_is_not_uploaded() {
+async fn an_approval_whose_previewed_bytes_are_gone_is_not_uploaded() {
     // The other half: the inputs are untouched, but the entry is pinned to
-    // an envelope digest the pipeline does not produce -- what a redaction
-    // service returning different spans for the same text looks like from
-    // the daemon's side.
+    // a preview whose stored envelope is not on disk. The daemon must not
+    // fall back to rebuilding -- that would send something the contributor
+    // was never shown -- so the approval is revoked and the entry
+    // re-offered for a fresh preview.
     let h = Harness::new().await;
     h.write_session("otherproj", "6b6b6b6b-6b6b-6b6b-6b6b-6b6b6b6b6b6b");
     h.discover().await;
     let entry_id = h.only_entry().entry_id;
     {
         let mut q = h.shared.queue.lock().unwrap();
-        assert!(q.record_previewed_envelope(entry_id, "sha256:something-else"));
+        assert!(q.record_previewed_envelope(entry_id, "sha256:never-stored"));
     }
     let resp = ipc::handle_local(
         &h.shared,
@@ -634,7 +635,7 @@ async fn an_approval_pinned_to_a_different_envelope_is_not_uploaded() {
     assert_eq!(entry.state, QueueState::Pending);
     assert_eq!(
         entry.reason_label.as_deref(),
-        Some("envelope-changed-after-approval")
+        Some("approved-envelope-unavailable")
     );
     assert!(
         entry.previewed_envelope_digest.is_none(),

@@ -161,6 +161,29 @@ rule has exactly one carve-out, and it is bounded:
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
 
+The exemption also covers **the previewed envelope at rest**. A successful
+`preview` writes the redacted envelope it built to the contributor's own
+0700 state directory (`daemon-approved-envelope-{entry_id}.json`, 0600,
+atomic), and the upload sends exactly those bytes rather than building a
+second envelope. That is what makes preview and upload agree under a
+privacy filter that does not reproduce its own output: with
+`pii_filter = "near-ai"` an LLM-backed filter returns different spans for
+identical text, and any design that rebuilt-and-compared refused every
+previewed entry forever. The stored bytes are held to the same bounds as
+the rest of the exemption, plus two of their own:
+
+- **Bounded.** One file per previewed-and-approved entry, each at most the
+  1.5 MB envelope ceiling, and live entries are capped by
+  `max_queue_entries`. Only an approved-but-unsent backlog accumulates.
+- **Deleted when the entry resolves.** Uploading, refusing, failing,
+  expiring, superseding, or revoking an approval all drop the file, and
+  `logout` removes any that remain. If the bytes are missing or unreadable
+  when the upload comes to read them, the approval is revoked and the entry
+  re-offered -- never silently rebuilt.
+
+They never cross the socket or the C ABI. `preview` reports the
+`envelope_digest` that identifies them; it does not serve them.
+
 Everywhere else the rule remains absolute: no path, token, invite code,
 claim, device key, or trace content in any log line, error string, receipt,
 history record, audit entry, notification text, or IPC response.
@@ -237,12 +260,19 @@ not extend to.
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
-hashes, never content. Issuing `preview` **pins the entry** to that digest:
-an `approve` that follows is an approval of exactly that envelope, and the
-upload refuses and re-offers the entry if the envelope the pipeline builds
-is not that one, or if any envelope-determining input has moved since. An
-app can hold these two values to confirm that the entry it later approves is
-the one it actually displayed.
+hashes, never content. Issuing `preview` **pins the entry** to that envelope
+and stores the envelope itself: an `approve` that follows is an approval of
+exactly those bytes, and the upload sends them verbatim rather than
+redacting a second time. The upload still refuses and re-offers the entry if
+an envelope-determining input has moved since (`approval-inputs-changed`),
+if the session file has changed, or if the stored bytes are gone
+(`approved-envelope-unavailable`). An app can hold these two values to
+confirm that the entry it later approves is the one it actually displayed.
+
+Previewing the same entry twice re-pins it to the second preview, which is
+the one the upload will send. Previewing an entry that is no longer
+`pending` reports the summary but changes no pin: an entry already approved
+stays bound to the artifact it was approved as.
 
 `would_send_bytes` is the size of the **redacted envelope**, not the raw
 session file -- the same envelope `submit` would actually send, computed by

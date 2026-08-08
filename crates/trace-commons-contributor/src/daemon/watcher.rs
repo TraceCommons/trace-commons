@@ -238,12 +238,13 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                     // `Queue::approve` only moves `Pending`, so this can
                     // never resurrect a dismissed-and-refused, expired, or
                     // already-uploaded entry.
-                    if armed
-                        && queue.approve(
-                            entry_id,
-                            &consent_scopes,
-                            approval_inputs.as_deref().unwrap_or(""),
-                        )
+                    // `approval_inputs` is passed through as `Option`, not
+                    // flattened to `""`: the upsert path above records
+                    // `None` for "the config could not be read", and this
+                    // path recording `Some("")` for the same condition made
+                    // two spellings of "unknown". Both fail closed, but the
+                    // uploader should only have one shape to recognize.
+                    if armed && queue.approve(entry_id, &consent_scopes, approval_inputs.as_deref())
                     {
                         changed = true;
                         report.auto_ready += 1;
@@ -275,6 +276,11 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
         {
             let queue = shared.queue.lock().expect("queue lock");
             queue.save(&shared.store)?;
+            // An expired or superseded entry keeps no redacted trace
+            // content on disk. Best-effort: a file that will not delete
+            // must not fail a poll.
+            let _ =
+                crate::daemon::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
         }
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }

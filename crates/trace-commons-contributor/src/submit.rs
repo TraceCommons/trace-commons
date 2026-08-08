@@ -235,7 +235,7 @@ pub struct SubmitContext<'a> {
     near_ai: Option<NearAiSettings>,
     receipts: Vec<Receipt>,
     canary_runs: u32,
-    expected_envelope_digest: Option<String>,
+    approved_envelope: Option<TraceContributionEnvelope>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -276,7 +276,7 @@ impl<'a> SubmitContext<'a> {
             near_ai,
             receipts,
             canary_runs: 0,
-            expected_envelope_digest: None,
+            approved_envelope: None,
         })
     }
 
@@ -300,23 +300,32 @@ impl<'a> SubmitContext<'a> {
         self.canary_runs
     }
 
-    /// Pin the next `submit_loaded` to a specific redacted envelope: if the
-    /// envelope this pipeline builds does not digest to `digest`, nothing
-    /// is uploaded and the session is refused with
-    /// `preview::REASON_ENVELOPE_CHANGED`.
+    /// Send *this* redacted envelope on the next `submit_loaded` instead of
+    /// building one.
     ///
     /// This is the artifact half of the daemon's consent guard. The re-hash
     /// guard verifies the *input* -- the raw session bytes -- and cannot see
     /// a redaction service that returned different spans, a privacy-filter
     /// configuration that changed, or any other input to the envelope that
-    /// is not the session file. Checking the digest here, rather than by
-    /// rebuilding the envelope in the caller, means the thing compared is
-    /// the thing sent, and costs no second redaction pass.
+    /// is not the session file.
     ///
-    /// One-shot: consumed by the next `submit_loaded` so a pin cannot leak
-    /// onto an unrelated later session.
-    pub fn expect_envelope_digest(&mut self, digest: Option<String>) {
-        self.expected_envelope_digest = digest;
+    /// An earlier version of this took a *digest* and refused when the
+    /// rebuilt envelope did not match it. That is correct and unusable: the
+    /// pilot runs `pii_filter = "near-ai"`, an LLM-backed filter does not
+    /// return identical spans for identical text, and so every previewed
+    /// entry was refused, re-offered, previewed again, and refused again --
+    /// the primary consent path never completed. Handing the pipeline the
+    /// approved bytes removes the divergence instead of detecting it: what
+    /// the contributor saw is what goes out, by construction.
+    ///
+    /// `None` restores the ordinary build-from-transcript path, which is
+    /// what armed auto-upload (never previewed, nothing shown to hold the
+    /// send to) still uses.
+    ///
+    /// One-shot: consumed by the next `submit_loaded` so an approved
+    /// envelope cannot leak onto an unrelated later session.
+    pub fn use_approved_envelope(&mut self, envelope: Option<TraceContributionEnvelope>) {
+        self.approved_envelope = envelope;
     }
 
     /// The effective contributor config this pipeline stamps onto
@@ -370,11 +379,11 @@ impl<'a> SubmitContext<'a> {
         mut transcript: crate::source::SessionTranscript,
     ) -> Result<SubmitOutcome> {
         let opts = self.opts;
-        // Taken up front, not at the comparison point below: several paths
+        // Taken up front, not at the point it is used below: several paths
         // return before that point (already-submitted, an unavailable
-        // filter, an over-size refusal), and a pin left behind would apply
-        // to whatever session came next.
-        let expected_digest = self.expected_envelope_digest.take();
+        // filter, an over-size refusal), and an approved envelope left
+        // behind would apply to whatever session came next.
+        let approved_envelope = self.approved_envelope.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -426,39 +435,41 @@ impl<'a> SubmitContext<'a> {
         }
 
         let now = Utc::now();
-        let raw = if opts.unenrolled_preview {
-            build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
-        } else {
-            build_raw_contribution(&transcript, &self.effective_cfg, now)
-        };
-        // Skip sessions that already exceed the envelope limit before the
-        // expensive redaction/privacy-filter pass; they would be refused for
-        // size after redaction anyway (envelope_size_ok below is the
-        // authoritative check).
-        if raw_contribution_size_ok(&raw).is_err() {
-            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-            return Ok(refused_for_size(&transcript.session_hash, size));
-        }
-        let mut envelope = match redact_to_envelope(&redactor, raw).await {
-            Ok(e) => e,
-            Err(_) => {
-                return Ok(refused("redaction-failed", &transcript.session_hash));
+        // The approved envelope, when there is one, is used *as it is*. No
+        // second redaction pass runs and nothing is compared: the bytes the
+        // contributor was shown are the bytes that go out. Everything
+        // downstream of here is unchanged and still applies to them -- the
+        // size ceiling, the residual-secret sweep, the granted scopes the
+        // issuer echoes back.
+        //
+        // The redactor above is still built and still canary-tested on this
+        // path. It is what the residual-secret sweep runs with, and a
+        // privacy filter that has gone bad must stop an upload whether or
+        // not this particular envelope was built through it.
+        let mut envelope = match approved_envelope {
+            Some(approved) => approved,
+            None => {
+                let raw = if opts.unenrolled_preview {
+                    build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
+                } else {
+                    build_raw_contribution(&transcript, &self.effective_cfg, now)
+                };
+                // Skip sessions that already exceed the envelope limit before
+                // the expensive redaction/privacy-filter pass; they would be
+                // refused for size after redaction anyway (envelope_size_ok
+                // below is the authoritative check).
+                if raw_contribution_size_ok(&raw).is_err() {
+                    let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                    return Ok(refused_for_size(&transcript.session_hash, size));
+                }
+                match redact_to_envelope(&redactor, raw).await {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return Ok(refused("redaction-failed", &transcript.session_hash));
+                    }
+                }
             }
         };
-        // Compared here: after redaction, before the granted scopes are
-        // stamped on, which is exactly where `build_preview` digests. An
-        // envelope that is not the one the contributor approved must not
-        // reach the claim mint, let alone the wire.
-        if let Some(expected) = expected_digest {
-            let actual = crate::daemon::preview::envelope_digest(&envelope)
-                .unwrap_or_else(|_| "sha256:unavailable".to_string());
-            if actual != expected {
-                return Ok(refused(
-                    crate::daemon::preview::REASON_ENVELOPE_CHANGED,
-                    &transcript.session_hash,
-                ));
-            }
-        }
 
         if !self.near_ai_notice_recorded
             && self.effective_cfg.pii_filter.as_deref() == Some("near-ai")

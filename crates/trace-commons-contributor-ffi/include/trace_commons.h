@@ -54,6 +54,12 @@
  * or a receipt. Preview content fails outright, rather than being silently
  * edited, if it cannot be represented as a NUL-terminated C string.
  *
+ * Opening a preview also stores the redacted envelope it built in the
+ * contributor's own private state directory (0600, one file per previewed
+ * entry, deleted when the entry resolves and on logout), so the upload can
+ * send exactly the bytes that were shown. Those stored bytes never come
+ * back across this ABI.
+ *
  * Every free function (tc_handle_free, tc_preview_free, tc_string_free)
  * detects a double free or a pointer of the wrong kind (e.g. a tc_handle*
  * passed to tc_preview_free) and refuses rather than acting on it --
