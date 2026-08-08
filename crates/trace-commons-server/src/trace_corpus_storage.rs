@@ -1896,6 +1896,28 @@ pub struct TraceScoreBySubmissionRow {
     pub gate_passed: bool,
 }
 
+/// Safe, label-only missing-control name returned when a storage backend has
+/// no real withdrawal implementation. Withdrawal deletes content and reports a
+/// distribution tier; a backend that cannot do either must refuse rather than
+/// degrade.
+pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
+
+/// The retained withdrawal tombstone (migration V43). Hash-only/label-only by
+/// construction: there is no content, no object path, and no contributor
+/// identity here, and there are no columns in the table to carry them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceWithdrawalRecord {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status the submission held immediately before
+    /// withdrawal, e.g. `quarantined` / `accepted`.
+    pub prior_status: String,
+    /// Which of the three withdrawal tiers applied. One of
+    /// `not_distributed`, `commons_not_distributed`, `commons_distributed`.
+    pub distribution_reach: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2236,6 +2258,90 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
         vector_entry_id: Uuid,
     ) -> Result<u64, DatabaseError>;
+
+    // -- Contributor-initiated withdrawal (migration V43) --------------------
+    //
+    // Every method below defaults to a fail-closed error rather than a
+    // permissive no-op: a backend without a real implementation must refuse
+    // the withdrawal path with a safe missing-control name instead of
+    // reporting a success that deleted nothing or a distribution tier it
+    // could not actually determine.
+
+    /// Record a contributor withdrawal for `(tenant_id, submission_id)`.
+    ///
+    /// Idempotent by construction: the first call wins and later calls return
+    /// the ORIGINAL row unchanged, so `withdrawn_at`, `prior_status`, and
+    /// `distribution_reach` never drift across retries. Implementations MUST
+    /// also move the submission row out of consumer reach (status `revoked`,
+    /// `withdrawn_at` set, `purged_at` set because the content is gone) in the
+    /// same transaction as the tombstone insert.
+    async fn record_trace_withdrawal(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _withdrawn_at: DateTime<Utc>,
+        _prior_status: &str,
+        _distribution_reach: &str,
+    ) -> Result<TraceWithdrawalRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Read the withdrawal tombstone for `(tenant_id, submission_id)`, or
+    /// `None` when the submission has never been withdrawn.
+    async fn get_trace_withdrawal(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Option<TraceWithdrawalRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Count the export-manifest rows this submission was published in,
+    /// including manifests whose membership has already been invalidated —
+    /// an invalidated membership still means copies went out. Drives the
+    /// `commons_distributed` tier, so it must never under-report.
+    async fn count_trace_export_memberships(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Every vector-index entry id this submission participates in: the
+    /// `trace_vector_entries` rows, the legacy per-decision `vector_entry_id`,
+    /// and the per-chunk entries. Used to evict the trace from the gate
+    /// service's in-memory index, where the content survives in derived form
+    /// even after the DB rows are invalidated.
+    async fn list_trace_vector_entry_ids_for_submission(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Drop this submission's gate decisions out of any dedup cluster
+    /// (migration V40 columns back to NULL). Peer rows keep their own cluster
+    /// assignment; their `dedup_cluster_size` snapshot is refreshed by the
+    /// existing recluster pass.
+    async fn clear_trace_dedup_cluster_for_submission(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
 
     async fn append_trace_audit_event(
         &self,

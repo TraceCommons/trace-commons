@@ -115,6 +115,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_audit_events",
     "trace_credit_ledger",
     "trace_tombstones",
+    "trace_withdrawals",
     "trace_vector_entries",
     "trace_export_manifests",
     "trace_export_manifest_items",
@@ -1271,6 +1272,29 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&41_i32, &"trace_contributor_cap"],
+                )
+                .await?;
+        }
+        // V43 (not V42: that number is held by the unmerged
+        // db-authoritative-invites branch) adds the contributor-withdrawal
+        // tombstone and the trace_submissions.withdrawn_at column.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&43_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V43__trace_withdrawal.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&43_i32, &"trace_withdrawal"],
                 )
                 .await?;
         }
@@ -4341,6 +4365,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -4356,6 +4381,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
