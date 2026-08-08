@@ -31,7 +31,7 @@ fn cstr_str(s: &str) -> CString {
 /// the reentrant-stop and unsubscribe regression tests flaky under a
 /// single-worker runtime, since a large real session history makes
 /// `watcher::tick`'s filesystem scan slow enough to matter.
-fn start(dir: &Path) -> *mut tc_handle {
+fn write_tempdir_session_roots(dir: &Path) {
     let claude_root = dir.join("claude-root");
     let codex_root = dir.join("codex-root");
     std::fs::create_dir_all(&claude_root).unwrap();
@@ -43,6 +43,10 @@ fn start(dir: &Path) -> *mut tc_handle {
         ..Default::default()
     };
     settings.save(&store).unwrap();
+}
+
+fn start(dir: &Path) -> *mut tc_handle {
+    write_tempdir_session_roots(dir);
 
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
@@ -170,6 +174,14 @@ fn tc_daemon_start_null_config_dir_is_an_error() {
 #[test]
 fn tc_daemon_start_null_err_out_param_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
+    // Same tempdir session roots every other test gets: without this the
+    // settings default of `claude_root: None` / `codex_root: None` means
+    // "the conventional per-user location", so the supervisor's first tick
+    // would scan and hash the *developer's real* ~/.claude and ~/.codex
+    // transcripts on every run of this suite. `start()` is not reused here
+    // because passing a null `err` out-param is the whole point of this
+    // test, and `start()` passes a real one.
+    write_tempdir_session_roots(dir.path());
     let h = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), std::ptr::null_mut()) };
     assert!(!h.is_null());
     stop(h);
@@ -394,38 +406,110 @@ fn no_callback_fires_after_tc_unsubscribe_returns() {
 /// callback that is provably still executing when `tc_daemon_stop` is
 /// called, and asserts the callback observes that `tc_daemon_stop` had
 /// already returned by the time the callback finished touching its state.
+/// How many worker threads `tc_daemon_start`'s runtime will actually have:
+/// it builds `Builder::new_multi_thread()` without calling
+/// `.worker_threads(..)`, so tokio honors `TOKIO_WORKER_THREADS` and
+/// otherwise defaults to the available parallelism.
+fn daemon_worker_threads() -> usize {
+    match std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => n,
+        _ => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    }
+}
+
+/// The in-flight window is bounded by an explicit release signal, not by a
+/// `sleep` long enough to outlast `tc_daemon_stop`'s teardown. An earlier
+/// revision of this test used a 150ms sleep in the callback and hoped
+/// `tc_daemon_stop` would return inside it; at `TOKIO_WORKER_THREADS=1`
+/// under a parallel suite run that lost the race about 1 run in 7
+/// (reproduced: 2 failures in 10 measured full-suite runs), each costing a
+/// 5s poll loop. The property under test has nothing to do with how long
+/// teardown takes, so the test must not either: here the callback blocks
+/// until the test thread -- having already returned from `tc_daemon_stop`
+/// and set `STOP_RETURNED` -- explicitly releases it. Whatever order the
+/// scheduler picks, the callback is provably still in flight across the
+/// whole of `tc_daemon_stop`.
+///
+/// # Why this needs at least two daemon worker threads, and is skipped below that
+///
+/// A `tc_subscribe` callback is a synchronous C function invoked from the
+/// subscription's tokio task, so an in-flight callback occupies a worker
+/// thread for its whole duration. `tc_daemon_stop` finishes by joining the
+/// supervisor task, which also needs a worker. With exactly one worker
+/// those two demands are mutually exclusive, so at
+/// `TOKIO_WORKER_THREADS=1` the scenario is not merely slow to arrange --
+/// it is unsatisfiable: `tc_daemon_stop` cannot return while a blocking
+/// callback is in flight, which is precisely what this test needs it to
+/// do. (The old sleep-based version appeared to pass at one worker only by
+/// accident: `watcher::tick` runs its scan under `block_in_place`, which
+/// makes tokio spin up a transient replacement worker, and whether one
+/// happened to exist at that instant was the coin flip. Making the window
+/// signal-bounded converts that coin flip into a hard hang, verified: a
+/// signal-bounded run at one worker hung outright on 1 of 10 attempts.)
+///
+/// So the test is deterministic where the property is achievable and
+/// explicitly, loudly skipped where it is not, rather than being an
+/// unconditional `#[ignore]` that would give up the coverage in the
+/// default configuration -- where it is both meaningful and reliable.
 #[test]
 fn a_callback_can_still_fire_after_tc_daemon_stop_returns() {
-    static CALLBACK_STARTED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    static STOP_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    static FIRED_AFTER_STOP_RETURNED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::AtomicBool;
 
-    extern "C" fn slow_cb(_event_json: *const c_char, _ctx: *mut c_void) {
-        CALLBACK_STARTED.store(true, Ordering::SeqCst);
-        // Comfortably longer than tc_daemon_stop's own teardown, so this
-        // invocation is still in flight (and would still be touching a
-        // real host's `ctx`) well after tc_daemon_stop has returned.
-        std::thread::sleep(std::time::Duration::from_millis(150));
+    let workers = daemon_worker_threads();
+    if workers < 2 {
+        eprintln!(
+            "SKIP a_callback_can_still_fire_after_tc_daemon_stop_returns: the \
+             daemon runtime has {workers} worker thread(s); an in-flight \
+             blocking callback and tc_daemon_stop's supervisor join cannot \
+             both hold the only worker, so the scenario is unsatisfiable \
+             here rather than merely flaky. See this test's doc comment."
+        );
+        return;
+    }
+
+    static CALLBACK_STARTED: AtomicBool = AtomicBool::new(false);
+    /// Set by the test thread only after `tc_daemon_stop` has returned.
+    static STOP_RETURNED: AtomicBool = AtomicBool::new(false);
+    /// Set by the test thread strictly after `STOP_RETURNED`, so a callback
+    /// that observes this necessarily observes `STOP_RETURNED == true`.
+    static RELEASE_CALLBACK: AtomicBool = AtomicBool::new(false);
+    static CALLBACK_FINISHED: AtomicBool = AtomicBool::new(false);
+    static FIRED_AFTER_STOP_RETURNED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn blocking_cb(_event_json: *const c_char, _ctx: *mut c_void) {
+        if CALLBACK_STARTED.swap(true, Ordering::SeqCst) {
+            // Only the first invocation participates; any later one must
+            // not re-block and stall the test's teardown.
+            return;
+        }
+        // Stay inside this invocation -- exactly as a real host's callback
+        // would still be touching `ctx` -- until the test thread says it is
+        // done observing. No timing assumption of any kind.
+        while !RELEASE_CALLBACK.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         if STOP_RETURNED.load(Ordering::SeqCst) {
             FIRED_AFTER_STOP_RETURNED.store(true, Ordering::SeqCst);
         }
+        CALLBACK_FINISHED.store(true, Ordering::SeqCst);
     }
 
     let dir = tempfile::tempdir().unwrap();
     let h = start(dir.path());
-    let token = unsafe { tc_subscribe(h, Some(slow_cb), std::ptr::null_mut()) };
+    let token = unsafe { tc_subscribe(h, Some(blocking_cb), std::ptr::null_mut()) };
     assert_ne!(token, 0);
 
     let _ = call(h, "resume", "{}");
-    // Wait until the callback has provably started (and is now inside its
-    // sleep) before stopping, so tc_daemon_stop races a callback that is
-    // definitely still in flight rather than one that hasn't begun yet. A
-    // generous window: under a heavily parallel test run (every test in
-    // this file has its own multi-thread tokio runtime), OS scheduling
-    // alone can push this well past a tight budget.
-    for _ in 0..200 {
+    // Wait until the callback has provably started (and is now parked in
+    // its release loop) before stopping, so `tc_daemon_stop` genuinely
+    // overlaps an in-flight callback. This wait has no upper bound tied to
+    // the property -- it only has to happen at all.
+    for _ in 0..400 {
         if CALLBACK_STARTED.load(Ordering::SeqCst) {
             break;
         }
@@ -436,15 +520,25 @@ fn a_callback_can_still_fire_after_tc_daemon_stop_returns() {
         "the callback never started -- test did not exercise the path under test"
     );
 
+    // The callback is still executing right now. If `tc_daemon_stop` were a
+    // synchronization point for subscriptions, this call could not return
+    // until the callback did -- and it cannot, because the callback is
+    // waiting on a flag only set after this returns. So reaching the next
+    // line at all is itself the proof.
     unsafe { tc_daemon_stop(h) };
     STOP_RETURNED.store(true, Ordering::SeqCst);
+    RELEASE_CALLBACK.store(true, Ordering::SeqCst);
 
-    for _ in 0..200 {
-        if FIRED_AFTER_STOP_RETURNED.load(Ordering::SeqCst) {
+    for _ in 0..400 {
+        if CALLBACK_FINISHED.load(Ordering::SeqCst) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    assert!(
+        CALLBACK_FINISHED.load(Ordering::SeqCst),
+        "the callback never finished after being released"
+    );
     assert!(
         FIRED_AFTER_STOP_RETURNED.load(Ordering::SeqCst),
         "a subscription callback must be able to still be running (and \
