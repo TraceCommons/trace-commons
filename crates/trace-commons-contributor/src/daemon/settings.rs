@@ -6,6 +6,8 @@
 //! environment. Settings read from env would leave every upload refusing with
 //! `pii-filter-unavailable` under systemd while working perfectly by hand.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +65,13 @@ pub struct DaemonSettings {
     /// Privacy-filter credentials, persisted so a service-managed daemon can
     /// reach the filter without a shell environment.
     pub near_ai: Option<NearAiSettings>,
+    /// Session roots to watch. `None` means the conventional per-user
+    /// location for that agent. Overridable so the daemon can follow a
+    /// relocated store, and so tests never touch the real one.
+    #[serde(default)]
+    pub claude_root: Option<PathBuf>,
+    #[serde(default)]
+    pub codex_root: Option<PathBuf>,
 }
 
 impl Default for DaemonSettings {
@@ -83,6 +92,8 @@ impl Default for DaemonSettings {
             canary_interval_secs: DEFAULT_CANARY_INTERVAL_SECS,
             local_notifications: false,
             near_ai: None,
+            claude_root: None,
+            codex_root: None,
         }
     }
 }
