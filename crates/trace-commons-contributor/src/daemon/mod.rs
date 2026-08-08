@@ -147,19 +147,19 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             .collect()
     };
     if approved.is_empty() {
-        // Re-check enrollment and retract upload-failure labels when the queue
-        // is empty, since nothing is failing to upload anymore.
+        // Re-check enrollment when the queue is empty, so a stale not-logged-in
+        // condition gets retracted if the contributor has logged back in.
+        // This is sound: enrollment_is_live genuinely re-checks the condition.
         if uploader::enrollment_is_live(&shared.store) {
             let mut health = shared.health.lock().expect("health lock");
             health.resolve(health::LABEL_NOT_LOGGED_IN);
         }
-        // An empty approved queue means there is nothing failing to upload,
-        // so stale upload-failure labels no longer describe reality.
-        {
-            let mut health = shared.health.lock().expect("health lock");
-            health.resolve(health::LABEL_CLAIM_MINT_FAILED);
-            health.resolve(health::LABEL_INGEST_UNREACHABLE);
-        }
+        // Do NOT retract LABEL_CLAIM_MINT_FAILED or LABEL_INGEST_UNREACHABLE here.
+        // The approved queue empties because upload entries move to Failed state when
+        // uploads fail. Retracting those labels with no evidence would be dishonest:
+        // ingest could still be down, and the HealthState.since field already tells
+        // the consumer how old the information is. A label saying "last attempt failed
+        // 3 hours ago" is accurate; one that silently says "now healthy" is not.
         return Ok(());
     }
 
@@ -414,4 +414,51 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
             let _ = tokio::signal::ctrl_c().await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(s: &str) -> chrono::DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_approved_queue_does_not_retract_ingest_unreachable() {
+        // When the approved queue is empty, do NOT retract ingest-unreachable.
+        // The queue emptied because upload entries moved to Failed state when
+        // uploads failed. With no evidence that ingest recovered, retracting
+        // the label would be dishonest.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+
+        // Set ingest-unreachable manually
+        {
+            let mut health = shared.health.lock().expect("health lock");
+            health.fail(health::LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:00:00Z"));
+        }
+        assert!(!{ shared.health.lock().expect("health lock").ok() });
+
+        // Call drain_approved with empty approved queue
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        // ingest-unreachable should SURVIVE because no recovery was proven
+        assert!(
+            !{ shared.health.lock().expect("health lock").ok() },
+            "ingest-unreachable must persist when queue is empty"
+        );
+        let label = {
+            shared
+                .health
+                .lock()
+                .expect("health lock")
+                .last_error_label
+                .clone()
+        };
+        assert_eq!(label.as_deref(), Some(health::LABEL_INGEST_UNREACHABLE));
+    }
 }

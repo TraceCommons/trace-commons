@@ -20,6 +20,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use super::eligibility::{Eligibility, Observation, evaluate};
+use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
 use super::policy::{ProjectMode, project_key_for, project_label_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
@@ -150,18 +151,18 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
                     } else {
                         report.queued += 1;
                     }
-                    // Upsert succeeded, so there is space in the queue.
+                    // A new entry passed capacity check: there is space in the queue.
                     let mut health = shared.health.lock().expect("health lock");
-                    health.resolve(super::health::LABEL_QUEUE_FULL);
+                    health.resolve(health::LABEL_QUEUE_FULL);
                 }
                 Ok(()) => {
-                    // Upsert succeeded (updating existing entry), so there is space in the queue.
-                    let mut health = shared.health.lock().expect("health lock");
-                    health.resolve(super::health::LABEL_QUEUE_FULL);
+                    // Dedup path: re-observing an already-queued session. Queue::upsert
+                    // returns Ok(()) here BEFORE checking capacity, so this does not
+                    // prove space is available. Do not retract queue-full.
                 }
                 Err(_) => {
                     let mut health = shared.health.lock().expect("health lock");
-                    health.fail(super::health::LABEL_QUEUE_FULL, now);
+                    health.fail(health::LABEL_QUEUE_FULL, now);
                 }
             }
         }
@@ -425,5 +426,52 @@ mod tests {
         assert!(e.session_hash.starts_with("sha256:"));
         assert_eq!(e.source, "claude-code");
         assert!(e.size_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn queue_full_is_retracted_when_a_new_entry_passes_capacity_check() {
+        // When a genuinely new entry is inserted, it passed the capacity check,
+        // so queue-full can be safely retracted: space is available.
+        let f = WatcherFixture::new();
+        // Set queue-full manually to simulate prior failure
+        {
+            let mut health = f.shared.health.lock().unwrap();
+            health.fail(health::LABEL_QUEUE_FULL, at("2026-08-08T12:00:00Z"));
+        }
+        assert!(!{ f.shared.health.lock().unwrap().ok() });
+        // Write a new session and settle it (two ticks to pass eligibility check)
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        // After settling, a new entry was inserted, which proves capacity check passed
+        assert_eq!(f.queue_len(), 1);
+        // queue-full should be retracted
+        assert!({ f.shared.health.lock().unwrap().ok() });
+    }
+
+    #[tokio::test]
+    async fn queue_full_survives_when_only_dedup_reobservation_occurs() {
+        // When only dedup re-observation occurs (session is already queued),
+        // Queue::upsert returns Ok(()) BEFORE checking capacity. Do not retract
+        // queue-full, as there is no evidence of available space.
+        let f = WatcherFixture::new();
+        // Write a session and settle it so it is queued
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+        // Set queue-full manually
+        {
+            let mut health = f.shared.health.lock().unwrap();
+            health.fail(health::LABEL_QUEUE_FULL, at("2026-08-08T12:00:00Z"));
+        }
+        assert!(!{ f.shared.health.lock().unwrap().ok() });
+        // Tick again: the same session is re-observed (dedup path)
+        tick(&f.shared, at("2030-01-02T00:00:00Z")).await.unwrap();
+        // Still exactly one entry (dedup did not insert a duplicate)
+        assert_eq!(f.queue_len(), 1);
+        // queue-full should SURVIVE because dedup does not check capacity
+        assert!(
+            !{ f.shared.health.lock().unwrap().ok() },
+            "queue-full must persist on dedup re-observation"
+        );
     }
 }
