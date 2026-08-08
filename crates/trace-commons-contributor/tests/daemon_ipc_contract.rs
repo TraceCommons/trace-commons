@@ -194,6 +194,31 @@ async fn bulk_approval_over_the_socket_is_now_allowed() {
 }
 
 #[tokio::test]
+async fn approve_reports_the_undo_window_the_document_promises() {
+    // Three application teams build the undo countdown from the contract
+    // document alone, so the fields it promises have to be on the response
+    // shape itself -- including the "nothing to undo" case, where a client
+    // must be able to tell `hold_until: null` from a missing key.
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    c.send(r#"{"id":6,"method":"approve","params":{"all":true}}"#)
+        .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    let result = &resp["result"];
+    assert_eq!(result["approved"], 0, "{result}");
+    assert_eq!(
+        result["hold_secs"], 10,
+        "the documented default hold: {result}"
+    );
+    assert!(
+        result.get("hold_until").is_some() && result["hold_until"].is_null(),
+        "an approval of nothing reports the key with a null deadline, so a \
+         client offers no undo rather than inventing one: {result}"
+    );
+}
+
+#[tokio::test]
 async fn a_malformed_line_is_rejected_and_closes_the_connection() {
     let h = TestDaemon::start().await;
     let mut c = h.connect().await;
@@ -348,6 +373,7 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
                 approved_scopes: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
+                approved_at: None,
             },
             100,
         )

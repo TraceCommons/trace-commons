@@ -100,6 +100,7 @@ impl Harness {
             approved_scopes: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
+            approved_at: None,
         };
         let mut q = self.shared.queue.lock().unwrap();
         q.upsert(entry.clone(), 100).unwrap();

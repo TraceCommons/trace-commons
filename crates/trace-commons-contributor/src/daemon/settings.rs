@@ -42,6 +42,23 @@ const DEFAULT_HISTORY_POLL_SECS: u64 = 1800;
 /// A privacy-filter self-test from days ago proves nothing about the filter
 /// now, so a long-lived process re-checks on this interval.
 const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
+/// How long an approval is held before the uploader will touch it, which is
+/// how long a contributor's "Undo" really lasts.
+///
+/// The designed affordance is a five-second undo after approving. Five
+/// seconds is therefore the floor, not the target: the client's countdown
+/// starts when it renders the response, which is already after the approval
+/// was stamped, and the cancel that ends it has to travel back over the
+/// socket. Ten leaves room for both, plus the second or two of clock skew
+/// between an application counting in its own process and a daemon deciding
+/// in another, and costs nothing that matters -- uploads are unattended
+/// background work on a 60-second poll, so an armed project's traces still
+/// go out on the very next tick.
+///
+/// Zero disables the hold, restoring the old behaviour for anyone who wants
+/// it; a client is expected to stop offering an undo when
+/// `approve` reports no `hold_until`.
+const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
@@ -58,6 +75,16 @@ pub struct DaemonSettings {
     pub max_queue_entries: usize,
     pub history_poll_secs: u64,
     pub canary_interval_secs: u64,
+    /// How long after an approval the uploader must leave the entry alone,
+    /// so the undo a client offers is real rather than a race against the
+    /// next upload pass. See `DEFAULT_APPROVAL_HOLD_SECS` and
+    /// `queue::QueueEntry::approved_at`.
+    ///
+    /// `#[serde(default = ...)]` so a settings file written before this
+    /// field existed loads with the hold on rather than off: a missing key
+    /// must not silently mean "no undo window".
+    #[serde(default = "default_approval_hold_secs")]
+    pub approval_hold_secs: u64,
     /// Whether the daemon itself renders OS notifications. Off by default:
     /// the native applications render their own, and the daemon's shell-out
     /// path needs a desktop session it may not have.
@@ -72,6 +99,10 @@ pub struct DaemonSettings {
     pub claude_root: Option<PathBuf>,
     #[serde(default)]
     pub codex_root: Option<PathBuf>,
+}
+
+fn default_approval_hold_secs() -> u64 {
+    DEFAULT_APPROVAL_HOLD_SECS
 }
 
 impl Default for DaemonSettings {
@@ -90,6 +121,7 @@ impl Default for DaemonSettings {
             max_queue_entries: DEFAULT_MAX_QUEUE_ENTRIES,
             history_poll_secs: DEFAULT_HISTORY_POLL_SECS,
             canary_interval_secs: DEFAULT_CANARY_INTERVAL_SECS,
+            approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,
             near_ai: None,
             claude_root: None,
@@ -167,6 +199,9 @@ pub fn apply_settings_object(
             "digest_interval_secs" => {
                 settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            "approval_hold_secs" => {
+                settings.approval_hold_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
@@ -220,6 +255,46 @@ mod tests {
         assert_eq!(s.max_reuploads, DEFAULT_MAX_REUPLOADS);
         assert!(!s.local_notifications, "notifications must be opt-in");
         assert!(s.near_ai.is_none());
+    }
+
+    #[test]
+    fn the_approval_hold_defaults_to_more_than_the_five_second_undo() {
+        // The client-side undo is five seconds. A hold shorter than that
+        // would leave the same race the hold exists to remove, so the
+        // default is a floor with margin rather than an exact match.
+        let s = DaemonSettings::default();
+        assert_eq!(s.approval_hold_secs, DEFAULT_APPROVAL_HOLD_SECS);
+        assert!(s.approval_hold_secs >= 5);
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_hold_existed_loads_with_it_on() {
+        // A missing key must not silently mean "no undo window".
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("approval_hold_secs");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().approval_hold_secs,
+            DEFAULT_APPROVAL_HOLD_SECS
+        );
+    }
+
+    #[test]
+    fn the_approval_hold_is_settable_and_type_checked() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"approval_hold_secs": 30})),
+            Ok(true)
+        );
+        assert_eq!(s.approval_hold_secs, 30);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"approval_hold_secs": "30"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(s.approval_hold_secs, 30, "a rejected value changes nothing");
     }
 
     #[test]

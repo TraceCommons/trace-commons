@@ -207,9 +207,9 @@ history record, audit entry, notification text, or IPC response.
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
 | `preview` | `entry_id` | see below | summary only, no trace body |
-| `approve` | `entry_id` or `all: true` | `approved: <count>` | `all: true` no longer requires a terminal |
+| `approve` | `entry_id` or `all: true` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; see "The approval hold" below |
 | `dismiss` | `entry_id` | `ok: true` | |
-| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; error if not currently `approved` |
+| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_label, mode, added_at}` | |
@@ -220,7 +220,7 @@ history record, audit entry, notification text, or IPC response.
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `local_notifications`, `claude_root`, `codex_root` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -261,7 +261,8 @@ healthy.
   "consent_scopes": ["debugging_evaluation"],
   "residual_risk": "pattern-based",
   "envelope_digest": "sha256:…",
-  "input_fingerprint": "sha256:…"
+  "input_fingerprint": "sha256:…",
+  "enrolled": true
 }
 ```
 
@@ -301,6 +302,86 @@ direction, only that `would_send_bytes` is the number that governs consent.
 `preview-failed` on failure). Neither `redactions` nor `pii_labels_present`
 in the response ever contains the actual matched text, only counts and
 category labels.
+
+**`preview` does not require an enrollment.** It performs no network I/O and
+needs neither the daemon's file lock nor its running loop, so an app can
+show a contributor what would be sent *before* they decide to enrol -- which
+is when the question matters most. Through `v1_1`'s first releases this
+refused with `unavailable` / `not-logged-in` unless a `contributor.json`
+existed, which forced app harnesses to fabricate an enrollment purely to
+preview a local file; that requirement was incidental and is gone.
+
+`enrolled` says which kind of preview you got:
+
+- `true` — the ordinary case. Built from the real enrolled identity through
+  the configured privacy filter, and (as described above) **pinned**: the
+  envelope is stored and a later `approve` covers exactly those bytes.
+- `false` — no enrollment on this device. The envelope is built from the
+  same placeholder identity the CLI's unenrolled `--dry-run` uses, with a
+  preview submission id disjoint from any real one, and through the
+  **deterministic-only** redactor: any configured external privacy filter is
+  ignored, so pre-enrollment trace text is never sent anywhere to be
+  classified. Nothing is pinned, and `envelope_digest` /
+  `input_fingerprint` describe that placeholder build -- neither is bindable
+  to a later approval, since enrolling changes the identity the envelope
+  carries. Render such a preview as an illustration, and re-preview after
+  enrolling before asking for an approval.
+
+`would_send_bytes`, `redactions`, `pii_labels_present` and `opening_prompt`
+are real in both cases; an unenrolled preview understates nothing about
+redaction except what an external filter would additionally have removed.
+
+### The approval hold (the undo window)
+
+`approve` returns:
+
+```json
+{ "approved": 1, "hold_secs": 10, "hold_until": "2026-08-08T12:00:10Z" }
+```
+
+`hold_until` is the instant the daemon will first consider the entry for
+upload. Until then the uploader skips it, so an "Undo" offered during that
+window is real: `cancel` cannot answer `not-cancelable` while the hold runs,
+because nothing can have claimed the entry.
+
+Rules an application can rely on:
+
+- **Count down against `hold_until`, never against your own duration.** A
+  client running its own five-second timer while the daemon holds for some
+  other interval is the same bug as having no hold at all -- the countdown
+  and the daemon disagree about when the decision stops being reversible.
+  `hold_until` is read from the entry the daemon just wrote and is the exact
+  value its upload pass compares against.
+- **The entry uploads at `hold_until`, not after some later poll.** The
+  comparison is `now < hold_until`, so waiting out exactly the reported
+  instant is waiting out exactly the hold. (The upload itself still happens
+  on the daemon's ordinary poll, so the send occurs at or after that
+  instant, never before it.)
+- **`approve: {"all": true}` holds every entry it approved**, all to the one
+  reported deadline. The response's `hold_until` is true of the whole batch.
+- **`hold_until` is `null`** when nothing was approved, or when
+  `approval_hold_secs` is `0`. A client must then offer no undo rather than
+  invent one.
+- **`cancel` during the hold returns the entry to `pending`** and clears the
+  approval outright: the scopes, the envelope-determining fingerprint, and
+  the hold itself. A subsequent `approve` starts a fresh window.
+- **A standing `auto_upload` opt-in is not held.** Those entries are
+  approved in advance, are separately audited, and no client is counting
+  down for them; they upload on the next pass exactly as before. Only an
+  `approve` call creates a hold.
+
+`hold_secs` is the configured window (`approval_hold_secs`, default **10
+seconds**). Ten rather than five: the designed undo is five seconds, and
+five is therefore the floor, not the target -- the client's countdown starts
+after the approval was stamped, and the `cancel` that ends it still has to
+travel back over the socket. The extra margin also absorbs clock skew
+between an application counting in its own process and a daemon deciding in
+another. It costs nothing that matters: uploading is unattended background
+work on a 60-second poll.
+
+The hold is a property of the entry (the approval instant it carries plus
+the configured window), not of the daemon's poll timing. Tuning
+`poll_interval_secs`, or the uploader getting faster, cannot shorten it.
 
 ### `pause` semantics
 
@@ -355,14 +436,24 @@ contract break.
 ### `set_settings`
 
 Takes a JSON object of settings to change. Every top-level key must be one
-of `quiescence_secs`, `digest_interval_secs`, `local_notifications`,
-`claude_root`, `codex_root` -- a key this method does not recognize is
+of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
+`local_notifications`, `claude_root`, `codex_root` -- a key this method does
+not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than
 a daemon that quietly kept the old value. A recognized key holding the
 wrong JSON type is refused the same way (`bad_params` /
 `settings-invalid-value`). An object with no keys at all is refused
 (`bad_params` / `no-known-setting-supplied`).
+
+`approval_hold_secs` takes a non-negative integer: how long an approval is
+held before the uploader will touch it, i.e. how long the contributor's undo
+really lasts. Default 10; `0` disables the hold, and `approve` then reports
+`hold_until: null` so a client knows to offer no undo. It is read at each
+upload pass, so a change applies to approvals already sitting in the queue,
+and a shortened hold can release an entry a client is still counting down
+for -- treat the `hold_until` from `approve` as authoritative for the
+approval it accompanied, and do not change this setting mid-countdown.
 
 `claude_root` and `codex_root` each take a JSON string (a filesystem path)
 or `null` (clear the override, falling back to the conventional per-user
@@ -479,7 +570,11 @@ race `list_pending` against the stream at startup. On `resync_required`, call
   `approval-inputs-changed`, or `envelope-changed-after-approval`. Nothing
   is sent. An app should treat these the same as a superseded entry: offer
   it again, previewing afresh.
-- `approved` entries can be returned to `pending` with `cancel`.
+- `approved` entries can be returned to `pending` with `cancel`. An entry
+  approved through `approve` stays untouched for its hold window first (see
+  "The approval hold" above), so `cancel` is guaranteed to succeed for that
+  whole window. After it, `cancel` still works right up until the upload
+  pass claims the entry (`uploading`), at which point it is refused.
 
 ## `reason_label` and health taxonomy
 

@@ -200,6 +200,36 @@ impl Harness {
         trace_commons_contributor::daemon::drain_approved_for_test(&self.shared, Self::now()).await
     }
 
+    /// An upload pass at a caller-chosen instant. The post-approval hold is
+    /// measured against this clock, and `approve` stamps the real one, so a
+    /// test about the hold has to drive both rather than run every pass at
+    /// the harness's far-future timestamp.
+    async fn upload_pass_at(&self, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
+        trace_commons_contributor::daemon::drain_approved_for_test(&self.shared, now).await
+    }
+
+    fn approve(&self, entry_id: uuid::Uuid) -> serde_json::Value {
+        let resp = ipc::handle_local(
+            &self.shared,
+            "approve",
+            serde_json::json!({ "entry_id": entry_id.to_string() }),
+        );
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    /// The deadline the daemon reported for the approval, parsed. This is
+    /// the value a UI counts down against, so every assertion below is made
+    /// against it rather than against a duration the test computed itself.
+    fn hold_until(result: &serde_json::Value) -> chrono::DateTime<Utc> {
+        result
+            .get("hold_until")
+            .and_then(|v| v.as_str())
+            .expect("approve must report a hold deadline")
+            .parse()
+            .expect("hold_until must be an RFC 3339 timestamp")
+    }
+
     fn states(&self) -> Vec<QueueState> {
         self.shared
             .queue
@@ -494,6 +524,185 @@ async fn an_entry_claimed_for_upload_can_no_longer_be_cancelled() {
         resp.error.is_some(),
         "cancel must be refused once the upload is genuinely in flight"
     );
+}
+
+// --- The post-approval hold: the undo window is real ----------------------
+
+#[tokio::test]
+async fn an_entry_approved_now_is_not_uploaded_by_the_very_next_pass() {
+    // Found by a real application: the design offers a five-second undo
+    // after approving ("Sending… [Undo] (4)"), and it did not exist.
+    // `approve` set `Approved` and the next `drain_approved` uploaded the
+    // entry with no delay at all, so on a machine with a working network
+    // the send completed while the app was still counting down and `cancel`
+    // answered `not-cancelable`. An undo that is sometimes already too late
+    // is worse than no undo, because the contributor believes they still
+    // have a choice.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let result = h.approve(entry_id);
+    let approved_at = h.only_entry().approved_at.expect("approval is stamped");
+
+    h.upload_pass_at(approved_at).await.unwrap();
+
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "an approval a moment old must not upload on the very next pass"
+    );
+    assert_eq!(
+        h.only_entry().state,
+        QueueState::Approved,
+        "the entry is held, not resolved"
+    );
+    assert!(Harness::hold_until(&result) > approved_at);
+}
+
+#[tokio::test]
+async fn the_same_entry_uploads_once_the_hold_has_elapsed() {
+    // The hold delays; it must not withhold. An entry whose window has
+    // passed uploads exactly as it did before any of this existed.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let hold_until = Harness::hold_until(&h.approve(entry_id));
+    h.upload_pass_at(hold_until).await.unwrap();
+
+    assert_eq!(h.received.lock().unwrap().len(), 1);
+    assert_eq!(h.only_entry().state, QueueState::Uploaded);
+}
+
+#[tokio::test]
+async fn the_reported_deadline_is_the_one_the_daemon_actually_honours() {
+    // A UI counting its own five seconds while the daemon holds for some
+    // other interval is the same class of bug as having no hold at all, so
+    // the deadline on the `approve` response has to be exactly the instant
+    // the uploader becomes willing to send: not one pass earlier, not one
+    // later.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "a3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a3a3");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let hold_until = Harness::hold_until(&h.approve(entry_id));
+
+    h.upload_pass_at(hold_until - chrono::Duration::milliseconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "one millisecond before the reported deadline, nothing may be sent"
+    );
+
+    h.upload_pass_at(hold_until).await.unwrap();
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        1,
+        "at the reported deadline the entry uploads, so a client that waits \
+         out exactly the deadline it was given has waited out the hold"
+    );
+}
+
+#[tokio::test]
+async fn cancel_succeeds_throughout_the_hold_and_returns_the_entry_to_pending() {
+    // The property the undo actually rests on: while the hold runs, nothing
+    // can have claimed the entry, so `cancel` cannot answer
+    // `not-cancelable`. Passes are run at several instants inside the
+    // window first, because before the hold existed it was precisely a pass
+    // landing in that gap that took the decision away.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "a4a4a4a4-a4a4-a4a4-a4a4-a4a4a4a4a4a4");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let result = h.approve(entry_id);
+    let approved_at = h.only_entry().approved_at.unwrap();
+    let hold_until = Harness::hold_until(&result);
+    let window = hold_until - approved_at;
+
+    for fraction in [0, 1, 2, 3] {
+        h.upload_pass_at(approved_at + window * fraction / 4)
+            .await
+            .unwrap();
+        let resp = ipc::handle_local(
+            &h.shared,
+            "cancel",
+            serde_json::json!({ "entry_id": entry_id.to_string() }),
+        );
+        assert!(
+            resp.error.is_none(),
+            "cancel must succeed at every instant inside the hold, got {:?}",
+            resp.error
+        );
+        assert_eq!(h.only_entry().state, QueueState::Pending);
+        assert!(h.only_entry().approved_at.is_none());
+        assert_eq!(h.received.lock().unwrap().len(), 0);
+        // Re-approve for the next instant in the window.
+        h.approve(entry_id);
+    }
+}
+
+#[tokio::test]
+async fn approve_all_holds_every_entry_it_approved() {
+    // The bulk path took the same `Queue::approve` but nothing made it
+    // stamp each entry, and a hold that covers only the first entry of a
+    // batch is an undo that silently does not apply to the rest.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "a5a5a5a5-a5a5-a5a5-a5a5-a5a5a5a5a5a5");
+    h.write_session("thirdproj", "a6a6a6a6-a6a6-a6a6-a6a6-a6a6a6a6a6a6");
+    h.discover().await;
+    assert_eq!(h.states().len(), 2);
+
+    let resp = ipc::handle_local(&h.shared, "approve", serde_json::json!({ "all": true }));
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    let result = resp.result.unwrap();
+    assert_eq!(result["approved"], 2);
+    let hold_until = Harness::hold_until(&result);
+
+    let entries = h.shared.queue.lock().unwrap().all().to_vec();
+    for e in &entries {
+        assert_eq!(
+            e.approved_at.map(|at| at + chrono::Duration::seconds(10)),
+            Some(hold_until),
+            "every entry in the batch is held to the one reported deadline"
+        );
+    }
+
+    h.upload_pass_at(hold_until - chrono::Duration::milliseconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "no entry of a bulk approval may upload inside the hold"
+    );
+
+    h.upload_pass_at(hold_until).await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_standing_opt_in_is_not_held() {
+    // The hold is the undo window for an approval a contributor just made.
+    // An armed project's opt-in is a decision taken in advance, separately
+    // audited, with no click to take back and no client counting down for
+    // it -- holding it would delay every unattended upload for no consent
+    // benefit. Stated as a test so the choice is deliberate rather than an
+    // accident of which code path stamps the entry.
+    let h = Harness::new().await;
+    h.opt_in("myproj");
+    h.write_session("myproj", "a7a7a7a7-a7a7-a7a7-a7a7-a7a7a7a7a7a7");
+    h.discover().await;
+
+    assert!(h.only_entry().approved_at.is_none());
+    h.upload_pass_at(Harness::now()).await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 1);
 }
 
 // --- I4: an approval covers the scopes it was given under -----------------

@@ -578,6 +578,17 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 .as_ref()
                 .map(|c| c.consent_scopes.clone())
                 .unwrap_or_default();
+            // One instant for the whole call, so `approve: {"all": true}`
+            // holds every entry it approved for the same window and reports
+            // one deadline that is true of all of them -- rather than a
+            // deadline that happens to describe the first entry and expires
+            // early for the rest.
+            let approved_at = Utc::now();
+            let approval_hold_secs = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .approval_hold_secs;
             // `None`, not `Some("")`, when there is no readable config:
             // every call site expresses "unknown" the same way, and the
             // uploader treats it as "re-ask" -- fail-closed.
@@ -626,11 +637,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
             let mut approved_ids = Vec::new();
             for id in ids {
-                if queue.approve(id, &scopes, inputs.as_deref()) {
+                if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
                     approved_ids.push(id);
                 }
             }
             let approved = approved_ids.len();
+            // The deadline the daemon will actually honour, taken from an
+            // entry it just wrote rather than recomputed here, so a client
+            // counting down against it is counting down against the same
+            // value `drain_approved` compares. `null` when nothing was
+            // approved or the hold is configured off -- a client must then
+            // offer no undo, rather than invent one.
+            let hold_until = approved_ids
+                .first()
+                .and_then(|id| queue.get(*id))
+                .and_then(|e| e.hold_until(approval_hold_secs));
             if let Err(_e) = queue.save(&shared.store) {
                 // The approvals exist only in memory and would not survive a
                 // restart; a queue that disagrees with its own file is worse
@@ -645,7 +666,14 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
             drop(queue);
             shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-            Response::ok(req.id, serde_json::json!({ "approved": approved }))
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "approved": approved,
+                    "hold_secs": approval_hold_secs,
+                    "hold_until": hold_until,
+                }),
+            )
         }
         "dismiss" => {
             let id = match parse_entry_id(&req.params) {
@@ -900,9 +928,14 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             None => return Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
         }
     };
-    let Ok(Some(cfg)) = shared.store.load_config() else {
-        return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
-    };
+    // No enrollment is not a refusal. Preview does no network I/O and needs
+    // neither the daemon's lock nor its running loop, so requiring a config
+    // here was incidental -- and it forced anyone who wanted to *see* what
+    // would be sent to enrol first, which is the wrong way round. Without a
+    // config the pipeline builds the same placeholder-identity,
+    // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
+    // and the response says so. See `preview::build_preview`.
+    let cfg = shared.store.load_config().ok().flatten();
     let (near_ai, claude_root, codex_root) = {
         let s = shared.settings.lock().expect("settings lock");
         (
@@ -916,9 +949,16 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
     };
 
-    match super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref).await {
+    match super::preview::build_preview(&shared.store, cfg.as_ref(), near_ai, source, &session_ref)
+        .await
+    {
         Ok((summary, _body, envelope)) => {
-            pin_previewed_envelope(shared, id, &summary, &envelope);
+            // An unenrolled preview is never pinned: it was built from a
+            // placeholder identity, so it is not the artifact any later
+            // approval would send.
+            if summary.enrolled {
+                pin_previewed_envelope(shared, id, &summary, &envelope);
+            }
             Response::ok(
                 req.id,
                 serde_json::json!({
@@ -937,6 +977,11 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
                     // it displayed.
                     "envelope_digest": summary.envelope_digest,
                     "input_fingerprint": summary.input_fingerprint,
+                    // False when this device is not enrolled: the summary
+                    // describes a placeholder-identity, deterministic-only
+                    // build, and neither hash above is bindable to a later
+                    // approval.
+                    "enrolled": summary.enrolled,
                 }),
             )
         }
@@ -963,11 +1008,10 @@ pub async fn open_preview(
         let queue = shared.queue.lock().expect("queue lock");
         queue.get(entry_id).cloned().ok_or("unknown-entry-id")?
     };
-    let cfg = shared
-        .store
-        .load_config()
-        .map_err(|_| "not-logged-in")?
-        .ok_or("not-logged-in")?;
+    // As with the socket's `"preview"`: no enrollment yields a
+    // placeholder-identity, deterministic-only preview rather than a
+    // refusal, and `summary.enrolled` says which one this is.
+    let cfg = shared.store.load_config().map_err(|_| "not-logged-in")?;
     let (near_ai, claude_root, codex_root) = {
         let s = shared.settings.lock().expect("settings lock");
         (
@@ -980,13 +1024,17 @@ pub async fn open_preview(
     let (source, session_ref) =
         super::find_session(&sources, &entry).ok_or("session-file-vanished")?;
     let (summary, body, envelope) =
-        super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref)
+        super::preview::build_preview(&shared.store, cfg.as_ref(), near_ai, source, &session_ref)
             .await
             .map_err(|_| "preview-failed")?;
     // Same pinning as the socket's `"preview"`: the entry now holds the
     // artifact this caller was shown, so an approval that follows covers
-    // that artifact and nothing else.
-    pin_previewed_envelope(shared, entry_id, &summary, &envelope);
+    // that artifact and nothing else. An unenrolled build is never pinned --
+    // it carries a placeholder identity, so it is not what any approval
+    // would send.
+    if summary.enrolled {
+        pin_previewed_envelope(shared, entry_id, &summary, &envelope);
+    }
     Ok((summary, body))
 }
 
@@ -1415,6 +1463,7 @@ mod tests {
                         approved_scopes: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
+                        approved_at: None,
                     },
                     500,
                 )
@@ -1512,6 +1561,7 @@ mod tests {
                         approved_scopes: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
+                        approved_at: None,
                     },
                     500,
                 )
@@ -1656,6 +1706,7 @@ mod tests {
                         approved_scopes: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
+                        approved_at: None,
                     },
                     500,
                 )
@@ -1730,6 +1781,7 @@ mod tests {
                         approved_scopes: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
+                        approved_at: None,
                     },
                     500,
                 )
@@ -1881,6 +1933,7 @@ mod tests {
             approved_scopes: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
+            approved_at: None,
         };
         let body = serde_json::to_string(&entry_value(&e)).unwrap();
         assert!(
@@ -1929,6 +1982,7 @@ mod tests {
                     approved_scopes: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
+                    approved_at: None,
                 },
                 500,
             )

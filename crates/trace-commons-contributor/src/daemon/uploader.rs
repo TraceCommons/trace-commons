@@ -489,6 +489,7 @@ mod tests {
                 approved_scopes: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
+                approved_at: None,
             }
         }
     }
@@ -755,7 +756,7 @@ mod tests {
 
         let (_summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
-            &cfg,
+            Some(&cfg),
             None,
             &session.source(),
             &session.session_ref(),
@@ -818,7 +819,7 @@ mod tests {
 
         let (_summary, _body, mut envelope) = crate::daemon::preview::build_preview(
             &store,
-            &cfg,
+            Some(&cfg),
             None,
             &session.source(),
             &session.session_ref(),
@@ -875,7 +876,7 @@ mod tests {
 
         let (summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
-            &cfg,
+            Some(&cfg),
             None,
             &session.source(),
             &session.session_ref(),

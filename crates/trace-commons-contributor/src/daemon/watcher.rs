@@ -206,6 +206,11 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 // is no shown artifact to pin to. The input fingerprint is
                 // the guard that applies to them.
                 previewed_envelope_digest: None,
+                // No post-approval hold on a standing opt-in: it is a
+                // decision taken in advance, separately audited, with no
+                // click to take back and no client counting down for it.
+                // See `Queue::approve`.
+                approved_at: None,
             };
             let entry_id = entry.entry_id;
 
@@ -244,7 +249,15 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                     // path recording `Some("")` for the same condition made
                     // two spellings of "unknown". Both fail closed, but the
                     // uploader should only have one shape to recognize.
-                    if armed && queue.approve(entry_id, &consent_scopes, approval_inputs.as_deref())
+                    // `None` for `approved_at`, matching the fresh-entry
+                    // path above: a standing opt-in is not held.
+                    if armed
+                        && queue.approve(
+                            entry_id,
+                            &consent_scopes,
+                            approval_inputs.as_deref(),
+                            None,
+                        )
                     {
                         changed = true;
                         report.auto_ready += 1;

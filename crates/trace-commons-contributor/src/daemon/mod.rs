@@ -287,11 +287,24 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         return Ok(());
     }
 
+    // The post-approval hold. An entry approved a moment ago is skipped
+    // until its hold elapses, so the undo a client offers after `approve`
+    // is a real window rather than a race against this pass -- see
+    // `queue::QueueEntry::approved_at`. It is deliberately a property of
+    // the entry (`approved_at` + the configured hold) and not of this
+    // loop's timing: tuning `poll_interval_secs`, or the uploader getting
+    // faster, cannot shorten it.
+    let approval_hold_secs = {
+        let s = shared.settings.lock().expect("settings lock");
+        s.approval_hold_secs
+    };
     let approved: Vec<queue::QueueEntry> = {
         let q = shared.queue.lock().expect("queue lock");
         q.all()
             .iter()
-            .filter(|e| e.state == queue::QueueState::Approved)
+            .filter(|e| {
+                e.state == queue::QueueState::Approved && !e.hold_active(now, approval_hold_secs)
+            })
             .cloned()
             .collect()
     };

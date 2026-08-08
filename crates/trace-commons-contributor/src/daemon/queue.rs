@@ -123,6 +123,60 @@ pub struct QueueEntry {
     /// fingerprint is what covers them.
     #[serde(default)]
     pub previewed_envelope_digest: Option<String>,
+    /// When the contributor approved this entry, and therefore when its
+    /// post-approval hold started.
+    ///
+    /// The design offers a five-second undo after an approval -- "Sending…
+    /// [Undo]" -- on the reasoning that a misclick should be a non-event
+    /// rather than a permanent one, because what is being sent is the
+    /// contributor's own work. That undo did not exist: `approve` set
+    /// `Approved` and the very next `drain_approved` pass uploaded the
+    /// entry, so on a machine with a working network the upload could
+    /// complete inside the window a client was still counting down. The
+    /// client offered a choice the daemon had already taken away.
+    ///
+    /// `drain_approved` now skips any entry whose approval is younger than
+    /// `DaemonSettings::approval_hold_secs`, so the window is a property of
+    /// the entry rather than a race the client hopes to win, and `cancel`
+    /// is guaranteed to succeed for its whole duration (nothing can have
+    /// claimed the entry). See `QueueEntry::hold_until`.
+    ///
+    /// `None` means "no hold applies", and there are exactly two ways to
+    /// get it: an entry written before this field existed, and an entry
+    /// auto-approved by a project's standing `auto_upload` opt-in. The
+    /// latter is deliberate -- see `Queue::approve`.
+    #[serde(default)]
+    pub approved_at: Option<DateTime<Utc>>,
+}
+
+impl QueueEntry {
+    /// The instant this entry's post-approval hold ends, i.e. the deadline a
+    /// client counts down to and the instant `drain_approved` becomes
+    /// willing to upload it.
+    ///
+    /// `None` means nothing is holding this entry: it carries no
+    /// `approved_at` (never approved, approved by a standing opt-in, or
+    /// written before the field existed) or the hold is configured off.
+    /// Reported to clients on the `approve` response so a UI counts against
+    /// the daemon's clock rather than its own -- a UI counting its own five
+    /// seconds while the daemon holds for some other interval is the same
+    /// class of bug the hold exists to fix.
+    pub fn hold_until(&self, hold_secs: u64) -> Option<DateTime<Utc>> {
+        if hold_secs == 0 {
+            return None;
+        }
+        self.approved_at
+            .map(|at| at + Duration::seconds(hold_secs as i64))
+    }
+
+    /// Whether the post-approval hold is still running at `now`.
+    ///
+    /// The comparison is `now < deadline`, so an entry is released exactly
+    /// at its reported deadline and not a tick later: a client that waits
+    /// out the deadline it was given has waited out precisely the hold.
+    pub fn hold_active(&self, now: DateTime<Utc>, hold_secs: u64) -> bool {
+        self.hold_until(hold_secs).is_some_and(|until| now < until)
+    }
 }
 
 /// A stable id for a queue entry, derived from the session hash so the same
@@ -237,7 +291,22 @@ impl Queue {
     /// (no readable config). Every call site expresses "unknown" the same
     /// way -- `None`, never `Some("")` -- so the uploader's fail-closed
     /// check has exactly one shape to recognize.
-    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String], inputs: Option<&str>) -> bool {
+    ///
+    /// `approved_at` starts the post-approval hold: `Some(now)` for an
+    /// approval a contributor just made, which is the one that needs an
+    /// undo window, and `None` for a project's standing `auto_upload`
+    /// opt-in. The opt-in case is `None` on purpose: it is a decision taken
+    /// in advance and separately audited, no client is showing a countdown
+    /// for it, and there is no click to take back -- holding it would only
+    /// delay every unattended upload by a poll interval for no consent
+    /// benefit. See `QueueEntry::approved_at`.
+    pub fn approve(
+        &mut self,
+        entry_id: Uuid,
+        scopes: &[String],
+        inputs: Option<&str>,
+        approved_at: Option<DateTime<Utc>>,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
@@ -248,6 +317,7 @@ impl Queue {
         e.reason_label = None;
         e.approved_scopes = Some(scopes.to_vec());
         e.approved_inputs = inputs.map(str::to_string);
+        e.approved_at = approved_at;
         true
     }
 
@@ -348,6 +418,7 @@ impl Queue {
         e.reason_label = Some(reason_label.to_string());
         e.approved_scopes = None;
         e.approved_inputs = None;
+        e.approved_at = None;
         // The artifact the contributor was shown is no longer the one that
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
@@ -416,15 +487,23 @@ impl Queue {
             // artifact that was shown -- do not.
             approved_scopes: None,
             approved_inputs: None,
+            approved_at: None,
             previewed_envelope_digest: None,
             ..old
         })
     }
 
-    /// Return an approved entry to pending, backing a short "undo" window on
-    /// an approval. Refuses once the entry has moved past `Approved` --
+    /// Return an approved entry to pending, backing the "undo" window on an
+    /// approval. Refuses once the entry has moved past `Approved` --
     /// notably `Uploading`, where an upload may already be in flight and an
     /// undo racing it would be indistinguishable from data loss.
+    ///
+    /// Throughout the post-approval hold this cannot refuse: nothing claims
+    /// a held entry, so it is still `Approved` by construction. That is the
+    /// whole point of the hold -- before it existed, an undo offered for
+    /// five seconds could find the upload already sent, and `cancel`
+    /// answered `not-cancelable` for a decision the contributor had been
+    /// told was still theirs to make.
     pub fn cancel(&mut self, entry_id: Uuid) -> Result<()> {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             bail!("unknown-entry-id");
@@ -436,6 +515,7 @@ impl Queue {
         e.reason_label = None;
         e.approved_scopes = None;
         e.approved_inputs = None;
+        e.approved_at = None;
         Ok(())
     }
 
@@ -487,6 +567,7 @@ mod tests {
             approved_scopes: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
+            approved_at: None,
         }
     }
 
@@ -653,6 +734,73 @@ mod tests {
     fn queue_defaults_when_the_file_is_absent() {
         let (_d, store) = temp_store();
         assert_eq!(Queue::load(&store).unwrap(), Queue::new());
+    }
+
+    #[test]
+    fn an_approval_records_when_it_was_given_and_holds_until_the_window_ends() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let at = at("2026-08-08T12:00:00Z");
+        assert!(q.approve(id, &[], None, Some(at)));
+
+        let e = q.get(id).unwrap();
+        assert_eq!(e.approved_at, Some(at));
+        assert_eq!(e.hold_until(10), Some(at + Duration::seconds(10)));
+        assert!(e.hold_active(at, 10));
+        assert!(e.hold_active(at + Duration::seconds(9), 10));
+        // Released exactly at the deadline the client was given, so waiting
+        // out the reported instant is waiting out precisely the hold.
+        assert!(!e.hold_active(at + Duration::seconds(10), 10));
+    }
+
+    #[test]
+    fn a_standing_opt_in_approval_is_not_held() {
+        // `None` for `approved_at` is the auto-upload path, and it is
+        // deliberate rather than an omission -- see `Queue::approve`.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        assert!(q.approve(id, &[], None, None));
+        let e = q.get(id).unwrap();
+        assert_eq!(e.hold_until(10), None);
+        assert!(!e.hold_active(at("2026-08-08T12:00:00Z"), 10));
+    }
+
+    #[test]
+    fn a_zero_hold_setting_reports_no_deadline_at_all() {
+        // A client must be able to tell "no undo window" from "a window I
+        // have to compute myself": zero reports no deadline rather than one
+        // equal to the approval instant.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let at = at("2026-08-08T12:00:00Z");
+        assert!(q.approve(id, &[], None, Some(at)));
+        assert_eq!(q.get(id).unwrap().hold_until(0), None);
+        assert!(!q.get(id).unwrap().hold_active(at, 0));
+    }
+
+    #[test]
+    fn cancel_and_revocation_both_clear_the_hold() {
+        // A re-offered entry must not carry the previous approval's
+        // deadline: the next approval starts its own window.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        let at = at("2026-08-08T12:00:00Z");
+
+        assert!(q.approve(id, &[], None, Some(at)));
+        q.cancel(id).unwrap();
+        assert!(q.get(id).unwrap().approved_at.is_none());
+
+        assert!(q.approve(id, &[], None, Some(at)));
+        q.revoke_approval(id, "approval-inputs-changed");
+        assert!(q.get(id).unwrap().approved_at.is_none());
     }
 
     #[test]

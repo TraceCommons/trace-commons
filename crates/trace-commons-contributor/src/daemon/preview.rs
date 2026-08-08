@@ -256,6 +256,27 @@ pub struct PreviewSummary {
     /// doc for why a comparison cannot work here.
     pub envelope_digest: String,
     pub input_fingerprint: String,
+    /// Whether this preview was built from a real enrollment.
+    ///
+    /// `false` is the pre-enrollment preview: the daemon has no contributor
+    /// config, so the envelope is built from the same placeholder identity
+    /// the CLI's `--dry-run` uses (`commands::unenrolled_preview_config`)
+    /// and through the deterministic-only redactor, with any configured
+    /// external privacy filter ignored so that pre-enrollment trace text
+    /// stays on the machine.
+    ///
+    /// Preview is a local operation -- no lock, no running loop, no network
+    /// -- and requiring an enrollment for it was incidental rather than
+    /// necessary: a contributor should be able to see what would be sent
+    /// *before* deciding to enrol, which is exactly when the question
+    /// matters most.
+    ///
+    /// When this is `false`, `envelope_digest` and `input_fingerprint`
+    /// describe that placeholder build. Nothing is pinned and neither value
+    /// is bindable to a later approval: enrolling changes the identity the
+    /// envelope carries, so an approval given afterwards is fingerprinted
+    /// against the real config and a fresh preview is what it covers.
+    pub enrolled: bool,
 }
 
 /// Redact one session without uploading and describe exactly what would be
@@ -271,9 +292,22 @@ pub struct PreviewSummary {
 /// build a redactor/envelope (`submit_one`); preview does not itself read or
 /// write through it -- everything it needs comes from `cfg` and the already
 /// -resolved `source`/`session_ref`.
+///
+/// `cfg` is `None` when this device is not enrolled. That is a supported
+/// preview, not an error: preview performs no network I/O and needs neither
+/// the daemon's lock nor its running loop, so the enrollment requirement it
+/// used to carry was incidental -- and "show me what would be sent" is a
+/// question a contributor most wants answered *before* enrolling. The
+/// envelope is then built exactly the way the CLI's unenrolled `--dry-run`
+/// builds it: the placeholder identity from
+/// `commands::unenrolled_preview_config`, a preview submission id disjoint
+/// from any real one, and the deterministic-only redactor, so no
+/// pre-enrollment trace text is sent to an external privacy filter. The
+/// summary says so (`PreviewSummary::enrolled`), and callers must not pin
+/// an entry to an unenrolled build.
 pub async fn build_preview(
     _store: &ConfigStore,
-    cfg: &ContributorConfig,
+    cfg: Option<&ContributorConfig>,
     near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
@@ -281,10 +315,31 @@ pub async fn build_preview(
     let transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
 
-    let fingerprint = input_fingerprint(cfg, near_ai.as_ref());
-    let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
-        .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
-    let raw = build_raw_contribution(&transcript, cfg, Utc::now());
+    let enrolled = cfg.is_some();
+    let placeholder;
+    let cfg = match cfg {
+        Some(c) => c,
+        None => {
+            placeholder = crate::commands::unenrolled_preview_config();
+            &placeholder
+        }
+    };
+    // The fingerprint of an unenrolled build describes the placeholder, and
+    // is reported only so the summary is self-describing. Nothing binds an
+    // approval to it -- see `PreviewSummary::enrolled`.
+    let fingerprint = input_fingerprint(cfg, near_ai.as_ref().filter(|_| enrolled));
+    let (redactor, raw) = if enrolled {
+        (
+            build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
+                .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?,
+            build_raw_contribution(&transcript, cfg, Utc::now()),
+        )
+    } else {
+        (
+            crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref()),
+            crate::envelope::build_preview_raw_contribution(&transcript, cfg, Utc::now()),
+        )
+    };
     let envelope = redact_to_envelope(&redactor, raw).await?;
     // Digested here, at exactly the point `submit_loaded` takes over the
     // envelope it is about to send: after redaction, before the granted
@@ -325,6 +380,7 @@ pub async fn build_preview(
             residual_risk,
             envelope_digest: digest,
             input_fingerprint: fingerprint,
+            enrolled,
         },
         body,
         envelope,
@@ -398,8 +454,9 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) =
-            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         assert!(summary.raw_session_bytes > 0);
         assert!(summary.would_send_bytes > 0);
         assert_ne!(
@@ -409,12 +466,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unenrolled_preview_redacts_locally_and_claims_no_identity() {
+        // Preview needs no enrollment, but it must not borrow one either:
+        // the envelope carries the placeholder identity, and a configured
+        // external privacy filter is ignored so pre-enrollment trace text
+        // never leaves the machine to be classified.
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let near_ai = NearAiSettings {
+            api_key: "unused".into(),
+            base_url: Some("http://filter.invalid".into()),
+            model: None,
+        };
+        let (summary, _body, envelope) = build_preview(&store, None, Some(near_ai), &src, &r)
+            .await
+            .unwrap();
+
+        assert!(!summary.enrolled);
+        assert!(summary.would_send_bytes > 0);
+        assert!(
+            summary.redactions.values().sum::<u32>() > 0,
+            "the deterministic redactor still runs: {:?}",
+            summary.redactions
+        );
+        let placeholder = crate::commands::unenrolled_preview_config();
+        let real = build_preview(&store, Some(&sample_cfg(&store)), None, &src, &r)
+            .await
+            .unwrap()
+            .2;
+        assert_ne!(
+            envelope.contributor.tenant_scope_ref, real.contributor.tenant_scope_ref,
+            "an unenrolled preview must not describe itself as the enrolled \
+             contributor"
+        );
+        assert!(placeholder.tenant_id.starts_with("tenant-"));
+    }
+
+    #[tokio::test]
     async fn preview_reports_what_redaction_actually_removed() {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) =
-            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         let total: u32 = summary.redactions.values().sum();
         assert!(
             total > 0,
@@ -429,8 +524,9 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (_summary, body, _envelope) =
-            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (_summary, body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         assert!(
             !body.contains("sk-fake-fixture-secret-1234"),
             "secret survived into the preview body"
@@ -442,8 +538,9 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) =
-            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         assert_eq!(summary.event_count, 1);
         assert!(!summary.opening_prompt.is_empty());
         assert!(
@@ -476,8 +573,9 @@ mod tests {
         let r = src.discover().unwrap().remove(0);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (summary, _body, _envelope) =
-            build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         assert!(summary.opening_prompt.chars().count() <= 200);
     }
 
@@ -488,8 +586,12 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
-        let (b, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (a, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        let (b, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
         assert_eq!(a.envelope_digest, b.envelope_digest);
         assert!(a.envelope_digest.starts_with("sha256:"));
     }
@@ -621,11 +723,13 @@ mod tests {
         let (_d, src, r) = fixture_session();
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
-        let (a, _, _) = build_preview(&store, &cfg, None, &src, &r).await.unwrap();
+        let (a, _, _) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
 
         let mut widened = cfg.clone();
         widened.consent_scopes = vec!["model_training".into()];
-        let (b, _, _) = build_preview(&store, &widened, None, &src, &r)
+        let (b, _, _) = build_preview(&store, Some(&widened), None, &src, &r)
             .await
             .unwrap();
         assert_ne!(a.envelope_digest, b.envelope_digest);

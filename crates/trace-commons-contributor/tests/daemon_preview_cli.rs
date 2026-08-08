@@ -36,6 +36,14 @@ const PLANTED_SECRET: &str = "sk-fake-fixture-secret-1234";
 /// something to do), and settings pointed at that fixture's project root.
 /// Returns the config dir and the entry id to preview.
 fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
+    seed_config_dir_with(true)
+}
+
+/// `enrolled: false` writes no `contributor.json` at all, which is the state
+/// a contributor is in before they have decided whether to enrol -- and the
+/// state in which "what would you actually send?" is the most useful
+/// question they can ask.
+fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().join("config");
     let store = ConfigStore::open(config_dir.clone()).unwrap();
@@ -71,7 +79,9 @@ fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
         pii_filter: None,
         allowed_hosts: None,
     };
-    store.save_config(&cfg).unwrap();
+    if enrolled {
+        store.save_config(&cfg).unwrap();
+    }
 
     let mut settings = DaemonSettings::load(&store).unwrap();
     settings.claude_root = Some(sessions_root);
@@ -98,6 +108,7 @@ fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
                 approved_scopes: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
+                approved_at: None,
             },
             100,
         )
@@ -165,6 +176,41 @@ fn cli_daemon_preview_prints_a_real_byte_count_not_null() {
         !stdout.contains(PLANTED_SECRET),
         "the planted secret leaked into CLI stdout: {stdout}"
     );
+}
+
+#[test]
+fn preview_works_before_enrollment() {
+    // Found by an application build: `preview` refused with `not-logged-in`
+    // unless a `contributor.json` existed, so the app's fixture launcher had
+    // to fabricate an enrollment purely to preview a local file. Preview
+    // does no network I/O and needs neither the daemon's lock nor its
+    // running loop -- the requirement was incidental, and it inverted the
+    // decision it exists to support: seeing what would be sent is precisely
+    // what someone wants *before* enrolling.
+    let (dir, entry_id) = seed_config_dir_with(false);
+    let config_dir = dir.path().join("config");
+
+    let out = run_preview(&config_dir, &entry_id.to_string(), true);
+    assert!(
+        out.status.success(),
+        "preview must not require an enrollment: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout was not valid JSON ({e}): {stdout}"));
+
+    assert_eq!(
+        value["enrolled"],
+        serde_json::json!(false),
+        "an unenrolled preview must say so, so an app can label it as a \
+         placeholder-identity build: {value}"
+    );
+    assert!(
+        value["would_send_bytes"].as_u64().unwrap_or(0) > 0,
+        "an unenrolled preview still reports what would be sent: {value}"
+    );
+    assert!(!stdout.contains(PLANTED_SECRET));
 }
 
 #[test]
