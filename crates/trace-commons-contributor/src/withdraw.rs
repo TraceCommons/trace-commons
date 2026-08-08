@@ -268,7 +268,7 @@ mod tests {
     async fn reports_the_in_commons_tier() {
         let base = spawn(stub_withdraw(
             Arc::new(Mutex::new(Vec::new())),
-            "in_commons",
+            "commons_not_distributed",
         ))
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
@@ -281,7 +281,7 @@ mod tests {
     async fn reports_the_distributed_tier_and_its_cannot_recall_meaning() {
         let base = spawn(stub_withdraw(
             Arc::new(Mutex::new(Vec::new())),
-            "distributed",
+            "commons_distributed",
         ))
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
