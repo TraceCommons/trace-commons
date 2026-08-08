@@ -21,7 +21,9 @@
 //!   never degrades to sending unfiltered text.
 
 pub mod eligibility;
+pub mod health;
 pub mod policy;
 pub mod queue;
 pub mod settings;
 pub mod state;
+pub mod uploader;
