@@ -1,12 +1,23 @@
 # Contributor daemon IPC — `trace_commons.daemon.v1_1`
 
-Status: **stable, additive**. This is the contract the native menu-bar and
-window applications are built against, on three separate teams, from this
-document alone. `v1_1` is additive over `v1`: every `v1` method keeps its
-`v1` request and response shape unchanged, so a `v1` client that ignores
-methods and fields it does not recognize keeps working against a `v1_1`
-daemon without modification. New methods and fields are additions, not
-replacements.
+Status: **stable, additive, with one deliberate exception**. This is the
+contract the native menu-bar and window applications are built against, on
+three separate teams, from this document alone. `v1_1` is additive over
+`v1`: every `v1` method keeps its `v1` request and response shape, so a
+`v1` client that ignores methods and fields it does not recognize keeps
+working against a `v1_1` daemon without modification. New methods and
+fields are additions, not replacements.
+
+**The exception, stated rather than buried:** `set_settings` now *refuses* a
+key it does not recognize, where `v1` silently ignored it. A `v1` caller
+that sent an unrecognized key alongside a recognized one used to get a
+partial success and now gets `bad_params`. This is a deliberate break of the
+compatibility rule above, made because the old behaviour meant a mistyped
+key left the daemon quietly running on the old value with the caller
+believing otherwise -- and one of those keys decides which directories get
+scanned for the contributor's transcripts. No shipped client relies on the
+old behaviour, because no application has shipped against `v1` yet. See
+[`set_settings`](#set_settings) for the full rules.
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
