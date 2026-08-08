@@ -34,7 +34,28 @@
 //! operations append a local, hash-only audit entry (`daemon::audit`) that a
 //! contributor can read to see when autonomy was granted and when a bulk
 //! approval happened. This is user-facing visibility, not a security
-//! control, and is not claimed to be one.
+//! control, and is not claimed to be one -- but it is written fail-closed:
+//! an audited action whose entry cannot be persisted is rolled back and the
+//! call returns `audit-write-failed`, because a change that stands with no
+//! record of it is exactly what removing the restriction was not supposed
+//! to make possible. See `daemon::audit`.
+//!
+//! # What crosses this socket
+//!
+//! No path, token, invite code, claim, device key, or trace content
+//! appears in any response, error string, or pushed event. `error.message`
+//! is a fixed label. Queue entries carry `project_label`, never
+//! `project_key` or `path`. Project labels are derived by the daemon from
+//! the key and are never a string a caller supplied.
+//!
+//! **The preview exemption.** `"preview"`'s `opening_prompt`, and the
+//! redacted body `open_preview` returns to the C ABI, *are* trace content,
+//! deliberately. A contributor cannot consent to sending something they
+//! cannot see, so preview is the one interface allowed to carry it --
+//! bounded to post-redaction content, only for an `entry_id` the caller
+//! already holds, and never onward into a log line, an audit entry, a
+//! history record, notification text, or a receipt. Everywhere else in
+//! this module the rule is absolute.
 //!
 //! # Sync vs. async dispatch
 //!
