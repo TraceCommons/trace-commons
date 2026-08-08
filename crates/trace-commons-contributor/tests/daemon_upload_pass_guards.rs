@@ -121,14 +121,21 @@ impl Harness {
         let claude_root = dir.path().join("projects");
         std::fs::create_dir_all(&claude_root).unwrap();
         let shared = Arc::new(DaemonShared::load(store).unwrap());
+        // Spawned before the lock is taken: holding a std MutexGuard across
+        // an await is a real hazard, not a lint to silence.
+        let filter_base = if broken_filter {
+            Some(spawn(noop_privacy_filter()).await)
+        } else {
+            None
+        };
         {
             let mut s = shared.settings.lock().unwrap();
             s.claude_root = Some(claude_root.clone());
             s.codex_root = Some(dir.path().join("codex"));
-            if broken_filter {
+            if let Some(base_url) = filter_base {
                 s.near_ai = Some(NearAiSettings {
                     api_key: "test-key".into(),
-                    base_url: Some(spawn(noop_privacy_filter()).await),
+                    base_url: Some(base_url),
                     model: None,
                 });
             }
