@@ -64,7 +64,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::UnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::EmbeddedDaemon;
@@ -217,19 +217,6 @@ struct RunningDaemon {
     supervisor: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
-/// `tc_handle.state`'s three phases. `TearingDown` exists so a *second*
-/// concurrent `tc_daemon_stop`/`tc_handle_free` call -- from another thread,
-/// racing the first -- waits for the first caller's teardown to actually
-/// finish (via `tc_handle::teardown_done`) instead of seeing `None`-shaped
-/// state and returning immediately while teardown is still in progress:
-/// without this phase, "stop returned" would not be a real teardown barrier
-/// for that second caller.
-enum DaemonState {
-    Running(RunningDaemon),
-    TearingDown,
-    Stopped,
-}
-
 /// The daemon handle: an owned tokio runtime plus the running daemon's
 /// shared state and background task handles.
 ///
@@ -239,24 +226,24 @@ enum DaemonState {
 /// function that does, and must not race a call still using the handle.
 pub struct tc_handle {
     rt: tokio::runtime::Runtime,
-    state: Mutex<DaemonState>,
-    /// Signalled once `state` leaves `TearingDown`, so a concurrent stop
-    /// caller can wait for the in-progress teardown to actually finish.
-    teardown_done: Condvar,
+    /// `None` once the daemon has been claimed for teardown -- by
+    /// `tc_daemon_stop`, or implicitly by `tc_handle_free` tearing it down
+    /// before freeing. Deliberately a plain `Option` and not a
+    /// `Running/TearingDown/Stopped` state machine with a `Condvar`: see
+    /// `stop_embedded`'s doc for why making a second concurrent stop *wait*
+    /// for the first caller's teardown is unsound here.
+    running: Mutex<Option<RunningDaemon>>,
     subscriptions: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_subscription: AtomicU64,
 }
 
 /// Borrow the running daemon's shared state, or `None` if it has been
-/// stopped (or is in the process of stopping). The one place `tc_call`,
-/// `tc_preview_open`, and `tc_subscribe` all read `handle.state` from, so
-/// they agree on what "stopped" means.
+/// stopped (or has been claimed for teardown by a concurrent stop). The one
+/// place `tc_call`, `tc_preview_open`, and `tc_subscribe` all read
+/// `handle.running` from, so they agree on what "stopped" means.
 fn shared_of(handle: &tc_handle) -> Option<Arc<ipc::DaemonShared>> {
-    let state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
-    match &*state {
-        DaemonState::Running(r) => Some(Arc::clone(&r.embedded.shared)),
-        DaemonState::TearingDown | DaemonState::Stopped => None,
-    }
+    let running = handle.running.lock().unwrap_or_else(|p| p.into_inner());
+    running.as_ref().map(|r| Arc::clone(&r.embedded.shared))
 }
 
 /// Opaque preview handle returned by `tc_preview_open`.
@@ -296,11 +283,10 @@ pub unsafe extern "C" fn tc_daemon_start(
             ));
             Ok(tc_handle {
                 rt,
-                state: Mutex::new(DaemonState::Running(RunningDaemon {
+                running: Mutex::new(Some(RunningDaemon {
                     embedded,
                     supervisor,
                 })),
-                teardown_done: Condvar::new(),
                 subscriptions: Mutex::new(HashMap::new()),
                 next_subscription: AtomicU64::new(1),
             })
@@ -356,35 +342,38 @@ pub unsafe extern "C" fn tc_daemon_start(
 /// `handle`, so there is nothing for that unwind to corrupt even if the
 /// dedicated thread's own teardown panics.
 ///
-/// A second, concurrent caller (from another thread, racing the first) sees
-/// `DaemonState::TearingDown` and blocks on `teardown_done` until the first
-/// caller's teardown actually finishes, rather than seeing `None`-shaped
-/// state and returning immediately -- otherwise "stop returned" would not
-/// be a real teardown barrier for that second caller.
+/// Exactly one caller wins the `running.take()` race and performs the
+/// teardown; a second, concurrent caller sees `None` and returns
+/// **immediately**, without waiting for the winner's teardown to finish.
+/// That is a deliberately weaker guarantee than "stop returned means
+/// teardown is complete", and it is the honest one -- an earlier revision
+/// made the loser block on a `Condvar` until the winner finished, which
+/// was unsound in two independent ways:
+///
+/// 1. **Use-after-free.** If the *winning* caller is `tc_handle_free`, it
+///    runs `stop_embedded`, signals, and then `Box::from_raw(handle)` --
+///    freeing the very `Mutex`/`Condvar` the loser is still parked inside
+///    `wait_while` on and must re-acquire before it can return. The header
+///    would have been advertising that as a safe combination.
+/// 2. **Runtime deadlock.** `tc_daemon_stop` is documented as callable from
+///    inside a `tc_subscribe` callback, i.e. from one of `handle.rt`'s own
+///    worker threads. A callback thread that lost the race would park that
+///    worker while the winner's teardown (joining the supervisor task)
+///    needs a free worker to make progress. At `TOKIO_WORKER_THREADS=1`
+///    neither call ever returns.
+///
+/// So the contract is: `tc_daemon_stop` is idempotent, but it is not a
+/// teardown barrier for a *second concurrent* caller, and a caller must not
+/// call `tc_handle_free` concurrently with `tc_daemon_stop`. Both are
+/// stated in the header.
 fn stop_embedded(handle: &tc_handle) {
-    let running = {
-        let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
-        match &*state {
-            DaemonState::Running(_) => {
-                let DaemonState::Running(running) =
-                    std::mem::replace(&mut *state, DaemonState::TearingDown)
-                else {
-                    unreachable!("just matched Running above");
-                };
-                running
-            }
-            DaemonState::TearingDown => {
-                // Someone else is already tearing down: wait for them
-                // rather than racing ahead, so this call returning really
-                // does mean teardown is complete.
-                let _guard = handle
-                    .teardown_done
-                    .wait_while(state, |s| matches!(s, DaemonState::TearingDown))
-                    .unwrap_or_else(|p| p.into_inner());
-                return;
-            }
-            DaemonState::Stopped => return,
-        }
+    let running = handle
+        .running
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    let Some(running) = running else {
+        return;
     };
     let _ = std::thread::spawn(move || {
         let RunningDaemon {
@@ -411,10 +400,6 @@ fn stop_embedded(handle: &tc_handle) {
         embedded.close();
     })
     .join();
-    let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
-    *state = DaemonState::Stopped;
-    drop(state);
-    handle.teardown_done.notify_all();
 }
 
 /// Stop the daemon loop. Idempotent, and safe to call from any thread --
@@ -423,12 +408,17 @@ fn stop_embedded(handle: &tc_handle) {
 /// threads: those observe the daemon as stopped
 /// (`{"error":{"code":"unavailable","message":"daemon-stopped"}}` /
 /// `entry-id-invalid`-style failure) rather than dereferencing freed
-/// memory, because this function does **not** free `handle`. A second,
-/// concurrent `tc_daemon_stop`/`tc_handle_free` call waits for the first
-/// caller's teardown to actually finish before returning, so "stop
-/// returned" is a real teardown barrier no matter which thread called it
-/// first. Call `tc_handle_free` once nothing else will use `handle` again
-/// to reclaim it. Safe to call with NULL (no-op).
+/// memory, because this function does **not** free `handle`. Call
+/// `tc_handle_free` once nothing else will use `handle` again to reclaim
+/// it. Safe to call with NULL (no-op).
+///
+/// Idempotent, but **not a teardown barrier for a second concurrent
+/// caller**: if two threads call this at once, one performs the teardown
+/// and the other returns immediately, possibly before the daemon has
+/// actually finished stopping. Only the call that wins that race blocks
+/// until teardown completes. See `stop_embedded`'s doc for why waiting
+/// would be unsound rather than merely slower. A caller must **not** call
+/// `tc_handle_free` concurrently with this function.
 ///
 /// **Not** a synchronization point for `tc_subscribe` callbacks -- see
 /// `tc_subscribe`'s doc. A callback can still be invoked, using `ctx`,
@@ -676,6 +666,13 @@ pub unsafe extern "C" fn tc_subscribe(
 /// Calling from inside a runtime context refuses instead (a no-op; the
 /// token stays valid, unlike `tc_handle_free`'s deliberate leak, since
 /// nothing here was allocated) and records why via `tc_last_error`.
+///
+/// That check cannot distinguish true reentrancy from a host calling this
+/// on a thread driving its own unrelated runtime, and since this function
+/// returns `void` the refusal is **silent**. A binding author must check
+/// `tc_last_error` after every `tc_unsubscribe` and treat a refusal as "the
+/// barrier did not hold" -- retry from a plain thread before freeing `ctx`.
+/// See the header's `tc_unsubscribe` entry.
 ///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start` (or NULL, a

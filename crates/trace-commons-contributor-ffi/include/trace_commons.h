@@ -22,7 +22,21 @@
  * free function here -- must not be called concurrently with any other
  * call still using the same pointer, and must be called from a plain
  * thread, never from inside a tc_subscribe callback (see its own doc for
- * why).
+ * why). In particular, tc_handle_free must NOT be called concurrently with
+ * tc_daemon_stop: tc_daemon_stop does not free the handle, but it also does
+ * not hold it against a concurrent free, and tc_handle_free performs its own
+ * teardown before freeing.
+ *
+ * tc_daemon_stop is idempotent, but it is NOT a teardown barrier for a
+ * SECOND CONCURRENT CALLER. If two threads call it at once, one thread
+ * performs the teardown and blocks until it completes; the other returns
+ * IMMEDIATELY, possibly while the daemon is still stopping. Do not treat a
+ * tc_daemon_stop return on thread B as proof that thread A's teardown
+ * finished. (An earlier revision made the second caller wait; that was
+ * unsound -- if the winning caller was tc_handle_free it freed the very lock
+ * the waiter had to re-acquire, and a waiter parked on one of the daemon
+ * runtime's own worker threads could deadlock the teardown it was waiting
+ * for. A weaker honest guarantee is better than a stronger false one.)
  *
  * Every function here catches Rust panics at the boundary and converts them
  * to an ordinary error; a panic never unwinds into the caller. Every
@@ -77,12 +91,14 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other
- * threads, and concurrently with itself / tc_handle_free from another
- * thread (a second concurrent caller waits for the first caller's teardown
- * to finish before returning, so "stop returned" is a real barrier no
- * matter which thread got there first). Does NOT free the handle; call
- * tc_handle_free once nothing else will use it again. Safe to call with
- * NULL.
+ * threads. Does NOT free the handle; call tc_handle_free once nothing else
+ * will use it again. Safe to call with NULL.
+ *
+ * Idempotent, but NOT a teardown barrier for a second concurrent caller:
+ * of two simultaneous callers, one performs the teardown and the other
+ * returns immediately, possibly before the daemon has finished stopping.
+ * And do NOT call tc_handle_free concurrently with this function. Both
+ * rules, and why, are spelled out at the top of this header.
  *
  * Is NOT a synchronization point for tc_subscribe callbacks -- see
  * SUBSCRIPTION LIFETIME above and tc_unsubscribe below.
@@ -140,6 +156,19 @@ uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ct
  * hang. Calling from inside a runtime context refuses (a no-op; the token
  * remains valid to retry from a plain thread) and records why via
  * tc_last_error.
+ *
+ * IMPORTANT for binding authors: that reentrancy check is "am I inside ANY
+ * tokio runtime context", which cannot distinguish true reentrancy (a
+ * callback unsubscribing itself) from a host that merely happens to call
+ * tc_unsubscribe from a thread driving its own, unrelated async runtime.
+ * The latter is refused too -- and because this function returns void, the
+ * refusal is SILENT. A host that assumes success there would free ctx while
+ * the subscription is still live, believing the API's only barrier had
+ * held. Therefore: after every tc_unsubscribe, check tc_last_error. A
+ * non-NULL, non-stale value means the call was refused and the barrier did
+ * NOT hold -- retry from a plain thread with no runtime context before
+ * freeing ctx. Clear or note the prior tc_last_error value first so a
+ * leftover error is not mistaken for this one.
  */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
