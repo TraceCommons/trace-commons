@@ -5704,6 +5704,300 @@ async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// Withdrawal is not a punishment. Credit already awarded for a trace survives
+/// its revocation: the record flips to `Revoked` and `credit_points_final` is
+/// left exactly as it was. Settlement is gated on `status == Accepted`, not on
+/// this value, so leaving it alone changes no control -- only the receipt the
+/// contributor reads.
+#[tokio::test]
+async fn revocation_leaves_awarded_final_credit_unchanged() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(2.5);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after revocation")
+        .expect("record still exists after revocation");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(
+        revoked.credit_points_final,
+        Some(2.5),
+        "revocation must not claw back credit that was already awarded"
+    );
+}
+
+/// Revoked means the content is gone. Both the stored envelope body and the
+/// encrypted artifact are deleted; only the hash-only tombstone and the
+/// status-flipped metadata record remain.
+#[tokio::test]
+async fn revocation_deletes_stored_envelope_body_and_encrypted_artifact() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("encrypted artifact receipt is persisted");
+    let body_path = temp.path().join(&record.object_key);
+    assert!(body_path.exists(), "envelope body exists before revocation");
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_ok(),
+        "encrypted artifact reads before revocation"
+    );
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        !body_path.exists(),
+        "revocation must delete the stored envelope body"
+    );
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_err(),
+        "revocation must delete the encrypted artifact"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some(),
+        "the hash-only tombstone survives"
+    );
+}
+
+/// A deployment that cannot reach the store holding a record's ciphertext
+/// cannot make revocation mean anything, so it refuses rather than tombstoning
+/// the record and leaving the payload behind.
+#[tokio::test]
+async fn revocation_fails_closed_when_artifact_store_is_unconfigured() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state_with_store = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state_with_store),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds with an artifact store configured");
+
+    // Same root, no artifact store: the record still carries a receipt for
+    // ciphertext this process can no longer delete.
+    let state_without_store = test_state(temp.path().to_path_buf());
+    let error = revoke_trace_handler(
+        State(state_without_store),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect_err("revocation fails closed without a reachable artifact store");
+    assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        error
+            .1
+            .0
+            .error
+            .contains("trace_artifact_store_unconfigured"),
+        "the refusal names the missing control"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_none(),
+        "no tombstone is written when revocation is refused"
+    );
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_ne!(record.status, TraceCorpusStatus::Revoked);
+}
+
+/// The tombstone is hash-only: it carries the submission and tenant keys plus
+/// sha256 digests, never the contributor's identity, the storage path of the
+/// deleted object, or any trace content.
+#[tokio::test]
+async fn revocation_tombstone_carries_no_identity_path_or_content() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("tombstone lookup succeeds")
+        .expect("tombstone exists");
+    let serialized = serde_json::to_string(&tombstone).expect("tombstone serializes");
+    assert!(
+        !serialized.contains(&record.object_key),
+        "tombstone must not carry the storage path of the deleted object"
+    );
+    assert!(
+        !serialized.contains(record.auth_principal_ref.as_str()),
+        "tombstone must not carry contributor identity"
+    );
+    assert!(
+        !serialized.contains("Please inspect the workspace"),
+        "tombstone must not carry trace content"
+    );
+    for hash in [
+        tombstone.redaction_hash.as_deref(),
+        tombstone.canonical_summary_hash.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(
+            hash.starts_with("sha256:"),
+            "tombstone hashes are sha256 digests"
+        );
+    }
+}
+
+/// Revoking an already-revoked trace is a no-op that still answers 204: the
+/// content is already gone, so the second delete finds nothing, and the
+/// awarded credit is not touched on either pass.
+#[tokio::test]
+async fn revoking_twice_is_idempotent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(1.25);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+    let body_path = temp.path().join(&record.object_key);
+
+    let first = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("first revocation succeeds");
+    assert_eq!(first, StatusCode::NO_CONTENT);
+
+    let second = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("second revocation succeeds");
+    assert_eq!(second, StatusCode::NO_CONTENT);
+
+    assert!(!body_path.exists(), "content stays deleted");
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after two revocations")
+        .expect("record still exists");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(revoked.credit_points_final, Some(1.25));
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn revoke_rejects_mismatched_file_record_tenant_before_side_effects() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -34263,7 +34557,9 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     assert_eq!(statuses_after_revoke.len(), 1);
     assert_eq!(statuses_after_revoke[0].status, "revoked");
     assert_eq!(statuses_after_revoke[0].credit_points_ledger, 0.0);
-    assert_eq!(statuses_after_revoke[0].credit_points_final, Some(0.0));
+    // Revocation does not claw back the awarded figure; this record was never
+    // finalized, so it stays `None` rather than being punitively zeroed.
+    assert_eq!(statuses_after_revoke[0].credit_points_final, None);
     assert_eq!(statuses_after_revoke[0].credit_points_total, None);
     assert!(
         statuses_after_revoke[0]

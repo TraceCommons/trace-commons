@@ -12224,6 +12224,20 @@ async fn revoke_submission(
             "revocation",
         )?;
     }
+    // Fail closed before anything is mutated. Revocation must leave the trace
+    // body unreachable, so a record that carries an encrypted artifact receipt
+    // can only be revoked on a deployment that can reach the store holding that
+    // ciphertext. Refusing here is preferable to tombstoning the record and
+    // silently leaving the payload in a store this process cannot delete from.
+    if let Some(record) = record.as_ref()
+        && record.artifact_receipt.is_some()
+        && state.artifact_store.is_none()
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation refused: missing control trace_artifact_store_unconfigured",
+        ));
+    }
     let revocation_reason =
         trace_revocation_reason_for_request(tenant.auth(), owner_self_revocation, reason)?;
     let mut derived = tenant
@@ -12243,9 +12257,17 @@ async fn revoke_submission(
             .map(|record| record.canonical_summary_hash.clone()),
     };
 
+    // Revocation flips status only. `credit_points_final` is deliberately left
+    // as-is: withdrawing a trace is a contributor's right, not an offence, and
+    // zeroing the awarded figure made the receipt read like a penalty. Nothing
+    // selects for settlement by this value -- `run_credit_settlement` gates on
+    // `status == Accepted` plus `!record.is_terminal()`, and the tenant credit
+    // summary only sums `credit_points_final` for Accepted records -- so the
+    // field is a display value here, not a control. Reversal of credit that has
+    // already settled is a separate, explicit mechanism
+    // (`enqueue_credit_settlement_reversal_items_for_revocation`).
     let mirrored_record = record.take().map(|mut record| {
         record.status = TraceCorpusStatus::Revoked;
-        record.credit_points_final = Some(0.0);
         record
     });
     let revoked_derived = derived.take().map(|mut derived| {
@@ -12358,6 +12380,18 @@ async fn revoke_submission(
         }
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Revoked means the content is gone, not merely relabelled. This runs last,
+    // after every hash-only tombstone, mirror, and invalidation has been written
+    // from the still-readable record -- `redaction_hash_for_record` reads the
+    // stored envelope, so deleting earlier would strip the tombstone of the very
+    // hashes it exists to carry. Errors propagate: a store that refuses deletion
+    // (a disabled remote object store returns an error) fails the request rather
+    // than leaving the payload behind under a revoked label. Deleting an object
+    // that is already gone is a no-op, so re-revoking is idempotent.
+    if let Some(record) = mirrored_record.as_ref() {
+        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -59803,8 +59837,10 @@ async fn run_maintenance(
                 .or_insert_with(|| TRACE_DEFAULT_REVOCATION_REASON.to_string())
                 .clone();
             if !request.dry_run {
+                // Same decision as `revoke_submission`: reconciling a record
+                // against an existing tombstone marks it revoked and leaves the
+                // awarded credit figure untouched.
                 record.status = TraceCorpusStatus::Revoked;
-                record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
                 mirror_revocation_to_db(
                     state,
