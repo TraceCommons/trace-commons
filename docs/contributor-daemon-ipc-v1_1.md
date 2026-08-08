@@ -134,14 +134,36 @@ something it can corroborate, rather than to a string a client invented.
   facts an app may render as a checkmark, never as text containing the
   actual value.
 - `preview` returns a **summary** over the socket -- counts, labels, and
-  sizes -- never the redacted trace body. The full redacted event body is
-  intentionally available only in-process, through the crate's C ABI, not
+  sizes -- never the full redacted trace body. The full redacted event body
+  is intentionally available only in-process, through the crate's C ABI, not
   over this IPC surface. This is not an oversight: unlike `enroll`, `preview`
   needs neither the daemon's file lock nor its running event loop, so a
   native app that wants the actual body should call the C ABI's local
   preview entry point directly rather than asking the daemon for it. The
   socket path exists for uses (a tray or window summarizing what's pending)
-  that never need the trace content itself.
+  that mostly do not need the trace content itself.
+
+### The preview exemption
+
+`preview` is the **one** interface that deliberately carries trace content,
+and this is a decision, not a contradiction left lying around. The socket's
+`opening_prompt` and the C ABI's `tc_preview_body` are both trace content. A
+contributor cannot consent to sending something they cannot see; an approval
+given against a byte count and a project name is not an informed one. So the
+rule has exactly one carve-out, and it is bounded:
+
+- **Post-redaction only.** What preview carries is what the real redaction
+  pipeline produced. Raw session text never crosses either boundary.
+- **Only for an entry the caller already holds.** Content is reachable only
+  by naming an `entry_id` already in the queue. There is no bulk read, no
+  ambient read, and no way to ask for a session the daemon has not offered.
+- **Never onward.** It never appears in a log line, an audit entry, a
+  history record, notification text, or a receipt. Not truncated, not
+  summarized, not hashed-with-a-sample. Nothing copies it into any of those.
+
+Everywhere else the rule remains absolute: no path, token, invite code,
+claim, device key, or trace content in any log line, error string, receipt,
+history record, audit entry, notification text, or IPC response.
 
 ## Methods
 
@@ -203,9 +225,24 @@ healthy.
   "redactions": { "aws_secret_key": 1 },
   "pii_labels_present": ["email"],
   "consent_scopes": ["debugging_evaluation"],
-  "residual_risk": "pattern-based"
+  "residual_risk": "pattern-based",
+  "envelope_digest": "sha256:…",
+  "input_fingerprint": "sha256:…"
 }
 ```
+
+`opening_prompt` is redacted trace content -- see "The preview exemption"
+above for why this one field is allowed to be, and what that permission does
+not extend to.
+
+`envelope_digest` identifies the redacted envelope this summary describes;
+`input_fingerprint` identifies the configuration that produced it. Both are
+hashes, never content. Issuing `preview` **pins the entry** to that digest:
+an `approve` that follows is an approval of exactly that envelope, and the
+upload refuses and re-offers the entry if the envelope the pipeline builds
+is not that one, or if any envelope-determining input has moved since. An
+app can hold these two values to confirm that the entry it later approves is
+the one it actually displayed.
 
 `would_send_bytes` is the size of the **redacted envelope**, not the raw
 session file -- the same envelope `submit` would actually send, computed by
@@ -367,6 +404,14 @@ race `list_pending` against the stream at startup. On `resync_required`, call
   before uploading; on a mismatch it sends nothing and creates a fresh
   `pending` entry for the new content. An approval covers content, not a
   filename.
+- An approval also covers the **terms** it was given under: the consent
+  scopes, the configuration that determines the envelope, and -- if the
+  entry was previewed -- the exact redacted envelope that was shown. If any
+  of those move before the upload, the approval is revoked and the entry
+  returns to `pending` with `consent-scopes-changed-after-approval`,
+  `approval-inputs-changed`, or `envelope-changed-after-approval`. Nothing
+  is sent. An app should treat these the same as a superseded entry: offer
+  it again, previewing afresh.
 - `approved` entries can be returned to `pending` with `cancel`.
 
 ## `reason_label` and health taxonomy
@@ -384,6 +429,9 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 | `dismissed-by-contributor` | declined by hand | n/a |
 | `expired-without-decision` | aged out | n/a |
 | `session-changed-after-offer` | superseded | n/a |
+| `consent-scopes-changed-after-approval` | approval revoked, entry re-offered | n/a |
+| `approval-inputs-changed` | an envelope-determining input moved after approval; entry re-offered | n/a |
+| `envelope-changed-after-approval` | the envelope that would be sent is not the one previewed; entry re-offered | n/a |
 
 ### Health precedence
 

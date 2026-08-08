@@ -75,6 +75,8 @@ impl Running {
                     retry_after: None,
                     submission_id: None,
                     approved_scopes: None,
+                    approved_inputs: None,
+                    previewed_envelope_digest: None,
                 },
                 500,
             )

@@ -529,6 +529,33 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 .get("all")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // Read before the queue lock is taken, so the settings lock is
+            // never held under it.
+            //
+            // What is being approved is not just a session: it is that
+            // session under the consent scopes and the
+            // envelope-determining configuration in force right now. Both
+            // are recorded on the entry so the uploader can refuse if
+            // either moves before it sends. An approval with no readable
+            // config records neither, which the uploader treats as
+            // "unknown, re-ask" -- fail-closed.
+            let cfg = shared.store.load_config().ok().flatten();
+            let scopes = cfg
+                .as_ref()
+                .map(|c| c.consent_scopes.clone())
+                .unwrap_or_default();
+            let inputs = cfg
+                .as_ref()
+                .map(|c| {
+                    let near_ai = shared
+                        .settings
+                        .lock()
+                        .expect("settings lock")
+                        .near_ai
+                        .clone();
+                    super::preview::input_fingerprint(c, near_ai.as_ref())
+                })
+                .unwrap_or_default();
             let mut queue = shared.queue.lock().expect("queue lock");
             let ids: Vec<Uuid> = if all {
                 queue.pending().iter().map(|e| e.entry_id).collect()
@@ -538,21 +565,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
                 }
             };
-            // The scopes in force right now are part of what is being
-            // approved, and are recorded on the entry so the uploader can
-            // refuse if they move before it sends. An approval with no
-            // readable config records no scopes, which the uploader treats
-            // as "unknown, re-ask" -- fail-closed.
-            let scopes = shared
-                .store
-                .load_config()
-                .ok()
-                .flatten()
-                .map(|c| c.consent_scopes)
-                .unwrap_or_default();
             let mut approved_ids = Vec::new();
             for id in ids {
-                if queue.approve(id, &scopes) {
+                if queue.approve(id, &scopes, &inputs) {
                     approved_ids.push(id);
                 }
             }
@@ -876,20 +891,40 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     };
 
     match super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref).await {
-        Ok((summary, _body)) => Response::ok(
-            req.id,
-            serde_json::json!({
-                "entry": entry_value(&entry),
-                "would_send_bytes": summary.would_send_bytes,
-                "raw_session_bytes": summary.raw_session_bytes,
-                "event_count": summary.event_count,
-                "opening_prompt": summary.opening_prompt,
-                "redactions": summary.redactions,
-                "pii_labels_present": summary.pii_labels_present,
-                "consent_scopes": summary.consent_scopes,
-                "residual_risk": summary.residual_risk,
-            }),
-        ),
+        Ok((summary, _body)) => {
+            // Pin the entry to the artifact just shown, so an approval that
+            // follows is an approval of exactly this envelope and not of
+            // whatever the pipeline happens to build at upload time. Best
+            // effort against the queue file: a failure to persist means the
+            // upload falls back to the input-fingerprint check, which is
+            // still fail-closed, never to no check at all.
+            {
+                let mut queue = shared.queue.lock().expect("queue lock");
+                if queue.record_previewed_envelope(id, &summary.envelope_digest) {
+                    let _ = queue.save(&shared.store);
+                }
+            }
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "entry": entry_value(&entry),
+                    "would_send_bytes": summary.would_send_bytes,
+                    "raw_session_bytes": summary.raw_session_bytes,
+                    "event_count": summary.event_count,
+                    "opening_prompt": summary.opening_prompt,
+                    "redactions": summary.redactions,
+                    "pii_labels_present": summary.pii_labels_present,
+                    "consent_scopes": summary.consent_scopes,
+                    "residual_risk": summary.residual_risk,
+                    // Hashes, not content: what the contributor is being shown,
+                    // and the configuration that produced it. An app can hold
+                    // these to confirm the entry it later approves is the one
+                    // it displayed.
+                    "envelope_digest": summary.envelope_digest,
+                    "input_fingerprint": summary.input_fingerprint,
+                }),
+            )
+        }
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
     }
 }
@@ -929,9 +964,20 @@ pub async fn open_preview(
     let sources = crate::source::all_sources(claude_root, codex_root, None);
     let (source, session_ref) =
         super::find_session(&sources, &entry).ok_or("session-file-vanished")?;
-    super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref)
-        .await
-        .map_err(|_| "preview-failed")
+    let (summary, body) =
+        super::preview::build_preview(&shared.store, &cfg, near_ai, source, &session_ref)
+            .await
+            .map_err(|_| "preview-failed")?;
+    // Same pinning as the socket's `"preview"`: the entry now records the
+    // digest of the artifact this caller was shown, so an approval that
+    // follows covers that artifact and nothing else.
+    {
+        let mut queue = shared.queue.lock().expect("queue lock");
+        if queue.record_previewed_envelope(entry_id, &summary.envelope_digest) {
+            let _ = queue.save(&shared.store);
+        }
+    }
+    Ok((summary, body))
 }
 
 /// Settings as returned over IPC: the privacy-filter credential is reported
@@ -1314,6 +1360,8 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
                     },
                     500,
                 )
@@ -1409,6 +1457,8 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
                     },
                     500,
                 )
@@ -1551,6 +1601,8 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
                     },
                     500,
                 )
@@ -1623,6 +1675,8 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
                     },
                     500,
                 )
@@ -1772,6 +1826,8 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
         };
         let body = serde_json::to_string(&entry_value(&e)).unwrap();
         assert!(
@@ -1818,6 +1874,8 @@ mod tests {
                     retry_after: None,
                     submission_id: None,
                     approved_scopes: None,
+                    approved_inputs: None,
+                    previewed_envelope_digest: None,
                 },
                 500,
             )

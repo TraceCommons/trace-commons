@@ -450,6 +450,23 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                     Some(reason_label),
                 );
             }
+            uploader::UploadDecision::ApprovalStale { reason_label } => {
+                // The same re-offer path the consent-scope guard above
+                // uses, and for the same reason: the approval covered
+                // terms that no longer hold, so it is revoked and the
+                // entry goes back in front of the contributor rather than
+                // being recorded as a refusal of the trace itself.
+                //
+                // Deliberately not `Queue::supersede`: that path is keyed
+                // on a *changed* session hash, and mints a replacement
+                // entry whose id is derived from it. Here the session hash
+                // is unchanged -- that is the whole point of the finding --
+                // so the replacement's id would collide with the entry
+                // just marked `Superseded`, `upsert` would treat it as
+                // already tracked, and the entry would never be re-offered
+                // at all.
+                q.revoke_approval(entry.entry_id, &reason_label);
+            }
             uploader::UploadDecision::Failed { reason_label } => {
                 q.record_attempt(entry.entry_id, None);
                 q.set_state(

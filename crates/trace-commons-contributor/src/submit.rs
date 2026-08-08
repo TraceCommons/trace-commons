@@ -235,6 +235,7 @@ pub struct SubmitContext<'a> {
     near_ai: Option<NearAiSettings>,
     receipts: Vec<Receipt>,
     canary_runs: u32,
+    expected_envelope_digest: Option<String>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -275,6 +276,7 @@ impl<'a> SubmitContext<'a> {
             near_ai,
             receipts,
             canary_runs: 0,
+            expected_envelope_digest: None,
         })
     }
 
@@ -296,6 +298,38 @@ impl<'a> SubmitContext<'a> {
     /// assert the canary is not re-run once per session.
     pub fn canary_runs(&self) -> u32 {
         self.canary_runs
+    }
+
+    /// Pin the next `submit_loaded` to a specific redacted envelope: if the
+    /// envelope this pipeline builds does not digest to `digest`, nothing
+    /// is uploaded and the session is refused with
+    /// `preview::REASON_ENVELOPE_CHANGED`.
+    ///
+    /// This is the artifact half of the daemon's consent guard. The re-hash
+    /// guard verifies the *input* -- the raw session bytes -- and cannot see
+    /// a redaction service that returned different spans, a privacy-filter
+    /// configuration that changed, or any other input to the envelope that
+    /// is not the session file. Checking the digest here, rather than by
+    /// rebuilding the envelope in the caller, means the thing compared is
+    /// the thing sent, and costs no second redaction pass.
+    ///
+    /// One-shot: consumed by the next `submit_loaded` so a pin cannot leak
+    /// onto an unrelated later session.
+    pub fn expect_envelope_digest(&mut self, digest: Option<String>) {
+        self.expected_envelope_digest = digest;
+    }
+
+    /// The effective contributor config this pipeline stamps onto
+    /// envelopes -- `cfg` with any per-invocation option overrides applied.
+    /// The daemon fingerprints this, not the raw config, so the fingerprint
+    /// describes what actually determines the envelope.
+    pub fn effective_cfg(&self) -> &ContributorConfig {
+        &self.effective_cfg
+    }
+
+    /// The NEAR AI privacy-filter settings in force, if any.
+    pub fn near_ai(&self) -> Option<&NearAiSettings> {
+        self.near_ai.as_ref()
     }
 
     /// Redact and submit one session, loading it from `source` first.
@@ -336,6 +370,11 @@ impl<'a> SubmitContext<'a> {
         mut transcript: crate::source::SessionTranscript,
     ) -> Result<SubmitOutcome> {
         let opts = self.opts;
+        // Taken up front, not at the comparison point below: several paths
+        // return before that point (already-submitted, an unavailable
+        // filter, an over-size refusal), and a pin left behind would apply
+        // to whatever session came next.
+        let expected_digest = self.expected_envelope_digest.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -406,6 +445,21 @@ impl<'a> SubmitContext<'a> {
                 return Ok(refused("redaction-failed", &transcript.session_hash));
             }
         };
+        // Compared here: after redaction, before the granted scopes are
+        // stamped on, which is exactly where `build_preview` digests. An
+        // envelope that is not the one the contributor approved must not
+        // reach the claim mint, let alone the wire.
+        if let Some(expected) = expected_digest {
+            let actual = crate::daemon::preview::envelope_digest(&envelope)
+                .unwrap_or_else(|_| "sha256:unavailable".to_string());
+            if actual != expected {
+                return Ok(refused(
+                    crate::daemon::preview::REASON_ENVELOPE_CHANGED,
+                    &transcript.session_hash,
+                ));
+            }
+        }
+
         if !self.near_ai_notice_recorded
             && self.effective_cfg.pii_filter.as_deref() == Some("near-ai")
         {

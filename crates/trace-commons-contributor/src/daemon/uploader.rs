@@ -3,12 +3,26 @@
 //! The uploader adds three things to the shared submit pipeline, all of them
 //! consequences of the upload being unattended:
 //!
-//! 1. **A re-hash guard.** The contributor approves a description of a
-//!    session -- a project, a size, a time. Digests batch every few hours, so
-//!    the file can grow between the offer and the approval. If it did, the
-//!    approval does not cover the current content, so nothing is uploaded and
-//!    a fresh offer is made instead. This is the central consent property of
-//!    the whole daemon.
+//! 1. **A re-hash guard, and an approval-terms guard.** The contributor
+//!    approves a description of a session -- a project, a size, a time --
+//!    and, if they previewed it, a specific redacted envelope. Digests
+//!    batch every few hours, so the file can grow between the offer and the
+//!    approval; if it did, the approval does not cover the current content,
+//!    so nothing is uploaded and a fresh offer is made instead.
+//!
+//!    The re-hash guard alone was not enough, and the comment that used to
+//!    live here claimed more than the code did. It verifies the *input*.
+//!    Everything else that determines what actually leaves the machine --
+//!    the privacy-filter selection, the NEAR AI backend and model, the
+//!    consent scopes, the identity and endpoints stamped onto the envelope,
+//!    and the redaction service's own output -- could move between the
+//!    preview and the send with the session hash unchanged, and the guard
+//!    stayed silent. So the approval also pins an input fingerprint
+//!    (`preview::input_fingerprint`), re-derived here before every upload,
+//!    and, for a previewed entry, the digest of the envelope that was
+//!    shown, checked by `submit_loaded` against the envelope it is about to
+//!    send. Either mismatch re-offers the entry instead of uploading it.
+//!    This is the central consent property of the whole daemon.
 //! 2. **Revocation checks.** A cached claim stays valid for minutes after a
 //!    logout, so enrollment is re-checked immediately before every upload
 //!    rather than once at startup.
@@ -50,6 +64,13 @@ pub enum UploadDecision {
     },
     /// The pipeline declined to send this, fail-closed.
     Refused {
+        reason_label: String,
+    },
+    /// The approval no longer covers what would be sent -- an
+    /// envelope-determining input moved, or the envelope the pipeline built
+    /// is not the one the contributor was shown. Nothing was sent; the
+    /// entry goes back in front of the contributor under `reason_label`.
+    ApprovalStale {
         reason_label: String,
     },
     /// Network or auth failure.
@@ -204,6 +225,31 @@ impl Uploader<'_, '_> {
             });
         }
 
+        // The input half of the approval-terms guard, re-derived from what
+        // this pipeline will actually use rather than from what the config
+        // said at some earlier moment. `None` on an approved entry means
+        // the terms were never recorded (an entry from before this field
+        // existed, or an approval taken with no readable config), which is
+        // "unknown, so re-ask": fail-closed.
+        let inputs_now =
+            super::preview::input_fingerprint(self.ctx.effective_cfg(), self.ctx.near_ai());
+        if entry.approved_inputs.as_deref() != Some(inputs_now.as_str()) {
+            return Ok(UploadDecision::ApprovalStale {
+                reason_label: super::preview::REASON_INPUTS_CHANGED.to_string(),
+            });
+        }
+
+        // The artifact half. Handed to the pipeline rather than checked
+        // here, because the pipeline is what builds the envelope that gets
+        // sent: comparing against a rebuild would compare against a second
+        // envelope nobody uploads, and would cost an extra redaction pass
+        // (a second privacy-filter round trip, for a NEAR AI backend).
+        // `None` for an entry that was never previewed -- an armed
+        // auto-upload, an approve-all -- where there is no shown artifact
+        // to hold the upload to.
+        self.ctx
+            .expect_envelope_digest(entry.previewed_envelope_digest.clone());
+
         // `submit_one` returns `Err` only for a fail-closed precondition
         // (`SubmitPreconditionFailure`) -- a privacy-filter canary that did
         // not catch its planted secret, an unrecordable NEAR AI notice, a
@@ -228,7 +274,17 @@ impl Uploader<'_, '_> {
                 return Err(e);
             }
         };
-        let decision = decision_for(outcome);
+        let mut decision = decision_for(outcome);
+        // The pipeline reports a digest mismatch as an ordinary refusal;
+        // the daemon treats it as a stale approval, so the entry is
+        // re-offered rather than recorded as refused forever.
+        if let UploadDecision::Refused { reason_label } = &decision {
+            if reason_label == super::preview::REASON_ENVELOPE_CHANGED {
+                decision = UploadDecision::ApprovalStale {
+                    reason_label: reason_label.clone(),
+                };
+            }
+        }
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -371,6 +427,15 @@ mod tests {
             .unwrap();
         }
 
+        /// An approved entry whose recorded terms match `cfg` -- i.e. the
+        /// ordinary case where nothing moved between approval and upload.
+        fn entry_for(&self, hash: &str, cfg: &crate::config::ContributorConfig) -> QueueEntry {
+            QueueEntry {
+                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None)),
+                ..self.entry(hash)
+            }
+        }
+
         fn entry(&self, hash: &str) -> QueueEntry {
             QueueEntry {
                 entry_id: entry_id_for(hash),
@@ -387,6 +452,8 @@ mod tests {
                 retry_after: None,
                 submission_id: None,
                 approved_scopes: None,
+                approved_inputs: None,
+                previewed_envelope_digest: None,
             }
         }
     }
@@ -484,7 +551,7 @@ mod tests {
         };
         store.save_config(&cfg).unwrap();
 
-        let entry = session.entry(&session.current_hash());
+        let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let mut state = DaemonState::new();
@@ -516,6 +583,226 @@ mod tests {
         assert!(health.ok());
     }
 
+    /// The config the fixture sessions above are approved and uploaded
+    /// under.
+    fn fixture_cfg(store: &ConfigStore) -> crate::config::ContributorConfig {
+        let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
+        crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "http://issuer.invalid".into(),
+            ingest_url: "http://ingest.invalid".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_when_an_envelope_determining_input_moved_but_the_bytes_did_not() {
+        // THE finding. The raw session file is byte-for-byte what was
+        // approved -- the re-hash guard is perfectly happy -- but the
+        // configuration that determines the envelope has moved underneath
+        // the approval. Before this guard, the uploader re-hashed only the
+        // transcript, then had `submit_loaded` rebuild the envelope from
+        // whatever the config said at that moment, and the upload went out
+        // silently under terms the contributor never saw.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let approved_under = fixture_cfg(&store);
+        store.save_config(&approved_under).unwrap();
+        let entry = session.entry_for(&session.current_hash(), &approved_under);
+
+        // Not a byte of the session changes. Only an envelope-determining
+        // input does: the contributor's identity is now stamped onto the
+        // envelope under a different tenant.
+        let mut cfg = approved_under.clone();
+        cfg.tenant_id = "tenant-somebody-else".into();
+        store.save_config(&cfg).unwrap();
+        assert_eq!(
+            session.current_hash(),
+            entry.session_hash,
+            "the raw session bytes must be unchanged for this test to mean anything"
+        );
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            UploadDecision::ApprovalStale {
+                reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
+            },
+            "an approval must not transfer to an envelope built from different inputs"
+        );
+        assert_eq!(state.uploads_today, 0, "nothing may be uploaded");
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_when_the_envelope_is_not_the_one_that_was_previewed() {
+        // The other half: every input is identical and the raw bytes are
+        // identical, but the entry is pinned to an envelope digest that is
+        // not what the pipeline builds -- which is what a redaction service
+        // returning different spans for the same text looks like from here.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let entry = QueueEntry {
+            previewed_envelope_digest: Some("sha256:not-what-the-pipeline-builds".to_string()),
+            ..session.entry_for(&session.current_hash(), &cfg)
+        };
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            UploadDecision::ApprovalStale {
+                reason_label: crate::daemon::preview::REASON_ENVELOPE_CHANGED.to_string(),
+            }
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
+    #[tokio::test]
+    async fn an_entry_pinned_to_the_envelope_the_pipeline_builds_uploads_normally() {
+        // The guard must not refuse the ordinary case: a preview ran, the
+        // contributor approved what it showed, nothing moved.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let (summary, _body) = crate::daemon::preview::build_preview(
+            &store,
+            &cfg,
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .unwrap();
+        let entry = QueueEntry {
+            previewed_envelope_digest: Some(summary.envelope_digest.clone()),
+            ..session.entry_for(&session.current_hash(), &cfg)
+        };
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "a digest built by the same pipeline from the same inputs must \
+             match: got {decision:?}"
+        );
+        assert_eq!(state.uploads_today, 1);
+    }
+
+    #[tokio::test]
+    async fn an_approved_entry_with_no_recorded_terms_is_re_offered_not_uploaded() {
+        // Entries written before the approval terms existed, and approvals
+        // taken with no readable config, record nothing. Unknown terms are
+        // re-asked, never assumed to still hold.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let entry = session.entry(&session.current_hash());
+        assert!(entry.approved_inputs.is_none());
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            decision,
+            UploadDecision::ApprovalStale {
+                reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
+            }
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
     #[tokio::test]
     async fn upload_refuses_once_the_enrollment_is_gone() {
         // A cached claim outlives a logout by minutes.
@@ -536,7 +823,7 @@ mod tests {
             allowed_hosts: None,
         };
         store.save_config(&cfg).unwrap();
-        let entry = session.entry(&session.current_hash());
+        let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
 
@@ -596,7 +883,7 @@ mod tests {
         };
         store.save_config(&cfg).unwrap();
 
-        let entry = session.entry(&session.current_hash());
+        let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let mut state = DaemonState::new();

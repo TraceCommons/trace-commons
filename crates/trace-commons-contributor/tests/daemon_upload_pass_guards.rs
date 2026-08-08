@@ -546,6 +546,138 @@ async fn widening_consent_scopes_after_approval_revokes_the_approval() {
     assert!(entry.approved_scopes.is_none());
 }
 
+// --- The approval covers the artifact, not just the input bytes ----------
+
+#[tokio::test]
+async fn an_envelope_determining_change_after_approval_revokes_the_approval() {
+    // The finding this test exists for: the raw session file is
+    // byte-for-byte what was approved, so the re-hash guard sees nothing
+    // wrong, but an input that determines the *envelope* has moved. The
+    // guard verified the input; it never verified the artifact, so the
+    // upload went out under configuration the contributor never saw.
+    //
+    // `pii_filter` is the change here rather than the consent scopes,
+    // precisely because the pre-existing `approved_scopes` guard already
+    // covers scopes and would mask the gap.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "6a6a6a6a-6a6a-6a6a-6a6a-6a6a6a6a6a6a");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+    let hash_at_approval = h.only_entry().session_hash.clone();
+
+    let resp = ipc::handle_local(
+        &h.shared,
+        "approve",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert!(
+        h.only_entry().approved_inputs.is_some(),
+        "an approval must record the envelope-determining inputs it was \
+         given under"
+    );
+
+    // Not one byte of the session changes. Only the configuration the
+    // envelope is built from does.
+    let mut cfg = h.shared.store.load_config().unwrap().unwrap();
+    cfg.tenant_id = "tenant-somebody-else".into();
+    h.shared.store.save_config(&cfg).unwrap();
+
+    h.upload_pass().await.unwrap();
+
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "a trace must not be sent under envelope-determining configuration \
+         the approval never covered"
+    );
+    let entry = h.only_entry();
+    assert_eq!(
+        entry.session_hash, hash_at_approval,
+        "the raw bytes were unchanged throughout -- the re-hash guard alone \
+         would have let this through"
+    );
+    assert_eq!(entry.state, QueueState::Pending, "the entry is re-offered");
+    assert_eq!(
+        entry.reason_label.as_deref(),
+        Some("approval-inputs-changed")
+    );
+    assert!(entry.approved_inputs.is_none());
+    assert!(entry.approved_scopes.is_none());
+}
+
+#[tokio::test]
+async fn an_approval_pinned_to_a_different_envelope_is_not_uploaded() {
+    // The other half: the inputs are untouched, but the entry is pinned to
+    // an envelope digest the pipeline does not produce -- what a redaction
+    // service returning different spans for the same text looks like from
+    // the daemon's side.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "6b6b6b6b-6b6b-6b6b-6b6b-6b6b6b6b6b6b");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+    {
+        let mut q = h.shared.queue.lock().unwrap();
+        assert!(q.record_previewed_envelope(entry_id, "sha256:something-else"));
+    }
+    let resp = ipc::handle_local(
+        &h.shared,
+        "approve",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+
+    h.upload_pass().await.unwrap();
+
+    assert_eq!(h.received.lock().unwrap().len(), 0);
+    let entry = h.only_entry();
+    assert_eq!(entry.state, QueueState::Pending);
+    assert_eq!(
+        entry.reason_label.as_deref(),
+        Some("envelope-changed-after-approval")
+    );
+    assert!(
+        entry.previewed_envelope_digest.is_none(),
+        "the re-offer must be previewed afresh"
+    );
+}
+
+#[tokio::test]
+async fn an_entry_approved_after_a_real_preview_still_uploads() {
+    // The guard must not break the ordinary path: preview, approve, send.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "6c6c6c6c-6c6c-6c6c-6c6c-6c6c6c6c6c6c");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let resp = ipc::handle_local(
+        &h.shared,
+        "preview",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert!(
+        h.only_entry().previewed_envelope_digest.is_some(),
+        "a preview must pin the entry to the artifact it showed"
+    );
+
+    let resp = ipc::handle_local(
+        &h.shared,
+        "approve",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+
+    h.upload_pass().await.unwrap();
+
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        1,
+        "an approval of exactly what was previewed must go through"
+    );
+    assert_eq!(h.only_entry().state, QueueState::Uploaded);
+}
+
 // --- M4: a standing opt-in must keep applying -----------------------------
 
 #[tokio::test]

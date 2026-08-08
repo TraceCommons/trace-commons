@@ -85,6 +85,38 @@ pub struct QueueEntry {
     /// treated as "unknown, so re-ask": fail-closed.
     #[serde(default)]
     pub approved_scopes: Option<Vec<String>>,
+    /// The fingerprint of everything outside the session file that
+    /// determines the envelope, as of the moment this entry was approved
+    /// (`preview::input_fingerprint`).
+    ///
+    /// `approved_scopes` was a narrow version of this -- it caught one
+    /// envelope-determining input moving between approval and send. Every
+    /// other one moved silently: the PII filter selection, the NEAR AI
+    /// backend and model, the identity and endpoints the envelope is
+    /// stamped with. The raw-hash guard could not see any of it, because it
+    /// re-hashes the *input*, not the artifact.
+    ///
+    /// `None` on entries written before this field existed and on
+    /// unapproved entries. `None` on an approved entry is "unknown, so
+    /// re-ask": fail-closed.
+    #[serde(default)]
+    pub approved_inputs: Option<String>,
+    /// The digest of the redacted envelope the contributor was actually
+    /// shown (`preview::envelope_digest`), recorded when a preview is run
+    /// for this entry and carried through an approval.
+    ///
+    /// Checked against the envelope the pipeline is about to send. This
+    /// catches what no fingerprint of the inputs can: a redaction service
+    /// that returns different spans for the same text with the same
+    /// configuration.
+    ///
+    /// `None` when the entry was never previewed -- an armed auto-upload
+    /// project, or an approve-all. Those are approvals given without seeing
+    /// the artifact in the first place, so there is nothing to compare
+    /// against and this check does not apply to them; the input
+    /// fingerprint still does.
+    #[serde(default)]
+    pub previewed_envelope_digest: Option<String>,
 }
 
 /// A stable id for a queue entry, derived from the session hash so the same
@@ -183,13 +215,19 @@ impl Queue {
         }
     }
 
-    /// Move an entry from `Pending` to `Approved`, recording the consent
-    /// scopes it was approved under. Returns whether anything changed.
+    /// Move an entry from `Pending` to `Approved`, recording the terms the
+    /// approval was given under: the consent scopes, and a fingerprint of
+    /// everything else outside the session file that determines the
+    /// envelope. Returns whether anything changed.
     ///
     /// This is the only way an entry becomes `Approved`, so an approved
-    /// entry always carries the scopes its approval was given under -- see
-    /// `QueueEntry::approved_scopes`.
-    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String]) -> bool {
+    /// entry always carries the terms of its own approval -- see
+    /// `QueueEntry::approved_scopes` and `QueueEntry::approved_inputs`.
+    ///
+    /// Any envelope digest already recorded from a preview of this entry is
+    /// left in place: it is what the contributor was shown, and the
+    /// approval is an approval of exactly that.
+    pub fn approve(&mut self, entry_id: Uuid, scopes: &[String], inputs: &str) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
@@ -199,6 +237,25 @@ impl Queue {
         e.state = QueueState::Approved;
         e.reason_label = None;
         e.approved_scopes = Some(scopes.to_vec());
+        e.approved_inputs = Some(inputs.to_string());
+        true
+    }
+
+    /// Record the digest of the redacted envelope a preview just showed for
+    /// this entry, so an approval that follows is pinned to that exact
+    /// artifact. Returns whether the entry exists.
+    ///
+    /// Only meaningful while the entry is still `Pending`: an entry already
+    /// approved has had its terms fixed, and a later preview must not
+    /// silently re-pin them to something else.
+    pub fn record_previewed_envelope(&mut self, entry_id: Uuid, digest: &str) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending {
+            return false;
+        }
+        e.previewed_envelope_digest = Some(digest.to_string());
         true
     }
 
@@ -255,6 +312,10 @@ impl Queue {
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
         e.approved_scopes = None;
+        e.approved_inputs = None;
+        // The artifact the contributor was shown is no longer the one that
+        // would be sent, so the re-offer must be previewed afresh.
+        e.previewed_envelope_digest = None;
         true
     }
 
@@ -315,9 +376,12 @@ impl Queue {
             attempts: 0,
             retry_after: None,
             submission_id: None,
-            // Provenance carries over; approval, and the scopes it was
-            // given under, do not.
+            // Provenance carries over; the approval and every term it was
+            // given under -- scopes, envelope-determining inputs, and the
+            // artifact that was shown -- do not.
             approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
             ..old
         })
     }
@@ -336,6 +400,7 @@ impl Queue {
         e.state = QueueState::Pending;
         e.reason_label = None;
         e.approved_scopes = None;
+        e.approved_inputs = None;
         Ok(())
     }
 
@@ -385,6 +450,8 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
         }
     }
 

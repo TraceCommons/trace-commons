@@ -157,16 +157,25 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
             };
 
-            // The scopes an auto-approval is given under, recorded on the
-            // entry so the uploader can refuse if they move before it
-            // sends. See `QueueEntry::approved_scopes`.
-            let consent_scopes = shared
-                .store
-                .load_config()
-                .ok()
-                .flatten()
-                .map(|c| c.consent_scopes)
+            // The terms an auto-approval is given under, recorded on the
+            // entry so the uploader can refuse if any of them move before
+            // it sends: the consent scopes, and a fingerprint of everything
+            // else outside the session file that determines the envelope.
+            // See `QueueEntry::approved_scopes` / `approved_inputs`.
+            let cfg = shared.store.load_config().ok().flatten();
+            let consent_scopes = cfg
+                .as_ref()
+                .map(|c| c.consent_scopes.clone())
                 .unwrap_or_default();
+            let approval_inputs = cfg.as_ref().map(|c| {
+                let near_ai = shared
+                    .settings
+                    .lock()
+                    .expect("settings lock")
+                    .near_ai
+                    .clone();
+                crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
+            });
             let armed = mode == ProjectMode::AutoUpload;
 
             let entry = QueueEntry {
@@ -190,6 +199,13 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 retry_after: None,
                 submission_id: None,
                 approved_scopes: armed.then(|| consent_scopes.clone()),
+                // `None` when the config could not be read, which the
+                // uploader treats as "unknown, re-ask": fail-closed.
+                approved_inputs: armed.then(|| approval_inputs.clone()).flatten(),
+                // An armed project's sessions are never previewed, so there
+                // is no shown artifact to pin to. The input fingerprint is
+                // the guard that applies to them.
+                previewed_envelope_digest: None,
             };
             let entry_id = entry.entry_id;
 
@@ -222,7 +238,13 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                     // `Queue::approve` only moves `Pending`, so this can
                     // never resurrect a dismissed-and-refused, expired, or
                     // already-uploaded entry.
-                    if armed && queue.approve(entry_id, &consent_scopes) {
+                    if armed
+                        && queue.approve(
+                            entry_id,
+                            &consent_scopes,
+                            approval_inputs.as_deref().unwrap_or(""),
+                        )
+                    {
                         changed = true;
                         report.auto_ready += 1;
                     }
