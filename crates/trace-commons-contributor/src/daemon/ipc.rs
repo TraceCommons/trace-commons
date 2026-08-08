@@ -475,23 +475,58 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // path, a token, or a transcript fragment into both of the
             // sinks this crate's label-only rule exists to protect. The
             // label is now derived from the key inside `set_mode`.
-            let mut policy = shared.policy.lock().expect("policy lock");
-            let mut queue = shared.queue.lock().expect("queue lock");
             // Lock order is policy before queue, as everywhere else.
-            let admissible = {
+            let mut policy = shared.policy.lock().expect("policy lock");
+            let audit_label = {
+                let queue = shared.queue.lock().expect("queue lock");
                 let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-                project_key_is_admissible(key, &known)
+                if !project_key_is_admissible(key, &known) {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+                }
+                disambiguated_label(key, &known)
             };
-            if !admissible {
-                return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+
+            // The audit entry goes down FIRST, before anything is armed,
+            // the way `acknowledge_near_ai_notice` does it.
+            //
+            // The reverse order looked equivalent and was not. It saved the
+            // policy, then appended, then on an append failure restored the
+            // in-memory policy and wrote it back best-effort -- but the
+            // disk-full or permissions failure that broke the append breaks
+            // that write back just as reliably, and the daemon loads its
+            // policy from disk on restart. The fail-closed guarantee did not
+            // survive a reboot: autonomy stayed armed on disk with no record
+            // of it ever having been armed. Recording first means there is
+            // nothing to roll back, so nothing that has to succeed twice.
+            //
+            // This is visibility, not a security control -- see
+            // `daemon::audit` -- but it is the *only* visibility there is
+            // here, and the terminal-only restriction it replaced was
+            // itself a visibility mechanism.
+            //
+            // Both locks are dropped for the append itself: it is a
+            // whole-file read-modify-write on a synchronous socket handler,
+            // and the queue lock in particular is contended with the upload
+            // pass. The policy lock is retaken immediately after; a
+            // concurrent `set_project_mode` can only interleave two
+            // record-then-arm sequences, never produce an armed policy with
+            // no record.
+            if mode == ProjectMode::AutoUpload {
+                drop(policy);
+                if let Err(_e) = audit::append(
+                    &shared.store,
+                    &AuditEntry {
+                        at: Utc::now(),
+                        action: "armed-auto-upload".to_string(),
+                        project_label: Some(audit_label),
+                        detail: None,
+                    },
+                ) {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+                }
+                policy = shared.policy.lock().expect("policy lock");
             }
-            // Kept so the whole change can be rolled back if its audit
-            // entry cannot be persisted: arming autonomy and recording that
-            // it was armed are one unit. The terminal-only restriction this
-            // call replaced was itself a visibility mechanism, and a change
-            // that stands with no record of it is exactly the outcome the
-            // replacement was supposed to prevent.
-            let previous_policy = policy.clone();
+
             if let Err(e) = policy.set_mode(key, mode, Utc::now()) {
                 return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
             }
@@ -505,47 +540,20 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // rather than leaving the queue to lag until the next poll,
             // which would leave two same-basename projects briefly
             // indistinguishable in the one place uploads are approved from.
-            if relabel_queue_entries(&policy, &mut queue) {
-                if let Err(_e) = queue.save(&shared.store) {
-                    return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
-                }
-                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-            }
-            if mode == ProjectMode::AutoUpload {
-                // A local, label-only record that autonomy was armed for
-                // this project. This is visibility, not a security control
-                // -- see `daemon::audit` -- but it is the *only* visibility
-                // there is here, so it is fail-closed: if it cannot be
-                // persisted (disk full, permissions, a corrupt log), the
-                // arming is rolled back and the call reports an error
-                // rather than leaving autonomy silently armed.
-                let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-                let audit_label = disambiguated_label(key, &known);
-                if let Err(_e) = audit::append(
-                    &shared.store,
-                    &AuditEntry {
-                        at: Utc::now(),
-                        action: "armed-auto-upload".to_string(),
-                        project_label: Some(audit_label),
-                        detail: None,
-                    },
-                ) {
-                    *policy = previous_policy;
-                    // Best effort, and deliberately not allowed to mask the
-                    // audit failure: the in-memory policy is authoritative
-                    // for every decision this process makes, and it has
-                    // already been restored above.
-                    let _ = policy.save(&shared.store);
-                    if relabel_queue_entries(&policy, &mut queue) {
-                        let _ = queue.save(&shared.store);
+            let relabelled = {
+                let mut queue = shared.queue.lock().expect("queue lock");
+                if relabel_queue_entries(&policy, &mut queue) {
+                    if let Err(_e) = queue.save(&shared.store) {
+                        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
                     }
-                    drop(queue);
-                    drop(policy);
-                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+                    true
+                } else {
+                    false
                 }
-                drop(queue);
-                drop(policy);
+            };
+            drop(policy);
+            if relabelled {
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
@@ -591,6 +599,31 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
                 }
             };
+            if all {
+                // A local, label-only record that the whole queue was
+                // bulk-approved, written BEFORE anything is approved --
+                // same ordering, and the same reason, as
+                // `set_project_mode`: a rollback that has to write to the
+                // disk that just refused a write is not a rollback. This is
+                // visibility, not a security control (see `daemon::audit`),
+                // but it is the only visibility there is for a call that
+                // used to require a terminal.
+                //
+                // The count is of entries eligible to be approved, taken
+                // under the same lock that then approves them, so it cannot
+                // drift from what happens next.
+                if let Err(_e) = audit::append(
+                    &shared.store,
+                    &AuditEntry {
+                        at: Utc::now(),
+                        action: "bulk-approved".to_string(),
+                        project_label: None,
+                        detail: Some(ids.len().to_string()),
+                    },
+                ) {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+                }
+            }
             let mut approved_ids = Vec::new();
             for id in ids {
                 if queue.approve(id, &scopes, inputs.as_deref()) {
@@ -599,36 +632,16 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
             let approved = approved_ids.len();
             if let Err(_e) = queue.save(&shared.store) {
-                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
-            }
-            if all {
-                // A local, label-only record that the whole queue was
-                // bulk-approved. This is visibility, not a security control
-                // -- see `daemon::audit` -- but it is the only visibility
-                // there is for a call that used to require a terminal, so
-                // it is fail-closed: an audit entry that cannot be
-                // persisted takes the approvals down with it.
-                if let Err(_e) = audit::append(
-                    &shared.store,
-                    &AuditEntry {
-                        at: Utc::now(),
-                        action: "bulk-approved".to_string(),
-                        project_label: None,
-                        detail: Some(approved.to_string()),
-                    },
-                ) {
-                    for id in approved_ids {
-                        // `cancel` refuses anything past `Approved`; these
-                        // were all set `Approved` a few lines ago under this
-                        // same lock, and no upload pass can have claimed one
-                        // without taking it.
-                        let _ = queue.cancel(id);
-                    }
-                    let _ = queue.save(&shared.store);
-                    drop(queue);
-                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+                // The approvals exist only in memory and would not survive a
+                // restart; a queue that disagrees with its own file is worse
+                // than no approval. `cancel` refuses anything past
+                // `Approved`, and these were set `Approved` a few lines ago
+                // under this same lock, so no upload pass can have claimed
+                // one.
+                for id in approved_ids {
+                    let _ = queue.cancel(id);
                 }
+                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
             }
             drop(queue);
             shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));

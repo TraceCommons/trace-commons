@@ -166,18 +166,19 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
     let Ok(Some(mut cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
     };
-    let previous_cfg = cfg.clone();
-    cfg.consent_scopes = scopes.clone();
-    if shared.store.save_config(&cfg).is_err() {
-        return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
-    }
+    // The audit entry goes down FIRST, before the config is rewritten, the
+    // way `acknowledge_near_ai_notice` does it.
+    //
+    // The reverse order saved the config, appended, and on an append
+    // failure restored the previous config best-effort -- but the disk-full
+    // or permissions failure that broke the append breaks that restore just
+    // as reliably, and the daemon reads its consent scopes from disk. A
+    // widened scope set could survive with no record of the widening, which
+    // is the exact outcome this entry exists to prevent. Recording first
+    // means there is nothing to roll back.
+    //
     // Label data, not secret: these are wire-name scope identifiers, the
     // same ones already returned in this very response and in `status`.
-    //
-    // Fail-closed, like the other audited socket actions: a widening of
-    // consent that leaves no record of itself is the exact outcome this
-    // entry exists to prevent, so an append failure rolls the scope change
-    // back and reports an error.
     if let Err(_e) = audit::append(
         &shared.store,
         &AuditEntry {
@@ -187,8 +188,11 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
             detail: Some(scopes.join(",")),
         },
     ) {
-        let _ = shared.store.save_config(&previous_cfg);
         return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    cfg.consent_scopes = scopes.clone();
+    if shared.store.save_config(&cfg).is_err() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
     }
     Response::ok(req.id, json!({ "consent_scopes": scopes }))
 }
