@@ -227,6 +227,22 @@ impl Queue {
         })
     }
 
+    /// Return an approved entry to pending, backing a short "undo" window on
+    /// an approval. Refuses once the entry has moved past `Approved` --
+    /// notably `Uploading`, where an upload may already be in flight and an
+    /// undo racing it would be indistinguishable from data loss.
+    pub fn cancel(&mut self, entry_id: Uuid) -> Result<()> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        if e.state != QueueState::Approved {
+            bail!("not-approved");
+        }
+        e.state = QueueState::Pending;
+        e.reason_label = None;
+        Ok(())
+    }
+
     /// Age out undecided entries. Returns how many expired.
     ///
     /// `blocked_on_health` suspends the clock entirely: an entry the daemon
@@ -438,5 +454,35 @@ mod tests {
     fn queue_defaults_when_the_file_is_absent() {
         let (_d, store) = temp_store();
         assert_eq!(Queue::load(&store).unwrap(), Queue::new());
+    }
+
+    #[test]
+    fn cancel_returns_an_approved_entry_to_pending() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        q.set_state(id, QueueState::Approved, None);
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+    }
+
+    #[test]
+    fn cancel_refuses_an_entry_that_is_not_approved() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        q.set_state(id, QueueState::Uploading, None);
+        let err = q.cancel(id).unwrap_err();
+        assert!(err.to_string().contains("not-approved"));
+        assert_eq!(q.get(id).unwrap().state, QueueState::Uploading);
+    }
+
+    #[test]
+    fn cancel_refuses_an_unknown_entry_id() {
+        let mut q = Queue::new();
+        let err = q.cancel(entry_id_for("sha256:missing")).unwrap_err();
+        assert!(err.to_string().contains("unknown-entry-id"));
     }
 }

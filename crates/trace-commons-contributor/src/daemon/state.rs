@@ -58,6 +58,13 @@ pub struct DaemonState {
     /// than living only in a running process's memory.
     #[serde(default)]
     pub paused: bool,
+    /// When a timed pause lapses. `None` means either not paused, or paused
+    /// with no timer. Persisted so a pause set by one process (the app) is
+    /// honored by another (the daemon), and survives a restart of either --
+    /// an app-side timer alone would die with the app and silently fail to
+    /// resume the daemon.
+    #[serde(default)]
+    pub paused_until: Option<DateTime<Utc>>,
     /// When history was last refreshed from the server.
     #[serde(default)]
     pub last_history_poll_at: Option<DateTime<Utc>>,
@@ -81,6 +88,7 @@ impl DaemonState {
             uploads_today: 0,
             bytes_today: 0,
             paused: false,
+            paused_until: None,
             last_history_poll_at: None,
         }
     }
