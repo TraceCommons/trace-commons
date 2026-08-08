@@ -21,6 +21,18 @@ const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 
+/// Background-daemon state files. All live in the same 0700 directory as the
+/// device key and are removed by `wipe()`, so a logout cannot leave one
+/// contributor's auto-upload opt-ins in place for whoever enrolls next.
+pub const DAEMON_SETTINGS_FILE: &str = "daemon-settings.json";
+pub const DAEMON_STATE_FILE: &str = "daemon-state.json";
+pub const DAEMON_PROJECTS_FILE: &str = "daemon-projects.json";
+pub const DAEMON_QUEUE_FILE: &str = "daemon-queue.jsonl";
+pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
+/// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
+pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
+pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
+
 /// Per-user contributor CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContributorConfig {
@@ -198,6 +210,39 @@ impl ConfigStore {
         Ok(receipts)
     }
 
+    /// Path to a daemon state file inside this store. Daemon state lives in
+    /// the same 0700 directory as the device key, so the directory
+    /// permissions are the single enforcing control for all of it.
+    pub fn daemon_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Atomically write a daemon state file at 0600.
+    pub fn write_daemon_file(&self, name: &str, body: &[u8]) -> Result<()> {
+        let path = self.daemon_path(name);
+        write_atomic_0600(&self.dir, &path, body)
+    }
+
+    /// Read a daemon state file, or `None` when it does not exist yet.
+    pub fn read_daemon_file(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.daemon_path(name);
+        match std::fs::read(&path) {
+            Ok(body) => Ok(Some(body)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// Remove a daemon runtime file (socket, lock). Missing is not an error.
+    pub fn remove_daemon_file(&self, name: &str) -> Result<()> {
+        let path = self.daemon_path(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+
     fn near_ai_notice_marker_path(&self) -> PathBuf {
         self.dir.join(NEAR_AI_NOTICE_MARKER_FILE)
     }
@@ -233,6 +278,11 @@ impl ConfigStore {
             DEVICE_KEY_FILE,
             RECEIPTS_FILE,
             NEAR_AI_NOTICE_MARKER_FILE,
+            DAEMON_SETTINGS_FILE,
+            DAEMON_STATE_FILE,
+            DAEMON_PROJECTS_FILE,
+            DAEMON_QUEUE_FILE,
+            DAEMON_HISTORY_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -241,10 +291,19 @@ impl ConfigStore {
             }
         }
 
-        let tmp_prefixes: Vec<String> = [CONFIG_FILE, DEVICE_KEY_FILE, RECEIPTS_FILE]
-            .into_iter()
-            .map(|name| format!(".{name}.tmp-"))
-            .collect();
+        let tmp_prefixes: Vec<String> = [
+            CONFIG_FILE,
+            DEVICE_KEY_FILE,
+            RECEIPTS_FILE,
+            DAEMON_SETTINGS_FILE,
+            DAEMON_STATE_FILE,
+            DAEMON_PROJECTS_FILE,
+            DAEMON_QUEUE_FILE,
+            DAEMON_HISTORY_FILE,
+        ]
+        .into_iter()
+        .map(|name| format!(".{name}.tmp-"))
+        .collect();
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -266,6 +325,19 @@ impl ConfigStore {
             }
         }
         Ok(())
+    }
+}
+
+/// Test-only helpers shared with the daemon modules, which all need a
+/// throwaway store rooted in a tempdir.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::ConfigStore;
+
+    pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        (dir, store)
     }
 }
 
@@ -403,6 +475,40 @@ mod tests {
         // Logout must also clear the first-use notice marker so a
         // re-enrolled user sees the notice again.
         assert!(store.ensure_near_ai_notice_shown().unwrap());
+    }
+
+    #[test]
+    fn wipe_removes_daemon_state() {
+        // Daemon state outliving a logout would hand the next person to
+        // enroll on this machine the previous contributor's auto-upload
+        // opt-ins and their contribution history.
+        let (_d, store) = store();
+        let names = [
+            DAEMON_SETTINGS_FILE,
+            DAEMON_STATE_FILE,
+            DAEMON_PROJECTS_FILE,
+            DAEMON_QUEUE_FILE,
+            DAEMON_HISTORY_FILE,
+        ];
+        for name in names {
+            store.write_daemon_file(name, b"{}").unwrap();
+        }
+        store.wipe().unwrap();
+        for name in names {
+            assert!(
+                store.read_daemon_file(name).unwrap().is_none(),
+                "{name} survived logout"
+            );
+        }
+    }
+
+    #[test]
+    fn wipe_removes_orphaned_daemon_temp_files() {
+        let (_d, store) = store();
+        let orphan = store.dir().join(".daemon-queue.jsonl.tmp-deadbeef");
+        std::fs::write(&orphan, b"leftover").unwrap();
+        store.wipe().unwrap();
+        assert!(!orphan.exists());
     }
 
     #[test]
