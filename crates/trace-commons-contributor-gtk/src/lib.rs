@@ -18,7 +18,11 @@
 //!   host the loop for someone who wants only the app. See `backend`.
 
 pub mod backend;
+pub mod copy;
 pub mod model;
+pub mod notify;
+pub mod ui;
+pub mod worker;
 
 /// Resolve the contributor state directory the same way the CLI does, so
 /// the app and `trace-commons-contributor daemon ...` always talk about the

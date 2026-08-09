@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libadwaita-1-dev \
       libnotify-dev \
       xvfb \
+      xauth \
+      x11-apps \
+      imagemagick \
       dbus \
       dbus-x11 \
       jq \
