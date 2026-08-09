@@ -11,6 +11,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use super::App;
+use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{Project, Settings, Status};
 
@@ -36,69 +37,74 @@ impl SettingsView {
     pub fn new() -> Self {
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(16)
-            .margin_top(16)
-            .margin_bottom(16)
-            .margin_start(16)
-            .margin_end(16)
+            .spacing(space::L)
+            .margin_top(space::XL)
+            .margin_bottom(space::XL)
+            .margin_start(space::L)
+            .margin_end(space::L)
             .build();
 
+        // What is running, and the one control that changes it, in one
+        // card. These two facts belong together: reading "a background
+        // watcher is running" and then hunting for Pause somewhere else is
+        // the state and its control being separated for no reason.
+        let state_card = style::card(gtk::Orientation::Vertical, space::M);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        content.append(&connection);
-
+        connection.add_css_class("tc-body");
+        state_card.append(&connection);
         let pause_button = gtk::Button::with_label("Pause");
+        pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
-        content.append(&pause_button);
+        state_card.append(&pause_button);
+        content.append(&state_card);
 
-        let projects_heading = gtk::Label::builder().label("Projects").xalign(0.0).build();
-        projects_heading.add_css_class("title-4");
-        content.append(&projects_heading);
-        let projects = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.append(&style::section("Projects"));
+        let projects = style::card(gtk::Orientation::Vertical, space::M);
         content.append(&projects);
 
-        let knobs_heading = gtk::Label::builder()
-            .label("How it behaves")
-            .xalign(0.0)
-            .build();
-        knobs_heading.add_css_class("title-4");
-        content.append(&knobs_heading);
-        let knobs = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.append(&style::section("How it behaves"));
+        let knobs = style::card(gtk::Orientation::Vertical, space::M);
         content.append(&knobs);
 
-        let autostart_heading = gtk::Label::builder()
-            .label(copy::AUTOSTART_HEADING)
-            .xalign(0.0)
-            .build();
-        autostart_heading.add_css_class("title-4");
-        content.append(&autostart_heading);
+        content.append(&style::section(copy::AUTOSTART_HEADING));
+        let autostart_card = style::card(gtk::Orientation::Vertical, space::M);
         let autostart_body = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        content.append(&autostart_body);
-        let autostart_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        autostart_body.add_css_class("tc-body");
+        autostart_card.append(&autostart_body);
+        let autostart_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         let autostart_switch_label = gtk::Label::builder()
             .label(copy::AUTOSTART_XDG_LABEL)
             .xalign(0.0)
             .hexpand(true)
             .build();
+        autostart_switch_label.add_css_class("tc-body");
         let autostart_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        // The switch is reachable by keyboard; the label beside it is not a
+        // control, so it is pointed at the switch for a screen reader
+        // rather than left as loose text.
+        autostart_switch
+            .update_property(&[gtk::accessible::Property::Label(copy::AUTOSTART_XDG_LABEL)]);
         autostart_row.append(&autostart_switch_label);
         autostart_row.append(&autostart_switch);
-        content.append(&autostart_row);
+        autostart_card.append(&autostart_row);
+        content.append(&autostart_card);
 
-        let audit_heading = gtk::Label::builder()
-            .label("What has been changed on this machine")
-            .xalign(0.0)
-            .build();
-        audit_heading.add_css_class("title-4");
-        content.append(&audit_heading);
-        let audit = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        content.append(&style::section("What has been changed on this machine"));
+        let audit = style::card(gtk::Orientation::Vertical, space::XS);
         content.append(&audit);
 
+        let clamp = adw::Clamp::builder()
+            .maximum_size(840)
+            .tightening_threshold(680)
+            .child(&content)
+            .build();
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&content)
+            .child(&clamp)
             .build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("tc-root");
         root.append(&scroller);
 
         Self {
@@ -280,7 +286,7 @@ pub fn refresh(app: &Rc<App>) {
                     .label("Nothing has been changed.")
                     .xalign(0.0)
                     .build();
-                empty.add_css_class("dim-label");
+                empty.add_css_class("tc-meta");
                 view.append(&empty);
             }
             for entry in entries {
@@ -292,12 +298,20 @@ pub fn refresh(app: &Rc<App>) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let at = entry.get("at").and_then(|v| v.as_str()).unwrap_or("");
-                let line = gtk::Label::builder()
-                    .label(format!("{at}  {}  {project}", audit_sentence(action)))
+                // The instant is a figure, so it is set as one, and the
+                // column of them lines up down the card.
+                let line = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+                let when = gtk::Label::builder().label(at).xalign(0.0).build();
+                when.add_css_class("tc-ledger");
+                when.add_css_class("tc-neutral");
+                line.append(&when);
+                let what = gtk::Label::builder()
+                    .label(format!("{}  {project}", audit_sentence(action)))
                     .xalign(0.0)
                     .wrap(true)
                     .build();
-                line.add_css_class("dim-label");
+                what.add_css_class("tc-meta");
+                line.append(&what);
                 view.append(&line);
             }
         },
@@ -329,33 +343,42 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         .iter()
         .filter(|p| p.mode == "auto_upload")
         .collect();
+    // Armed means "contributes without asking", which is the strongest
+    // thing this window can be set to do. It gets the attention tone when
+    // anything is armed and the clear tone when nothing is, plus a glyph
+    // and words, because it is the state a person most needs to be able to
+    // check at a glance.
+    let armed_summary = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    armed_summary.append(&if armed.is_empty() {
+        style::tag("Nothing is armed", Tone::Clear)
+    } else {
+        style::tag(&format!("{} armed", armed.len()), Tone::Attention)
+    });
     let armed_line = gtk::Label::builder()
         .label(if armed.is_empty() {
-            "Armed: nothing. Every session is offered to you first.".to_string()
+            "Every session is offered to you first.".to_string()
         } else {
-            format!(
-                "Armed: {} - {}",
-                armed.len(),
-                armed
-                    .iter()
-                    .map(|p| p.project_label.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            armed
+                .iter()
+                .map(|p| p.project_label.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
         })
         .xalign(0.0)
         .wrap(true)
         .build();
-    armed_line.add_css_class("heading");
-    view.append(&armed_line);
+    armed_line.add_css_class("tc-body");
+    armed_summary.append(&armed_line);
+    view.append(&armed_summary);
 
     for project in projects {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         let label = gtk::Label::builder()
             .label(&project.project_label)
             .xalign(0.0)
             .hexpand(true)
             .build();
+        label.add_css_class("tc-body");
         row.append(&label);
 
         let modes = gtk::DropDown::from_strings(&[
@@ -363,6 +386,12 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
             "Contribute automatically",
             "Never offer this one",
         ]);
+        // The project name sits in a separate label, so the control has to
+        // say what it controls on its own.
+        modes.update_property(&[gtk::accessible::Property::Label(&format!(
+            "How to treat {}",
+            project.project_label
+        ))]);
         modes.set_selected(match project.mode.as_str() {
             "auto_upload" => 1,
             "ignore" => 2,

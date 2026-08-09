@@ -9,6 +9,7 @@ pub mod history;
 pub mod preview;
 pub mod queue;
 pub mod settings;
+pub mod style;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -72,6 +73,10 @@ const PREVIEW_PREFETCH_LIMIT: usize = 12;
 
 impl App {
     pub fn build(application: &adw::Application, worker: Worker) -> Rc<Self> {
+        // Before any widget is built, so nothing is ever drawn in the
+        // theme's palette and then repainted in this one.
+        style::install();
+
         let window = adw::ApplicationWindow::builder()
             .application(application)
             .title(copy::APP_NAME)
@@ -99,27 +104,41 @@ impl App {
             .title(copy::APP_NAME)
             .build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+        header.add_css_class("tc-header");
+        // The mark, drawn from its own geometry rather than shipped as an
+        // asset. See `style::brand_mark`.
+        header.pack_start(&style::brand_mark());
 
         let health_label = gtk::Label::builder()
             .wrap(true)
             .xalign(0.0)
             .hexpand(true)
             .build();
+        health_label.add_css_class("tc-body");
         let health_button = gtk::Button::builder().visible(false).build();
+        health_button.add_css_class("tc-quiet");
+        health_button.set_valign(gtk::Align::Center);
+        // The glyph is what carries "weigh this" into greyscale; the gold
+        // rule around the banner is the colour half of the same statement.
+        let health_glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        health_glyph.add_css_class("tc-attention");
+        health_glyph.add_css_class("tc-card-title");
+        health_glyph.set_valign(gtk::Align::Start);
         let health_banner = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
+            .spacing(style::space::M)
             .visible(false)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(12)
-            .margin_end(12)
+            .margin_top(style::space::M)
+            .margin_start(style::space::L)
+            .margin_end(style::space::L)
             .build();
+        health_banner.append(&health_glyph);
         health_banner.append(&health_label);
         health_banner.append(&health_button);
-        health_banner.add_css_class("card");
+        health_banner.add_css_class("tc-banner");
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.add_css_class("tc-root");
         content.append(&header);
         content.append(&health_banner);
         content.append(&stack);
@@ -416,21 +435,19 @@ impl App {
 }
 
 /// A heading and a paragraph, the shape most of this window is made of.
+///
+/// The heading is set as an eyebrow rather than as a bold sentence: these
+/// are field labels over values, not section titles, and setting them as
+/// titles made every list of facts read like a stack of headlines.
 pub fn titled_paragraph(title: &str, body: &str) -> gtk::Box {
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let heading = gtk::Label::builder()
-        .label(title)
-        .xalign(0.0)
-        .wrap(true)
-        .build();
-    heading.add_css_class("heading");
+    let container = gtk::Box::new(gtk::Orientation::Vertical, style::space::XXS);
+    container.append(&style::eyebrow(title));
     let paragraph = gtk::Label::builder()
         .label(body)
         .xalign(0.0)
         .wrap(true)
         .build();
-    paragraph.add_css_class("dim-label");
-    container.append(&heading);
+    paragraph.add_css_class("tc-body");
     container.append(&paragraph);
     container
 }

@@ -20,8 +20,45 @@ pub const APP_NAME: &str = "Trace Commons";
 
 // --- Queue -------------------------------------------------------------
 
+/// The concession, in full. Shown once per decision, in the preview sheet,
+/// where a person is reading rather than scanning.
 pub const RESIDUAL_RISK: &str =
     "Scrubbing is pattern-based. It misses things it hasn't seen before.";
+
+/// The same concession on a queue row, said in terms of what scrubbing
+/// actually did to *this* session.
+///
+/// The constant above used to be printed verbatim on every card. Repeated
+/// down a column, identical each time, it stops being read -- which is how
+/// a warning becomes wallpaper, and the warning it becomes is the one this
+/// product most needs someone to take seriously. Splitting it across
+/// several places only makes several pieces of wallpaper.
+///
+/// So the row carries a line that changes with the count. "Scrubbing
+/// matched nothing" and "scrubbing removed 4 things" are different
+/// sentences describing different situations, and a person reads the second
+/// one because it is not the one they read on the card above. The zero case
+/// is also the one worth weighing -- a session that obviously touched a
+/// `.env` and reports nothing removed is a signal -- so it is the case that
+/// carries the attention tone and, on the card, the gold rule.
+///
+/// The full sentence is never dropped: it is restated in the preview sheet
+/// under "Residual risk", which is the screen a person is on when they
+/// actually decide.
+pub fn residual_risk_line(total_redactions: u32) -> String {
+    match total_redactions {
+        0 => "Scrubbing matched nothing here. That is not the same as there being nothing to \
+              find -- it only recognises patterns it has seen before."
+            .to_string(),
+        1 => "Scrubbing removed 1 thing it recognised. It works from patterns, so it misses \
+              what it hasn't seen before."
+            .to_string(),
+        n => format!(
+            "Scrubbing removed {n} things it recognised. It works from patterns, so it misses \
+             what it hasn't seen before."
+        ),
+    }
+}
 pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
 pub const NOT_THIS_ONE_TOOLTIP: &str =
@@ -248,6 +285,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_row_caveat_varies_and_still_concedes() {
+        let none = residual_risk_line(0);
+        let some = residual_risk_line(4);
+        // The whole point: two different situations do not get the same
+        // sentence. If these ever converge, the line is wallpaper again.
+        assert_ne!(none, some);
+        assert!(none.contains("matched nothing"));
+        assert!(some.contains("4 things"));
+        // And whatever it says, it concedes the limit. A row that reported
+        // a count without the concession would be reassurance.
+        for line in [&none, &some, &residual_risk_line(1)] {
+            assert!(
+                line.contains("seen before") || line.contains("patterns it has seen"),
+                "the caveat must survive every count: {line}"
+            );
+        }
+        // Singular and plural are both written out; "1 things" reads as a
+        // bug, and it is one.
+        assert!(residual_risk_line(1).contains("1 thing it"));
     }
 
     #[test]

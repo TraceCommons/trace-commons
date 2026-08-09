@@ -25,6 +25,12 @@ fn main() -> anyhow::Result<()> {
     let search_term = std::env::args()
         .position(|a| a == "--search")
         .and_then(|i| std::env::args().nth(i + 1));
+    // Which tab of the preview sheet to photograph. "search" is what a
+    // person lands on; "would-be-sent" is the one a capture run has to ask
+    // for, and it is the one carrying the redaction highlighting.
+    let preview_tab = std::env::args()
+        .position(|a| a == "--preview-tab")
+        .and_then(|i| std::env::args().nth(i + 1));
     let start_page = std::env::args()
         .position(|a| a == "--start-page")
         .and_then(|i| std::env::args().nth(i + 1));
@@ -69,8 +75,9 @@ fn main() -> anyhow::Result<()> {
         if open_preview {
             let app = app.clone();
             let search_term = search_term.clone();
+            let preview_tab = preview_tab.clone();
             gtk::glib::timeout_add_seconds_local(3, move || {
-                ui::preview::open_with_search(&app, 0, search_term.clone());
+                ui::preview::open_with_search(&app, 0, search_term.clone(), preview_tab.clone());
                 gtk::glib::ControlFlow::Break
             });
         }
