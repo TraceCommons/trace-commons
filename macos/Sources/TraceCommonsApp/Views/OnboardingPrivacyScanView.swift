@@ -147,7 +147,7 @@ struct OnboardingPrivacyScanContent: View {
             }
             onContinue()
         }
-        .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
         .keyboardShortcut(.defaultAction)
     }
 }

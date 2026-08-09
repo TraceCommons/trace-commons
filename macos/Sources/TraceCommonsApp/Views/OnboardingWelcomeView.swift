@@ -128,7 +128,7 @@ struct OnboardingWelcomeContent: View {
     private var actions: some View {
         HStack(spacing: TC.Space.m) {
             Button("Get started", action: onGetStarted)
-                .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
             Button("What gets removed?", action: onWhatGetsRemoved)

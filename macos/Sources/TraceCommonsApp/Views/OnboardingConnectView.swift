@@ -149,7 +149,7 @@ struct OnboardingConnectContent: View {
             Text("This invite is for **\(link.issuerHost)**.")
                 .font(.callout)
             Button("Join \(link.issuerHost)") { join(link) }
-                .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
         }
     }

@@ -119,7 +119,7 @@ struct OnboardingProjectsContent: View {
         Button("Continue") {
             onContinue()
         }
-        .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
         .keyboardShortcut(.defaultAction)
     }
 }

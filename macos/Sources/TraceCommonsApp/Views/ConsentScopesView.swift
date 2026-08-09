@@ -173,7 +173,7 @@ struct ConsentScopesContent: View {
         return Button("Continue with \(total) \(total == 1 ? "permission" : "permissions")") {
             onContinue(selected)
         }
-        .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
         .keyboardShortcut(.defaultAction)
     }
 }

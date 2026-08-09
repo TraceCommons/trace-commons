@@ -262,7 +262,7 @@ struct PreviewSheet: View {
                     model.approve(current)
                     advance()
                 }
-                .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
                 .disabled(summary == nil)
             }

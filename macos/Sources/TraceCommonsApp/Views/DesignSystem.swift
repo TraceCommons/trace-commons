@@ -196,6 +196,31 @@ enum TC {
     /// Site `--coral`. Refused, withdrawn, cannot proceed.
     static let coral = dynamic(hex(0xD65D4F), hex(0xF2887A))
 
+    // Fill-safe counterparts for a FILLED primary action.
+    //
+    // `green` is tuned to be read *on* the ground, not to be a fill with a
+    // label on top of it, and the difference is not cosmetic. A white label
+    // on the dark-mode mint measures 2.32:1 -- below even the 3:1 large-text
+    // floor -- and on the light green 4.04:1, below the 4.5:1 normal-text
+    // floor. That is the same failure this file already refuses for gold
+    // warning text, and it was sitting on Contribute: the one irreversible
+    // control in the product, the button that moves a private transcript to
+    // a public commons. A consent action nobody can read is not a consent
+    // action.
+    //
+    // So the filled action carries its own pair, measured rather than
+    // eyeballed:
+    //   light  #137C61 fill + white label -> 5.14:1
+    //   dark   #3FBE9A fill + #0B1F19 ink -> 7.39:1
+    // Light darkens the fill (the hue survives; the site's green is still
+    // recognisably the accent) and dark flips the label instead of dulling
+    // the mint, because the mint is what makes the dark scheme feel like the
+    // same product.
+    /// Fill for a filled primary action. Not the same value as `green`.
+    static let primaryFill = dynamic(hex(0x137C61), hex(0x3FBE9A))
+    /// Label colour that sits on `primaryFill` at >= 4.5:1 in both schemes.
+    static let primaryLabel = dynamic(hex(0xFFFFFF), hex(0x0B1F19))
+
     // Text-safe counterparts.
     //
     // The site's accents are tuned for fills, meter bars and borders, where
@@ -437,7 +462,40 @@ private struct TCScreen: ViewModifier {
     }
 }
 
+/// A filled primary action whose label is legible on its fill in both
+/// appearances.
+///
+/// This is a full `ButtonStyle` rather than a tint plus a `foregroundStyle`,
+/// and that is not a stylistic preference. `.borderedProminent` derives its
+/// own label colour from the tint and ignores an outer `.foregroundStyle`, so
+/// the obvious version of this fix compiles, reads correctly, changes
+/// nothing, and leaves white-on-mint at 2.32:1 exactly where it was. Drawing
+/// the fill and the label here is what actually makes the pair hold.
+struct TCPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(TC.primaryLabel)
+            .padding(.horizontal, TC.Space.m)
+            .padding(.vertical, TC.Space.s)
+            .background(
+                RoundedRectangle(cornerRadius: TC.Radius.inset, style: .continuous)
+                    .fill(TC.primaryFill)
+            )
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.45)
+            .contentShape(Rectangle())
+    }
+}
+
 extension View {
+    /// The filled primary action. Replaces `.buttonStyle(.borderedProminent)`
+    /// rather than decorating it -- see `TCPrimaryButtonStyle` for why.
+    func tcPrimaryAction() -> some View {
+        buttonStyle(TCPrimaryButtonStyle())
+    }
+
     func tcCard(emphasised: Bool = false) -> some View {
         modifier(TCCard(emphasised: emphasised))
     }

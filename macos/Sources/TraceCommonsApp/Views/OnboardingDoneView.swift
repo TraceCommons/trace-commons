@@ -54,7 +54,7 @@ struct OnboardingDoneContent: View {
             loginItemOffer
 
             Button("Done", action: onFinish)
-                .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
         }
         .padding(TC.Space.xxl)
@@ -86,7 +86,7 @@ struct OnboardingDoneContent: View {
                     Button("Start at login") {
                         registerOutcome = LoginItemManager.register()
                     }
-                    .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 }
             }
             .padding(TC.Space.l)

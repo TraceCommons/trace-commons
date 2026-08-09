@@ -272,7 +272,7 @@ struct QueueRow: View {
                 .tint(.primary)
                 .help("Skips this session only. This project will keep being offered.")
             Button("Look inside", action: onLookInside)
-                .buttonStyle(.borderedProminent)
+                .tcPrimaryAction()
                 .keyboardShortcut(.defaultAction)
         }
         .fixedSize()
