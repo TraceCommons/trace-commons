@@ -35,8 +35,17 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 # A random password per run: this account exists for the length of one job,
 # and a constant here would be a credential checked into a public repository
 # even though it only ever unlocks an ephemeral runner account.
-Add-Type -AssemblyName 'System.Web'
-$password = [System.Web.Security.Membership]::GeneratePassword(24, 6)
+#
+# Built from RandomNumberGenerator rather than
+# System.Web.Security.Membership::GeneratePassword -- System.Web does not
+# exist in .NET Core, so that call throws under pwsh (PowerShell 7), which is
+# the shell this job runs in.
+$bytes = [byte[]]::new(32)
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+# Strip to alphanumerics, then append one of each required class so the
+# result always satisfies the local password policy regardless of what the
+# random bytes happened to produce.
+$password = ([Convert]::ToBase64String($bytes) -replace '[^a-zA-Z0-9]', '') + 'aA1!'
 $secure = ConvertTo-SecureString $password -AsPlainText -Force
 $userName = 'tcaclprobe'
 
