@@ -6,12 +6,20 @@
 #
 # # Why an unsigned build is not shippable
 #
-# Gatekeeper refuses a downloaded app that is not signed with a Developer ID
-# and notarized. The contributor would see "TraceCommons.app is damaged and
-# can't be opened" -- which is not a warning they can click through, and it is
-# indistinguishable from an actual tampered download. A background app that
-# reads coding transcripts is precisely the kind of thing a user should refuse
-# to run when macOS says that, so shipping unsigned is not an option.
+# Gatekeeper blocks a downloaded app that is not signed with a Developer ID and
+# notarized. Exactly what the contributor sees varies with the macOS version
+# and with how the signature is broken -- an ad-hoc signature typically reads
+# as "damaged", an unsigned build as "the developer cannot be verified" -- and
+# some of those states can still be bypassed by a user who knows the
+# right-click-Open or Open Anyway path. So this is not "the app is literally
+# unopenable"; the earlier version of this comment overstated that.
+#
+# The argument does not need the overstatement. Shipping something whose only
+# install route is teaching contributors to click past Gatekeeper is
+# indefensible for a background app that reads their coding transcripts:
+# that warning is exactly the signal that should stop someone installing a
+# tampered build, and training people through it is training them past the
+# real thing. Developer ID plus notarization is the requirement.
 #
 # # Credentials
 #
@@ -66,15 +74,40 @@ done
 echo "--- building the release bundle"
 ./scripts/make-app-bundle.sh "$CONFIG"
 
+# A private scratch directory. RUNNER_TEMP exists only under GitHub Actions,
+# and the header advertises this as runnable for a one-off developer release
+# too -- under `set -u` that combination aborted before the cleanup trap was
+# even installed, leaving nothing to clean up but also doing nothing useful.
+WORK="${RUNNER_TEMP:-$(mktemp -d)}"
+mkdir -p "$WORK"
+
 # The certificate goes into a throwaway keychain rather than the login
 # keychain: on a CI runner there is no login keychain worth touching, and on a
 # developer's machine this must not leave a Developer ID key behind in their
 # default keychain after a one-off release build.
-KEYCHAIN="$RUNNER_TEMP/tc-signing.keychain-db"
+KEYCHAIN="$WORK/tc-signing.keychain-db"
 KEYCHAIN_PASSWORD="$(uuidgen)"
+NOTARY_PROFILE=tc-notary
+
+# Capture the search list BEFORE touching it. `security list-keychains -s`
+# REPLACES the list rather than adding to it, so setting it without restoring
+# would leave a developer's own keychains missing from every later `security`
+# call in that login session -- long after this script exited, and with no
+# clue as to why.
+ORIGINAL_KEYCHAINS="$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')"
+
+# Installed before the first mutation, so every early failure below still
+# restores the search list and removes the keychain and certificate.
 cleanup() {
+  security delete-generic-password -l "$NOTARY_PROFILE" >/dev/null 2>&1 || true
+  xcrun notarytool store-credentials --keychain "$KEYCHAIN" \
+    --delete "$NOTARY_PROFILE" >/dev/null 2>&1 || true
   security delete-keychain "$KEYCHAIN" 2>/dev/null || true
-  rm -f "$RUNNER_TEMP/cert.p12"
+  rm -f "$WORK/cert.p12"
+  if [ -n "${ORIGINAL_KEYCHAINS:-}" ]; then
+    # shellcheck disable=SC2086
+    security list-keychains -d user -s $ORIGINAL_KEYCHAINS || true
+  fi
 }
 trap cleanup EXIT
 
@@ -82,12 +115,14 @@ echo "--- importing the signing certificate into a throwaway keychain"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 900 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12"
+security import "$WORK/cert.p12" -k "$KEYCHAIN" \
   -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: \
   -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+# Append rather than replace, and restore in the trap.
+# shellcheck disable=SC2086
+security list-keychains -d user -s "$KEYCHAIN" $ORIGINAL_KEYCHAINS
 
 echo "--- signing"
 # The embedded dylib is signed before the bundle that contains it: codesign
@@ -113,10 +148,26 @@ hdiutil create -volname TraceCommons -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"
-xcrun notarytool submit "$DMG" \
+# Credentials are stored once into the throwaway keychain, then referenced by
+# profile name. Passing --password on every notarytool call would put the
+# Apple app-specific password in this process's argv for the whole
+# notarization wait, where any local process can read it from `ps`.
+#
+# RESIDUAL EXPOSURE, stated rather than implied: store-credentials still takes
+# the password as an argument, so there is one short window instead of a long
+# one, and `security import -P` has the same shape for the p12 password --
+# neither tool accepts the secret on stdin. This narrows the window; it does
+# not close it. Run release builds on an isolated ephemeral runner, and never
+# enable shell tracing (set -x) in this script.
+xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+  --keychain "$KEYCHAIN" \
   --apple-id "$MACOS_NOTARY_APPLE_ID" \
   --password "$MACOS_NOTARY_PASSWORD" \
-  --team-id "$MACOS_NOTARY_TEAM_ID" \
+  --team-id "$MACOS_NOTARY_TEAM_ID" >/dev/null
+
+xcrun notarytool submit "$DMG" \
+  --keychain "$KEYCHAIN" \
+  --keychain-profile "$NOTARY_PROFILE" \
   --wait
 
 echo "--- stapling"
