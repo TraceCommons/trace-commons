@@ -19,6 +19,21 @@ scanned for the contributor's transcripts. No shipped client relies on the
 old behaviour, because no application has shipped against `v1` yet. See
 [`set_settings`](#set_settings) for the full rules.
 
+**New in this revision (additive, no existing field or shape changed):**
+
+- `project_id` — an opaque, daemon-issued handle for a project. It appears
+  on every queue entry (`list_pending`, the `snapshot` event) and on every
+  `list_projects` row, and `set_project_mode` accepts it in place of
+  `project_key`. Before this, a socket client could not call
+  `set_project_mode` at all: paths never cross this socket, so a client held
+  only `project_label`, and a label is not an admissible `project_key`.
+  Arming and ignoring a project were unreachable from every GUI. See
+  ["Naming a project"](#naming-a-project-ids-keys-and-labels).
+- `list_projects` now reports **discovered** projects as well as configured
+  ones, each with the mode actually in force and a `configured` boolean. An
+  onboarding screen that asks a contributor to exclude a repository has to
+  be able to list a repository nobody has ruled on yet.
+
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
 test asserts that list matches `METHODS` in `src/daemon/ipc.rs`, so this file
@@ -109,7 +124,54 @@ It does not prevent anything; it only lets a contributor later see that
 something happened. Do not build a security argument, a permission gate, or
 any enforcement logic on top of `list_audit` -- it is a record, not a guard.
 
-## Project keys and labels
+## Naming a project: ids, keys, and labels
+
+A project has three names on this contract, and they are not
+interchangeable.
+
+| Name | Who mints it | Crosses the socket | What it is for |
+|---|---|---|---|
+| `project_id` | the daemon | yes | naming a project back to the daemon |
+| `project_label` | the daemon | yes | showing a project to a human |
+| `project_key` | the caller | **no** | naming a project from a terminal |
+
+### `project_id`
+
+`project_id` is an opaque handle the daemon derives from the project key:
+`"proj_"` followed by 16 hex characters of `sha256(project_key)`. It is a
+hash, not an encoding, so it carries no path component and cannot be turned
+back into one. It is derived rather than stored, so it is the same across a
+daemon restart and across a policy file rebuilt from scratch, and there is
+nothing to migrate.
+
+It appears on every queue entry and every `list_projects` row: a client that
+can see a project can name it. `set_project_mode` accepts it in place of
+`project_key`, and it is the identifier **every socket client should use**.
+`project_id` wins if both are sent.
+
+An id resolves only against projects the daemon already knows — one already
+in the policy, one sitting in the queue, or the `unknown-project` sentinel.
+An id that resolves to none of those is refused with the fixed label
+`project-id-unrecognized`, and nothing is recorded.
+
+Knowing an id confers nothing. It is an identifier, not a capability: the
+same call was always available to anyone who could name the directory, and
+resolution is still limited to projects the daemon discovered on its own.
+
+### `project_key`, and why it is still accepted
+
+`project_key` is an absolute local path. It does not cross the socket in any
+response, and no GUI should ever hold one. It remains an accepted
+*parameter* for exactly one caller: a human in a terminal running
+`daemon project <path> --mode ignore` **before that project's first
+session** — the flow that excludes a repository pre-emptively. The daemon
+cannot mint an id for a project it has never discovered, so an id cannot
+serve that flow, and the two coexist deliberately rather than one replacing
+the other.
+
+Sending neither is `bad_params` with `project_id-or-project_key-required`.
+
+### `project_label`
 
 `project_label` is **always derived by the daemon** from `project_key`. A
 client cannot choose one. `set_project_mode` still accepts a `label`
@@ -129,14 +191,16 @@ by any socket client with an arbitrary path, token, or transcript fragment.
   canonicalizes to itself.
 
 Anything else is refused with the fixed label `project-key-unrecognized`
-and nothing is recorded. This keeps the label the daemon derives anchored to
+and nothing is recorded. An unrecognized `project_id` is refused the same
+way, with `project-id-unrecognized`. This keeps the label the daemon derives anchored to
 something it can corroborate, rather than to a string a client invented.
 
 ## Privacy rules binding on clients
 
-- Queue entries on the wire carry `project_label`, never `project_key` or
-  `path`. Both of those are local filesystem paths and never cross the socket.
-  Do not display or log a path.
+- Queue entries on the wire carry `project_label` and `project_id`, never
+  `project_key` or `path`. Both of those are local filesystem paths and never
+  cross the socket. Do not display or log a path. Render the label; send the
+  id back.
 - History records carry no path at all.
 - `get_settings` reports three booleans -- `near_ai_configured`,
   `claude_root_configured`, `codex_root_configured` -- and never the
@@ -212,8 +276,8 @@ history record, audit entry, notification text, or IPC response.
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_label, mode, added_at}` | |
-| `set_project_mode` | `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | `auto_upload` no longer requires a terminal; see "Project keys and labels" below |
+| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured}` | configured **and** discovered projects; see "`list_projects`" below |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `refresh_history` | — | `requested: true` | |
@@ -330,6 +394,43 @@ preview a local file; that requirement was incidental and is gone.
 `would_send_bytes`, `redactions`, `pii_labels_present` and `opening_prompt`
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
+
+### `list_projects`
+
+```json
+{
+  "projects": [
+    {
+      "project_id": "proj_9f2c1ab30d4e5f60",
+      "project_label": "my-proj",
+      "mode": "notify_only",
+      "added_at": null,
+      "configured": false
+    }
+  ]
+}
+```
+
+Every project the daemon knows about, in two kinds:
+
+- **configured** (`configured: true`, `added_at` set) — the contributor has
+  ruled on it with `set_project_mode`.
+- **discovered** (`configured: false`, `added_at: null`) — the daemon has
+  seen a session for it and nobody has ruled on it. `mode` is the effective
+  mode, which for an unruled project is the `notify_only` default.
+
+Discovered rows are reported because the onboarding "which of these should
+never be uploaded" screen has to list precisely the projects nobody has
+decided about yet. A project becomes configured only by being ruled on, so a
+configured-only list is a list of decisions already made — it can never
+contain the repository the contributor is being asked to exclude. Nothing
+new crosses the socket: a discovered row carries the same two
+daemon-derived fields (`project_id`, `project_label`) that the queue entry
+for that project already carries.
+
+`mode` is always the mode in force, not the stored value: the
+`unknown-project` bucket reports `notify_only` even if a hand-edited policy
+file says `auto_upload`, because the daemon refuses to act on that.
 
 ### The approval hold (the undo window)
 
