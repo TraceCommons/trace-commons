@@ -460,21 +460,62 @@ final class AppModel: ObservableObject {
     /// Opens a real preview for the first waiting entry, runs a real search
     /// over the redacted body, and hands back everything the sheet needs to
     /// be rendered without its own async load. Used by the screenshot hook.
+    /// A wholly synthetic preview for the screenshot hook.
+    ///
+    /// This used to open a REAL queued entry and hand its redacted body to
+    /// `PreviewSheet`, which was then rasterized to a PNG in a directory the
+    /// caller named. That put trace content in a durable file outside the
+    /// protected state directory. The preview exemption covers showing
+    /// redacted content to the contributor who owns the entry -- it does not
+    /// cover writing it to an arbitrary path, and "we only ever point this at
+    /// fixtures" is a property of how it is invoked, not of the code.
+    ///
+    /// The screenshots exist to show what the UI looks like, and a fabricated
+    /// transcript does that just as well. Nothing here reads the queue.
     func loadCaptureSample(needle: String) async -> (QueueEntry, PreviewSheet.Preloaded)? {
-        guard let entry = awaitingDecision.first else { return nil }
-        guard case .opened(let preview) = await openPreview(entryID: entry.entryID) else {
-            return nil
+        let transcript = """
+            user: Add a retry to the Northwind billing sync -- it drops the \
+            batch when the upstream 503s.
+
+            assistant: I will wrap the call in a bounded retry. The credential \
+            was scrubbed from this transcript: [REDACTED:aws_secret_key]
+
+            tool: edit billing/sync.rs
+            """
+        let summary = PreviewSummary(
+            wouldSendBytes: 4160,
+            rawSessionBytes: 1615,
+            eventCount: 3,
+            openingPrompt: "Add a retry to the Northwind billing sync",
+            redactions: ["aws_secret_key": 1, "local_path": 3],
+            piiLabelsPresent: ["email"],
+            consentScopes: ["debugging_evaluation"],
+            residualRisk: "pattern-based"
+        )
+        let entry = QueueEntry(
+            entryID: "entry_screenshot_fixture",
+            sessionHash: "sha256:0000000000000000",
+            source: "claude-code",
+            projectLabel: "northwind-billing",
+            sizeBytes: 1615,
+            discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),
+            state: .pending,
+            reasonLabel: nil,
+            attempts: 0
+        )
+        var offsets: [Int] = []
+        if !needle.isEmpty {
+            var searchRange = transcript.startIndex..<transcript.endIndex
+            while let found = transcript.range(of: needle, range: searchRange) {
+                offsets.append(transcript.distance(from: transcript.startIndex, to: found.lowerBound))
+                searchRange = found.upperBound..<transcript.endIndex
+            }
         }
-        defer { preview.close() }
-        guard let data = preview.summaryJSON.data(using: .utf8),
-              let summary = try? DaemonDecoding.decoder().decode(PreviewSummary.self, from: data)
-        else { return nil }
-        let offsets = preview.search(needle) ?? []
         return (
             entry,
             PreviewSheet.Preloaded(
                 summary: summary,
-                transcript: preview.body,
+                transcript: transcript,
                 needle: needle,
                 offsets: offsets
             )

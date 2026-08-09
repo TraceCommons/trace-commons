@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 /// Drives the typed layer against the live in-process daemon and writes what
@@ -8,6 +9,21 @@ import Foundation
 /// that `approve` then `cancel` actually round-trips an entry back to
 /// `pending`. This does, in text, against the same daemon the UI is driving.
 /// It is inert unless the environment variable is set.
+
+/// A short, stable digest for values that must be *correlatable* in a report
+/// without being *disclosed* by it.
+///
+/// The self-test writes to a path its caller chose, which can be anywhere. A
+/// tenant id is contributor identity and the contract says identity does not
+/// get written to surfaces like this. But an assertion still needs to say
+/// "the id after enrolling is the same one status reports", so the value is
+/// hashed rather than dropped: equality survives, the identity does not.
+private func reportDigest(_ value: String?) -> String {
+    guard let value, !value.isEmpty else { return "nil" }
+    let digest = SHA256.hash(data: Data(value.utf8))
+    return "sha256:" + digest.compactMap { String(format: "%02x", $0) }.prefix(8).joined()
+}
+
 enum SelfTest {
     @MainActor
     static func runIfRequested(model: AppModel) {
@@ -43,7 +59,7 @@ enum SelfTest {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             let report = "trace-commons macOS resume check\n"
                 + "status.logged_in=\(model.status.loggedIn) "
-                + "tenant_id=\(model.status.tenantID ?? "nil") "
+                + "tenant_id=\(reportDigest(model.status.tenantID)) "
                 + "consent_scopes=\(model.status.consentScopes)\n"
                 + "isOnboardingComplete=\(model.isOnboardingComplete)\n"
                 + "would show: "
@@ -95,7 +111,7 @@ enum SelfTest {
         switch await model.enroll(invite: invite) {
         case .succeeded(let result):
             lines.append("enroll: enrolled=\(result.enrolled) "
-                + "tenant_id=\(result.tenantID ?? "nil") "
+                + "tenant_id=\(reportDigest(result.tenantID)) "
                 + "consent_scopes=\(result.consentScopes ?? [])")
         case .failed:
             lines.append("FAIL: enroll did not succeed")
@@ -130,7 +146,7 @@ enum SelfTest {
         model.refreshStatus()
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         lines.append("after: status.logged_in=\(model.status.loggedIn) "
-            + "tenant_id=\(model.status.tenantID ?? "nil") "
+            + "tenant_id=\(reportDigest(model.status.tenantID)) "
             + "consent_scopes=\(model.status.consentScopes)")
 
         // Screen 6 equivalent: mark onboarding complete, the way
@@ -177,8 +193,15 @@ enum SelfTest {
         if let summary = model.summaries[entry.entryID] {
             lines.append("socket preview: would_send=\(summary.wouldSendBytes) "
                 + "raw=\(summary.rawSessionBytes) events=\(summary.eventCount)")
+            // The receipt is category labels and counts -- `redactions` is
+            // [String: Int] and carries no matched text -- so it is safe to
+            // write. The opening prompt is not: it is trace content, and the
+            // preview exemption covers showing it to the contributor who owns
+            // the entry, not writing it to a path the caller picked. Assert
+            // its shape instead of reproducing it.
             lines.append("redaction receipt: \(summary.redactionReceipt)")
-            lines.append("opening prompt: \(summary.openingPrompt.prefix(80))")
+            lines.append("opening prompt: chars=\(summary.openingPrompt.count) "
+                + "nonempty=\(!summary.openingPrompt.isEmpty)")
         } else {
             lines.append("socket preview: not loaded (\(model.summaryErrors[entry.entryID] ?? "pending"))")
         }

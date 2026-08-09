@@ -93,9 +93,18 @@ chmod 600 "$STATE_DIR/daemon-settings.json" "$STATE_DIR/contributor.json"
 chmod 700 "$STATE_DIR"
 
 echo "state dir: $STATE_DIR"
-if [ ! -d "$APP" ]; then
-  "$PACKAGE_DIR/scripts/make-app-bundle.sh"
-fi
+# ALWAYS rebuild, never "only if missing".
+#
+# This used to be `if [ ! -d "$APP" ]`, which meant the second and every
+# subsequent run launched whatever binary happened to be sitting in .build --
+# so any source change after the first run was silently ignored and the demo
+# reported on stale code. Anything "verified" that way was verified against a
+# build that no longer existed in the tree, which is worse than not checking:
+# it produces confident output about code you are not running.
+#
+# make-app-bundle.sh runs `swift build`, which is incremental, so an unchanged
+# tree costs almost nothing here.
+"$PACKAGE_DIR/scripts/make-app-bundle.sh"
 
 TRACE_COMMONS_CONTRIBUTOR_DIR="$STATE_DIR" \
 TRACE_COMMONS_SHOW_WINDOW="${TRACE_COMMONS_SHOW_WINDOW:-1}" \
