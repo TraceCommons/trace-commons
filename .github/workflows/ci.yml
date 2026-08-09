@@ -22,8 +22,12 @@ name: ci
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch. This repository uses stacked
+  # PRs, and a `branches: [main]` filter here means a PR targeting another
+  # branch gets no CI at all -- the work is only ever tested once it reaches
+  # main, which is exactly when a failure is most expensive to unwind. A PR
+  # should be tested against the branch it will actually merge into.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
