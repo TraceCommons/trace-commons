@@ -20,6 +20,9 @@ pub struct SettingsView {
     pause_button: gtk::Button,
     projects: gtk::Box,
     knobs: gtk::Box,
+    autostart_body: gtk::Label,
+    autostart_row: gtk::Box,
+    autostart_switch: gtk::Switch,
     audit: gtk::Box,
 }
 
@@ -62,6 +65,25 @@ impl SettingsView {
         let knobs = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.append(&knobs);
 
+        let autostart_heading = gtk::Label::builder()
+            .label(copy::AUTOSTART_HEADING)
+            .xalign(0.0)
+            .build();
+        autostart_heading.add_css_class("title-4");
+        content.append(&autostart_heading);
+        let autostart_body = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        content.append(&autostart_body);
+        let autostart_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let autostart_switch_label = gtk::Label::builder()
+            .label(copy::AUTOSTART_XDG_LABEL)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        let autostart_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        autostart_row.append(&autostart_switch_label);
+        autostart_row.append(&autostart_switch);
+        content.append(&autostart_row);
+
         let audit_heading = gtk::Label::builder()
             .label("What has been changed on this machine")
             .xalign(0.0)
@@ -85,6 +107,9 @@ impl SettingsView {
             pause_button,
             projects,
             knobs,
+            autostart_body,
+            autostart_row,
+            autostart_switch,
             audit,
         }
     }
@@ -105,6 +130,28 @@ pub fn wire(app: &Rc<App>) {
             offer_pause(&a);
         }
     });
+
+    render_autostart(app);
+    let a = Rc::clone(app);
+    app.settings
+        .autostart_switch
+        .connect_state_set(move |_, wanted| {
+            // Only reachable when detection already put the switch in play --
+            // see `render_autostart`, which hides this row entirely rather
+            // than disabling it when a systemd unit is doing the job. So an
+            // event here always means "write or remove the XDG entry",
+            // never "fight the systemd unit for control".
+            let result = if wanted {
+                crate::autostart::enable_xdg_entry()
+            } else {
+                crate::autostart::disable_xdg_entry()
+            };
+            if result.is_err() {
+                a.toast("That couldn't be changed just now. Nothing else changed either.");
+            }
+            render_autostart(&a);
+            gtk::glib::Propagation::Proceed
+        });
 }
 
 /// Pause offers the three durations from the shared spec, backed by
@@ -150,6 +197,31 @@ fn tomorrow_morning() -> chrono::DateTime<chrono::Utc> {
         .and_hms_opt(9, 0, 0)
         .map(|naive| naive.and_utc())
         .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(12))
+}
+
+/// Which of the two autostart mechanisms is in force, and say so plainly.
+/// Local filesystem state, not the daemon's, so this needs no round trip
+/// and can be called eagerly at wire time.
+fn render_autostart(app: &Rc<App>) {
+    match crate::autostart::detect() {
+        crate::autostart::Mechanism::SystemdUnit => {
+            app.settings
+                .autostart_body
+                .set_text(copy::AUTOSTART_SYSTEMD_BODY);
+            app.settings.autostart_row.set_visible(false);
+        }
+        crate::autostart::Mechanism::XdgEntry { enabled } => {
+            app.settings
+                .autostart_body
+                .set_text(copy::AUTOSTART_XDG_BODY);
+            app.settings.autostart_row.set_visible(true);
+            // Programmatic sync from disk, not a click. GTK's
+            // `state-set` signal fires only on user interaction with the
+            // switch, not from `set_active`, so this cannot loop back
+            // into the handler above and re-write the file it just read.
+            app.settings.autostart_switch.set_active(enabled);
+        }
+    }
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {

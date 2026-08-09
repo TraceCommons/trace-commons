@@ -126,6 +126,19 @@ pub const NOTIFY_NOTHING_SENT: &str = "Nothing is sent until you review them.";
 pub const PORTAL_BACKGROUND_REASON: &str =
     "Trace Commons reviews new sessions and uploads only what you approve.";
 
+// --- Autostart -----------------------------------------------------------
+
+pub const AUTOSTART_HEADING: &str = "Starting automatically";
+/// Shown when the systemd user unit is doing the job. The service name is
+/// not a filesystem path, so naming it here does not violate the no-paths
+/// rule.
+pub const AUTOSTART_SYSTEMD_BODY: &str = "A background service you installed already starts \
+     Trace Commons at login. Manage it with systemctl --user, not from here, so this window and \
+     that service never disagree about whether it's running.";
+pub const AUTOSTART_XDG_LABEL: &str = "Start Trace Commons when you log in";
+pub const AUTOSTART_XDG_BODY: &str =
+    "No background service is installed, so this switch is the other way to do it.";
+
 // --- Health ------------------------------------------------------------
 
 /// The sentence to render for a `status.health.last_error_label`.

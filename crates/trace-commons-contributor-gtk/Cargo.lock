@@ -2696,6 +2696,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "dirs",
  "glib",
  "gtk4",
  "libadwaita",

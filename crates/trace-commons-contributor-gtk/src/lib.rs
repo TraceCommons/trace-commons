@@ -17,6 +17,7 @@
 //!   and this application is an optional client over its socket. It can also
 //!   host the loop for someone who wants only the app. See `backend`.
 
+pub mod autostart;
 pub mod backend;
 pub mod copy;
 pub mod model;
