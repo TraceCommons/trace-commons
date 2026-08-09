@@ -25,6 +25,19 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", 
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
+# Windows only. The daemon's transport there is a named pipe in the
+# machine-wide namespace, whose DACL is the sole access control on it (the
+# unix build relies on its 0700 state directory instead, and needs none of
+# this). Building that descriptor requires Win32 directly: tokio exposes only
+# `create_with_security_attributes_raw`, which takes a raw pointer.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 trace-commons-server = { path = "../trace-commons-server" }
 async-trait = "0.1"

@@ -37,6 +37,8 @@ pub mod settings;
 pub mod state;
 pub mod uploader;
 pub mod watcher;
+#[cfg(windows)]
+pub mod win_pipe;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -148,10 +150,20 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     }
 
     let shared = Arc::new(ipc::DaemonShared::load(store)?);
+    // The two transports are the same protocol over different plumbing: a
+    // unix socket guarded by its 0700 state directory, or a Windows named
+    // pipe guarded by its DACL. See `win_pipe` for why the Windows side
+    // carries the whole access control itself.
+    #[cfg(unix)]
     let listener = ipc::bind(&shared.store).await?;
+    #[cfg(windows)]
+    let listener = win_pipe::bind(&shared.store).await?;
 
     let serve_shared = Arc::clone(&shared);
+    #[cfg(unix)]
     let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
+    #[cfg(windows)]
+    let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
 
     Ok(EmbeddedDaemon {
         shared,

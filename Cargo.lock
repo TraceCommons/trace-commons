@@ -7148,6 +7148,7 @@ dependencies = [
  "trace-commons-server",
  "tracing",
  "uuid 1.23.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

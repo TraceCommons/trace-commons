@@ -41,13 +41,50 @@ and the implementation cannot drift silently.
 
 ## Transport
 
-A unix domain socket at `$TRACE_COMMONS_CONTRIBUTOR_DIR/daemon.sock`
-(default `~/.config/trace-commons/daemon.sock`).
+Two transports carrying an identical protocol. The framing, the method set,
+and the error taxonomy do not vary by platform; only the listening and
+connecting ends do. `ipc::serve_connection` is generic over the stream, so
+both share one implementation of everything above the transport.
 
-Windows is specified but **not implemented in v1_1**. A per-user-restricted
-named pipe needs a `SECURITY_DESCRIPTOR`, which needs a `windows-sys`
-dependency. That dependency is approved (2026-08-08), scoped to
-`cfg(windows)` only; the implementation lands with the Windows application.
+**Unix**: a domain socket at `$TRACE_COMMONS_CONTRIBUTOR_DIR/daemon.sock`
+(default `~/.config/trace-commons/daemon.sock`). Access control is the
+containing directory: the daemon refuses to serve unless it is 0700, and a
+0700 directory belonging to another user is not writable, so no one else can
+place a socket there either.
+
+**Windows**: a named pipe at `\\.\pipe\trace-commons-daemon-<16 hex>`, where
+the hex is a SHA-256 prefix over the state directory path — never the path
+itself, which under the default layout carries the OS username, and which a
+pipe name would expose to every process on the machine.
+
+The Windows access control is entirely different in kind, and the difference
+matters. A named pipe does not live in the state directory; it lives in the
+machine-wide pipe namespace, where any local process may attempt to open it
+by name. **Its DACL is the only thing protecting it.** The daemon builds one
+granting the creating user's SID alone (`D:P(A;;GA;;;<sid>)`, protected so
+no inherited entry can widen it) and refuses to serve if it cannot — there is
+no fallback to a default-ACL pipe, because that fallback is the
+vulnerability. The first instance is created with `first_pipe_instance` so a
+squatter cannot pre-create the name under a weaker descriptor and be served
+on.
+
+One behavioural difference on the client side: the Windows one-shot client
+opens the pipe as a file handle, which has no equivalent of
+`set_read_timeout`, so the 60-second request timeout is not applied there.
+
+> **The Windows DACL is UNVERIFIED.** The transport type-checks for
+> `x86_64-pc-windows-gnu`, which establishes the FFI signatures and the
+> control flow and nothing about whether the descriptor actually excludes
+> another user — a runtime property that cannot be observed from a
+> cross-compile. Before this ships, a real Windows machine must confirm that
+> a second, non-administrator local account is refused when connecting to the
+> pipe. The procedure is written out in the module doc of
+> `crates/trace-commons-contributor/src/daemon/win_pipe.rs`. Until it has
+> been run and passed, do not describe the ACL as working.
+
+`windows-sys` is approved (2026-08-08) for exactly this and scoped to
+`[target.'cfg(windows)'.dependencies]`; macOS and Linux dependency trees do
+not contain it.
 See `docs/superpowers/specs/2026-08-08-contributor-shell-windows-design.md`.
 
 ## Framing

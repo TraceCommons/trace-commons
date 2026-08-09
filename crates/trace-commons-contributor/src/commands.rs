@@ -336,18 +336,14 @@ pub(crate) enum DaemonStopOutcome {
 fn stop_running_daemon(store: &ConfigStore) -> Result<DaemonStopOutcome> {
     use std::io::{BufRead, BufReader, Write};
 
-    let sock = store.daemon_path(crate::config::DAEMON_SOCK_FILE);
-    if !sock.exists() {
-        return Ok(DaemonStopOutcome::NotRunning);
-    }
-    let mut stream = match std::os::unix::net::UnixStream::connect(&sock) {
-        Ok(s) => s,
-        // A stale socket from a crashed daemon: nothing is running.
-        Err(_) => return Ok(DaemonStopOutcome::NotRunning),
+    // Both transports are reached the same way the one-shot client reaches
+    // them, so this cannot drift from `daemon::client` when one of them
+    // changes.
+    let mut stream = match crate::daemon::client::connect_for_shutdown(store) {
+        Some(s) => s,
+        // Nothing listening, or a stale endpoint from a crashed daemon.
+        None => return Ok(DaemonStopOutcome::NotRunning),
     };
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok();
     stream
         .write_all(b"{\"id\":0,\"method\":\"shutdown\"}\n")
         .context("sending shutdown")?;

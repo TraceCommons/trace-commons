@@ -100,12 +100,15 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+#[cfg(any(unix, test))]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
@@ -120,7 +123,9 @@ use super::policy::{
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
 use super::state::DaemonState;
-use crate::config::{ConfigStore, DAEMON_SOCK_FILE};
+use crate::config::ConfigStore;
+#[cfg(unix)]
+use crate::config::DAEMON_SOCK_FILE;
 
 pub const IPC_SCHEMA: &str = "trace_commons.daemon.v1_1";
 /// Every schema version a client may declare compatibility with. `hello`
@@ -1465,9 +1470,11 @@ fn one_line_label(s: &str) -> String {
 
 /// The kernel's limit on a unix socket path, conservatively the smallest of
 /// the common values (macOS allows 104 bytes, Linux 108).
+#[cfg(unix)]
 const MAX_SOCKET_PATH_BYTES: usize = 104;
 
 /// Bind the daemon socket, refusing unless the state directory is private.
+#[cfg(unix)]
 pub async fn bind(store: &ConfigStore) -> Result<UnixListener> {
     ensure_private_dir(store.dir())?;
     let path = store.daemon_path(DAEMON_SOCK_FILE);
@@ -1517,12 +1524,8 @@ fn ensure_private_dir(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn ensure_private_dir(_dir: &std::path::Path) -> Result<()> {
-    bail!("the daemon socket is unix-only in this version")
-}
-
 /// Serve connections until shutdown is requested.
+#[cfg(unix)]
 pub async fn serve(listener: UnixListener, shared: Arc<DaemonShared>) -> Result<()> {
     loop {
         let (stream, _addr) = match listener.accept().await {
@@ -1536,8 +1539,18 @@ pub async fn serve(listener: UnixListener, shared: Arc<DaemonShared>) -> Result<
     }
 }
 
-pub async fn serve_connection(stream: UnixStream, shared: Arc<DaemonShared>) -> Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+/// Serve one client connection.
+///
+/// Generic over the stream so the unix-socket and Windows named-pipe
+/// transports share one implementation: the protocol, the framing, and the
+/// error taxonomy are identical on both, and three applications are built
+/// against one contract document. Only the listening and connecting ends
+/// differ per platform.
+pub async fn serve_connection<S>(stream: S, shared: Arc<DaemonShared>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut subscription: Option<broadcast::Receiver<Event>> = None;
     let mut line = String::new();
@@ -1601,10 +1614,11 @@ pub async fn serve_connection(stream: UnixStream, shared: Arc<DaemonShared>) -> 
     }
 }
 
-async fn write_json<T: Serialize>(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
-    value: &T,
-) -> Result<()> {
+async fn write_json<W, T>(w: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
     let mut body = serde_json::to_vec(value).context("serializing ipc frame")?;
     body.push(b'\n');
     w.write_all(&body).await.context("writing ipc frame")?;
