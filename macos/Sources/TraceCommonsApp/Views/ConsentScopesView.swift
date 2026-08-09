@@ -22,10 +22,15 @@ import SwiftUI
 struct ConsentScopesView: View {
     @EnvironmentObject private var model: AppModel
     var onContinue: (Set<String>) -> Void = { _ in }
+    /// Scopes the contributor had already ticked, when this screen is being
+    /// re-entered from later in onboarding (screen 4 or 5) rather than seen
+    /// for the first time -- see `OnboardingCoordinatorView`'s back
+    /// navigation. Empty on first entry, matching the previous behavior.
+    var initialSelection: Set<String> = []
 
     var body: some View {
         ScrollView {
-            ConsentScopesContent(onContinue: onContinue)
+            ConsentScopesContent(onContinue: onContinue, initialSelection: initialSelection)
                 .environmentObject(model)
         }
     }
@@ -39,10 +44,17 @@ struct ConsentScopesContent: View {
     @EnvironmentObject private var model: AppModel
 
     /// Names of optional (non-always-on) scopes the person has ticked.
-    /// Nothing optional starts selected -- see rule 2 below.
-    @State private var selected: Set<String> = []
+    /// Nothing optional starts selected on first entry -- see rule 2 below
+    /// -- but a re-entry from later in onboarding seeds this from whatever
+    /// was chosen before, via `initialSelection`.
+    @State private var selected: Set<String>
 
     var onContinue: (Set<String>) -> Void = { _ in }
+
+    init(onContinue: @escaping (Set<String>) -> Void = { _ in }, initialSelection: Set<String> = []) {
+        self.onContinue = onContinue
+        _selected = State(initialValue: initialSelection)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {

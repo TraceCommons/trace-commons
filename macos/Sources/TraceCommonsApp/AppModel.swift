@@ -276,6 +276,63 @@ final class AppModel: ObservableObject {
         })
     }
 
+    enum SetScopesOutcome: Equatable {
+        case succeeded([String])
+        /// Deliberately carries no message, matching `EnrollOutcome.failed`:
+        /// `set_consent_scopes` only reports `not-logged-in` (this call
+        /// only ever runs after `enroll` already succeeded, so that should
+        /// not be reachable) or a local config-write failure, neither of
+        /// which is more actionable to a contributor than a flat retry.
+        case failed
+    }
+
+    /// Applies the consent scopes chosen on `ConsentScopesView`. Bypasses
+    /// `perform` (like `enroll`) so the onboarding coordinator can await the
+    /// outcome and only advance past the consent screen once the daemon has
+    /// actually recorded the choice -- see the coordinator's ordering note
+    /// on why this call, not `enroll`, is what applies scopes in this app's
+    /// flow.
+    func setConsentScopes(_ scopes: [String]) async -> SetScopesOutcome {
+        guard let client else { return .failed }
+        let outcome: SetScopesOutcome = await Task.detached(priority: .userInitiated) {
+            do {
+                return .succeeded(try client.setConsentScopes(scopes))
+            } catch {
+                return .failed
+            }
+        }.value
+        if case .succeeded = outcome {
+            refreshStatus()
+        }
+        return outcome
+    }
+
+    // MARK: - Onboarding resume
+
+    /// Whether onboarding has been walked to the end (the Done screen) for
+    /// the *currently enrolled* device. Keyed off `status.tenantID` rather
+    /// than a single global flag: `enroll` alone flips `status.loggedIn` to
+    /// true (it happens on screen 2, before consent is even chosen on
+    /// screen 3), so `loggedIn` cannot by itself distinguish "fully
+    /// onboarded" from "enrolled but consent was never confirmed." A
+    /// contributor who quit mid-flow must come back to the rest of
+    /// onboarding, not straight to the main window with whatever scopes
+    /// `enroll`'s floor-only default happened to leave in place -- see the
+    /// coordinator's atomicity note.
+    var isOnboardingComplete: Bool {
+        guard let tenantID = status.tenantID else { return false }
+        return UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
+    }
+
+    func markOnboardingComplete() {
+        guard let tenantID = status.tenantID else { return }
+        UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
+    }
+
+    private static func onboardingCompleteKey(_ tenantID: String) -> String {
+        "trace_commons.onboarding_complete.\(tenantID)"
+    }
+
     func refreshOutcomeCounts() {
         perform("queue_outcome_counts", work: { try $0.queueOutcomeCounts() }, onSuccess: {
             self.outcomeCounts = $0

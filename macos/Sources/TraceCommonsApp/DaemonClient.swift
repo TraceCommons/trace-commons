@@ -113,6 +113,23 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_near_ai_notice")
     }
 
+    /// Replaces the enrolled device's consent scopes. Local config write
+    /// only -- no network I/O -- and requires an existing enrollment
+    /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used
+    /// by the onboarding consent screen: `enroll` is always called with no
+    /// scopes (floor scope only), and this call is what actually applies
+    /// whatever the contributor ticked on `ConsentScopesView`, once they
+    /// confirm it -- see "### `set_consent_scopes`" in the contract.
+    @discardableResult
+    func setConsentScopes(_ scopes: [String]) throws -> [String] {
+        struct Wrapper: Decodable {
+            let consentScopes: [String]
+            enum CodingKeys: String, CodingKey { case consentScopes = "consent_scopes" }
+        }
+        let params: [String: Any] = scopes.isEmpty ? [:] : ["scopes": scopes]
+        return try call("set_consent_scopes", params: params, as: Wrapper.self).consentScopes
+    }
+
     /// Counts by `reason_label` across entries that ARE on the queue. It does
     /// not explain sessions the watcher never queued, and the UI must not
     /// claim it does.
