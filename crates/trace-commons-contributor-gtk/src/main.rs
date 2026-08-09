@@ -21,6 +21,13 @@ fn main() -> anyhow::Result<()> {
         .and_then(|i| std::env::args().nth(i + 1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
+    let open_preview = std::env::args().any(|a| a == "--open-preview");
+    let search_term = std::env::args()
+        .position(|a| a == "--search")
+        .and_then(|i| std::env::args().nth(i + 1));
+    let start_page = std::env::args()
+        .position(|a| a == "--start-page")
+        .and_then(|i| std::env::args().nth(i + 1));
     // A state directory can be named explicitly, mostly so a container run
     // does not touch a real one.
     let dir = match std::env::args().position(|a| a == "--state-dir") {
@@ -50,6 +57,23 @@ fn main() -> anyhow::Result<()> {
         };
         let app = ui::App::build(application, worker);
         app.window.present();
+
+        // Debug drivers for the headless container run. They open a surface
+        // that a person would otherwise have to click to, so a screenshot
+        // can show it. Neither approves anything: there is no flag in this
+        // application that contributes a trace without a person pressing
+        // Contribute in the preview sheet.
+        if let Some(page) = start_page.clone() {
+            app.stack.set_visible_child_name(&page);
+        }
+        if open_preview {
+            let app = app.clone();
+            let search_term = search_term.clone();
+            gtk::glib::timeout_add_seconds_local(3, move || {
+                ui::preview::open_with_search(&app, 0, search_term.clone());
+                gtk::glib::ControlFlow::Break
+            });
+        }
 
         if exit_after_realize {
             let application = application.clone();

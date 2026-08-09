@@ -24,6 +24,12 @@ use crate::model::{ApproveResult, PreviewSummary, human_bytes};
 
 /// Open the preview sheet on the `index`-th pending entry.
 pub fn open(app: &Rc<App>, index: usize) {
+    open_with_search(app, index, None)
+}
+
+/// As `open`, with a search term already typed. Used by the headless
+/// container run to photograph a real search result; a person types theirs.
+pub fn open_with_search(app: &Rc<App>, index: usize, term: Option<String>) {
     let entries = app.entries.borrow();
     let pending: Vec<crate::model::QueueEntry> = entries
         .iter()
@@ -34,7 +40,7 @@ pub fn open(app: &Rc<App>, index: usize) {
     if index >= pending.len() {
         return;
     }
-    Sheet::present(app, pending, index);
+    Sheet::present(app, pending, index, term);
 }
 
 struct Sheet {
@@ -60,7 +66,12 @@ struct Sheet {
 }
 
 impl Sheet {
-    fn present(app: &Rc<App>, pending: Vec<crate::model::QueueEntry>, index: usize) {
+    fn present(
+        app: &Rc<App>,
+        pending: Vec<crate::model::QueueEntry>,
+        index: usize,
+        term: Option<String>,
+    ) {
         let window = adw::Window::builder()
             .transient_for(&app.window)
             .modal(true)
@@ -229,6 +240,9 @@ impl Sheet {
         sheet.load();
         window.present();
         search_entry.grab_focus();
+        if let Some(term) = term {
+            search_entry.set_text(&term);
+        }
     }
 
     fn current(&self) -> Option<&crate::model::QueueEntry> {

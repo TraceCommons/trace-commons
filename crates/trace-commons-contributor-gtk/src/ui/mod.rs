@@ -283,12 +283,10 @@ impl App {
     /// to any event.
     pub fn refresh(self: &Rc<Self>) {
         self.call("status", serde_json::json!({}), |app, result| {
-            if let Ok(value) = result {
-                if let Ok(status) = serde_json::from_value::<Status>(value) {
-                    app.render_health(&status);
-                    settings::render_status(app, &status);
-                    *app.status.borrow_mut() = Some(status);
-                }
+            if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
+                app.render_health(&status);
+                settings::render_status(app, &status);
+                *app.status.borrow_mut() = Some(status);
             }
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {

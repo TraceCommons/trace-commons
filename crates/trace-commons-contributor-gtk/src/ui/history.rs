@@ -21,6 +21,12 @@ pub struct HistoryView {
     content: gtk::Box,
 }
 
+impl Default for HistoryView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HistoryView {
     pub fn new() -> Self {
         let content = gtk::Box::builder()
@@ -125,7 +131,7 @@ fn render(app: &Rc<App>, rollup: &HistoryRollup, records: &[HistoryRecord]) {
     // --- Quarantine, expanded --------------------------------------------
     if rollup.quarantined > 0 {
         let expander = gtk::Expander::builder()
-            .label(&format!(
+            .label(format!(
                 "{} - {} traces",
                 copy::QUARANTINE_HEADING,
                 rollup.quarantined

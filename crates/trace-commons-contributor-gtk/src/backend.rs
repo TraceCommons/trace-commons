@@ -163,16 +163,14 @@ struct BroadcastEvents {
 
 impl EventStream for BroadcastEvents {
     fn next(&mut self) -> Option<String> {
-        loop {
-            match self.rx.blocking_recv() {
-                Ok(event) => return Some(event.event),
-                // Lagged: the shell's answer to a missed event is the same
-                // as its answer to `resync_required` -- re-read everything.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    return Some("resync_required".to_string());
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        match self.rx.blocking_recv() {
+            Ok(event) => Some(event.event),
+            // Lagged: the shell's answer to a missed event is the same as
+            // its answer to `resync_required` -- re-read everything.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Some("resync_required".to_string())
             }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
         }
     }
 }

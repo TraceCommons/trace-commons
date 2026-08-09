@@ -23,6 +23,12 @@ pub struct SettingsView {
     audit: gtk::Box,
 }
 
+impl Default for SettingsView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsView {
     pub fn new() -> Self {
         let content = gtk::Box::builder()

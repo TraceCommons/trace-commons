@@ -13,6 +13,10 @@
 # exist and are laid out, not that the design reads well.
 set -euo pipefail
 
+# Extra arguments for the shell binary, and where the screenshot lands.
+EXTRA_ARGS=${EXTRA_ARGS:-}
+SHOT=${SHOT:-.linux-shell-screenshot.png}
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fixture.sh
 source "$HERE/fixture.sh"
@@ -45,13 +49,13 @@ export G_MESSAGES_DEBUG=
 xvfb-run -a -s "-screen 0 1280x900x24" bash -c '
   set -e
   dbus-run-session -- bash -c "
-    /target/debug/trace-commons-shell --state-dir '"$TC_DIR"' --exit-after-realize --realize-seconds 14 &
+    /target/debug/trace-commons-shell --state-dir '"$TC_DIR"' --exit-after-realize --realize-seconds 20 '"$EXTRA_ARGS"' &
     APP_PID=\$!
-    sleep 8
-    import -window root /work/.linux-shell-screenshot.png 2>/dev/null \
+    sleep 12
+    import -window root /work/'"$SHOT"' 2>/dev/null \
       || xwd -root -silent > /tmp/shell-window.xwd 2>/dev/null \
       || echo \"(no screenshot tool available)\"
     wait \$APP_PID
   "
 '
-ls -l /work/.linux-shell-screenshot.png 2>/dev/null || true
+ls -l "/work/$SHOT" 2>/dev/null || true

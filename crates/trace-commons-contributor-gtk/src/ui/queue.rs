@@ -27,6 +27,12 @@ pub struct QueueView {
     scroller: gtk::ScrolledWindow,
 }
 
+impl Default for QueueView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueueView {
     pub fn new() -> Self {
         let list = gtk::Box::builder()
@@ -91,7 +97,7 @@ pub fn render(app: &Rc<App>) {
         .collect();
     if !resolved.is_empty() {
         let expander = gtk::Expander::builder()
-            .label(&format!("Not sent ({}) ", resolved.len()))
+            .label(format!("Not sent ({}) ", resolved.len()))
             .build();
         let inner = gtk::Box::new(gtk::Orientation::Vertical, 6);
         inner.set_margin_top(6);

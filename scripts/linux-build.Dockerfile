@@ -27,6 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       jq \
     && rm -rf /var/lib/apt/lists/*
 
+# rustfmt and clippy so the crate is held to the same bar as the rest of
+# the repository, even though CI cannot build it.
+RUN rustup component add rustfmt clippy
+
 # Cargo's registry and the target directory are mounted as named volumes by
 # scripts/linux-build.sh, so a rebuild does not re-download or re-compile the
 # dependency tree.
