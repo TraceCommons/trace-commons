@@ -118,6 +118,14 @@ pub const NOTIFY_REVIEW: &str = "Review";
 pub const NOTIFY_NOT_NOW: &str = "Not now";
 pub const NOTIFY_NOTHING_SENT: &str = "Nothing is sent until you review them.";
 
+// --- Background portal ---------------------------------------------------
+
+/// Shown to the desktop's own permission dialog, not to a widget in this
+/// window -- `org.freedesktop.portal.Background`'s `reason` option is
+/// rendered by the portal implementation itself (GNOME Shell, Plasma, ...).
+pub const PORTAL_BACKGROUND_REASON: &str =
+    "Trace Commons reviews new sessions and uploads only what you approve.";
+
 // --- Health ------------------------------------------------------------
 
 /// The sentence to render for a `status.health.last_error_label`.

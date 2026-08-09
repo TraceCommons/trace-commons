@@ -2705,6 +2705,7 @@ dependencies = [
  "tokio",
  "trace-commons-contributor",
  "uuid",
+ "zbus",
 ]
 
 [[package]]

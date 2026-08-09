@@ -21,6 +21,8 @@ pub mod backend;
 pub mod copy;
 pub mod model;
 pub mod notify;
+pub mod portal;
+pub mod tray;
 pub mod ui;
 pub mod worker;
 

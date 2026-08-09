@@ -152,10 +152,20 @@ impl App {
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
+        app.wire_tray();
         queue::wire(&app);
         history::wire(&app);
         settings::wire(&app);
         app.refresh();
+
+        // Best-effort and platform-optional, in the order the design spec
+        // gives them: the portal registration is the one that matters most
+        // (it is where a GNOME user looks for this app at all), the tray
+        // is the bonus. Neither can keep the window from opening -- both
+        // run on their own threads and report nothing back that would
+        // block or fail startup.
+        crate::portal::spawn_request();
+
         app
     }
 
@@ -245,6 +255,21 @@ impl App {
             });
             dialog.present();
             glib::Propagation::Stop
+        });
+    }
+
+    /// The tray icon's entire vocabulary reaches the window through here:
+    /// a click of any kind raises it at the queue. See `tray.rs` for why
+    /// that is the whole of it, and why absence of a tray (most Linux
+    /// desktops, including plain GNOME) never reaches this at all.
+    fn wire_tray(self: &Rc<Self>) {
+        let rx = crate::tray::spawn();
+        let app = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            while rx.recv().await.is_ok() {
+                app.stack.set_visible_child_name("queue");
+                app.window.present();
+            }
         });
     }
 
