@@ -69,22 +69,23 @@ struct OnboardingPrivacyScanContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
             explanation
             choices
             continueButton
         }
-        .padding(24)
-        .frame(maxWidth: 620, alignment: .leading)
+        .padding(TC.Space.xxl)
+        .tcColumn(TC.Measure.prose)
+        .tcScreen()
     }
 
     private var header: some View {
-        Text("Extra scrub before sending? (optional)").font(.title2.weight(.semibold))
+        Text("Extra scrub before sending? (optional)").font(TC.Font_.sectionTitle)
     }
 
     private var explanation: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
             Text("""
             Local scrubbing removes secrets, keys, tokens and credentials by pattern \
             before anything leaves this machine. It runs either way.
@@ -109,7 +110,7 @@ struct OnboardingPrivacyScanContent: View {
     }
 
     private var choices: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: TC.Space.s) {
             choiceRow(.localOnly, title: "Local scrubbing only")
             choiceRow(.localPlusScan, title: "Local scrubbing + NEAR AI scan")
         }
@@ -119,13 +120,20 @@ struct OnboardingPrivacyScanContent: View {
         Button {
             choice = value
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: TC.Space.m) {
                 Image(systemName: choice == value ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(choice == value ? .primary : .secondary)
-                Text(title).font(.callout)
+                    .font(.system(size: 15))
+                    .foregroundStyle(choice == value ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+                Text(title).font(TC.Font_.body.weight(choice == value ? .semibold : .regular))
+                Spacer(minLength: 0)
             }
+            .padding(TC.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(choice == value ? [.isSelected] : [])
     }
 
     private var continueButton: some View {
@@ -139,6 +147,7 @@ struct OnboardingPrivacyScanContent: View {
             }
             onContinue()
         }
+        .buttonStyle(.borderedProminent)
         .keyboardShortcut(.defaultAction)
     }
 }

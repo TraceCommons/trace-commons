@@ -43,7 +43,7 @@ struct OnboardingProjectsContent: View {
     var onContinue: () -> Void = {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
             if let error = model.lastActionError {
                 Text(error).font(.callout).foregroundStyle(.secondary)
@@ -52,13 +52,14 @@ struct OnboardingProjectsContent: View {
             unresolvedNote
             continueButton
         }
-        .padding(24)
-        .frame(maxWidth: 620, alignment: .leading)
+        .padding(TC.Space.xxl)
+        .tcColumn(TC.Measure.prose)
+        .tcScreen()
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("What to watch").font(.title2.weight(.semibold))
+            Text("What to watch").font(TC.Font_.sectionTitle)
             Text("Every project below asks you first, every time. You can turn one off entirely.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -81,19 +82,24 @@ struct OnboardingProjectsContent: View {
 
     private func projectRow(_ project: ProjectRow) -> some View {
         let isIgnored = project.mode == .ignore
-        return HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.projectLabel).font(.callout.weight(.semibold))
-                Text(isIgnored ? "Never offered" : "Asks you first")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        return HStack(spacing: TC.Space.m) {
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(project.projectLabel).font(TC.Font_.body.weight(.semibold))
+                TCTag(
+                    text: isIgnored ? "Never offered" : "Asks you first",
+                    tone: isIgnored ? .neutral : .clear,
+                    symbol: isIgnored ? "minus.circle" : "hand.raised"
+                )
             }
-            Spacer()
+            Spacer(minLength: TC.Space.m)
             Button(isIgnored ? "Ignored" : "Ignore") {
                 model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)
             }
             .buttonStyle(.bordered)
         }
+        .padding(TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard()
     }
 
     // Sessions the watcher cannot map to any project are not itemized here
@@ -113,6 +119,7 @@ struct OnboardingProjectsContent: View {
         Button("Continue") {
             onContinue()
         }
+        .buttonStyle(.borderedProminent)
         .keyboardShortcut(.defaultAction)
     }
 }

@@ -20,8 +20,8 @@ struct CreditRecordView: View {
     let lastRefreshedAt: Date?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("About credit.").font(.headline)
+        VStack(alignment: .leading, spacing: TC.Space.s) {
+            Text("About credit.").font(TC.Font_.cardTitle)
             Text("""
             Contributions earn credit points, scored on how novel and \
             information-rich a trace is. Today credit is a record, not a currency: \
@@ -30,25 +30,36 @@ struct CreditRecordView: View {
             will settle from this record. Contribute because you want the commons to \
             exist.
             """)
-            .font(.callout)
+            .font(TC.Font_.body)
             .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 560, alignment: .leading)
 
             if lastRefreshedAt == nil {
                 // Never a confident 0.0 for a number that was never fetched.
-                Text("Not synced yet").font(.callout)
+                TCTag(text: "Not synced yet", tone: .neutral, symbol: "arrow.triangle.2.circlepath")
             } else {
-                HStack(spacing: 24) {
-                    VStack(alignment: .leading) {
-                        Text("Final").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.1f", creditFinal)).monospacedDigit()
-                    }
-                    VStack(alignment: .leading) {
-                        Text("Still being scored").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.1f", creditPending)).monospacedDigit()
-                    }
+                // Same label-over-figure shape as a queue card's manifest.
+                // No currency symbol, no ring, no streak: it is a record.
+                HStack(alignment: .top, spacing: TC.Space.xxl) {
+                    figure("Final", creditFinal)
+                    figure("Still being scored", creditPending)
                 }
             }
         }
+        .padding(TC.Space.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard()
+    }
+
+    private func figure(_ label: String, _ value: Double) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+            TCFieldLabel(label)
+            Text(String(format: "%.1f", value))
+                .font(.title3.weight(.bold))
+                .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(String(format: "%.1f", value))")
     }
 }

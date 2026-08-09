@@ -49,6 +49,15 @@ struct PreviewSheet: View {
             case .permissions: return "Permissions"
             }
         }
+
+        var symbol: String {
+            switch self {
+            case .search: return "magnifyingglass"
+            case .whatsInIt: return "list.bullet.rectangle"
+            case .transcript: return "doc.plaintext"
+            case .permissions: return "checklist"
+            }
+        }
     }
 
     init(entry: QueueEntry, preloaded: Preloaded? = nil) {
@@ -69,6 +78,7 @@ struct PreviewSheet: View {
             footer
         }
         .frame(width: 820, height: 620)
+        .tcScreen()
         .task(id: current.entryID) {
             guard preloaded == nil else { return }
             await load()
@@ -81,25 +91,45 @@ struct PreviewSheet: View {
 
     // MARK: - Chrome
 
+    /// The same identity line and the same labelled figures as a queue card,
+    /// in the same order. Recognising the card you just clicked is one of
+    /// the quieter things that makes a preview trustworthy.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(current.projectLabel).font(.headline)
-                Text(current.agentName).foregroundStyle(.secondary)
-                Text("·").foregroundStyle(.tertiary)
-                Text(Format.when(current.discoveredAt)).foregroundStyle(.secondary)
-                Spacer()
-                if let summary {
-                    Text("Would send \(Format.bytes(summary.wouldSendBytes))")
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: TC.Space.s) {
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                Text(current.projectLabel).font(TC.Font_.cardTitle)
+                Text(current.agentName)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: TC.Space.m)
+                Text(Format.when(current.discoveredAt))
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.tertiary)
             }
-            .font(.callout)
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxl) {
+                if let summary {
+                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                        TCFieldLabel("Would send")
+                        Text(Format.bytes(summary.wouldSendBytes))
+                            .font(TC.Font_.ledger)
+                            .monospacedDigit()
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    TCFieldLabel("Status")
+                    TCTag(text: "nothing sent yet", tone: .clear, symbol: "lock")
+                }
+                .accessibilityElement(children: .combine)
+                Spacer(minLength: 0)
+            }
             Text("Nothing has been sent. This is what would be.")
-                .font(.caption)
+                .font(TC.Font_.footnote)
                 .foregroundStyle(.secondary)
         }
-        .padding(16)
+        .padding(TC.Space.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(TC.surface)
     }
 
     @ViewBuilder
@@ -118,17 +148,17 @@ struct PreviewSheet: View {
                 """
             )
         } else if let summary {
-            // A segmented picker rather than a TabView: inside a sheet this
+            // A segmented control rather than a TabView: inside a sheet this
             // is the standard macOS treatment, and Search has to be able to
             // start selected and focused.
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("", selection: $tab) {
-                    ForEach(Tab.allCases) { tab in
-                        Text(tab.title).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+            //
+            // It is built from Buttons rather than `Picker(.segmented)`
+            // because each segment needs to carry a glyph AND a count -- the
+            // number of things scrubbing removed sits on "What's in it", so
+            // a person can see there is something to look at before they
+            // click the tab. A stock segmented picker takes labels only.
+            VStack(alignment: .leading, spacing: TC.Space.m) {
+                tabBar(summary)
 
                 switch tab {
                 case .search:
@@ -147,33 +177,99 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(12)
+            .padding(TC.Space.m)
         }
     }
 
-    private var footer: some View {
-        HStack {
-            Button("Not this one") {
-                model.dismiss(current)
-                advance()
+    /// The four tabs, in the spec's order, each a plain button. The one that
+    /// has something to report says so on its face.
+    private func tabBar(_ summary: PreviewSummary) -> some View {
+        HStack(spacing: TC.Space.xxs) {
+            ForEach(Tab.allCases) { item in
+                Button {
+                    tab = item
+                } label: {
+                    HStack(spacing: TC.Space.xs) {
+                        Image(systemName: item.symbol)
+                            .imageScale(.small)
+                        Text(item.title)
+                        if let note = badge(for: item, summary: summary) {
+                            Text(note)
+                                .font(TC.Font_.ledger)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(TC.Font_.footnote.weight(tab == item ? .bold : .regular))
+                    .foregroundStyle(tab == item ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .padding(.horizontal, TC.Space.m)
+                    .padding(.vertical, TC.Space.xs)
+                    .background {
+                        RoundedRectangle(cornerRadius: TC.Radius.inset)
+                            .fill(tab == item ? TC.surface : Color.clear)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: TC.Radius.inset)
+                            .strokeBorder(
+                                tab == item ? TC.green.opacity(0.55) : Color.clear,
+                                lineWidth: TC.Space.hairline
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(tab == item ? [.isSelected, .isButton] : .isButton)
             }
-            Spacer()
-            if !remaining.isEmpty {
-                Text("\(remaining.count) more after this")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            Button("Close") { dismiss() }
-            // The ONLY approve control in the product, and it is behind the
-            // preview by design.
-            Button("Contribute") {
-                model.approve(current)
-                advance()
-            }
-            .keyboardShortcut(.defaultAction)
-            .disabled(summary == nil)
+            Spacer(minLength: 0)
         }
-        .padding(16)
+        .padding(TC.Space.xxs)
+        .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.card))
+    }
+
+    private func badge(for item: Tab, summary: PreviewSummary) -> String? {
+        switch item {
+        case .whatsInIt:
+            let removed = summary.redactions.values.reduce(0, +)
+            return removed == 0 ? nil : "\(removed)"
+        case .permissions:
+            return "\(summary.consentScopes.count)"
+        default:
+            return nil
+        }
+    }
+
+    /// The one irreversible click in the product, and the one place the
+    /// scrubbing caveat is repeated verbatim on purpose -- see
+    /// `ScrubbingCaveat`.
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            ScrubbingCaveatAtCommit()
+            HStack(spacing: TC.Space.s) {
+                Button("Not this one") {
+                    model.dismiss(current)
+                    advance()
+                }
+                // Untinted: it must not read as a second way to approve.
+                .tint(.primary)
+                if !remaining.isEmpty {
+                    Text("\(remaining.count) more after this")
+                        .font(TC.Font_.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: TC.Space.m)
+                Button("Close") { dismiss() }
+                // The ONLY approve control in the product, and it is behind
+                // the preview by design.
+                Button("Contribute") {
+                    model.approve(current)
+                    advance()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(summary == nil)
+            }
+        }
+        .padding(TC.Space.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(TC.surface)
     }
 
     // MARK: - Flow
@@ -297,13 +393,16 @@ struct SearchTab: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else if offsets!.isEmpty {
-            Text("0 matches")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.green)
+            // The answer to the only question this tab exists for, in
+            // the app's two loudest tones -- each with a glyph, because a
+            // green word and an amber word are the same word in greyscale.
+            Label("0 matches", systemImage: TC.Tone.clear.symbol)
+                .font(TC.Font_.sectionTitle)
+                .foregroundStyle(TC.Tone.clear.textColor)
         } else {
-            Text("^[\(offsets!.count) match](inflect: true)")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.orange)
+            Label("^[\(offsets!.count) match](inflect: true)", systemImage: TC.Tone.attention.symbol)
+                .font(TC.Font_.sectionTitle)
+                .foregroundStyle(TC.Tone.attention.textColor)
         }
     }
 

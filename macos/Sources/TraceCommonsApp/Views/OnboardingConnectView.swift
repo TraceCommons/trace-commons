@@ -67,13 +67,14 @@ struct OnboardingConnectContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
             pasteField
             phaseView
         }
-        .padding(24)
-        .frame(maxWidth: 620, alignment: .leading)
+        .padding(TC.Space.xxl)
+        .tcColumn(TC.Measure.prose)
+        .tcScreen()
         .onOpenURL { url in
             guard let invite = DeepLink.inviteURL(from: url) else { return }
             inviteText = invite
@@ -83,7 +84,7 @@ struct OnboardingConnectContent: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Connect to a commons").font(.title2.weight(.semibold))
+            Text("Connect to a commons").font(TC.Font_.sectionTitle)
             Text("Paste the invite link someone sent you, or click it from your email.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -128,9 +129,16 @@ struct OnboardingConnectContent: View {
                 Text("Connecting to \(link.issuerHost)…").font(.callout).foregroundStyle(.secondary)
             }
         case .deadInvite:
-            Text(Self.deadInviteMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            // Refused is a tone in this app, and it is never colour alone.
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                Image(systemName: TC.Tone.refused.symbol)
+                    .imageScale(.small)
+                    .foregroundStyle(TC.Tone.refused.textColor)
+                    .accessibilityHidden(true)
+                Text(Self.deadInviteMessage)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -141,6 +149,7 @@ struct OnboardingConnectContent: View {
             Text("This invite is for **\(link.issuerHost)**.")
                 .font(.callout)
             Button("Join \(link.issuerHost)") { join(link) }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
         }
     }

@@ -57,23 +57,24 @@ struct ConsentScopesContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: TC.Space.xl) {
             header
             groups
             Text("To pull a trace back later, use History → Withdraw.")
-                .font(.callout)
+                .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
             continueButton
         }
-        .padding(24)
-        .frame(maxWidth: 620, alignment: .leading)
+        .padding(TC.Space.xxl)
+        .tcColumn(TC.Measure.prose)
+        .tcScreen()
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("How may your traces be used?").font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
+            Text("How may your traces be used?").font(TC.Font_.sectionTitle)
             Text("You can change this later. It applies to traces you send from now on.")
-                .font(.callout)
+                .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
         }
     }
@@ -92,28 +93,26 @@ struct ConsentScopesContent: View {
         let optional = model.consentScopes.filter { !$0.alwaysOn && $0.grantsDataUse }
         let credit = model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }
 
-        return VStack(alignment: .leading, spacing: 16) {
+        return VStack(alignment: .leading, spacing: TC.Space.xl) {
             if !alwaysOn.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Always included").font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    TCSectionHeader(title: "Always included")
                     ForEach(alwaysOn) { scope in
                         scopeRow(scope, checked: true, alwaysOn: true)
                     }
                 }
             }
             if !optional.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Optional — each one lets your traces do more")
-                        .font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    TCSectionHeader(title: "Optional — each one lets your traces do more")
                     ForEach(optional) { scope in
                         scopeRow(scope, checked: selected.contains(scope.name), alwaysOn: false)
                     }
                 }
             }
             if !credit.isEmpty {
-                Divider().frame(maxWidth: 320)
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Credit").font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: TC.Space.m) {
+                    TCSectionHeader(title: "Credit")
                     ForEach(credit) { scope in
                         scopeRow(scope, checked: selected.contains(scope.name), alwaysOn: false)
                     }
@@ -133,23 +132,36 @@ struct ConsentScopesContent: View {
                 selected.insert(scope.name)
             }
         } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: checked ? "checkmark.square" : "square")
-                    .foregroundStyle(checked ? .primary : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                // A filled mark in the brand green when granted, an empty
+                // box when not: the shape changes as well as the colour, so
+                // "granted" is never carried by hue alone.
+                Image(systemName: checked ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 15))
+                    .foregroundStyle(checked ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    HStack(spacing: TC.Space.s) {
                         Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
-                            .font(.callout.weight(.semibold))
+                            .font(TC.Font_.body.weight(.semibold))
                         if alwaysOn {
-                            Text("always on").font(.caption).foregroundStyle(.secondary)
+                            TCTag(text: "always on", tone: .clear, symbol: "lock")
                         }
                     }
-                    Text(scope.description).font(.callout).foregroundStyle(.secondary)
+                    Text(scope.description)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                Spacer(minLength: 0)
             }
+            .padding(TC.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(alwaysOn)
+        .accessibilityAddTraits(checked ? [.isSelected] : [])
     }
 
     private var continueButton: some View {
@@ -161,6 +173,7 @@ struct ConsentScopesContent: View {
         return Button("Continue with \(total) \(total == 1 ? "permission" : "permissions")") {
             onContinue(selected)
         }
+        .buttonStyle(.borderedProminent)
         .keyboardShortcut(.defaultAction)
     }
 }

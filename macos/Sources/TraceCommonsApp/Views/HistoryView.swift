@@ -11,7 +11,7 @@ struct HistoryView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: TC.Space.xl) {
                 if let rollup = model.rollup {
                     groups(rollup)
                     if rollup.quarantined > 0 {
@@ -19,39 +19,59 @@ struct HistoryView: View {
                     }
                     credit(rollup)
                 } else {
-                    Text("Nothing yet.").foregroundStyle(.secondary)
+                    Text("Nothing yet.")
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
                 }
 
                 if !model.history.isEmpty {
-                    Divider()
-                    Text("Everything you've contributed").font(.headline)
-                    ForEach(model.history) { record in
-                        HistoryRow(record: record)
+                    VStack(alignment: .leading, spacing: TC.Space.m) {
+                        TCSectionHeader(
+                            title: "Everything you've contributed",
+                            trailing: "\(model.history.count)"
+                        )
+                        ForEach(model.history) { record in
+                            HistoryRow(record: record)
+                        }
                     }
                 }
             }
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, TC.Space.xxl)
+            .padding(.vertical, TC.Space.xl)
+            .tcColumn()
         }
+        .tcScreen()
     }
 
+    /// Three states, three tones, three glyphs, three words. The counts are
+    /// the same shape as a queue card's manifest -- uppercase label over a
+    /// monospaced figure -- so the two screens read as one system.
     private func groups(_ rollup: HistoryRollup) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("checkmark.circle", "In the commons", rollup.allTime.accepted)
-            row("clock", "Being reviewed for privacy", rollup.quarantined)
-            row("circle.dotted", "Waiting to be scored", rollup.allTime.submitted)
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            tally("In the commons", rollup.allTime.accepted, .clear, "checkmark.circle")
+            tally("Held for privacy review", rollup.quarantined, .held, "clock")
+            tally("Waiting to be scored", rollup.allTime.submitted, .neutral, "circle.dotted")
         }
     }
 
-    private func row(_ symbol: String, _ title: String, _ count: Int) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(.secondary)
-            Text(title)
-            Spacer()
-            Text("\(count)").monospacedDigit()
+    private func tally(_ title: String, _ count: Int, _ tone: TC.Tone, _ symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.s) {
+            HStack(spacing: TC.Space.xs) {
+                Image(systemName: symbol)
+                    .imageScale(.small)
+                    .foregroundStyle(tone.textColor)
+                    .accessibilityHidden(true)
+                TCFieldLabel(title)
+            }
+            Text("\(count)")
+                .font(.title2.weight(.bold))
+                .monospacedDigit()
         }
-        .font(.callout)
-        .frame(maxWidth: 420, alignment: .leading)
+        .padding(TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(count)")
     }
 
     private func quarantine(_ rollup: HistoryRollup) -> some View {
@@ -96,14 +116,21 @@ struct HistoryView: View {
             .frame(maxWidth: 560, alignment: .leading)
             .padding(.top, 8)
         } label: {
-            Text("Held for privacy review — ^[\(rollup.quarantined) trace](inflect: true)")
-                .font(.headline)
+            // Held is a state, not a colour. It says "held", it carries a
+            // clock, and it is tinted -- in that order of importance.
+            HStack(spacing: TC.Space.s) {
+                Image(systemName: TC.Tone.held.symbol)
+                    .foregroundStyle(TC.Tone.held.textColor)
+                    .accessibilityHidden(true)
+                Text("Held for privacy review — ^[\(rollup.quarantined) trace](inflect: true)")
+                    .font(TC.Font_.cardTitle)
+            }
         }
     }
 
     private func credit(_ rollup: HistoryRollup) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Divider()
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            TCSectionHeader(title: "Credit")
             CreditRecordView(
                 creditFinal: rollup.creditFinal,
                 creditPending: rollup.creditPending,
@@ -117,21 +144,25 @@ struct HistoryRow: View {
     let record: HistoryRecord
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Text(record.projectLabel).font(.callout.weight(.semibold))
-                Text(Format.when(record.submittedAt)).foregroundStyle(.secondary)
-                Spacer()
-                Text(statusSentence).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
+            HStack(spacing: TC.Space.s) {
+                Text(record.projectLabel).font(TC.Font_.body.weight(.semibold))
+                Text(Format.when(record.submittedAt))
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: TC.Space.m)
+                TCTag(text: statusSentence, tone: statusTone)
             }
-            .font(.callout)
             ForEach(Array(record.explanations.enumerated()), id: \.offset) { _, text in
-                Text(text).font(.caption).foregroundStyle(.secondary)
+                Text(text)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(10)
+        .padding(TC.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+        .tcCard()
     }
 
     private var statusSentence: String {
@@ -140,6 +171,15 @@ struct HistoryRow: View {
         case "quarantined": return "Held for privacy review"
         case "submitted": return "Waiting to be scored"
         default: return "Not in the commons"
+        }
+    }
+
+    private var statusTone: TC.Tone {
+        switch record.status {
+        case "accepted": return .clear
+        case "quarantined": return .held
+        case "submitted": return .neutral
+        default: return .refused
         }
     }
 }

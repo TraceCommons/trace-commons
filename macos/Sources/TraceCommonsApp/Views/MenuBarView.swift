@@ -1,24 +1,49 @@
 import AppKit
 import SwiftUI
 
-/// Icon precedence, from the shared design: attention (numeric badge) ->
-/// unhealthy (amber dot) -> paused (struck through) -> idle.
+/// The menu-bar item.
+///
+/// The mark, not a tray glyph. A menu bar holds twenty icons drawn from the
+/// same SF Symbol set and a generic tray is not findable among them; the
+/// TraceCommons mark is, and it is the same mark the community site carries,
+/// which is the point. It is drawn monochrome so the system can tint it for
+/// a light or dark menu bar and invert it when the menu is open, the way a
+/// template image behaves.
+///
+/// State precedence is unchanged from the shared design: decisions owed
+/// (numeric badge) -> unhealthy -> paused -> idle. The badge counts
+/// DECISIONS OWED; if it shows 3, there are exactly three things to say yes
+/// or no to. Every state that is not "idle" carries a second glyph as well
+/// as a count, because a dimmed mark on its own is not a state anybody can
+/// read.
 struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        if model.decisionsOwed > 0 {
-            // The badge counts DECISIONS OWED. If it shows 3, there are
-            // exactly three things to say yes or no to.
-            Label("\(model.decisionsOwed)", systemImage: "tray.full")
-        } else if model.health != nil {
-            Image(systemName: "exclamationmark.triangle")
-        } else if model.status.paused {
-            Image(systemName: "tray.and.arrow.down.fill")
-                .foregroundStyle(.tertiary)
-        } else {
-            Image(systemName: "tray")
+        HStack(spacing: 3) {
+            BrandMark(size: 15, monochrome: true)
+                .opacity(model.status.paused ? 0.5 : 1)
+            if model.decisionsOwed > 0 {
+                Text("\(model.decisionsOwed)").monospacedDigit()
+            } else if model.health != nil {
+                Image(systemName: "exclamationmark.triangle")
+                    .imageScale(.small)
+            } else if model.status.paused {
+                Image(systemName: "pause.fill")
+                    .imageScale(.small)
+            }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        if model.decisionsOwed > 0 {
+            return "Trace Commons. ^[\(model.decisionsOwed) session](inflect: true) waiting for your decision."
+        }
+        if model.health != nil { return "Trace Commons. Needs attention." }
+        if model.status.paused { return "Trace Commons. Paused." }
+        return "Trace Commons. Nothing waiting."
     }
 }
 
@@ -34,10 +59,23 @@ struct MenuBarContent: View {
             armedSection
             weekSection
             Divider()
-            Button("Review waiting sessions…") { openMain() }
+            // A menu is not a shrunken window. There are no cards, no
+            // manifest strips and no brand colour down here -- an AppKit
+            // menu draws its own vibrancy, its own highlight and its own
+            // type, and anything painted over that reads as a bug. The only
+            // additions are leading glyphs, which menus have always had.
+            Button {
+                openMain()
+            } label: {
+                Label("Review waiting sessions…", systemImage: "tray.full")
+            }
             pauseSection
             Divider()
-            Button("Open Trace Commons") { openMain() }
+            Button {
+                openMain()
+            } label: {
+                Label("Open Trace Commons", systemImage: "macwindow")
+            }
             Button("Quit…") { confirmQuit() }
         }
         .onAppear { model.refreshAll() }
@@ -102,7 +140,11 @@ struct MenuBarContent: View {
     @ViewBuilder
     private var pauseSection: some View {
         if model.status.paused {
-            Button("Resume watching") { model.resume() }
+            Button {
+                model.resume()
+            } label: {
+                Label("Resume watching", systemImage: "play.circle")
+            }
         } else {
             Menu("Pause") {
                 Button("For 1 hour") {

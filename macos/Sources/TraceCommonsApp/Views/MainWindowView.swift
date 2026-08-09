@@ -17,6 +17,17 @@ struct MainWindowView: View {
             case .settings: return "gearshape"
             }
         }
+
+        /// What the section is for, in the window's subtitle. A person who
+        /// opened this app from a notification needs to know where they are
+        /// before they need to know what to do.
+        var subtitle: String {
+            switch self {
+            case .queue: return "Nothing is sent unless you say so."
+            case .history: return "What you have contributed, and what is still being reviewed."
+            case .settings: return "What this machine watches, and what your traces are allowed to do."
+            }
+        }
     }
 
     var body: some View {
@@ -63,23 +74,75 @@ struct MainWindowView: View {
                     startAt: model.status.loggedIn ? .consent : .welcome,
                     onComplete: { model.markOnboardingComplete() }
                 )
+                .tcScreen()
                 .onAppear { model.refreshAll() }
             } else {
-                NavigationSplitView {
-                    List(Section.allCases, selection: $section) { item in
-                        Label(item.rawValue, systemImage: item.symbol)
-                            .badge(item == .queue ? model.decisionsOwed : 0)
-                            .tag(item)
-                    }
-                    .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-                } detail: {
-                    switch section ?? .queue {
-                    case .queue: QueueView()
-                    case .history: HistoryView()
-                    case .settings: SettingsView()
-                    }
+                shell
+                    .onAppear { model.refreshAll() }
+            }
+        }
+    }
+
+    /// Sidebar plus a real title bar. Without a toolbar the window read as a
+    /// preview canvas: content floating in an unowned field with nothing to
+    /// anchor it and nowhere to put a global control.
+    private var shell: some View {
+        NavigationSplitView {
+            List(Section.allCases, selection: $section) { item in
+                Label(item.rawValue, systemImage: item.symbol)
+                    .badge(item == .queue ? model.decisionsOwed : 0)
+                    .tag(item)
+            }
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+        } detail: {
+            Group {
+                switch section ?? .queue {
+                case .queue: QueueView()
+                case .history: HistoryView()
+                case .settings: SettingsView()
                 }
-                .onAppear { model.refreshAll() }
+            }
+            // The brand ground stops here. The sidebar and the title bar
+            // above it stay system materials, which is what keeps this
+            // looking like a Mac window rather than a web page in one.
+            .tcScreen()
+            .navigationTitle((section ?? .queue).rawValue)
+            .navigationSubtitle((section ?? .queue).subtitle)
+            .toolbar { watchState }
+        }
+    }
+
+    /// The one global control worth a toolbar slot, and a permanent readout
+    /// of whether this machine is watching at all. Paused is a state a
+    /// person can forget they chose, so it is never left implicit.
+    @ToolbarContentBuilder
+    private var watchState: some ToolbarContent {
+        ToolbarItem(placement: .status) {
+            if model.status.paused {
+                TCTag(text: "Paused", tone: .attention, symbol: "pause.circle")
+                    .accessibilityLabel("Paused. Nothing is being queued or sent.")
+            } else {
+                TCTag(text: "Watching", tone: .neutral, symbol: "eye")
+                    .accessibilityLabel("Watching for finished sessions.")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            if model.status.paused {
+                Button {
+                    model.resume()
+                } label: {
+                    Label("Resume watching", systemImage: "play.circle")
+                }
+                .help("Start noticing finished sessions again.")
+            } else {
+                Menu {
+                    Button("For 1 hour") { model.pause(until: Date().addingTimeInterval(3600)) }
+                    Button("Until tomorrow morning") { model.pause(until: Format.tomorrowMorning()) }
+                    Button("Until I turn it back on") { model.pause(until: nil) }
+                } label: {
+                    Label("Pause", systemImage: "pause.circle")
+                }
+                .help("Stop noticing finished sessions.")
             }
         }
     }
@@ -90,16 +153,17 @@ struct CenteredNotice: View {
     let detail: String
 
     var body: some View {
-        VStack(spacing: 10) {
-            Text(title).font(.title3.weight(.semibold))
+        VStack(spacing: TC.Space.s) {
+            Text(title).font(TC.Font_.screenTitle)
             Text(detail)
-                .font(.callout)
+                .font(TC.Font_.meta)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 460)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .padding(TC.Space.xl)
     }
 }
 
@@ -108,17 +172,25 @@ struct CenteredNotice: View {
 struct HealthBanner: View {
     let health: HealthCopy
 
+    private var tone: TC.Tone {
+        health.severity == .actionable ? .attention : .neutral
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Circle()
-                .fill(health.severity == .actionable ? Color.orange : Color.secondary)
-                .frame(width: 9, height: 9)
-                .padding(.top, 5)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(health.title).font(.callout.weight(.semibold))
-                Text(health.detail).font(.callout).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            // Symbol, not a coloured dot: the severity has to survive
+            // greyscale and it has to reach VoiceOver.
+            Image(systemName: tone.symbol)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(health.title).font(TC.Font_.cardTitle)
+                Text(health.detail)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
+            Spacer(minLength: TC.Space.m)
             if let action = health.actionTitle {
                 // Deliberately inert: the flows behind Reconnect and Review
                 // and confirm are onboarding surfaces, which are not built
@@ -129,7 +201,14 @@ struct HealthBanner: View {
                     .help("Not wired up in this build.")
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        .padding(TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: health.severity == .actionable)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            health.severity == .actionable
+                ? "Needs attention. \(health.title)"
+                : health.title
+        )
     }
 }

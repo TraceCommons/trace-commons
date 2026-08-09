@@ -15,6 +15,7 @@ struct TraceCommonsShell: App {
         MenuBarExtra {
             MenuBarContent()
                 .environmentObject(model)
+                .tint(TC.green)
         } label: {
             Launcher(model: model)
         }
@@ -23,6 +24,15 @@ struct TraceCommonsShell: App {
             MainWindowView()
                 .environmentObject(model)
                 .frame(minWidth: 760, minHeight: 520)
+                // The community site's primary is green, not the platform
+                // blue. Overriding the user's chosen accent colour is a real
+                // departure from macOS convention and it is made on purpose:
+                // this app and `community/public` are one product, the
+                // accent is the single strongest cue that they are, and the
+                // green carries a meaning here (good standing) that the
+                // system blue does not. Everything else about the controls
+                // -- shape, focus ring, keyboard behaviour -- stays stock.
+                .tint(TC.green)
         }
         .defaultSize(width: 940, height: 660)
     }
@@ -57,6 +67,17 @@ private struct Launcher: View {
             queue: .main
         ) { _ in
             MainActor.assumeIsolated { model.shutdown() }
+        }
+
+        // Development hook, same family as TRACE_COMMONS_SHOW_WINDOW below:
+        // pins the app to one appearance so a capture run can produce light
+        // and dark images without touching the machine's system setting.
+        // Unset (the normal case) leaves the app following the system, which
+        // is the only correct behaviour for a shipping build.
+        switch ProcessInfo.processInfo.environment["TRACE_COMMONS_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
         }
 
         // Used by scripts/run-demo.sh to bring the window up for a

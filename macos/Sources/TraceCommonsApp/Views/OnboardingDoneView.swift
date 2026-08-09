@@ -34,9 +34,15 @@ struct OnboardingDoneContent: View {
     @State private var registerOutcome: LoginItemManager.RegisterOutcome?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("You're set up. Nothing has been sent.")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: TC.Space.xl) {
+            HStack(spacing: TC.Space.s) {
+                Image(systemName: TC.Tone.clear.symbol)
+                    .font(.system(size: 18))
+                    .foregroundStyle(TC.green)
+                    .accessibilityHidden(true)
+                Text("You're set up. Nothing has been sent.")
+                    .font(TC.Font_.sectionTitle)
+            }
 
             Text("""
             Trace Commons lives in your menu bar. When a session finishes and goes \
@@ -48,10 +54,12 @@ struct OnboardingDoneContent: View {
             loginItemOffer
 
             Button("Done", action: onFinish)
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
         }
-        .padding(24)
-        .frame(maxWidth: 620, alignment: .leading)
+        .padding(TC.Space.xxl)
+        .tcColumn(TC.Measure.prose)
+        .tcScreen()
     }
 
     /// Nothing is shown once the app is already an enabled login item --
@@ -72,15 +80,18 @@ struct OnboardingDoneContent: View {
                     Button("Not now") {
                         offerDismissed = true
                     }
+                    // Untinted: declining should not wear the accent that
+                    // means "yes" everywhere else in the app.
+                    .tint(.primary)
                     Button("Start at login") {
                         registerOutcome = LoginItemManager.register()
                     }
                     .buttonStyle(.borderedProminent)
                 }
             }
-            .padding(14)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(TC.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
         }
     }
 
