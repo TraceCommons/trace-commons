@@ -25,33 +25,30 @@
 //! silently unprotected daemon, which is the precise shape of bug the
 //! repository's fail-closed rule exists to prevent.
 //!
-//! # VERIFICATION STATUS: the DACL is UNVERIFIED
+//! # VERIFICATION STATUS
 //!
-//! This code type-checks for `x86_64-pc-windows-gnu`, which establishes the
-//! FFI signatures, the ownership of each allocation, and the control flow.
-//! **It establishes nothing about whether the DACL actually excludes another
-//! user.** That is a runtime property of the Windows security model and
-//! cannot be observed from a cross-compile on another operating system.
+//! Cross-compiling this file establishes the FFI signatures, the ownership of
+//! each allocation, and the control flow. **It establishes nothing about
+//! whether the DACL actually excludes another user.** That is a runtime
+//! property of the Windows security model and cannot be observed from a
+//! cross-compile on another operating system.
 //!
-//! Before this ships, run this on a real Windows machine:
+//! The observation is automated. CI's `windows-pipe-acl` job runs
+//! `scripts/windows/verify-pipe-acl.ps1` on `windows-latest`, which creates a
+//! second, non-administrator local account, has it attempt to open this pipe,
+//! and requires ERROR_ACCESS_DENIED -- plus a control confirming the owning
+//! user is still admitted, since a DACL that excludes everyone is also a bug.
+//! `src/bin/win-pipe-acl-probe.rs` is the probe it drives.
 //!
-//!   1. Log in as user A and start the daemon (`trace-commons-contributor
-//!      daemon run`).
-//!   2. Create a second local account, user B, that is NOT an administrator.
-//!      (An administrator can take ownership of any object and is expected to
-//!      reach the pipe; testing with one proves nothing.)
-//!   3. As user B, attempt to connect to the pipe -- e.g. in PowerShell:
-//!        $p = new-object System.IO.Pipes.NamedPipeClientStream(
-//!               '.', '<pipe name from the daemon log>', 'InOut')
-//!        $p.Connect(5000)
-//!   4. REQUIRED RESULT: the connect fails with access denied (UnauthorizedAccess).
-//!      If it connects, or fails with any other error, the DACL is wrong and
-//!      this transport must not ship.
-//!   5. Repeat as user A to confirm the owner is still admitted -- a DACL that
-//!      excludes everyone is also a bug, just a less dangerous one.
+//! The account is deliberately not an administrator: an administrator can
+//! take ownership of any object and would reach the pipe whether or not the
+//! DACL were correct, so such a test would look like evidence while proving
+//! nothing.
 //!
-//! Until step 4 has been run and passed, treat this transport as unverified
-//! and do not describe the ACL as working.
+//! **As of this commit that job has never run** -- it lands with the branch
+//! that adds it. Until it has run and passed on a real Windows runner, treat
+//! the ACL as unverified and do not describe it as working. A green
+//! cross-compile is not the same claim.
 
 use std::ffi::c_void;
 use std::sync::Arc;

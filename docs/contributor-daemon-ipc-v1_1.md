@@ -72,15 +72,22 @@ One behavioural difference on the client side: the Windows one-shot client
 opens the pipe as a file handle, which has no equivalent of
 `set_read_timeout`, so the 60-second request timeout is not applied there.
 
-> **The Windows DACL is UNVERIFIED.** The transport type-checks for
-> `x86_64-pc-windows-gnu`, which establishes the FFI signatures and the
-> control flow and nothing about whether the descriptor actually excludes
-> another user — a runtime property that cannot be observed from a
-> cross-compile. Before this ships, a real Windows machine must confirm that
-> a second, non-administrator local account is refused when connecting to the
-> pipe. The procedure is written out in the module doc of
-> `crates/trace-commons-contributor/src/daemon/win_pipe.rs`. Until it has
-> been run and passed, do not describe the ACL as working.
+> **The Windows DACL is verified by CI, and that job has not yet run.**
+> Type-checking for `x86_64-pc-windows-gnu` establishes the FFI signatures
+> and the control flow and nothing about whether the descriptor actually
+> excludes another user — a runtime property no cross-compile can observe.
+> The observation is the `windows-pipe-acl` CI job
+> (`scripts/windows/verify-pipe-acl.ps1`, driving
+> `src/bin/win-pipe-acl-probe.rs`): on `windows-latest` it creates a second,
+> non-administrator local account, has it attempt to open the pipe, and
+> requires ERROR_ACCESS_DENIED, with a control confirming the owning user is
+> still admitted. The account is deliberately not an administrator — one can
+> take ownership of any object and would reach the pipe regardless, so that
+> test would look like evidence while proving nothing.
+>
+> That job lands with the branch that adds it and has never run. Until it has
+> run and passed, treat the ACL as unverified and do not describe it as
+> working.
 
 `windows-sys` is approved (2026-08-08) for exactly this and scoped to
 `[target.'cfg(windows)'.dependencies]`; macOS and Linux dependency trees do
