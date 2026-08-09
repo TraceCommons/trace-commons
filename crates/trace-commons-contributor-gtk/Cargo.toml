@@ -1,0 +1,44 @@
+# The Linux contributor shell.
+#
+# This is its own workspace, not a member of the repository root's. The root
+# workspace builds on macOS, and every crate in it must keep doing so; this
+# one links GTK 4 and libadwaita and cannot build there at all. Excluding it
+# keeps `cargo check` at the root honest instead of newly broken, and keeps
+# the GTK dependency tree out of every other crate's lockfile.
+[workspace]
+
+[package]
+name = "trace-commons-contributor-gtk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zmanian/trace-commons-server"
+description = "GTK 4 contributor shell for Trace Commons (Linux)"
+
+[[bin]]
+name = "trace-commons-shell"
+path = "src/main.rs"
+
+[[bin]]
+name = "trace-commons-shell-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+# The core is linked directly rather than through the C ABI: on Linux both
+# sides are Rust, so the FFI layer would buy nothing and cost a marshalling
+# boundary. macOS and Windows keep using the C ABI.
+trace-commons-contributor = { path = "../trace-commons-contributor" }
+
+adw = { package = "libadwaita", version = "0.5", features = ["v1_2"] }
+gtk = { package = "gtk4", version = "0.7" }
+glib = "0.18"
+
+anyhow = "1"
+async-channel = "2"
+chrono = { version = "0.4", features = ["serde"] }
+notify-rust = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
