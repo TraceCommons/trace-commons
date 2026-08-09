@@ -123,9 +123,21 @@ struct SettingsView: View {
         }
     }
 
+    // Only `ask` <-> `ignore` is offered here, same as onboarding screen 5:
+    // arming `auto_upload` outside a deliberate confirmation flow is still
+    // not built. Changing a mind about "ignore" -- set during onboarding or
+    // never revisited since -- should not require a terminal, so that half
+    // is wired to `AppModel.setProjectMode`, the same real `set_project_mode`
+    // call the onboarding screen uses. See `DaemonClient.setProjectMode` for
+    // why that call is expected to fail with `project-key-unrecognized` for
+    // every real project today; this view surfaces that the same way
+    // onboarding does rather than pretending the toggle always lands.
     private var projects: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Projects").font(.headline)
+            if let error = model.lastActionError {
+                Text(error).font(.callout).foregroundStyle(.secondary)
+            }
             if model.projects.isEmpty {
                 Text("No projects seen yet.").font(.callout).foregroundStyle(.secondary)
             } else {
@@ -134,6 +146,15 @@ struct SettingsView: View {
                         Text(project.projectLabel)
                         Spacer()
                         Text(modeSentence(project.mode)).foregroundStyle(.secondary)
+                        if project.mode == .ask || project.mode == .ignore {
+                            Button(project.mode == .ignore ? "Ask again" : "Ignore") {
+                                model.setProjectMode(
+                                    project,
+                                    mode: project.mode == .ignore ? .ask : .ignore
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
                     .font(.callout)
                 }

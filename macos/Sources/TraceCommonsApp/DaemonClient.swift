@@ -60,6 +60,29 @@ final class DaemonClient {
         return try call("list_projects", as: Wrapper.self).projects
     }
 
+    /// Sets `projectKey`'s mode. The daemon still accepts a `label`
+    /// parameter for compatibility with older clients and always ignores
+    /// it -- `project_label` is derived by the daemon from `project_key`,
+    /// never accepted from a caller (see "Project keys and labels" in the
+    /// contract) -- so this wrapper never sends one.
+    ///
+    /// `projectKey` must be something the daemon can validate: its locked
+    /// unknown-cwd sentinel, a key already known to it (discovered on a
+    /// queued session or already in its project policy), or an absolute
+    /// path that exists on this machine and canonicalizes to itself.
+    /// Anything else is refused with `project-key-unrecognized`. Neither
+    /// `list_projects` nor `list_pending` ever puts a real `project_key` on
+    /// the wire -- both carry `project_label` only, by the same
+    /// never-a-path rule that keeps this app from rendering one -- so this
+    /// app has no source for a `projectKey` that is guaranteed to satisfy
+    /// that check. See `docs/superpowers/plans/macos-set-project-mode-report.md`.
+    func setProjectMode(projectKey: String, mode: ProjectMode) throws {
+        _ = try rawResult(
+            "set_project_mode",
+            params: ["project_key": projectKey, "mode": mode.rawValue]
+        )
+    }
+
     func settings() throws -> DaemonSettingsView {
         try call("get_settings", as: DaemonSettingsView.self)
     }

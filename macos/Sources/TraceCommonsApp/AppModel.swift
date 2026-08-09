@@ -202,6 +202,28 @@ final class AppModel: ObservableObject {
         perform("list_projects", work: { try $0.listProjects() }, onSuccess: { self.projects = $0 })
     }
 
+    /// Sets `project`'s mode via the daemon and refreshes `projects` from
+    /// the daemon's own answer on success. Deliberately does not flip
+    /// `project.mode` optimistically: the whole reason this method exists
+    /// is that a UI that assumes a choice landed, when it did not, is worse
+    /// than a UI that offers no choice at all. A failure lands in
+    /// `lastActionError`, same as every other action here, and the caller
+    /// must leave its own state alone until this succeeds.
+    ///
+    /// `project.projectLabel` is the only identifier `ProjectRow` carries.
+    /// It is not guaranteed to be a `project_key` the daemon will accept --
+    /// see the comment on `DaemonClient.setProjectMode` -- so callers
+    /// should expect `project-key-unrecognized` today and must surface it
+    /// rather than assume success.
+    func setProjectMode(_ project: ProjectRow, mode: ProjectMode) {
+        perform(
+            "set_project_mode",
+            work: { try $0.setProjectMode(projectKey: project.projectLabel, mode: mode) }
+        ) { _ in
+            self.refreshProjects()
+        }
+    }
+
     func refreshSettings() {
         perform("get_settings", work: { try $0.settings() }, onSuccess: { self.daemonSettings = $0 })
     }

@@ -14,15 +14,18 @@ import SwiftUI
 /// `Ignore` is offered here and `auto_upload` is deliberately not: excluding
 /// a client repo is a live thought at this exact moment and never returns,
 /// whereas arming automation before the contributor has seen a single
-/// preview asks for trust they have no basis to give yet. There is no
-/// `set_project_mode` daemon call yet (see `SettingsView.modeSentence`,
-/// which is read-only for the same reason), so this screen -- like
-/// `ConsentScopesContent` -- keeps the chosen ignore-set as local state and
-/// hands it to the caller via `onContinue` rather than calling the daemon
-/// itself.
+/// preview asks for trust they have no basis to give yet.
+///
+/// Choosing `Ignore` calls `AppModel.setProjectMode` -- a real
+/// `set_project_mode` call, not local-only state -- and the row reflects
+/// `project.mode` from `model.projects` (the daemon's own answer) rather
+/// than a set this view invented and would otherwise have discarded on
+/// `Continue`. A failure is shown inline, not swallowed: see
+/// `DaemonClient.setProjectMode` for why `project-key-unrecognized` is a
+/// real, reachable outcome today, not a hypothetical one.
 struct OnboardingProjectsView: View {
     @EnvironmentObject private var model: AppModel
-    var onContinue: (Set<String>) -> Void = { _ in }
+    var onContinue: () -> Void = {}
 
     var body: some View {
         ScrollView {
@@ -37,15 +40,14 @@ struct OnboardingProjectsView: View {
 struct OnboardingProjectsContent: View {
     @EnvironmentObject private var model: AppModel
 
-    /// Labels of projects the person has marked to skip. Nothing starts
-    /// ignored -- every discovered project begins ask-first, per the spec.
-    @State private var ignored: Set<String> = []
-
-    var onContinue: (Set<String>) -> Void = { _ in }
+    var onContinue: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             header
+            if let error = model.lastActionError {
+                Text(error).font(.callout).foregroundStyle(.secondary)
+            }
             projectList
             unresolvedNote
             continueButton
@@ -78,7 +80,7 @@ struct OnboardingProjectsContent: View {
     }
 
     private func projectRow(_ project: ProjectRow) -> some View {
-        let isIgnored = ignored.contains(project.projectLabel)
+        let isIgnored = project.mode == .ignore
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.projectLabel).font(.callout.weight(.semibold))
@@ -88,11 +90,7 @@ struct OnboardingProjectsContent: View {
             }
             Spacer()
             Button(isIgnored ? "Ignored" : "Ignore") {
-                if isIgnored {
-                    ignored.remove(project.projectLabel)
-                } else {
-                    ignored.insert(project.projectLabel)
-                }
+                model.setProjectMode(project, mode: isIgnored ? .ask : .ignore)
             }
             .buttonStyle(.bordered)
         }
@@ -113,7 +111,7 @@ struct OnboardingProjectsContent: View {
 
     private var continueButton: some View {
         Button("Continue") {
-            onContinue(ignored)
+            onContinue()
         }
         .keyboardShortcut(.defaultAction)
     }
