@@ -1755,19 +1755,32 @@ pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
         let empty = Vec::new();
         let projects = v["projects"].as_array().unwrap_or(&empty);
         if projects.is_empty() {
-            println!("no projects configured; everything defaults to notify-only");
+            println!("no projects known yet; everything defaults to notify-only");
             return;
         }
+        // `list_projects` reports discovered-but-unruled projects too, so
+        // the mode column alone would not say whether a `notify_only` row
+        // is a decision the contributor made or just the default in force.
+        // The third column says which.
         let rows: Vec<Vec<String>> = projects
             .iter()
             .map(|p| {
                 vec![
                     p["project_label"].as_str().unwrap_or("-").to_string(),
                     p["mode"].as_str().unwrap_or("-").to_string(),
+                    if p["configured"].as_bool().unwrap_or(true) {
+                        "configured".to_string()
+                    } else {
+                        "discovered".to_string()
+                    },
                 ]
             })
             .collect();
-        let _ = print_table(&mut std::io::stdout(), &["PROJECT", "MODE"], &rows);
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["PROJECT", "MODE", "SOURCE"],
+            &rows,
+        );
     })
 }
 

@@ -181,6 +181,77 @@ async fn setting_notify_only_over_the_socket_is_allowed() {
 }
 
 #[tokio::test]
+async fn a_client_can_set_a_mode_using_only_what_this_socket_gave_it() {
+    // The gap a real SwiftUI client hit. Paths never cross this socket, so
+    // a GUI holds `project_label` and nothing else -- and a label is not an
+    // admissible `project_key`. `list_projects` and `list_pending` now also
+    // carry `project_id`, an opaque daemon-issued handle, and
+    // `set_project_mode` accepts it. Nothing in this test names a path
+    // after the first (terminal-style) call, which is the point.
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = std::fs::canonicalize(dir.path()).unwrap();
+    let key = key.to_string_lossy();
+    c.send(&format!(
+        r#"{{"id":1,"method":"set_project_mode","params":{{"project_key":"{key}","mode":"notify_only"}}}}"#,
+    ))
+    .await;
+    assert!(c.recv_json().await["error"].is_null());
+
+    c.send(r#"{"id":2,"method":"list_projects"}"#).await;
+    let listed = c.recv_json().await;
+    let row = listed["result"]["projects"][0].clone();
+    let project_id = row["project_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("list_projects must carry an id a client can name: {listed}"))
+        .to_string();
+    let serialized = serde_json::to_string(&listed).unwrap();
+    assert!(
+        !serialized.contains(key.as_ref()),
+        "a path crossed the socket: {serialized}"
+    );
+
+    c.send(&format!(
+        r#"{{"id":3,"method":"set_project_mode","params":{{"project_id":"{project_id}","mode":"ignore"}}}}"#,
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+
+    c.send(r#"{"id":4,"method":"list_projects"}"#).await;
+    let listed = c.recv_json().await;
+    assert_eq!(
+        listed["result"]["projects"][0]["mode"], "ignore",
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrecognized_project_id_is_refused_with_a_fixed_label() {
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    c.send(
+        r#"{"id":1,"method":"set_project_mode","params":{"project_id":"proj_0123456789abcdef","mode":"auto_upload"}}"#,
+    )
+    .await;
+    let resp = c.recv_json().await;
+    assert_eq!(resp["error"]["code"], ERR_BAD_PARAMS, "{resp}");
+    assert_eq!(
+        resp["error"]["message"], "project-id-unrecognized",
+        "{resp}"
+    );
+
+    c.send(r#"{"id":2,"method":"list_projects"}"#).await;
+    let listed = c.recv_json().await;
+    assert_eq!(
+        listed["result"]["projects"].as_array().unwrap().len(),
+        0,
+        "a refused call must record nothing: {listed}"
+    );
+}
+
+#[tokio::test]
 async fn bulk_approval_over_the_socket_is_now_allowed() {
     // Removed for the same reason as arming autonomy above: the restriction
     // stopped nothing an attacker with same-user code execution did not

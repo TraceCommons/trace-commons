@@ -102,8 +102,8 @@ use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
 use super::policy::{
-    ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy, disambiguated_label, known_keys,
-    project_key_is_admissible,
+    ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
+    disambiguated_label, known_keys, project_id_for, project_key_for_id, project_key_is_admissible,
 };
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
@@ -400,11 +400,18 @@ pub fn relabel_queue_entries(policy: &ProjectPolicy, queue: &mut Queue) -> bool 
 ///
 /// `path` and `project_key` are deliberately absent: both are local
 /// filesystem paths, and applications render `project_label`.
+///
+/// `project_id` is the opaque handle that makes the label useful for more
+/// than rendering: it is the only thing a socket client can pass back to
+/// `set_project_mode` to arm or silence the project this entry came from.
+/// It is a hash of the key, so it carries no path component (see
+/// `policy::project_id_for`).
 pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
     serde_json::json!({
         "entry_id": e.entry_id,
         "session_hash": e.session_hash,
         "source": e.source,
+        "project_id": project_id_for(&e.project_key),
         "project_label": e.project_label,
         "size_bytes": e.size_bytes,
         "discovered_at": e.discovered_at,
@@ -438,27 +445,81 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 queue.pending().iter().map(|e| entry_value(e)).collect();
             Response::ok(req.id, serde_json::json!({ "pending": entries }))
         }
+        // Every project the daemon knows about -- configured *and* merely
+        // discovered -- with the mode actually in force for each.
+        //
+        // It used to report `policy.projects` alone, which meant a project
+        // the daemon had seen but the contributor had never ruled on was
+        // invisible here. That is precisely the set an onboarding "which of
+        // these should never be uploaded" screen has to show: a project
+        // becomes configured only by being ruled on, so listing only
+        // configured projects lists only the ones already decided. A
+        // contributor could not exclude their employer's repository before
+        // anything was sent, because the screen could not name it.
+        //
+        // A discovered row carries `configured: false` and `added_at:
+        // null`; its `mode` is the effective one, which for an unruled
+        // project is the notify-only default. Nothing new crosses the
+        // socket: the label and the id are the same two daemon-derived
+        // fields the queue entry for that project already carries.
         "list_projects" => {
             let policy = shared.policy.lock().expect("policy lock");
             let queue = shared.queue.lock().expect("queue lock");
             let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+            let discovered: std::collections::BTreeSet<String> = queue
+                .all()
+                .iter()
+                .map(|e| e.project_key.clone())
+                .filter(|key| !policy.projects.contains_key(key))
+                .collect();
             let projects: Vec<serde_json::Value> = policy
                 .projects
                 .iter()
                 .map(|(key, entry)| {
                     serde_json::json!({
+                        "project_id": project_id_for(key),
                         "project_label": disambiguated_label(key, &known),
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
+                        "configured": true,
                     })
                 })
+                .chain(discovered.iter().map(|key| {
+                    serde_json::json!({
+                        "project_id": project_id_for(key),
+                        "project_label": disambiguated_label(key, &known),
+                        "mode": policy.resolve(key),
+                        "added_at": serde_json::Value::Null,
+                        "configured": false,
+                    })
+                }))
                 .collect();
             Response::ok(req.id, serde_json::json!({ "projects": projects }))
         }
+        // Two ways to name a project, for two different callers.
+        //
+        // `project_id` is for anything that learned about the project over
+        // this socket -- a queue entry or a `list_projects` row. It is the
+        // only identifier such a caller holds, because keys are paths and
+        // paths do not cross this socket. Without it this method was
+        // unreachable from every GUI: a label is not an admissible key, and
+        // the only writer of `policy.projects` is this method itself, so
+        // there was no way in.
+        //
+        // `project_key` is for a caller standing in a terminal, where the
+        // human types the path: `daemon project <path> --mode ignore`. That
+        // flow must keep working *before* the project's first session,
+        // which is exactly when the daemon has no id to offer for it -- it
+        // cannot mint one for a project it has never discovered. So both
+        // are supported, deliberately, rather than one replacing the other.
+        //
+        // `project_id` wins when both are sent.
         "set_project_mode" => {
-            let Some(key) = req.params.get("project_key").and_then(|v| v.as_str()) else {
-                return Response::err(req.id, ERR_BAD_PARAMS, "project_key-required");
-            };
+            let id_param = req.params.get("project_id").and_then(|v| v.as_str());
+            let key_param = req.params.get("project_key").and_then(|v| v.as_str());
+            if id_param.is_none() && key_param.is_none() {
+                return Response::err(req.id, ERR_BAD_PARAMS, "project_id-or-project_key-required");
+            }
             let mode: ProjectMode = match req
                 .params
                 .get("mode")
@@ -477,13 +538,39 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // label is now derived from the key inside `set_mode`.
             // Lock order is policy before queue, as everywhere else.
             let mut policy = shared.policy.lock().expect("policy lock");
-            let audit_label = {
+            let (key, audit_label) = {
                 let queue = shared.queue.lock().expect("queue lock");
                 let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-                if !project_key_is_admissible(key, &known) {
-                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
-                }
-                disambiguated_label(key, &known)
+                // Whichever way the project was named, what comes out of
+                // here is a key the daemon itself already holds or has just
+                // corroborated on disk -- never a caller's string. That is
+                // what keeps the derived label, and so `list_projects` and
+                // `daemon-audit.jsonl`, un-injectable.
+                let key = match id_param {
+                    Some(id) => match project_key_for_id(id, &known) {
+                        Some(key) => key,
+                        None => {
+                            return Response::err(
+                                req.id,
+                                ERR_BAD_PARAMS,
+                                ERR_PROJECT_ID_UNRECOGNIZED,
+                            );
+                        }
+                    },
+                    None => {
+                        let key = key_param.unwrap_or_default();
+                        if !project_key_is_admissible(key, &known) {
+                            return Response::err(
+                                req.id,
+                                ERR_BAD_PARAMS,
+                                ERR_PROJECT_KEY_UNRECOGNIZED,
+                            );
+                        }
+                        key.to_string()
+                    }
+                };
+                let label = disambiguated_label(&key, &known);
+                (key, label)
             };
 
             // The audit entry goes down FIRST, before anything is armed,
@@ -527,7 +614,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 policy = shared.policy.lock().expect("policy lock");
             }
 
-            if let Err(e) = policy.set_mode(key, mode, Utc::now()) {
+            if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
                 return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
             }
             if let Err(_e) = policy.save(&shared.store) {
@@ -1621,6 +1708,323 @@ mod tests {
             audit::load(&s.store).unwrap()[0].project_label.as_deref(),
             Some("myproj")
         );
+    }
+
+    /// Seed one pending queue entry for `project_key`, the way a poll that
+    /// discovered a session would, without running the watcher.
+    fn seed_entry(s: &DaemonShared, project_key: &str) -> uuid::Uuid {
+        let entry_id = uuid::Uuid::new_v4();
+        let mut queue = s.queue.lock().unwrap();
+        queue
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id,
+                    session_hash: format!("sha256:{entry_id}"),
+                    source: "claude-code".to_string(),
+                    project_key: project_key.to_string(),
+                    project_label: super::super::policy::project_label_for(project_key),
+                    path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    state: QueueState::Pending,
+                    reason_label: None,
+                    attempts: 0,
+                    retry_after: None,
+                    submission_id: None,
+                    approved_scopes: None,
+                    approved_inputs: None,
+                    previewed_envelope_digest: None,
+                    approved_at: None,
+                },
+                500,
+            )
+            .unwrap();
+        entry_id
+    }
+
+    fn projects_of(s: &DaemonShared) -> Vec<serde_json::Value> {
+        handle_request(s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_project_id_from_list_pending_is_accepted_by_set_project_mode() {
+        // The gap this closes. A socket client sees `project_label` and
+        // never `project_key`, and a label is not an admissible key -- so
+        // before the id existed, a GUI holding a queue entry had no way to
+        // say anything at all about the project it came from.
+        let s = shared();
+        let key = tmp_project("p");
+        seed_entry(&s, &key);
+
+        let pending = handle_request(&s, &req("list_pending", serde_json::json!({})))
+            .result
+            .unwrap()["pending"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let project_id = pending[0]["project_id"].as_str().unwrap().to_string();
+        assert!(
+            pending[0].get("project_key").is_none(),
+            "a key must never cross the wire: {:?}",
+            pending[0]
+        );
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(&key), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn a_project_id_from_list_projects_is_accepted_by_set_project_mode() {
+        let s = shared();
+        let key = tmp_project("p");
+        seed_entry(&s, &key);
+
+        let row = projects_of(&s)[0].clone();
+        let project_id = row["project_id"].as_str().unwrap().to_string();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "auto_upload"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&key),
+            ProjectMode::AutoUpload
+        );
+    }
+
+    #[test]
+    fn an_unknown_project_id_is_refused_with_a_fixed_label_and_records_nothing() {
+        let s = shared();
+        let unknown = super::super::policy::project_id_for("/Users/z/never/seen");
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": unknown, "mode": "auto_upload"}),
+            ),
+        );
+        let err = r.error.expect("an unknown id must be refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, ERR_PROJECT_ID_UNRECOGNIZED);
+        assert!(s.policy.lock().unwrap().projects.is_empty());
+        assert!(
+            audit::load(&s.store).unwrap().is_empty(),
+            "a refused call must record nothing"
+        );
+        assert!(projects_of(&s).is_empty());
+    }
+
+    #[test]
+    fn a_real_canonical_path_is_still_accepted_before_the_project_is_ever_seen() {
+        // The CLI's pre-discovery flow: `daemon project <path> --mode
+        // ignore` for a project whose first session has not happened, so no
+        // id exists for it and none can. This is why the id supplements the
+        // key rather than replacing it.
+        let s = shared();
+        let key = tmp_project("employer-repo");
+        assert!(
+            projects_of(&s).is_empty(),
+            "the project must be genuinely unknown for this test to mean anything"
+        );
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(&key), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn a_project_id_is_stable_across_a_daemon_restart_and_a_rebuilt_policy_file() {
+        // Ids are derived, never stored, so there is nothing for a restart
+        // or a from-scratch policy file to lose. A client that cached an id
+        // yesterday can still use it today.
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let open = || crate::config::ConfigStore::open(state.clone()).unwrap();
+        let key = tmp_project("p");
+
+        let first = {
+            let s = DaemonShared::load(open()).unwrap();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": key, "mode": "ignore"}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            projects_of(&s)[0]["project_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // A second daemon over the same state directory: a restart.
+        let s = DaemonShared::load(open()).unwrap();
+        assert_eq!(projects_of(&s)[0]["project_id"].as_str().unwrap(), first);
+
+        // And a policy file rebuilt from scratch, holding the same project.
+        let mut rebuilt = ProjectPolicy::new();
+        rebuilt
+            .set_mode(&key, ProjectMode::NotifyOnly, Utc::now())
+            .unwrap();
+        rebuilt.save(&open()).unwrap();
+        let s = DaemonShared::load(open()).unwrap();
+        let row = projects_of(&s)[0].clone();
+        assert_eq!(row["project_id"].as_str().unwrap(), first);
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": first, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+    }
+
+    #[test]
+    fn a_project_id_never_carries_a_path_component() {
+        let s = shared();
+        let key = tmp_project("acme-secret-client");
+        seed_entry(&s, &key);
+        let wire = format!(
+            "{}{}",
+            serde_json::to_string(&handle_request(
+                &s,
+                &req("list_pending", serde_json::json!({}))
+            ))
+            .unwrap(),
+            serde_json::to_string(&projects_of(&s)).unwrap()
+        );
+        let id = super::super::policy::project_id_for(&key);
+        assert!(wire.contains(&id), "the id must be on the wire: {wire}");
+        assert!(
+            !id.contains("acme") && !id.contains("secret") && !id.contains('/'),
+            "the id leaked a path component: {id}"
+        );
+        for segment in std::path::Path::new(&key)
+            .parent()
+            .unwrap()
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+        {
+            assert!(
+                !id.contains(&segment),
+                "the id leaked the path segment {segment}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_projects_reports_a_discovered_but_unconfigured_project() {
+        // Onboarding's "which of these should never be uploaded" screen
+        // needs exactly this set: a project is configured only once it has
+        // been ruled on, so listing only configured projects lists only the
+        // decisions already made and never the one the contributor is being
+        // asked to make.
+        let s = shared();
+        let key = tmp_project("employer-repo");
+        seed_entry(&s, &key);
+
+        let rows = projects_of(&s);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["project_label"], serde_json::json!("employer-repo"));
+        assert_eq!(rows[0]["configured"], serde_json::json!(false));
+        assert!(rows[0]["added_at"].is_null());
+        assert_eq!(
+            rows[0]["mode"],
+            serde_json::json!("notify_only"),
+            "an unruled project reports the effective default"
+        );
+
+        // Ruling on it makes it configured, and does not duplicate the row.
+        let id = rows[0]["project_id"].as_str().unwrap().to_string();
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "ignore"}),
+            ),
+        );
+        let rows = projects_of(&s);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["configured"], serde_json::json!(true));
+        assert_eq!(rows[0]["mode"], serde_json::json!("ignore"));
+    }
+
+    #[test]
+    fn nothing_a_client_sends_reaches_list_projects_or_the_audit_log_via_an_id() {
+        // The original injection fix must survive the new entry point: the
+        // id path resolves to a key the daemon already holds, so the label
+        // is still derived and a caller's strings still reach neither sink.
+        let s = shared();
+        let key = tmp_project("myproj");
+        seed_entry(&s, &key);
+        let id = super::super::policy::project_id_for(&key);
+        let injected = "ghp_fakeinjectedtoken/and/a/path";
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": id,
+                    "project_key": injected,
+                    "label": injected,
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let listed = serde_json::to_string(&projects_of(&s)).unwrap();
+        assert!(
+            !listed.contains("ghp_fakeinjectedtoken"),
+            "a caller-supplied string reached list_projects: {listed}"
+        );
+        assert!(listed.contains("\"myproj\""), "{listed}");
+        let audit_text = serde_json::to_string(&audit::load(&s.store).unwrap()).unwrap();
+        assert!(
+            !audit_text.contains("ghp_fakeinjectedtoken"),
+            "a caller-supplied string reached the audit log: {audit_text}"
+        );
+        assert_eq!(
+            audit::load(&s.store).unwrap()[0].project_label.as_deref(),
+            Some("myproj")
+        );
+    }
+
+    #[test]
+    fn naming_a_project_neither_way_is_a_bad_params_error() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req("set_project_mode", serde_json::json!({"mode": "ignore"})),
+        );
+        let err = r.error.expect("must be refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, "project_id-or-project_key-required");
     }
 
     /// Make the audit log unappendable: `audit::load` reads the file as

@@ -198,6 +198,74 @@ pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bo
     }
 }
 
+/// The prefix every opaque project id carries.
+///
+/// It exists so the two identifier spaces `set_project_mode` accepts can
+/// never be confused for one another: an id always starts with this and a
+/// project key never does (a key is either an absolute path or the
+/// `unknown-project` sentinel).
+pub const PROJECT_ID_PREFIX: &str = "proj_";
+
+/// Hex characters of SHA-256 carried in an opaque project id. 16 nibbles is
+/// 64 bits, which is far more than enough to keep the handful of projects on
+/// one contributor's machine distinct, and short enough to be pasted into a
+/// bug report.
+const PROJECT_ID_HEX_CHARS: usize = 16;
+
+/// The fixed label `set_project_mode` refuses an unrecognized id with.
+pub const ERR_PROJECT_ID_UNRECOGNIZED: &str = "project-id-unrecognized";
+
+/// The opaque, daemon-issued identifier for a project.
+///
+/// This exists because a socket client could not previously name a project
+/// at all. The privacy rule is that a project key -- a local filesystem path
+/// -- never crosses the socket, so queue entries and `list_projects` rows
+/// carry only `project_label`. But a label is not an admissible key, and
+/// `project_key_is_admissible` (rightly) refuses anything that is not a real
+/// path the daemon can corroborate. A GUI therefore held nothing it could
+/// pass to `set_project_mode`, which made arming and ignoring a project
+/// unreachable from every application this contract exists to serve.
+///
+/// The id is a hash of the key, not an encoding of it: it is one-way, so it
+/// leaks no path component, and it is deterministic, so it is the same
+/// across a daemon restart and across a policy file rebuilt from scratch --
+/// nothing is stored to make it stable, because nothing needs to be.
+///
+/// It is *not* a capability. Knowing an id confers nothing that naming the
+/// directory did not already confer; it is an identifier a client can hold,
+/// and the daemon still resolves it only against projects it already knows.
+pub fn project_id_for(project_key: &str) -> String {
+    let digest = Sha256::digest(project_key.as_bytes());
+    format!(
+        "{PROJECT_ID_PREFIX}{}",
+        hex_prefix(&digest, PROJECT_ID_HEX_CHARS)
+    )
+}
+
+/// Resolve an opaque project id back to the key it was minted from, or
+/// `None` if no project the daemon knows about has that id.
+///
+/// Resolution is by re-deriving ids over the known-key set rather than by
+/// any stored mapping, which is what keeps ids stable with nothing to
+/// migrate. The unknown-cwd sentinel is always resolvable -- it is a
+/// permanent bucket rather than a discovered project, and a client that sees
+/// it in a queue entry must be able to silence it -- while `set_mode` still
+/// refuses to arm it.
+///
+/// An id can only ever name a project the daemon already knows. That is the
+/// deliberate asymmetry with `project_key`: a path can name a project that
+/// has never been seen (the CLI's `daemon project <path> --mode ignore`
+/// before that project's first session), and an id cannot, because the
+/// daemon cannot mint an id for something it has never discovered.
+pub fn project_key_for_id(project_id: &str, known_keys: &[String]) -> Option<String> {
+    if !project_id.starts_with(PROJECT_ID_PREFIX) {
+        return None;
+    }
+    std::iter::once(UNKNOWN_PROJECT_KEY.to_string())
+        .chain(known_keys.iter().cloned())
+        .find(|key| project_id_for(key) == project_id)
+}
+
 /// Whether a working directory yields a usable display label -- i.e. has a
 /// final path segment at all.
 ///
@@ -528,6 +596,86 @@ mod tests {
         ];
         let a = disambiguated_label("/Users/z/work/api", &keys);
         assert!(!a.contains("work") && !a.contains('/'), "got {a}");
+    }
+
+    #[test]
+    fn a_project_id_leaks_no_path_component() {
+        // The whole reason the label-only rule exists: this key names a
+        // client the contributor may not disclose. The id crosses the same
+        // socket the key is forbidden from crossing.
+        let key = "/Users/z/clients/acme-secret-merger/api";
+        let id = project_id_for(key);
+        for fragment in ["acme", "secret", "merger", "clients", "api", "Users", "/"] {
+            assert!(!id.contains(fragment), "{id} leaked {fragment}");
+        }
+        assert!(id.starts_with(PROJECT_ID_PREFIX), "got {id}");
+        assert_eq!(id.len(), PROJECT_ID_PREFIX.len() + PROJECT_ID_HEX_CHARS);
+    }
+
+    #[test]
+    fn a_project_id_is_deterministic_and_distinct_per_project() {
+        // Deterministic: nothing is stored to make it stable, so it is the
+        // same after a restart and after a policy file rebuilt from scratch.
+        assert_eq!(
+            project_id_for("/Users/z/code/proj"),
+            project_id_for("/Users/z/code/proj")
+        );
+        assert_ne!(
+            project_id_for("/Users/z/work/api"),
+            project_id_for("/Users/z/client/api"),
+            "colliding basenames must still get distinct ids"
+        );
+    }
+
+    #[test]
+    fn a_project_id_resolves_back_to_the_key_that_minted_it() {
+        let keys = vec![
+            "/Users/z/work/api".to_string(),
+            "/Users/z/client/api".to_string(),
+        ];
+        for key in &keys {
+            assert_eq!(
+                project_key_for_id(&project_id_for(key), &keys).as_deref(),
+                Some(key.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn an_id_for_a_project_the_daemon_does_not_know_resolves_to_nothing() {
+        let keys = vec!["/Users/z/work/api".to_string()];
+        assert_eq!(
+            project_key_for_id(&project_id_for("/Users/z/never/seen"), &keys),
+            None
+        );
+        // A label is not an id, and neither is a path or a bare string.
+        for bogus in ["api", "/Users/z/work/api", "proj_deadbeefdeadbeef", ""] {
+            assert_eq!(project_key_for_id(bogus, &keys), None, "accepted {bogus}");
+        }
+    }
+
+    #[test]
+    fn the_unknown_bucket_has_a_resolvable_id_even_when_nothing_is_known() {
+        // It is a permanent bucket rather than a discovered project, and a
+        // client seeing it on a queue entry must be able to silence it.
+        assert_eq!(
+            project_key_for_id(&project_id_for(UNKNOWN_PROJECT_KEY), &[]).as_deref(),
+            Some(UNKNOWN_PROJECT_KEY)
+        );
+    }
+
+    #[test]
+    fn an_id_survives_a_policy_file_rebuilt_from_scratch() {
+        let (_d, store) = temp_store();
+        let key = "/Users/z/code/proj";
+        let mut p = ProjectPolicy::new();
+        p.set_mode(key, ProjectMode::Ignore, now()).unwrap();
+        p.save(&store).unwrap();
+        let before = project_id_for(key);
+
+        let reloaded = ProjectPolicy::load(&store).unwrap();
+        let reloaded_key = reloaded.projects.keys().next().unwrap();
+        assert_eq!(project_id_for(reloaded_key), before);
     }
 
     #[test]
