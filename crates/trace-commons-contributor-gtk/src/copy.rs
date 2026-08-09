@@ -139,6 +139,16 @@ pub const AUTOSTART_XDG_LABEL: &str = "Start Trace Commons when you log in";
 pub const AUTOSTART_XDG_BODY: &str =
     "No background service is installed, so this switch is the other way to do it.";
 
+// --- Flatpak session-root access (for onboarding, not yet built) ---------
+
+/// The Linux design spec's exact wording for why a confined build asks for
+/// two specific folders rather than the whole home directory. Onboarding
+/// does not exist yet (see the report), so nothing renders this today; it
+/// is pinned here so the string is ready and cannot drift from the spec
+/// when onboarding is built.
+pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = "Trace Commons needs to read your Claude \
+     Code and Codex session files. It asks for access to those folders only.";
+
 // --- Health ------------------------------------------------------------
 
 /// The sentence to render for a `status.health.last_error_label`.
