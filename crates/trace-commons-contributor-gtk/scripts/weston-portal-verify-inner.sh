@@ -36,57 +36,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- axis 2: a real portal daemon ------------------------------------------
-
-"$PORTAL_BIN" &
-PIDS+=("$!")
-"$PORTAL_GTK_BIN" &
-PIDS+=("$!")
-
-PORTAL_UP=0
-for _ in $(seq 1 20); do
-  if gdbus call --session \
-      --dest org.freedesktop.DBus \
-      --object-path /org/freedesktop/DBus \
-      --method org.freedesktop.DBus.NameHasOwner \
-      org.freedesktop.portal.Desktop 2>/dev/null | grep -q 'true'; then
-    PORTAL_UP=1
-    break
-  fi
-  sleep 0.5
-done
-
-if [ "$PORTAL_UP" -ne 1 ]; then
-  fail "xdg-desktop-portal never claimed org.freedesktop.portal.Desktop on the session bus"
-else
-  echo "portal daemon is alive and owns org.freedesktop.portal.Desktop"
-
-  # Independent of the app: call RequestBackground directly and check the
-  # failure mode. A live portal with no Background backend must answer
-  # (with an error) inside a bounded time, and that error must not be the
-  # ServiceUnknown/NameHasNoOwner class -- that is exactly what "nothing is
-  # listening at all" looks like, and getting it here would mean this
-  # setup is not actually testing anything different from headless-run.sh.
-  PROBE_OUT=$(timeout 10 gdbus call --session \
-    --dest org.freedesktop.portal.Desktop \
-    --object-path /org/freedesktop/portal/desktop \
-    --method org.freedesktop.portal.Background.RequestBackground "" "{}" 2>&1)
-  PROBE_RC=$?
-  echo "RequestBackground probe (rc=$PROBE_RC): $PROBE_OUT"
-
-  if [ "$PROBE_RC" -eq 124 ]; then
-    fail "RequestBackground did not return within 10s against a live portal -- should fail fast with no Background backend registered, not hang"
-  elif echo "$PROBE_OUT" | grep -Eqi 'ServiceUnknown|NameHasNoOwner|was not provided by any \.service files'; then
-    fail "RequestBackground got the same 'nothing is listening' error as no-portal-at-all -- the live daemon above did not actually field the call"
-  else
-    echo "RequestBackground reached the live portal daemon and got a real (non-absence) reply"
-  fi
-fi
-
 # --- axis 1: real rendering under a real compositor ------------------------
 
 WAYLAND_SOCKET=wayland-ci
+# A SOFTWARE renderer, explicitly. Without this weston finds no GL on a CI
+# runner (no GPU; MESA reports "ZINK: vkCreateInstance failed" and "failed to
+# get driver name for fd -1") and silently falls back to its NO-OP renderer.
+# The no-op renderer composites nothing, so there is no framebuffer to capture
+# and weston-screenshooter aborts on `assertion 'width > 0' failed` -- which
+# reads like a screenshot tool bug and is actually "nothing was ever drawn".
+#
+# The flag was renamed across weston versions, so probe rather than guess:
+# --renderer=pixman on weston 12+, --use-pixman before that.
+if weston --help 2>&1 | grep -q -- '--renderer='; then
+  RENDERER_FLAG=(--renderer=pixman)
+elif weston --help 2>&1 | grep -q -- '--use-pixman'; then
+  RENDERER_FLAG=(--use-pixman)
+else
+  echo "note: this weston exposes neither --renderer= nor --use-pixman;" >&2
+  echo "      it will pick its own renderer and may fall back to no-op." >&2
+  RENDERER_FLAG=()
+fi
+
 weston --backend=headless-backend.so --width=1280 --height=900 \
+  "${RENDERER_FLAG[@]}" \
   --socket="$WAYLAND_SOCKET" --idle-time=0 &
 WESTON_PID=$!
 PIDS+=("$WESTON_PID")
@@ -101,6 +74,44 @@ if [ "$WESTON_UP" -ne 1 ]; then
   fail "weston headless backend never created its Wayland socket"
 else
   echo "weston headless compositor is up on $WAYLAND_SOCKET"
+
+  # --- axis 2: a real portal daemon ------------------------------------------
+  #
+  # ORDER MATTERS, and getting it wrong is why the first run of this job proved
+  # nothing about the portal. xdg-desktop-portal-gtk is itself a GTK application
+  # and needs a display to start. Launched before the compositor exists it dies
+  # immediately, and the log fills with
+  #   Activated service 'org.freedesktop.impl.portal.desktop.gtk' failed:
+  #   Process ... exited with status 1
+  # repeated once per portal interface -- while the FRONTEND still claims
+  # org.freedesktop.portal.Desktop perfectly happily. So a bus-name check alone
+  # reports a healthy portal with no backend behind it at all.
+  #
+  # Weston is therefore started above, and the backend is given WAYLAND_DISPLAY.
+
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" "$PORTAL_BIN" &
+  PIDS+=("$!")
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland "$PORTAL_GTK_BIN" &
+  PIDS+=("$!")
+
+  # The frontend owning the bus name is NOT evidence the backend is alive -- see
+  # above. Assert the backend separately.
+  BACKEND_UP=0
+  for _ in $(seq 1 20); do
+    if gdbus call --session --dest org.freedesktop.DBus \
+        --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner \
+        org.freedesktop.impl.portal.desktop.gtk 2>/dev/null | grep -q 'true'; then
+      BACKEND_UP=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$BACKEND_UP" -ne 1 ]; then
+    fail "the gtk portal BACKEND never came up (org.freedesktop.impl.portal.desktop.gtk has no owner) -- a frontend-only portal is not the thing this job claims to verify"
+  else
+    echo "gtk portal backend is alive and owns org.freedesktop.impl.portal.desktop.gtk"
+  fi
 
   (
     cd "$WORKDIR" || exit 1
@@ -158,3 +169,44 @@ else
 fi
 
 exit "$FAIL"
+
+PORTAL_UP=0
+for _ in $(seq 1 20); do
+  if gdbus call --session \
+      --dest org.freedesktop.DBus \
+      --object-path /org/freedesktop/DBus \
+      --method org.freedesktop.DBus.NameHasOwner \
+      org.freedesktop.portal.Desktop 2>/dev/null | grep -q 'true'; then
+    PORTAL_UP=1
+    break
+  fi
+  sleep 0.5
+done
+
+if [ "$PORTAL_UP" -ne 1 ]; then
+  fail "xdg-desktop-portal never claimed org.freedesktop.portal.Desktop on the session bus"
+else
+  echo "portal daemon is alive and owns org.freedesktop.portal.Desktop"
+
+  # Independent of the app: call RequestBackground directly and check the
+  # failure mode. A live portal with no Background backend must answer
+  # (with an error) inside a bounded time, and that error must not be the
+  # ServiceUnknown/NameHasNoOwner class -- that is exactly what "nothing is
+  # listening at all" looks like, and getting it here would mean this
+  # setup is not actually testing anything different from headless-run.sh.
+  PROBE_OUT=$(timeout 10 gdbus call --session \
+    --dest org.freedesktop.portal.Desktop \
+    --object-path /org/freedesktop/portal/desktop \
+    --method org.freedesktop.portal.Background.RequestBackground "" "{}" 2>&1)
+  PROBE_RC=$?
+  echo "RequestBackground probe (rc=$PROBE_RC): $PROBE_OUT"
+
+  if [ "$PROBE_RC" -eq 124 ]; then
+    fail "RequestBackground did not return within 10s against a live portal -- should fail fast with no Background backend registered, not hang"
+  elif echo "$PROBE_OUT" | grep -Eqi 'ServiceUnknown|NameHasNoOwner|was not provided by any \.service files'; then
+    fail "RequestBackground got the same 'nothing is listening' error as no-portal-at-all -- the live daemon above did not actually field the call"
+  else
+    echo "RequestBackground reached the live portal daemon and got a real (non-absence) reply"
+  fi
+fi
+
