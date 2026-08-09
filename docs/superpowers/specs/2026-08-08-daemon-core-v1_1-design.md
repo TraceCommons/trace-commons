@@ -137,15 +137,29 @@ directory and the session path; it does not need the lock, the queue, or the
 running loop. So **any process with access to the state directory can produce
 a preview**, whether or not it is the one hosting the daemon.
 
-That is what makes the Linux arrangement work: a GTK window connected over the
-socket to a systemd-hosted daemon still gets full body and search, because it
-computes the preview itself through the same library rather than asking the
-daemon for it.
+That is true of the *pipeline*, and it was mistakenly written up here as
+though it were true of the interface: this section used to claim that a GTK
+window connected over the socket to a systemd-hosted daemon "still gets full
+body and search, because it computes the preview itself through the same
+library rather than asking the daemon for it." It does not, and could not.
+The library entry point that returns a body (`ipc::open_preview`, behind the
+C ABI's `tc_preview_open`) takes `&DaemonShared`, which only the process
+holding the daemon lock has; a socket client is by definition not that
+process. Loading a second `DaemonShared` is not a workaround either — it
+rewrites the queue file and sweeps the pinned envelopes the running daemon is
+still using. So on the recommended Linux deployment the window's "Search" and
+"Exactly what would be sent" tabs had no way to obtain a body at all.
 
-The socket's `preview` therefore returns the summary only, and the body is
-obtained locally in every shell. This is not a limitation being worked around
-— shipping a redacted transcript through a socket to a process that could
-simply read it is pointless work.
+What actually happens now: the socket's `preview` returns the summary, and
+the socket's `preview_body` returns the redacted body itself, paged under the
+1 MiB line cap (`offset`/`limit` in, `chunk`/`next_offset`/`total_bytes`
+out, continuation pages anchored by `body_digest`). A previewed entry is
+served from the envelope already stored for it, so the socket body is
+byte-identical to what the hosting process gets from `open_preview`. Search
+stays in the client — the daemon ships the text and does not match against
+it — and a client that has not received the whole body must not report a
+trace clean. See "The preview exemption" and "`preview_body`" in
+`docs/contributor-daemon-ipc-v1_1.md`.
 
 The one invariant this must not break: preview and upload call the same
 redaction path, so what preview shows cannot disagree with what gets sent. A

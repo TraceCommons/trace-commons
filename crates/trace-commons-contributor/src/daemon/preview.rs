@@ -365,8 +365,7 @@ pub async fn build_preview(
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "pattern-based".to_string());
 
-    let body = serde_json::to_string_pretty(&envelope.events)
-        .map_err(|_| anyhow::anyhow!("preview-body-serialize-failed"))?;
+    let body = body_of(&envelope)?;
 
     Ok((
         PreviewSummary {
@@ -385,6 +384,25 @@ pub async fn build_preview(
         body,
         envelope,
     ))
+}
+
+/// The redacted body a contributor is shown for one envelope: the redacted
+/// events, pretty-printed.
+///
+/// The single definition of "the preview body". [`build_preview`] returns
+/// exactly this for the envelope it just built, and the socket's
+/// `preview_body` returns exactly this for the *stored* envelope the entry
+/// is pinned to -- which is why those two are byte-identical for the same
+/// entry rather than merely equivalent. A second spelling of this
+/// expression anywhere else is how they would stop being.
+///
+/// It is redacted trace content and carries the preview exemption with it:
+/// post-redaction only, only for an entry the caller already holds, never
+/// onward into a log line, an audit entry, a history record, notification
+/// text, or a receipt.
+pub fn body_of(envelope: &TraceContributionEnvelope) -> Result<String> {
+    serde_json::to_string_pretty(&envelope.events)
+        .map_err(|_| anyhow::anyhow!("preview-body-serialize-failed"))
 }
 
 /// Serde's wire name for a `Serialize` value that serializes to a bare

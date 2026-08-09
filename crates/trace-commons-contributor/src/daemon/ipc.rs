@@ -48,14 +48,25 @@
 //! `project_key` or `path`. Project labels are derived by the daemon from
 //! the key and are never a string a caller supplied.
 //!
-//! **The preview exemption.** `"preview"`'s `opening_prompt`, and the
-//! redacted body `open_preview` returns to the C ABI, *are* trace content,
-//! deliberately. A contributor cannot consent to sending something they
-//! cannot see, so preview is the one interface allowed to carry it --
-//! bounded to post-redaction content, only for an `entry_id` the caller
-//! already holds, and never onward into a log line, an audit entry, a
-//! history record, notification text, or a receipt. Everywhere else in
-//! this module the rule is absolute.
+//! **The preview exemption.** `"preview"`'s `opening_prompt`,
+//! `"preview_body"`'s `chunk`, and the redacted body `open_preview` returns
+//! to the C ABI, *are* trace content, deliberately. A contributor cannot
+//! consent to sending something they cannot see, so preview is the one
+//! interface allowed to carry it -- bounded to post-redaction content, only
+//! for an `entry_id` the caller already holds, and never onward into a log
+//! line, an audit entry, a history record, notification text, or a receipt.
+//! Everywhere else in this module the rule is absolute.
+//!
+//! `"preview_body"` is the *same* carve-out reaching the same body over the
+//! socket, not a second one. It exists because the body used to be
+//! reachable only through `open_preview`, which takes `&DaemonShared` and so
+//! can only be called by the process holding the daemon lock. On the
+//! recommended Linux arrangement -- a systemd-managed daemon with the window
+//! as a socket client -- that is never the window, so "search this trace for
+//! my client's name" and "show me exactly what would be sent" were not slow
+//! or awkward there, they were impossible. Loading a second `DaemonShared`
+//! is not the workaround it looks like: it rewrites the queue file and
+//! sweeps the pinned envelopes the running daemon is still holding.
 //!
 //! # Sync vs. async dispatch
 //!
@@ -92,6 +103,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
@@ -121,15 +133,46 @@ pub const SUPPORTED_VERSIONS: [&str; 2] = ["trace_commons.daemon.v1", "trace_com
 /// real request.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
+/// The largest slice of a redacted preview body `preview_body` will put in
+/// one frame, and the cap it silently applies to a larger `limit`.
+///
+/// Sized against [`MAX_LINE_BYTES`], not against the body. A redacted
+/// envelope may approach `MAX_ENVELOPE_BYTES` (1.5 MB), so a whole body does
+/// not reliably fit one 1 MiB line and `preview_body` pages. The chunk still
+/// has to survive JSON string escaping on the way out: `serde_json` passes
+/// non-ASCII UTF-8 through unescaped but expands a control byte to `\u00XX`,
+/// six bytes for one, so a pathological 128 KiB chunk serializes to at most
+/// 768 KiB and the frame stays comfortably inside the line cap with the
+/// response's own fields on top.
+pub const MAX_PREVIEW_BODY_CHUNK_BYTES: usize = 128 * 1024;
+
 pub const ERR_UNKNOWN_METHOD: &str = "unknown_method";
 pub const ERR_BAD_PARAMS: &str = "bad_params";
 pub const ERR_NOT_AUTHORIZED: &str = "not_authorized";
 pub const ERR_BUSY: &str = "busy";
 pub const ERR_UNAVAILABLE: &str = "unavailable";
 
+/// `preview_body` refused because the body it resolved is not the one the
+/// caller has been reading: the `body_digest` from the caller's first page
+/// does not match. Splicing two pages of two different bodies together
+/// would produce a transcript nobody ever redacted, and a search over it
+/// would be answering about text that does not exist. Restart from
+/// `offset: 0`.
+pub const ERR_PREVIEW_BODY_CHANGED: &str = "preview-body-changed";
+/// A continuation page (`offset > 0`) arrived without the `body_digest` the
+/// first page returned. Required, not optional: without it the daemon
+/// cannot tell a continuation of the body the caller holds from a page of a
+/// different one, and paging is the whole reason this method exists.
+pub const ERR_BODY_DIGEST_REQUIRED: &str = "body-digest-required";
+/// The fixed label every `preview_body` refusal for an entry the caller
+/// does not hold -- unknown id, or an id that is not in the queue -- comes
+/// back under. Identical to `preview`'s, deliberately: the two must not be
+/// distinguishable.
+pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
+
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 24] = [
+pub const METHODS: [&str; 25] = [
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
@@ -145,6 +188,7 @@ pub const METHODS: [&str; 24] = [
     "list_projects",
     "pause",
     "preview",
+    "preview_body",
     "queue_outcome_counts",
     "refresh_history",
     "resume",
@@ -802,9 +846,14 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         "preview_requires_async": true,
                     }),
                 ),
-                None => Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
+                None => Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
             }
         }
+        // Resolving a body may have to run the redaction pipeline, which is
+        // async. Same treatment as `"enroll"`: an honest refusal here rather
+        // than a partial answer. No real caller reaches it -- see the module
+        // doc's "Sync vs. async dispatch" section.
+        "preview_body" => Response::err(req.id, ERR_UNAVAILABLE, "preview-body-requires-async"),
         "pause" => {
             // An optional timed pause, persisted so it survives a restart of
             // either the daemon or the app that requested it -- an app-side
@@ -982,7 +1031,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 /// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"enroll"`) for real and delegates every other method, unchanged, to the
+/// `"preview_body"`, `"enroll"`) for real and delegates every other method,
+/// unchanged, to the
 /// synchronous `handle_request`. See the module doc's "Sync vs. async
 /// dispatch" section for why this is the only place that decides which
 /// methods are async, and why both real callers (the socket loop and
@@ -991,6 +1041,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "preview" => handle_preview(shared, req).await,
+        "preview_body" => handle_preview_body(shared, req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         _ => handle_request(shared, req),
     }
@@ -1012,7 +1063,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
         let queue = shared.queue.lock().expect("queue lock");
         match queue.get(id) {
             Some(e) => e.clone(),
-            None => return Response::err(req.id, ERR_BAD_PARAMS, "unknown-entry-id"),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
         }
     };
     // No enrollment is not a refusal. Preview does no network I/O and needs
@@ -1023,29 +1074,9 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
-    let (near_ai, claude_root, codex_root) = {
-        let s = shared.settings.lock().expect("settings lock");
-        (
-            s.near_ai.clone(),
-            s.claude_root.clone(),
-            s.codex_root.clone(),
-        )
-    };
-    let sources = crate::source::all_sources(claude_root, codex_root, None);
-    let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
-    };
 
-    match super::preview::build_preview(&shared.store, cfg.as_ref(), near_ai, source, &session_ref)
-        .await
-    {
-        Ok((summary, _body, envelope)) => {
-            // An unenrolled preview is never pinned: it was built from a
-            // placeholder identity, so it is not the artifact any later
-            // approval would send.
-            if summary.enrolled {
-                pin_previewed_envelope(shared, id, &summary, &envelope);
-            }
+    match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
+        Ok((summary, _body, _envelope)) => {
             Response::ok(
                 req.id,
                 serde_json::json!({
@@ -1072,33 +1103,33 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
                 }),
             )
         }
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
+        Err((code, label)) => Response::err(req.id, code, label),
     }
 }
 
-/// Full preview -- summary *and* redacted body -- for one queue entry, for a
-/// caller that already holds `shared` directly rather than issuing a
-/// request/response frame. This is what the C ABI's `tc_preview_open` uses.
+/// Build the redacted envelope for one queue entry, pin the entry to it, and
+/// hand back the summary, the redacted body, and the envelope.
 ///
-/// The socket's `"preview"` (`handle_preview`, above) returns the summary
-/// only and never the body: per the design's "preview is a local operation,
-/// not daemon state" section, a body only ever needs to leave this process
-/// through a return value a caller who is already inside it can hold a
-/// pointer to, never through the 1 MiB-capped socket. Errors are fixed
-/// labels, matching every other surface at this boundary -- no path, no
-/// entry content.
-pub async fn open_preview(
+/// The one place the preview pipeline is driven. `handle_preview` (the
+/// socket's summary), `open_preview` (the C ABI's in-process full preview),
+/// and `handle_preview_body` (the socket's body, when there is no stored
+/// envelope to read instead) all go through it, so the summary one surface
+/// reports and the body another returns always describe the same build.
+/// Errors are `(code, fixed label)` -- no path, no entry content -- and the
+/// callers that need a bare label discard the code.
+async fn build_and_pin_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
-) -> Result<(super::preview::PreviewSummary, String), &'static str> {
-    let entry = {
-        let queue = shared.queue.lock().expect("queue lock");
-        queue.get(entry_id).cloned().ok_or("unknown-entry-id")?
-    };
-    // As with the socket's `"preview"`: no enrollment yields a
-    // placeholder-identity, deterministic-only preview rather than a
-    // refusal, and `summary.enrolled` says which one this is.
-    let cfg = shared.store.load_config().map_err(|_| "not-logged-in")?;
+    entry: &super::queue::QueueEntry,
+    cfg: Option<&crate::config::ContributorConfig>,
+) -> Result<
+    (
+        super::preview::PreviewSummary,
+        String,
+        trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+    ),
+    (&'static str, &'static str),
+> {
     let (near_ai, claude_root, codex_root) = {
         let s = shared.settings.lock().expect("settings lock");
         (
@@ -1109,20 +1140,233 @@ pub async fn open_preview(
     };
     let sources = crate::source::all_sources(claude_root, codex_root, None);
     let (source, session_ref) =
-        super::find_session(&sources, &entry).ok_or("session-file-vanished")?;
+        super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
     let (summary, body, envelope) =
-        super::preview::build_preview(&shared.store, cfg.as_ref(), near_ai, source, &session_ref)
+        super::preview::build_preview(&shared.store, cfg, near_ai, source, &session_ref)
             .await
-            .map_err(|_| "preview-failed")?;
-    // Same pinning as the socket's `"preview"`: the entry now holds the
-    // artifact this caller was shown, so an approval that follows covers
-    // that artifact and nothing else. An unenrolled build is never pinned --
-    // it carries a placeholder identity, so it is not what any approval
-    // would send.
+            .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    // An unenrolled preview is never pinned: it was built from a placeholder
+    // identity, so it is not the artifact any later approval would send.
     if summary.enrolled {
         pin_previewed_envelope(shared, entry_id, &summary, &envelope);
     }
+    Ok((summary, body, envelope))
+}
+
+/// Full preview -- summary *and* redacted body -- for one queue entry, for a
+/// caller that already holds `shared` directly rather than issuing a
+/// request/response frame. This is what the C ABI's `tc_preview_open` uses.
+///
+/// A socket client reaches the same body through `"preview_body"`
+/// (`handle_preview_body`, below), which pages it under the 1 MiB line cap.
+/// That method exists because this function's `&DaemonShared` is only
+/// available to the process holding the daemon lock -- which, on a
+/// systemd-hosted daemon with the window as a socket client, is never the
+/// window. Errors are fixed labels, matching every other surface at this
+/// boundary -- no path, no entry content.
+pub async fn open_preview(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+) -> Result<(super::preview::PreviewSummary, String), &'static str> {
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue.get(entry_id).cloned().ok_or(ERR_UNKNOWN_ENTRY_ID)?
+    };
+    // As with the socket's `"preview"`: no enrollment yields a
+    // placeholder-identity, deterministic-only preview rather than a
+    // refusal, and `summary.enrolled` says which one this is.
+    let cfg = shared.store.load_config().map_err(|_| "not-logged-in")?;
+    // Same pinning as the socket's `"preview"`: the entry now holds the
+    // artifact this caller was shown, so an approval that follows covers
+    // that artifact and nothing else.
+    let (summary, body, _envelope) = build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref())
+        .await
+        .map_err(|(_code, label)| label)?;
     Ok((summary, body))
+}
+
+/// The redacted preview body for one queue entry, over the socket, in pages.
+///
+/// # Why this exists
+///
+/// `open_preview` needs `&DaemonShared`, so only the process holding the
+/// daemon lock can call it. On the recommended Linux arrangement the daemon
+/// is a systemd unit and the window is a socket client, so the window is
+/// never that process: without this method its "search" and "exactly what
+/// would be sent" surfaces cannot work at all. Search in particular is the
+/// affordance that lets a contributor under an NDA check in seconds whether
+/// a trace names their client, and it was dead on the platform's primary
+/// deployment.
+///
+/// # Paging, and why the body is not searched here
+///
+/// A redacted envelope may approach `MAX_ENVELOPE_BYTES`, above the 1 MiB
+/// `MAX_LINE_BYTES` frame, so the body is paged: `offset` in, `chunk` plus
+/// `next_offset` out, `next_offset: null` at the end. Nothing is ever
+/// silently truncated -- a client that believed it had searched a whole
+/// trace when it had searched the first megabyte would report a confident,
+/// false "0 matches", which is the exact failure this affordance exists to
+/// prevent.
+///
+/// The daemon ships the body and does not search it. A server-side matcher
+/// would have to reproduce the client's own notion of a match (case folding,
+/// word boundaries, how an event boundary is spanned) and would still have
+/// to ship surrounding text for the client to render, so the client would
+/// end up holding the body anyway -- but with a second matcher to keep in
+/// step with the one displaying results. One body, one text, one search:
+/// what the contributor searched is what the contributor is looking at.
+///
+/// The property that must survive either choice is that **a client can never
+/// report a trace clean when it could not actually look**, and paging is the
+/// only thing that could quietly break it. Two things hold it up: the client
+/// is told `total_bytes` and can refuse to report a result until it has
+/// received `[0, total_bytes)`, and a continuation page must carry the
+/// `body_digest` of the page it continues. A body that changed underneath a
+/// paging client is refused with [`ERR_PREVIEW_BODY_CHANGED`] rather than
+/// spliced -- which matters because a rebuild is not reproducible: event ids
+/// are minted per build, and under an LLM-backed privacy filter the
+/// redaction spans move too.
+///
+/// # Where the body comes from
+///
+/// A previewed, pinned entry has its envelope on disk, and that stored
+/// artifact is what is read -- the same bytes the upload will send, so
+/// paging is stable across calls and identical to what `open_preview`
+/// returns. Only an entry with no stored envelope runs the pipeline (which
+/// pins it, exactly as `preview` does). An entry that *is* pinned but whose
+/// bytes are missing or unusable is refused with
+/// `approved-envelope-unavailable` rather than rebuilt: a rebuild would show
+/// a contributor something other than what they approved.
+///
+/// Trace content, under the preview exemption in this module's doc: only for
+/// an entry the caller already holds, post-redaction only, and never onward.
+async fn handle_preview_body(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let offset = match req.params.get("offset") {
+        None => 0usize,
+        Some(v) => match v.as_u64() {
+            Some(n) => n as usize,
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "offset-invalid"),
+        },
+    };
+    let limit = match req.params.get("limit") {
+        None => MAX_PREVIEW_BODY_CHUNK_BYTES,
+        Some(v) => match v.as_u64() {
+            // A larger ask is capped, not refused: the cap is a framing
+            // limit, and a client that asks for the whole body in one go is
+            // making a reasonable request the transport cannot grant.
+            Some(n) if n > 0 => (n as usize).min(MAX_PREVIEW_BODY_CHUNK_BYTES),
+            _ => return Response::err(req.id, ERR_BAD_PARAMS, "limit-invalid"),
+        },
+    };
+    let expected_digest = match req.params.get("body_digest") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(s) => Some(s.to_string()),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "body-digest-invalid"),
+        },
+    };
+    // Fail-closed rather than best-effort: an unanchored continuation is
+    // indistinguishable from a continuation of a body that no longer exists.
+    if offset > 0 && expected_digest.is_none() {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_BODY_DIGEST_REQUIRED);
+    }
+
+    let (body, envelope_digest, enrolled) = match resolve_preview_body(shared, id).await {
+        Ok(v) => v,
+        Err((code, label)) => return Response::err(req.id, code, label),
+    };
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if let Some(expected) = expected_digest {
+        if expected != body_digest {
+            return Response::err(req.id, ERR_UNAVAILABLE, ERR_PREVIEW_BODY_CHANGED);
+        }
+    }
+
+    let total = body.len();
+    if offset > total || !body.is_char_boundary(offset) {
+        return Response::err(req.id, ERR_BAD_PARAMS, "offset-invalid");
+    }
+    let mut end = offset.saturating_add(limit).min(total);
+    // The body is UTF-8 and `chunk` is a JSON string, so a page may not
+    // split a character. Walk the end down to a boundary; if that leaves no
+    // progress at all (a `limit` smaller than the character it lands in),
+    // walk up instead, so a paging client can never stall.
+    while end > offset && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == offset && offset < total {
+        end = offset + 1;
+        while end < total && !body.is_char_boundary(end) {
+            end += 1;
+        }
+    }
+    let next_offset = (end < total).then_some(end);
+
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "entry_id": id,
+            "total_bytes": total,
+            "offset": offset,
+            "chunk": &body[offset..end],
+            "next_offset": next_offset,
+            // The token that anchors the next page to this body, and the
+            // digest of the envelope the body came from -- the same value
+            // `preview` reports, so an app can tie the body it is showing to
+            // the summary it displayed.
+            "body_digest": body_digest,
+            "envelope_digest": envelope_digest,
+            "enrolled": enrolled,
+            "max_chunk_bytes": MAX_PREVIEW_BODY_CHUNK_BYTES,
+        }),
+    )
+}
+
+/// The redacted body for one entry, plus its envelope digest and whether the
+/// build behind it was an enrolled one. See `handle_preview_body` for which
+/// of the two sources is used and why.
+async fn resolve_preview_body(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+) -> Result<(String, String, bool), (&'static str, &'static str)> {
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .cloned()
+            .ok_or((ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID))?
+    };
+    match super::approved_envelope::load(&shared.store, entry_id) {
+        Ok(Some(envelope)) => {
+            let digest = super::preview::envelope_digest(&envelope)
+                .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+            let body = super::preview::body_of(&envelope)
+                .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+            // Only an enrolled preview is ever stored.
+            Ok((body, digest, true))
+        }
+        // Pinned, but the bytes are not there. Refuse rather than rebuild:
+        // a rebuild is a different artifact from the one this entry is
+        // pinned to, and showing it as "what would be sent" would be false.
+        Ok(None) if entry.previewed_envelope_digest.is_some() => Err((
+            ERR_UNAVAILABLE,
+            super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE,
+        )),
+        Ok(None) => {
+            let cfg = shared.store.load_config().ok().flatten();
+            let (summary, body, _envelope) =
+                build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref()).await?;
+            Ok((body, summary.envelope_digest, summary.enrolled))
+        }
+        Err(_) => Err((
+            ERR_UNAVAILABLE,
+            super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE,
+        )),
+    }
 }
 
 /// Store the redacted envelope a preview just built and pin the entry to

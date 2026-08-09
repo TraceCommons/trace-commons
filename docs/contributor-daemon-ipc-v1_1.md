@@ -209,29 +209,39 @@ something it can corroborate, rather than to a string a client invented.
   facts an app may render as a checkmark, never as text containing the
   actual value.
 - `preview` returns a **summary** over the socket -- counts, labels, and
-  sizes -- never the full redacted trace body. The full redacted event body
-  is intentionally available only in-process, through the crate's C ABI, not
-  over this IPC surface. This is not an oversight: unlike `enroll`, `preview`
-  needs neither the daemon's file lock nor its running event loop, so a
-  native app that wants the actual body should call the C ABI's local
-  preview entry point directly rather than asking the daemon for it. The
-  socket path exists for uses (a tray or window summarizing what's pending)
-  that mostly do not need the trace content itself.
+  sizes. The full redacted event body is a separate call, `preview_body`,
+  because it does not fit one frame and has to be paged. Both carry trace
+  content under the one carve-out below; nothing else on this surface does.
+  An earlier revision of this document said the body was deliberately
+  in-process only, reachable through the crate's C ABI, on the reasoning
+  that any process could compute a preview for itself. That reasoning does
+  not survive the deployment we recommend: the C ABI's entry point needs the
+  daemon's shared state, which only the process holding the daemon lock has,
+  and under a systemd-managed daemon with the window as a socket client that
+  is never the window. Loading a second copy of the daemon's state is not a
+  substitute -- it rewrites the queue file and sweeps the pinned envelopes
+  the running daemon is still holding. So the body is served over the
+  socket, paged.
 
 ### The preview exemption
 
 `preview` is the **one** interface that deliberately carries trace content,
 and this is a decision, not a contradiction left lying around. The socket's
-`opening_prompt` and the C ABI's `tc_preview_body` are both trace content. A
-contributor cannot consent to sending something they cannot see; an approval
-given against a byte count and a project name is not an informed one. So the
-rule has exactly one carve-out, and it is bounded:
+`opening_prompt`, the socket's `preview_body` chunks, and the C ABI's
+`tc_preview_body` are all trace content. A contributor cannot consent to
+sending something they cannot see; an approval given against a byte count
+and a project name is not an informed one. So the rule has exactly one
+carve-out, and it is bounded:
 
 - **Post-redaction only.** What preview carries is what the real redaction
   pipeline produced. Raw session text never crosses either boundary.
 - **Only for an entry the caller already holds.** Content is reachable only
   by naming an `entry_id` already in the queue. There is no bulk read, no
   ambient read, and no way to ask for a session the daemon has not offered.
+  An id that is not in the queue -- unknown, already swept, or never
+  offered -- is refused by both `preview` and `preview_body` with the same
+  fixed label, `bad_params` / `unknown-entry-id`, so the two cases are not
+  distinguishable from outside.
 - **Never onward.** It never appears in a log line, an audit entry, a
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
@@ -270,7 +280,8 @@ history record, audit entry, notification text, or IPC response.
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
-| `preview` | `entry_id` | see below | summary only, no trace body |
+| `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
+| `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `approve` | `entry_id` or `all: true` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; see "The approval hold" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
@@ -394,6 +405,91 @@ preview a local file; that requirement was incidental and is gone.
 `would_send_bytes`, `redactions`, `pii_labels_present` and `opening_prompt`
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
+
+### `preview_body`
+
+The redacted body `preview` describes: the envelope's redacted events,
+pretty-printed JSON, exactly the bytes the upload will send. This is what a
+"Search" tab searches and what an "Exactly what would be sent" tab renders.
+
+Request:
+
+```json
+{ "entry_id": "…", "offset": 0, "limit": 131072, "body_digest": "sha256:…" }
+```
+
+Response:
+
+```json
+{
+  "entry_id": "…",
+  "total_bytes": 432118,
+  "offset": 0,
+  "chunk": "[\n  {\n    \"event_type\": \"user_message\", …",
+  "next_offset": 131072,
+  "body_digest": "sha256:…",
+  "envelope_digest": "sha256:…",
+  "enrolled": true,
+  "max_chunk_bytes": 131072
+}
+```
+
+**It is paged, and you must page it.** A redacted envelope can approach the
+1.5 MB envelope ceiling; a socket line is capped at `max_line_bytes` (1 MiB).
+A single frame therefore cannot be promised, so there is none: read from
+`offset: 0`, append `chunk`, and follow `next_offset` until it is `null`.
+Nothing is ever silently truncated -- `total_bytes` is the length of the
+whole body, and a client that has not received `[0, total_bytes)` has not
+read the trace.
+
+**Continuation pages must be anchored.** Every response carries
+`body_digest`, a SHA-256 over the complete body. Send it back on every
+request with `offset > 0`. Omitting it is `bad_params` /
+`body-digest-required`; sending one that does not match the body the daemon
+resolved is `unavailable` / `preview-body-changed`, and the correct
+response to that is to restart from `offset: 0`, not to splice. This is not
+ceremony: a rebuilt envelope is a different artifact (event ids are minted
+per build, and an LLM-backed privacy filter does not reproduce its own
+spans), so two pages of two builds concatenated would be a transcript that
+never existed.
+
+`offset` is a byte offset into a UTF-8 string and is only ever a value the
+daemon handed you: pages break on character boundaries, so `next_offset` is
+not always `offset + limit`. An `offset` that is out of range or not on a
+character boundary is `bad_params` / `offset-invalid`. `limit` above
+`max_chunk_bytes` is capped rather than refused; `limit: 0` is
+`bad_params` / `limit-invalid`.
+
+**Search happens in the client.** The daemon ships the body and does not
+match against it. A daemon-side search would have to reproduce whatever the
+client means by a match -- case folding, word boundaries, how a hit that
+spans two events is presented -- and would still have to ship surrounding
+text for the client to render, leaving the client holding the body anyway
+plus a second matcher to keep in step. One body, one text, one search: what
+the contributor searched is the text in front of them.
+
+The property that outranks both of those decisions: **never report a trace
+clean that you could not actually read.** A "0 matches" is only honest after
+`[0, total_bytes)` has been received and searched. If any page errors, if
+`preview-body-changed` interrupts you, or if you stopped early, say so --
+"could not read the whole trace" -- and do not render an all-clear.
+
+Where the body comes from, and why it is stable:
+
+- An entry already previewed (and so pinned) has its envelope stored on
+  disk, and that is what is read -- byte-identical across pages, across
+  calls, and identical to the C ABI's `tc_preview_body` for the same entry.
+- An entry with no stored envelope runs the redaction pipeline, exactly as
+  `preview` does, and is pinned by the same rules (an unenrolled build is
+  never pinned, and `enrolled: false` says so). A first call may therefore
+  take as long as `preview`.
+- An entry that is pinned but whose stored bytes are missing or unusable is
+  refused with `unavailable` / `approved-envelope-unavailable`. It is not
+  rebuilt: a rebuild is not the artifact the contributor approved, and
+  presenting it as "what would be sent" would be false.
+
+`envelope_digest` is the same value `preview` reports, so an app can confirm
+the body it is showing belongs to the summary it displayed.
 
 ### `list_projects`
 
@@ -721,6 +817,12 @@ detail, not for picking a different label to show instead.
 ## Error codes
 
 `unknown_method`, `bad_params`, `not_authorized`, `busy`, `unavailable`.
+
+`error.message` is always a fixed label. The ones `preview_body` adds are
+`unknown-entry-id`, `offset-invalid`, `limit-invalid`,
+`body-digest-invalid`, `body-digest-required` (all `bad_params`), and
+`preview-body-changed`, `preview-failed`, `approved-envelope-unavailable`
+(all `unavailable`).
 
 `not_authorized` is retained in the error taxonomy for forward
 compatibility but is no longer returned by any method in this version --
