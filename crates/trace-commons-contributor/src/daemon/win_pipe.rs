@@ -45,10 +45,12 @@
 //! DACL were correct, so such a test would look like evidence while proving
 //! nothing.
 //!
-//! **As of this commit that job has never run** -- it lands with the branch
-//! that adds it. Until it has run and passed on a real Windows runner, treat
-//! the ACL as unverified and do not describe it as working. A green
-//! cross-compile is not the same claim.
+//! **That job has run and passed** (PR #247, run 31307072159): the second
+//! user was refused with `DENIED 5` -- ERROR_ACCESS_DENIED, i.e. refused by
+//! the access check specifically, not by pipe-busy or file-not-found -- and
+//! the owning user still connected. The DACL is verified behaviour, not an
+//! argument, and stays that way only for as long as that job keeps running:
+//! if it is removed or weakened, this claim lapses with it.
 
 use std::ffi::c_void;
 use std::sync::Arc;

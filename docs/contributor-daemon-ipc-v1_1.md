@@ -85,9 +85,12 @@ opens the pipe as a file handle, which has no equivalent of
 > take ownership of any object and would reach the pipe regardless, so that
 > test would look like evidence while proving nothing.
 >
-> That job lands with the branch that adds it and has never run. Until it has
-> run and passed, treat the ACL as unverified and do not describe it as
-> working.
+> **That job has run and passed** (PR #247, run 31307072159): `DENIED 5` from
+> the second user — ERROR_ACCESS_DENIED, refused by the access check
+> specifically rather than by pipe-busy or file-not-found, which the script
+> rejects so a coincidental refusal cannot pass as evidence — and `CONNECTED`
+> from the owner. The claim holds only while that job keeps running; weaken
+> or remove it and the verification lapses with it.
 
 `windows-sys` is approved (2026-08-08) for exactly this and scoped to
 `[target.'cfg(windows)'.dependencies]`; macOS and Linux dependency trees do
