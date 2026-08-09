@@ -264,6 +264,24 @@ struct DaemonSettingsView: Decodable, Equatable {
     }
 }
 
+/// `enroll`'s success shape. `tenant_id`/`device_key_id` are the same
+/// already-public identifiers `whoami` prints -- never key material, never a
+/// URL. See "### `enroll`" in the contract for what is deliberately absent
+/// on failure.
+struct EnrollResult: Decodable, Equatable {
+    let enrolled: Bool
+    let tenantID: String?
+    let deviceKeyID: String?
+    let consentScopes: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case enrolled
+        case tenantID = "tenant_id"
+        case deviceKeyID = "device_key_id"
+        case consentScopes = "consent_scopes"
+    }
+}
+
 // MARK: - Events
 
 enum DaemonEvent: Equatable {

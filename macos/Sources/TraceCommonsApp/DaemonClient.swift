@@ -87,6 +87,32 @@ final class DaemonClient {
         try call("get_settings", as: DaemonSettingsView.self)
     }
 
+    /// Redeems `invite` for enrollment. Deliberately never sends
+    /// `allowed_hosts` -- the contract's `enroll` entry says the daemon does
+    /// not accept one from a socket caller at all (unlike the CLI's
+    /// `--allowed-hosts` flag), so there is no parameter here to set one
+    /// with.
+    ///
+    /// On failure this always throws the same `Failure` shape as every
+    /// other call, but callers should not surface `failure.message` here:
+    /// the contract only ever reports `unavailable` / `enroll-failed` for
+    /// this method, on purpose, because the underlying issuer response can
+    /// carry a URL or a response body that must never reach a UI. See
+    /// `OnboardingConnectView`.
+    func enroll(invite: String, scopes: [String] = []) throws -> EnrollResult {
+        var params: [String: Any] = ["invite": invite]
+        if !scopes.isEmpty { params["scopes"] = scopes }
+        return try call("enroll", params: params, as: EnrollResult.self)
+    }
+
+    /// Records that the NEAR AI first-use notice was actually shown to the
+    /// person in this UI. Callers must not call this without having shown
+    /// that notice text first -- see "### `acknowledge_near_ai_notice`" in
+    /// the contract: it is audited on the caller's unverified word.
+    func acknowledgeNearAINotice() throws {
+        _ = try rawResult("acknowledge_near_ai_notice")
+    }
+
     /// Counts by `reason_label` across entries that ARE on the queue. It does
     /// not explain sessions the watcher never queued, and the UI must not
     /// claim it does.

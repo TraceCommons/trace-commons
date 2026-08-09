@@ -60,6 +60,29 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-onboarding-done.png",
                 size: CGSize(width: 660, height: 360)
             )
+            render(
+                OnboardingConnectContent(
+                    previewPhase: .resolved(InviteLink(
+                        raw: "https://issuer.tracecommons.ai/onboard#SAMPLECODE",
+                        issuerHost: "issuer.tracecommons.ai"
+                    ))
+                ),
+                to: directory + "/macos-shell-onboarding-connect.png",
+                size: CGSize(width: 660, height: 420)
+            )
+            render(
+                OnboardingConnectContent(
+                    previewPhase: .deadInvite,
+                    previewText: "https://issuer.tracecommons.ai/onboard#EXPIRED"
+                ),
+                to: directory + "/macos-shell-onboarding-connect-dead-invite.png",
+                size: CGSize(width: 660, height: 420)
+            )
+            render(
+                OnboardingPrivacyScanContent(),
+                to: directory + "/macos-shell-onboarding-privacy-scan.png",
+                size: CGSize(width: 660, height: 560)
+            )
             if let rollup = model.rollup {
                 render(
                     CreditRecordView(

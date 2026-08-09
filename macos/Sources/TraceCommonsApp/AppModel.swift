@@ -228,6 +228,48 @@ final class AppModel: ObservableObject {
         perform("get_settings", work: { try $0.settings() }, onSuccess: { self.daemonSettings = $0 })
     }
 
+    // MARK: - Enrollment
+
+    enum EnrollOutcome {
+        case succeeded(EnrollResult)
+        /// Deliberately carries no message. The daemon's `enroll` only ever
+        /// reports the generic `unavailable` / `enroll-failed` for this
+        /// path -- see `DaemonClient.enroll` -- so there is nothing more
+        /// specific a caller could show even if this case carried a string.
+        case failed
+    }
+
+    /// Redeems `invite` for enrollment. Bypasses the `perform` helper (and
+    /// its `lastActionError` label) on purpose: that helper renders
+    /// `failure.message`, and `enroll`'s failure message must never reach a
+    /// screen -- `OnboardingConnectView` renders one fixed sentence for
+    /// every failure of this call instead.
+    func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
+        guard let client else { return .failed }
+        return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
+            do {
+                return .succeeded(try client.enroll(invite: invite, scopes: scopes))
+            } catch {
+                return .failed
+            }
+        }.value
+    }
+
+    /// Records that the NEAR AI first-use notice was shown, and clears the
+    /// health label that otherwise keeps the daemon refusing that filter.
+    /// Refreshes settings and status afterward so `nearAIConfigured` /
+    /// `health` reflect the daemon's own post-acknowledgment state rather
+    /// than an assumption made here.
+    func acknowledgeNearAINotice() {
+        perform(
+            "acknowledge_near_ai_notice",
+            work: { try $0.acknowledgeNearAINotice() }
+        ) { _ in
+            self.refreshSettings()
+            self.refreshStatus()
+        }
+    }
+
     func refreshConsentOptions() {
         perform("consent_options", work: { try $0.consentOptions() }, onSuccess: {
             self.consentScopes = $0
