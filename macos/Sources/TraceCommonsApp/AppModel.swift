@@ -145,29 +145,40 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Ordered teardown: unsubscribe (the ABI's only real barrier), then
-    /// stop, then free. All three on the main thread, which is a plain
-    /// thread with no tokio context.
+    /// Teardown. Every user action here runs its daemon call on a detached
+    /// task, so at the moment a contributor quits there can be a preview, an
+    /// enrollment or a refresh sitting inside the C ABI with the raw handle.
+    /// This method must not free that handle until those have left.
+    ///
+    /// It does not try to track those tasks itself. Tracking them here would
+    /// mean tracking Swift Tasks, which can be cancelled and resumed at
+    /// suspension points that have nothing to do with when the C call
+    /// actually returns. The only place that knows a C call is in progress
+    /// is the wrapper that makes it, so `TCDaemon.shutdown` owns the
+    /// drain: it refuses new calls, waits for outstanding ones, and frees
+    /// only if it can prove the handle is idle. If it cannot prove that, it
+    /// leaks the handle on purpose -- see the note on `TCDaemon`.
+    ///
+    /// Called on the main thread (willTerminate), which is a plain thread
+    /// with no tokio context, as the ABI requires. It blocks there for up to
+    /// a few seconds in the bad case; that is the correct trade against
+    /// freeing memory another thread is reading.
     func shutdown() {
         undoTask?.cancel()
-        if let subscription, let daemon {
-            if !daemon.unsubscribe(subscription) {
-                // Refused. The header says the barrier did NOT hold and ctx
-                // must stay alive; retry once from a fresh plain thread.
-                let thread = Thread {
-                    _ = daemon.unsubscribe(subscription)
-                }
-                thread.start()
-                // Give the retry a moment rather than freeing the handle
-                // out from under a callback that may still be running.
-                Thread.sleep(forTimeInterval: 0.2)
-            }
-            self.subscription = nil
+        let subscription = self.subscription
+        let daemon = self.daemon
+        // Dropped first so no new work can be started from this side while
+        // teardown runs; `perform`, `enroll` and the rest all guard on
+        // `client`.
+        self.subscription = nil
+        self.daemon = nil
+        self.client = nil
+        guard let daemon else { return }
+        if case .leaked(let reason) = daemon.shutdown(unsubscribing: subscription) {
+            // A fixed label, no path or token, per this repo's logging rule.
+            // The handle stayed allocated on purpose; the process is exiting.
+            lastActionError = "shutdown: handle-leaked-\(reason)"
         }
-        daemon?.stop()
-        daemon?.close()
-        daemon = nil
-        client = nil
     }
 
     // MARK: - Refresh

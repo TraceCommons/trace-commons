@@ -75,6 +75,75 @@ func seedSettings(configDir: String) throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
 }
 
+// MARK: - Teardown stress (TC_DEMO_TEARDOWN_STRESS=1).
+//
+// The regression harness for the use-after-free this bridge used to have:
+// the app fires every user action on a detached task that calls through the
+// raw tc_handle*, and quitting used to free that handle without waiting for
+// them. Here, worker threads hammer tc_call and a subscription is live while
+// teardown runs, so `shutdown` is exercised with calls genuinely mid-flight.
+//
+// A clean run prints `.freed` and exits 0. A regression shows up as a crash
+// (SIGSEGV / malloc double-free), not as a failed assertion, which is why
+// this is a stress loop rather than a unit test.
+final class Counter {
+    private let lock = NSLock()
+    private var refused = 0
+    private var served = 0
+
+    func record(refused isRefused: Bool) {
+        lock.lock()
+        if isRefused { refused += 1 } else { served += 1 }
+        lock.unlock()
+    }
+
+    var snapshot: (served: Int, refused: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (served, refused)
+    }
+}
+
+func stressTeardown(_ daemon: TCDaemon) {
+    let counter = Counter()
+    let deadline = Date().addingTimeInterval(3.0)
+    let subscription = daemon.subscribe { _ in }
+    print("stress: subscription \(subscription == nil ? "refused" : "registered")")
+
+    for _ in 0..<8 {
+        let thread = Thread {
+            while Date() < deadline {
+                let response = daemon.call("status")
+                counter.record(refused: response.contains("handle-freed"))
+            }
+        }
+        thread.start()
+    }
+
+    // Long enough that several threads are inside tc_call right now.
+    Thread.sleep(forTimeInterval: 0.5)
+    // Evidence that teardown really does begin with calls mid-flight: a
+    // nonzero count here is the exact condition the old code freed under.
+    print("stress: calls inside the ABI at teardown: \(daemon.inFlightCalls)")
+    // TC_DEMO_TEARDOWN_DRAIN_TIMEOUT=0 exercises the other branch: teardown
+    // that cannot prove the handle is idle must LEAK it, not free it.
+    let drainTimeout = ProcessInfo.processInfo
+        .environment["TC_DEMO_TEARDOWN_DRAIN_TIMEOUT"]
+        .flatMap(Double.init) ?? 3.0
+    let outcome = daemon.shutdown(unsubscribing: subscription, drainTimeout: drainTimeout)
+    let counts = counter.snapshot
+    print("stress: shutdown -> \(outcome) (served=\(counts.served) refused=\(counts.refused))")
+
+    // Let the workers run past the deadline so their post-teardown calls are
+    // observed too, then confirm they were all refused rather than served.
+    Thread.sleep(forTimeInterval: 3.0)
+    let after = counter.snapshot
+    print("stress: after workers finished (served=\(after.served) refused=\(after.refused))")
+    if outcome != .freed {
+        print("stress: handle was LEAKED, not freed -- safe, but investigate")
+    }
+}
+
 let configDir = makeShortTempDir()
 print("config dir: \(configDir)")
 
@@ -91,9 +160,12 @@ do {
     let statusResponse = daemon.call("status")
     print("status -> \(statusResponse)")
 
-    daemon.stop()
-    daemon.close()
-    print("daemon stopped and handle freed")
+    if ProcessInfo.processInfo.environment["TC_DEMO_TEARDOWN_STRESS"] == "1" {
+        stressTeardown(daemon)
+    } else {
+        daemon.stop()
+        print("teardown -> \(daemon.close())")
+    }
 } catch {
     print("FAILED: \(error)")
     exit(1)

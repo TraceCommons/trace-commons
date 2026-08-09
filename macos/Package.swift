@@ -17,7 +17,7 @@ let package = Package(
         .target(
             name: "TCBridge",
             dependencies: ["CTraceCommons"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
             name: "TraceCommonsApp",
