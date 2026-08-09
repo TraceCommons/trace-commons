@@ -84,9 +84,20 @@ enum DaemonHost {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Refusal.settingsMissing
         }
+        // BOTH, not either. An `||` here was a fail-open: declaring only
+        // `claude_root` left `codex_root` unset, and an unset root does not
+        // mean "no codex source" -- it means the daemon watches the real
+        // `~/.codex`. The refusal exists precisely to stop a developer's
+        // actual work being scanned by accident, and half a declaration
+        // bought none of that protection while reading as though it had.
+        //
+        // A source that genuinely should not be watched still has to be
+        // named, pointed at a directory the contributor chose. Silence is
+        // not a way to opt out, because silence is indistinguishable from
+        // forgetting.
         let claudeDeclared = object["claude_root"] is String
         let codexDeclared = object["codex_root"] is String
-        guard claudeDeclared || codexDeclared else { throw Refusal.rootsNotDeclared }
+        guard claudeDeclared, codexDeclared else { throw Refusal.rootsNotDeclared }
 
         return Resolution(path: dir)
     }
