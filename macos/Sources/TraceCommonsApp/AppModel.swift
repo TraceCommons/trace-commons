@@ -17,10 +17,38 @@ final class AppModel: ObservableObject {
         case refused(String)
     }
 
+    /// The recovery hold that follows an approval.
+    ///
+    /// It deliberately carries no countdown. The real deadline is the
+    /// daemon's next upload sweep -- `drain_approved` claims everything in
+    /// `Approved` on a poll tick -- and this process cannot see when that
+    /// tick lands: the socket's `status` and `get_settings` views expose the
+    /// digest interval and the queue TTL but not the poll interval, and
+    /// `list_pending` returns only `Pending` entries, so an approved entry
+    /// disappears from everything the app can observe the moment it is
+    /// approved.
+    ///
+    /// The old five-second counter was a number this app made up. Counting
+    /// down to zero and vanishing told a contributor the window had closed
+    /// when it usually had not, and told them nothing at all about the case
+    /// that actually matters -- the sweep that fires one second after they
+    /// clicked. So this counts UP, from a time that is real, and the
+    /// affordance stays until the contributor puts it away or until the
+    /// daemon refuses the cancel (`undoApproval` says so plainly when it
+    /// does).
     struct Undo: Equatable {
         let entryID: String
         let projectLabel: String
-        var secondsRemaining: Int
+        /// When the approval was made, on this machine's clock.
+        let approvedAt: Date
+        /// Seconds since `approvedAt`, ticked for display. Stops advancing
+        /// after `Undo.tickCeiling`; the affordance does not.
+        var heldSeconds: Int
+
+        /// The display counter stops here. Past a couple of minutes the exact
+        /// figure has stopped meaning anything, and a ticker that runs for the
+        /// life of the process to redraw a number nobody is reading is waste.
+        static let tickCeiling = 120
     }
 
     @Published private(set) var startup: Startup = .starting
@@ -375,8 +403,8 @@ final class AppModel: ObservableObject {
 
     // MARK: - Decisions
 
-    /// Approve, then hold a five-second undo. `cancel` returns the entry to
-    /// `pending`, so the undo is real rather than cosmetic.
+    /// Approve, then raise the recovery affordance. `cancel` returns the
+    /// entry to `pending`, so the undo is real rather than cosmetic.
     func approve(_ entry: QueueEntry) {
         perform("approve", work: { try $0.approve(entryID: entry.entryID) }) { _ in
             self.refreshQueue()
@@ -386,17 +414,31 @@ final class AppModel: ObservableObject {
 
     private func startUndo(for entry: QueueEntry) {
         undoTask?.cancel()
-        undo = Undo(entryID: entry.entryID, projectLabel: entry.projectLabel, secondsRemaining: 5)
+        undo = Undo(
+            entryID: entry.entryID,
+            projectLabel: entry.projectLabel,
+            approvedAt: Date(),
+            heldSeconds: 0
+        )
         undoTask = Task { @MainActor in
-            for _ in 0..<5 {
+            for second in 1...Undo.tickCeiling {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if Task.isCancelled { return }
                 guard var current = undo, current.entryID == entry.entryID else { return }
-                current.secondsRemaining -= 1
-                undo = current.secondsRemaining > 0 ? current : nil
-                if undo == nil { return }
+                current.heldSeconds = second
+                undo = current
             }
+            // The counter stops; the affordance stays. Only `undoApproval`
+            // and `dismissUndo` clear it.
         }
+    }
+
+    /// Put the recovery affordance away without cancelling anything. The
+    /// contributor is saying "yes, send it", which is the choice they already
+    /// made -- so this touches the daemon not at all.
+    func dismissUndo() {
+        undoTask?.cancel()
+        undo = nil
     }
 
     /// Undo, and be honest when it is too late.

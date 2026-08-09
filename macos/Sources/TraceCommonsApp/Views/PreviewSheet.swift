@@ -9,6 +9,16 @@ import TCBridge
 /// purpose: "does this mention my client's name?" is a question a
 /// contributor can answer in five seconds. Judging redaction quality by eye
 /// is not, and this interface never asks them to.
+///
+/// **One sheet, one session, one decision.** Both decisions close it and put
+/// the contributor back on the queue. It used to load the next waiting
+/// session into itself with `Contribute` under the same pixels, which made a
+/// second click -- or a second Return, since the button was the default
+/// action -- send a transcript nobody had looked at, with the recovery bar
+/// stranded behind the sheet where it could not be seen.
+///
+/// `Contribute` waits on the read gate below (`readGate`) and is bound to no
+/// keyboard shortcut at all.
 struct PreviewSheet: View {
     /// Content already loaded elsewhere, so the sheet can be rendered
     /// without running its `task`. Used only by the screenshot hook, which
@@ -27,13 +37,36 @@ struct PreviewSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var current: QueueEntry
-    @State private var remaining: [QueueEntry] = []
     @State private var preview: TCPreview?
     @State private var summary: PreviewSummary?
     @State private var transcriptText: String
     @State private var failure: String?
     @State private var loading: Bool
+
+    // MARK: - The read gate
+    //
+    // `Contribute` used to enable the instant metadata arrived, which meant
+    // the one irreversible control in the product could be clicked by
+    // somebody who had never opened "Exactly what would be sent". These two
+    // flags are what it now waits on.
+    //
+    // The gate is deliberately "first screen + explicit acknowledgement" and
+    // not "paged and scrolled to the end". Real traces on this pilot run to
+    // 169 KB; a scroll-to-the-bottom gate on that is a long drag, and a gate
+    // people defeat by throwing the scrollbar at the end verifies nothing
+    // while reading, to everyone downstream, as though it verified reading.
+    // This one claims only what it can establish: the redacted body was put
+    // in front of them, and they said out loud what scrubbing does not
+    // guarantee.
+    //
+    // Neither flag is persisted anywhere and neither is pre-set. They live
+    // and die with this sheet, which now handles exactly one session, so
+    // every entry starts the gate from zero.
+
+    /// True once the transcript tab has actually been on screen.
+    @State private var sawFirstScreen = false
+    /// True once the contributor ticks the acknowledgement themselves.
+    @State private var acknowledged = false
     /// Search first, always: it is the question a contributor can actually
     /// answer in five seconds.
     @State private var tab: Tab = .search
@@ -63,7 +96,6 @@ struct PreviewSheet: View {
     init(entry: QueueEntry, preloaded: Preloaded? = nil) {
         self.entry = entry
         self.preloaded = preloaded
-        _current = State(initialValue: entry)
         _summary = State(initialValue: preloaded?.summary)
         _transcriptText = State(initialValue: preloaded?.transcript ?? "")
         _loading = State(initialValue: preloaded == nil)
@@ -79,12 +111,9 @@ struct PreviewSheet: View {
         }
         .frame(width: 820, height: 620)
         .tcScreen()
-        .task(id: current.entryID) {
+        .task(id: entry.entryID) {
             guard preloaded == nil else { return }
             await load()
-        }
-        .onAppear {
-            remaining = model.awaitingDecision.filter { $0.entryID != current.entryID }
         }
         .onDisappear { closePreview() }
     }
@@ -97,12 +126,12 @@ struct PreviewSheet: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: TC.Space.s) {
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-                Text(current.projectLabel).font(TC.Font_.cardTitle)
-                Text(current.agentName)
+                Text(entry.projectLabel).font(TC.Font_.cardTitle)
+                Text(entry.agentName)
                     .font(TC.Font_.footnote)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: TC.Space.m)
-                Text(Format.when(current.discoveredAt))
+                Text(Format.when(entry.discoveredAt))
                     .font(TC.Font_.footnote)
                     .foregroundStyle(.tertiary)
             }
@@ -169,9 +198,9 @@ struct PreviewSheet: View {
                         initialOffsets: preloaded?.offsets
                     )
                 case .whatsInIt:
-                    WhatsInItTab(entry: current, summary: summary)
+                    WhatsInItTab(entry: entry, summary: summary)
                 case .transcript:
-                    TranscriptTab(transcript: transcriptText)
+                    TranscriptTab(transcript: transcriptText) { sawFirstScreen = true }
                 case .permissions:
                     PermissionsTab(summary: summary, options: model.consentScopes)
                 }
@@ -242,29 +271,34 @@ struct PreviewSheet: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
             ScrubbingCaveatAtCommit()
+            readGate
             HStack(spacing: TC.Space.s) {
                 Button("Not this one") {
-                    model.dismiss(current)
-                    advance()
+                    model.dismiss(entry)
+                    dismiss()
                 }
                 // Untinted: it must not read as a second way to approve.
                 .tint(.primary)
-                if !remaining.isEmpty {
-                    Text("\(remaining.count) more after this")
-                        .font(TC.Font_.footnote)
-                        .foregroundStyle(.secondary)
-                }
                 Spacer(minLength: TC.Space.m)
                 Button("Close") { dismiss() }
-                // The ONLY approve control in the product, and it is behind
-                // the preview by design.
+                // The ONLY approve control in the product. It is behind the
+                // preview by design, it is behind the read gate above by
+                // design, and it has NO keyboard shortcut: this used to be
+                // `.defaultAction`, which put an irreversible send one
+                // Return away from a hand resting on the keyboard.
                 Button("Contribute") {
-                    model.approve(current)
-                    advance()
+                    model.approve(entry)
+                    // Back to the queue, never on to the next session. The
+                    // sheet used to load the next entry with the button
+                    // under the same pixels, so a second keystroke or a
+                    // second click sent a transcript nobody had looked at --
+                    // and it did it with the recovery bar stranded behind
+                    // the sheet. One sheet, one session, one decision.
+                    dismiss()
                 }
                 .tcPrimaryAction()
-                .keyboardShortcut(.defaultAction)
-                .disabled(summary == nil)
+                .disabled(!canContribute)
+                .help(gateHelp)
             }
         }
         .padding(TC.Space.l)
@@ -272,27 +306,89 @@ struct PreviewSheet: View {
         .background(TC.surface)
     }
 
-    // MARK: - Flow
+    // MARK: - The read gate
 
-    /// Advancing to the next entry inside the sheet is what makes three
-    /// sessions three deliberate clicks in one flow. There is no select-all.
-    private func advance() {
-        closePreview()
-        guard let next = remaining.first else {
-            dismiss()
-            return
+    private var canContribute: Bool {
+        summary != nil && sawFirstScreen && acknowledged
+    }
+
+    private var gateHelp: String {
+        canContribute
+            ? "Sends this session. Nothing else."
+            : "Open \"Exactly what would be sent\" and tick the acknowledgement first."
+    }
+
+    /// Two requirements, both visible, both in the state they are actually
+    /// in. Drawn in SwiftUI rather than built from `Toggle`: an NSView-backed
+    /// control cannot be rasterized by `ImageRenderer`, so a `Toggle` here
+    /// would show up as a yellow placeholder in every verification
+    /// screenshot of the most safety-relevant control in the product. The
+    /// same reason `ConsentScopesView` draws its permission boxes this way.
+    private var readGate: some View {
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
+            Button {
+                tab = .transcript
+            } label: {
+                gateLine(
+                    done: sawFirstScreen,
+                    text: sawFirstScreen
+                        ? "You have opened \"Exactly what would be sent\"."
+                        : "Open \"Exactly what would be sent\" and look at it."
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(summary == nil)
+            .accessibilityHint("Opens the redacted transcript this would send.")
+
+            Button {
+                guard sawFirstScreen else { return }
+                acknowledged.toggle()
+            } label: {
+                gateLine(
+                    done: acknowledged,
+                    text: """
+                    I have looked at what would be sent, and I understand \
+                    scrubbing is pattern-based and may have missed something.
+                    """
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!sawFirstScreen)
+            .accessibilityAddTraits(acknowledged ? [.isSelected] : [])
+
+            if !canContribute {
+                Text("""
+                Contribute stays off until both are done. Looking at the first \
+                screen is what this checks -- it cannot check that you read \
+                all of it, and it does not claim to.
+                """)
+                .font(TC.Font_.footnote)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        remaining.removeFirst()
-        summary = nil
-        transcriptText = ""
-        failure = nil
-        loading = true
-        current = next
+    }
+
+    private func gateLine(done: Bool, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+            // The shape changes, not just the colour, so the state survives
+            // greyscale and colour-blindness.
+            Image(systemName: done ? "checkmark.square.fill" : "square")
+                .font(.system(size: 14))
+                .foregroundStyle(done ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+            Text(text)
+                .font(TC.Font_.footnote)
+                .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
     }
 
     private func load() async {
         loading = true
-        let outcome = await model.openPreview(entryID: current.entryID)
+        let outcome = await model.openPreview(entryID: entry.entryID)
         switch outcome {
         case .opened(let opened):
             preview = opened
@@ -507,6 +603,11 @@ struct WhatsInItTab: View {
 /// contributor can see WHERE scrubbing fired -- which is the point.
 struct TranscriptTab: View {
     let transcript: String
+    /// Called once the redacted body is actually on screen. This is what the
+    /// preview sheet's read gate is built on, and it is the honest limit of
+    /// what the gate can claim: the first screenful was displayed. Nothing
+    /// here reports what was read, and nothing here reports the content.
+    var onFirstScreenShown: () -> Void = {}
 
     var body: some View {
         ScrollView([.vertical, .horizontal]) {
@@ -516,6 +617,7 @@ struct TranscriptTab: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
         }
+        .onAppear(perform: onFirstScreenShown)
     }
 }
 

@@ -46,7 +46,11 @@ struct QueueContent: View {
                 HealthBanner(health: health)
             }
             if let undo = model.undo {
-                UndoBar(undo: undo) { model.undoApproval() }
+                UndoBar(
+                    undo: undo,
+                    onUndo: { model.undoApproval() },
+                    onKeep: { model.dismissUndo() }
+                )
             }
             if let error = model.lastActionError {
                 Text(error)
@@ -271,9 +275,14 @@ struct QueueRow: View {
                 // green as "Look inside" reads as a second approval.
                 .tint(.primary)
                 .help("Skips this session only. This project will keep being offered.")
+            // No keyboard shortcut. Return used to be bound here as the
+            // default action, which meant a two-row queue registered the
+            // same shortcut twice and neither row could say which one a
+            // keystroke would open. In this app Return is reserved for the
+            // recovery surface -- see `UndoBar` -- and is bound to nothing
+            // that moves a transcript.
             Button("Look inside", action: onLookInside)
                 .tcPrimaryAction()
-                .keyboardShortcut(.defaultAction)
         }
         .fixedSize()
     }
@@ -328,27 +337,71 @@ struct WeekBand: View {
     }
 }
 
-/// "Sending… [ Undo ] (4)". Backed by `cancel`, which returns the entry to
+/// The recovery surface. Backed by `cancel`, which returns the entry to
 /// pending, so the undo is real.
+///
+/// It sits at the head of the queue, which is where the decision now ends:
+/// the preview sheet closes on a decision instead of loading the next session
+/// into itself, so this is on screen and not behind a sheet at the moment it
+/// is needed. That ordering is the whole point -- an undo rendered under a
+/// modal is an undo that does not exist.
+///
+/// **No countdown.** See `AppModel.Undo`: the real deadline is the daemon's
+/// next upload sweep and this process cannot observe it, so the bar counts up
+/// from a real instant and says what it actually knows. It does not disappear
+/// on a timer, because a recovery path that removes itself while recovery is
+/// still possible is worse than no timer at all.
 struct UndoBar: View {
     let undo: AppModel.Undo
     let onUndo: () -> Void
+    let onKeep: () -> Void
 
     var body: some View {
-        HStack(spacing: TC.Space.m) {
-            ProgressView().controlSize(.small)
-            Text("Sending \(undo.projectLabel)…").font(TC.Font_.meta)
-            Button("Undo", action: onUndo)
-            Text("(\(undo.secondsRemaining))")
-                .font(TC.Font_.ledger)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: TC.Space.s) {
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                Image(systemName: TC.Tone.held.symbol)
+                    .imageScale(.small)
+                    .foregroundStyle(TC.Tone.held.textColor)
+                    .accessibilityHidden(true)
+                Text("Approved \(undo.projectLabel). Still on this machine.")
+                    .font(TC.Font_.meta.weight(.semibold))
+                Text(held)
+                    .font(TC.Font_.ledger)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            Text("""
+            The watcher sends approved sessions on its next sweep. This app \
+            cannot see when that lands, so it does not pretend to count it \
+            down: undo works until the sweep starts, and says so plainly if \
+            it is already too late.
+            """)
+            .font(TC.Font_.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: TC.Space.s) {
+                // The one Return binding in this app, and it is on the safe
+                // action: a keystroke made by a hand resting on the keyboard
+                // pulls a transcript BACK.
+                Button("Undo", action: onUndo)
+                    .tcPrimaryAction()
+                    .keyboardShortcut(.defaultAction)
+                Button("Let it send", action: onKeep)
+                    .tint(.primary)
+                    .help("Puts this notice away. It does not change the decision.")
+                Spacer(minLength: 0)
+            }
         }
-        .padding(.horizontal, TC.Space.l)
-        .padding(.vertical, TC.Space.m)
+        .padding(TC.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard()
+    }
+
+    private var held: String {
+        undo.heldSeconds >= AppModel.Undo.tickCeiling
+            ? "held \(AppModel.Undo.tickCeiling)s+"
+            : "held \(undo.heldSeconds)s"
     }
 }
 
