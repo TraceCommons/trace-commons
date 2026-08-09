@@ -176,6 +176,61 @@ pub const AUTOSTART_XDG_LABEL: &str = "Start Trace Commons when you log in";
 pub const AUTOSTART_XDG_BODY: &str =
     "No background service is installed, so this switch is the other way to do it.";
 
+// --- Background portal probe ----------------------------------------------
+
+/// Shown while `portal::spawn_request`'s classification is still in
+/// flight. Replaced by `portal_status_line` once it lands.
+pub const PORTAL_STATUS_CHECKING: &str = "Checking whether this desktop can list background apps…";
+
+/// The background-registration row, chosen from both of the two things
+/// that actually decide it: whether this desktop has a `Background` portal
+/// backend at all (`state`), and whether the systemd user unit -- not this
+/// window, and not the portal -- is what really keeps Trace Commons running
+/// (`systemd_unit_installed`, from `autostart::detect`).
+///
+/// The portal is not what keeps the process alive on any desktop; systemd
+/// is, with `loginctl enable-linger` needed to survive logout, and no
+/// portal can do that on any desktop either. The portal's only job here is
+/// being listed in GNOME's or Plasma's own "Background Apps" UI and not
+/// being treated as a rogue process. So a desktop with no such backend
+/// (XFCE, Cinnamon, MATE, Budgie, Sway, and other wlroots compositors) is
+/// not a degraded product when the systemd unit is doing the real work --
+/// and it is a real, nameable gap when nothing is.
+pub fn portal_status_line(
+    state: crate::portal::BackendState,
+    systemd_unit_installed: bool,
+) -> &'static str {
+    use crate::portal::BackendState::{Absent, Present, Unknown};
+    match (state, systemd_unit_installed) {
+        (Present, true) => {
+            "This desktop can list Trace Commons as a background app. The systemd service you \
+             installed is what actually keeps it running."
+        }
+        (Present, false) => {
+            "This desktop can list Trace Commons as a background app. That listing alone \
+             doesn't keep it running past login -- the switch above does."
+        }
+        (Absent, true) => {
+            "This desktop has no background-app list to register with. Nothing is wrong: the \
+             systemd service you installed is what keeps Trace Commons running here, the same \
+             as it would anywhere else."
+        }
+        (Absent, false) => {
+            "This desktop has no background-app list to register with, and no systemd service \
+             is installed either, so Trace Commons only runs while this window is open. Turn on \
+             the switch above, or install the service, to change that."
+        }
+        (Unknown, true) => {
+            "Couldn't tell whether this desktop can list background apps. Either way, the \
+             systemd service you installed is what keeps Trace Commons running."
+        }
+        (Unknown, false) => {
+            "Couldn't tell whether this desktop can list background apps. No systemd service is \
+             installed, so right now Trace Commons only runs while this window is open."
+        }
+    }
+}
+
 // --- Flatpak session-root access (for onboarding, not yet built) ---------
 
 /// The Linux design spec's exact wording for why a confined build asks for
@@ -336,6 +391,65 @@ mod tests {
                 !text.contains(forbidden),
                 "no turnaround time may be stated"
             );
+        }
+    }
+
+    #[test]
+    fn portal_status_matrix_says_only_what_is_true_in_each_cell() {
+        use crate::portal::BackendState::{Absent, Present};
+
+        let present_installed = portal_status_line(Present, true);
+        let present_bare = portal_status_line(Present, false);
+        let absent_installed = portal_status_line(Absent, true);
+        let absent_bare = portal_status_line(Absent, false);
+
+        // A backend that exists is always described as such, whether or
+        // not systemd is doing the persisting.
+        for line in [present_installed, present_bare] {
+            assert!(line.contains("can list Trace Commons as a background app"));
+        }
+        // A desktop with no backend never says it can -- that would be a
+        // false claim, not just an optimistic one.
+        for line in [absent_installed, absent_bare] {
+            assert!(!line.contains("can list Trace Commons as a background app"));
+            assert!(line.contains("no background-app list"));
+        }
+
+        // The absent+installed cell is the one the spec calls out by name:
+        // it must read as "nothing is wrong", not as a degraded product.
+        assert!(absent_installed.to_lowercase().contains("nothing is wrong"));
+
+        // Every cell where systemd *is* what's running the unit says so by
+        // name, because that -- not the portal -- is what actually keeps
+        // the process running.
+        for line in [present_installed, absent_installed] {
+            assert!(line.to_lowercase().contains("systemd"));
+        }
+
+        // The four conclusive cells are pairwise distinct: each one says
+        // something only true in that cell.
+        let conclusive = [
+            present_installed,
+            present_bare,
+            absent_installed,
+            absent_bare,
+        ];
+        for (i, a) in conclusive.iter().enumerate() {
+            for b in &conclusive[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_probe_never_asserts_either_answer() {
+        use crate::portal::BackendState::Unknown;
+
+        for systemd_unit_installed in [true, false] {
+            let line = portal_status_line(Unknown, systemd_unit_installed);
+            assert!(!line.contains("can list Trace Commons as a background app"));
+            assert!(!line.contains("no background-app list"));
+            assert!(line.to_lowercase().contains("couldn't tell"));
         }
     }
 }

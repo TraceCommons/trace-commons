@@ -6,6 +6,7 @@
 //! contributor does not have. Nothing in this view is the only way to do
 //! anything.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -24,6 +25,12 @@ pub struct SettingsView {
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
+    /// The background-app-registration row, filled in once
+    /// `portal::spawn_request`'s classification lands -- see
+    /// `render_background`. `None` until then, which is why it starts on
+    /// `copy::PORTAL_STATUS_CHECKING` rather than a guess.
+    background_state: RefCell<Option<crate::portal::BackendState>>,
+    background_body: gtk::Label,
     audit: gtk::Box,
 }
 
@@ -87,6 +94,14 @@ impl SettingsView {
         autostart_row.append(&autostart_switch_label);
         autostart_row.append(&autostart_switch);
         autostart_card.append(&autostart_row);
+        // Same card, not a new section: whether this desktop can list
+        // Trace Commons as a background app is the same topic as whether
+        // it starts automatically, and the two facts read better together
+        // than split across headings.
+        let background_body = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        background_body.add_css_class("tc-meta");
+        background_body.set_text(copy::PORTAL_STATUS_CHECKING);
+        autostart_card.append(&background_body);
         content.append(&autostart_card);
 
         content.append(&style::section("What has been changed on this machine"));
@@ -116,6 +131,8 @@ impl SettingsView {
             autostart_body,
             autostart_row,
             autostart_switch,
+            background_state: RefCell::new(None),
+            background_body,
             audit,
         }
     }
@@ -158,6 +175,23 @@ pub fn wire(app: &Rc<App>) {
             render_autostart(&a);
             gtk::glib::Propagation::Proceed
         });
+}
+
+/// Drain the background-portal probe's answer, once, and render it. The
+/// probe is spawned once at app startup (see `App::build`), so this is
+/// wired once here too rather than re-run on every settings refresh.
+pub fn wire_background_probe(
+    app: &Rc<App>,
+    rx: async_channel::Receiver<crate::portal::BackendState>,
+) {
+    render_background(app);
+    let a = Rc::clone(app);
+    gtk::glib::spawn_future_local(async move {
+        if let Ok(state) = rx.recv().await {
+            *a.settings.background_state.borrow_mut() = Some(state);
+            render_background(&a);
+        }
+    });
 }
 
 /// Pause offers the three durations from the shared spec, backed by
@@ -228,6 +262,22 @@ fn render_autostart(app: &Rc<App>) {
             app.settings.autostart_switch.set_active(enabled);
         }
     }
+}
+
+/// The background-app-registration row. Reads live filesystem detection for
+/// the systemd signal (cheap, and the source of truth `render_autostart`
+/// already uses) and the stored probe answer for the portal signal, so the
+/// two are never rendered from stale copies of each other.
+fn render_background(app: &Rc<App>) {
+    let systemd_unit_installed = matches!(
+        crate::autostart::detect(),
+        crate::autostart::Mechanism::SystemdUnit
+    );
+    let text = match *app.settings.background_state.borrow() {
+        Some(state) => copy::portal_status_line(state, systemd_unit_installed),
+        None => copy::PORTAL_STATUS_CHECKING,
+    };
+    app.settings.background_body.set_text(text);
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {

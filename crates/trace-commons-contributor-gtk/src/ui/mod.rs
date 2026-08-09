@@ -181,9 +181,12 @@ impl App {
         // gives them: the portal registration is the one that matters most
         // (it is where a GNOME user looks for this app at all), the tray
         // is the bonus. Neither can keep the window from opening -- both
-        // run on their own threads and report nothing back that would
-        // block or fail startup.
-        crate::portal::spawn_request();
+        // run on their own threads. The portal request also classifies
+        // whether any backend answered at all, so a desktop with none does
+        // not silently no-op -- see `settings::wire_background_probe` for
+        // where that classification is actually shown to a contributor.
+        let portal_probe = crate::portal::spawn_request();
+        settings::wire_background_probe(&app, portal_probe);
 
         app
     }
