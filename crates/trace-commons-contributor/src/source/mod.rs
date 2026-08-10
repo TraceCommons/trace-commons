@@ -62,7 +62,10 @@ pub struct SessionTranscript {
     pub events: Vec<SessionEvent>,
 }
 
-pub trait TraceSource {
+/// `Send + Sync` because the background daemon holds source adapters across
+/// await points on a multi-threaded runtime. Every adapter is stateless --
+/// each one holds only a root path -- so this costs nothing.
+pub trait TraceSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
