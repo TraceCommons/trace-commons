@@ -2719,6 +2719,14 @@ fn signed_claim_principal_refs(tenant_id: &str, actor_ref: &str) -> (String, Str
     )
 }
 
+/// The method-bound ref alone, without its legacy alias.
+///
+/// Only the test module calls this -- production paths need both halves and
+/// use `static_token_principal_refs` directly. It is `cfg(test)` rather than
+/// deleted because `cargo check --bins` does not compile tests, so without
+/// the gate it reads as dead code under `-D warnings` while 201 call sites in
+/// the extracted test module depend on it.
+#[cfg(test)]
 fn static_token_principal_ref(token: &str) -> String {
     static_token_principal_refs(token).0
 }
