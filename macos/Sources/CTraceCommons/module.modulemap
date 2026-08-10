@@ -1,0 +1,4 @@
+module CTraceCommons {
+    umbrella header "include/trace_commons.h"
+    export *
+}

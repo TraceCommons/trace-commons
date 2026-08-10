@@ -221,6 +221,26 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Drop all but the `keep` most recent snapshots for a window/metric,
+    /// returning how many rows were removed.
+    ///
+    /// Only the newest snapshot is ever served, but older ones are the
+    /// record of what was published and under which privacy controls, so
+    /// this trims rather than truncates. It exists because recompute went
+    /// from an occasional manual action to a scheduled one: at a 60s
+    /// interval an unpruned table gains on the order of half a million
+    /// rows a year, each carrying a full JSON payload.
+    async fn prune_leaderboard_snapshots(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+        _keep: i64,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "prune_leaderboard_snapshots not implemented".to_string(),
+        ))
+    }
+
     /// Fetch the most recent snapshot matching `(window_label, metric)`.
     /// Returns `Ok(None)` if no snapshot has ever been computed.
     async fn latest_leaderboard_snapshot(
