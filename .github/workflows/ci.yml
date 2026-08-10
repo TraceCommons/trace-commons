@@ -319,6 +319,12 @@ jobs:
           key: ${{ runner.os }}-cargo-linux-shell-desktop-${{ hashFiles('Cargo.lock', 'crates/trace-commons-contributor-gtk/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-linux-shell-desktop-
+      # fonts-dejavu-core is not decoration. --no-install-recommends means
+      # GTK pulls no fonts, so the shell renders chrome and colour but no
+      # legible glyphs: the frame is non-uniform (so the blank check passes)
+      # while OCR finds no text at all. That is exactly the failure mode seen
+      # on the first run with capture working -- a screenshot that looks fine
+      # to a stddev test and contains nothing readable.
       - name: Install GTK/portal/compositor dependencies
         run: |
           sudo apt-get update -qq
@@ -335,7 +341,8 @@ jobs:
             libglib2.0-bin \
             imagemagick \
             tesseract-ocr \
-            tesseract-ocr-eng
+            tesseract-ocr-eng \
+            fonts-dejavu-core
       # trace-commons-contributor is a root-workspace crate; the shell links
       # it directly (see the crate's own Cargo.toml comment on why -- both
       # sides are Rust on Linux, no FFI boundary needed).
