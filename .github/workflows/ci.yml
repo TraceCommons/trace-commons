@@ -254,3 +254,102 @@ jobs:
       - name: Verify the pipe excludes a second local user
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
+
+  linux-shell-desktop-integration:
+    name: linux-shell desktop integration (weston + portal)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # crates/trace-commons-contributor-gtk is excluded from the root
+    # workspace (it cannot build on macOS) and was previously verified only
+    # under Xvfb with no portal/tray service on the bus at all -- see
+    # docs/superpowers/plans/linux-integration-report.md's "What this
+    # evidence actually proves, and what it does not". That is real
+    # coverage of the fail-closed path, but weaker than it sounds: it does
+    # not prove anything renders, and it does not prove a portal call
+    # reaches an actual portal implementation.
+    #
+    # This job upgrades both axes as far as CI genuinely can:
+    #   1. Renders under weston's headless backend (a real Wayland
+    #      compositor, not just a display-less pixel sink) and asserts the
+    #      captured frame is not blank/uniform and that expected header-bar
+    #      text is present via OCR.
+    #   2. Runs RequestBackground against a real, running
+    #      xdg-desktop-portal + xdg-desktop-portal-gtk under
+    #      dbus-run-session, so the call reaches a live D-Bus service
+    #      instead of failing with ServiceUnknown before it leaves the
+    #      process.
+    #
+    # What it does NOT establish, and does not claim to:
+    #   - xdg-desktop-portal-gtk does not implement
+    #     org.freedesktop.impl.portal.Background at all (checked directly
+    #     against its .portal manifest). The only backend that does is
+    #     xdg-desktop-portal-gnome, and that implementation calls
+    #     org.gnome.Shell.Introspect -- i.e. it needs a real running GNOME
+    #     Shell, which this job does not have and does not fake by
+    #     installing the package without the shell behind it. So this job
+    #     cannot get an actual grant/deny out of a permission dialog; it
+    #     only proves the request reaches a live portal daemon and gets a
+    #     real (non-absence) reply.
+    #   - A tray icon appearing in a real desktop shell. GNOME has not shown
+    #     StatusNotifierItem without a user-installed extension for years;
+    #     nothing here starts GNOME Shell, KDE Plasma, or any other shell
+    #     that hosts a StatusNotifierWatcher, so src/tray.rs stays
+    #     unverified beyond the existing "watcher absent" path. It is worth
+    #     exactly what a bonus, deliberately non-load-bearing surface is
+    #     worth -- see the report.
+    #   - GNOME/KDE/Mutter-specific window-manager behaviour of any kind
+    #     (the Background Apps panel, its quit affordance, real desktop
+    #     theming). weston's headless backend is not Mutter or KWin.
+    #
+    # See docs/superpowers/plans/linux-desktop-verification-report.md for
+    # the full writeup, including what was verified statically (apt package
+    # names, the weston-screenshooter binary path, the portal manifests)
+    # versus what ran live.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            crates/trace-commons-contributor-gtk/target
+          key: ${{ runner.os }}-cargo-linux-shell-desktop-${{ hashFiles('Cargo.lock', 'crates/trace-commons-contributor-gtk/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-shell-desktop-
+      # fonts-dejavu-core is not decoration. --no-install-recommends means
+      # GTK pulls no fonts, so the shell renders chrome and colour but no
+      # legible glyphs: the frame is non-uniform (so the blank check passes)
+      # while OCR finds no text at all. That is exactly the failure mode seen
+      # on the first run with capture working -- a screenshot that looks fine
+      # to a stddev test and contains nothing readable.
+      - name: Install GTK/portal/compositor dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libnotify-dev \
+            weston \
+            xdg-desktop-portal \
+            xdg-desktop-portal-gtk \
+            dbus \
+            dbus-x11 \
+            libglib2.0-bin \
+            imagemagick \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            fonts-dejavu-core
+      # trace-commons-contributor is a root-workspace crate; the shell links
+      # it directly (see the crate's own Cargo.toml comment on why -- both
+      # sides are Rust on Linux, no FFI boundary needed).
+      - name: Build the daemon
+        run: cargo build -p trace-commons-contributor --bin trace-commons-contributor
+      # The GTK crate is its own workspace, excluded from the root one.
+      - name: Build the shell
+        run: cargo build --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
+      - name: Run weston + portal verification
+        run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh

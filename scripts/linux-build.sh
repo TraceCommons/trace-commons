@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+#
+# Build and run the Linux contributor shell inside a container.
+#
+# The shell links GTK 4 and libadwaita, so it does not build on the macOS
+# host this repository is usually developed on. This script is the whole
+# incantation: it builds the toolchain image once, keeps Cargo's registry and
+# target directory in named volumes so rebuilds are incremental, and runs
+# whatever command you give it inside the crate directory.
+#
+#   scripts/linux-build.sh                    # cargo build
+#   scripts/linux-build.sh cargo clippy       # anything else
+#   scripts/linux-build.sh --shell            # interactive shell
+#   scripts/linux-build.sh --run-headless     # start the app under Xvfb
+#   scripts/linux-build.sh --probe            # talk to a throwaway daemon
+#
+# Nothing here touches the host toolchain, and the host workspace still
+# builds on macOS because the GTK crate is excluded from it.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE=trace-commons-linux-build
+CARGO_VOLUME=trace-commons-linux-cargo
+TARGET_VOLUME=trace-commons-linux-target
+CRATE_DIR=crates/trace-commons-contributor-gtk
+
+build_image() {
+  docker build -q -t "$IMAGE" -f "$REPO_ROOT/scripts/linux-build.Dockerfile" "$REPO_ROOT/scripts" >/dev/null
+}
+
+run() {
+  docker run --rm -i \
+    -v "$REPO_ROOT:/work" \
+    -v "$CARGO_VOLUME:/cargo" \
+    -v "$TARGET_VOLUME:/target" \
+    -w "/work/$CRATE_DIR" \
+    "$IMAGE" \
+    bash -c "$1"
+}
+
+build_image
+
+case "${1:---build}" in
+  --build)
+    run "cargo build"
+    ;;
+  --shell)
+    docker run --rm -it \
+      -v "$REPO_ROOT:/work" \
+      -v "$CARGO_VOLUME:/cargo" \
+      -v "$TARGET_VOLUME:/target" \
+      -w "/work/$CRATE_DIR" \
+      "$IMAGE" bash
+    ;;
+  --probe)
+    # Milestone check: start a real daemon on a throwaway 0700 state
+    # directory, then have the shell's client layer connect over the socket
+    # and print what it got back. Proves the crate links the contributor core
+    # and speaks the v1_1 contract, without needing a display.
+    run "bash /work/$CRATE_DIR/scripts/probe.sh"
+    ;;
+  --run-headless)
+    # Starts the real application under Xvfb with a private session bus.
+    # This proves the process starts, realizes its widgets and reaches the
+    # daemon. It does not prove the layout looks right -- nobody sees it.
+    run "bash /work/$CRATE_DIR/scripts/headless-run.sh"
+    ;;
+  *)
+    run "$*"
+    ;;
+esac
