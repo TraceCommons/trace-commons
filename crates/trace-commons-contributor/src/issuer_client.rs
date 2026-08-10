@@ -9,7 +9,9 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
-use trace_commons_protocol::onboarding::{TraceInstanceEnrollRequest, TraceOnboardResponse};
+use trace_commons_protocol::onboarding::{
+    TraceInstanceEnrollRequest, TraceOnboardRequest, TraceOnboardResponse,
+};
 
 use crate::identity::{
     SignedClaimRequest, TRACE_DEVICE_KEY_ID_HEADER, TRACE_DEVICE_SIGNATURE_HEADER,
@@ -93,6 +95,38 @@ impl IssuerClient {
             .json::<TraceOnboardResponse>()
             .await
             .context("parsing enroll response")
+    }
+
+    /// Redeem an invite code, registering this device and returning the
+    /// tenant/audience/ingest details needed to write `contributor.json`.
+    ///
+    /// NOT idempotent: every success spends one use of the invite, including
+    /// re-registering a key that is already enrolled. Call it once.
+    pub async fn onboard(
+        &self,
+        issuer_url: &str,
+        req: &TraceOnboardRequest,
+    ) -> Result<TraceOnboardResponse> {
+        let url = format!("{issuer_url}/v1/onboard");
+        let parsed = reqwest::Url::parse(&url).with_context(|| format!("parsing {url}"))?;
+        self.allowlist.check(&parsed)?;
+
+        let response = self
+            .http
+            .post(parsed)
+            .json(req)
+            .send()
+            .await
+            .with_context(|| format!("sending onboard request to {url}"))?;
+
+        if !response.status().is_success() {
+            return Err(error_from_response(response, "onboard refused").await);
+        }
+
+        response
+            .json::<TraceOnboardResponse>()
+            .await
+            .context("parsing onboard response")
     }
 
     /// Mint an upload-claim bearer token, sending the pre-signed body

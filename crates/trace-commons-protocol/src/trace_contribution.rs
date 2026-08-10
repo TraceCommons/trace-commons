@@ -27,7 +27,11 @@ use crate::redaction::redact_sensitive_json;
 
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
-pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v2";
+/// Bumped to v3 when the contextual-entropy pass began re-anchoring after `=`
+/// so a cue glued to its value (`api_key=<secret>`) is seen. Stored envelopes
+/// carry this string, so a v2 stamp means the glued-assignment shape was not
+/// covered when that envelope was redacted.
+pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 
@@ -37,7 +41,11 @@ pub enum PrivacyFilterBackendTag {
     Sidecar,
     NearAi,
 }
-pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v1";
+/// v2 alongside the deterministic pipeline bump above: the server re-scrub
+/// runs the same detector, so its stamp has to move with it.
+pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
+#[cfg(feature = "near-ai-privacy-filter")]
+pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
@@ -205,6 +213,7 @@ pub struct TraceContributionEvent {
 pub enum TraceContributionEventType {
     UserMessage,
     AssistantMessage,
+    Reasoning,
     ToolCall,
     ToolResult,
     RoutingDecision,
@@ -903,8 +912,19 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        - 0.40 * duplicate_penalty
-        - 0.60 * privacy_risk;
+        // Residual privacy risk is applied once, by `gate`, and not again
+        // here. `privacy_gate` and `privacy_risk_score` are both pure
+        // functions of the same enum, so subtracting the second after
+        // multiplying by the first penalised one signal twice. For the
+        // medium band that was a halving plus a flat -0.30, which needs the
+        // weighted terms above 0.6 to clear zero - unreachable in practice
+        // once `replayability` is 0, as it is for any recorded session. Every
+        // medium-risk submission in the pilot corpus scored exactly zero.
+        //
+        // Dropping this term changes nothing for low risk, where
+        // `privacy_risk_score` is already 0.0, and nothing for high risk,
+        // which the `credit_points_estimate` branch below zeroes outright.
+        - 0.40 * duplicate_penalty;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
         if matches!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::High) {
@@ -1383,7 +1403,23 @@ pub struct RedactionReport {
     pub pii_labels_present: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// True when a secret-shaped span was **found and removed** during scrub.
+    ///
+    /// This is a redaction success signal, not evidence that a live secret
+    /// remains in the envelope. `residual_risk` therefore treats it as a
+    /// Medium floor (reviewable), matching the polarity used by comparable
+    /// corpora (Dolma drops only *unredacted* spans; BigCode / Sentry /
+    /// OTel treat detection reports as annotations). High is reserved for
+    /// `key_finding_detected` (unredactable) and for residual envelope-scan
+    /// hits that survive scrub (via `resolve_post_scrub_risk`).
     pub blocked_secret_detected: bool,
+    /// Set when a classifier flagged an *object key* (not just a value) as
+    /// PII-bearing. Keys are not rewritten in place (rewriting risks
+    /// collisions with sibling keys), so a key finding cannot be resolved by
+    /// redaction the way a value finding can. It forces High rather than
+    /// being silently dropped or merely counted.
+    #[serde(default)]
+    pub key_finding_detected: bool,
 }
 
 impl RedactionReport {
@@ -1418,6 +1454,7 @@ impl RedactionReport {
             self.add_warning(warning);
         }
         self.blocked_secret_detected |= other.blocked_secret_detected;
+        self.key_finding_detected |= other.key_finding_detected;
     }
 }
 
@@ -2071,11 +2108,162 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection. Shorter tokens are too noisy to gate reliably.
-const ENTROPY_MIN_LEN: usize = 16;
+/// detection when a secret cue is present.
+///
+/// Historically 16 (#157). #193 row 2 lowers it to 8: a cue plus a short
+/// opaque value is a strong enough signal that the old floor was leaking
+/// real API keys in the 8–15 range. The floor is still an FP control —
+/// below 8 even a cue is too noisy (see the #193 FP-budget fixtures).
+const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
+/// Size of each window used when measuring entropy over a bounded (`=`-split)
+/// reading of a candidate.
+///
+/// A bounded reading is only taken once the cheap gates in [`is_cued_secret`]
+/// (length, cue, allowlist) have passed, so this is not on the hot path an
+/// attacker controls by stuffing a candidate with `=`; see the ordering note
+/// there. [`entropy_sample_bits`] covers the whole candidate in windows of
+/// this size, so a candidate of any length is measured completely rather than
+/// only at fixed anchors.
+///
+/// Kept close to [`ENTROPY_MIN_LEN`] rather than large: entropy is measured
+/// as an aggregate over the whole window, so a short opaque secret sitting in
+/// a window otherwise full of low-entropy filler is diluted by that filler --
+/// a big window can miss a real secret even when a window does cover it. A
+/// smaller window bounds how much filler can dilute the one window that
+/// contains the secret.
+const ENTROPY_SAMPLE_BYTES: usize = 64;
+
+/// Entropy of `token`, measured as the maximum over a set of windows that
+/// together cover the whole token, on char boundaries.
+///
+/// This only runs once [`is_cued_secret`]'s cheap gates (length, cue,
+/// allowlist) have already passed, so it is on the rare path, not the hot
+/// one -- see the ordering note on [`is_cued_secret`].
+///
+/// A fixed number of windows spread evenly across the token (the previous
+/// approach here) leaves a blind spot on any token long enough that the
+/// spacing between windows exceeds a window: opaque material placed between
+/// two windows, surrounded by low-entropy filler, is never sampled. Instead,
+/// windows advance by half a window each step. Any run of opaque material no
+/// longer than half a window cannot fall entirely in the gap between two
+/// windows -- it always lands wholly inside at least one of them -- so the
+/// whole token is covered with no length-dependent gap. Cost stays linear in
+/// the token's length: the window count grows with the token, but each
+/// window is a fixed [`ENTROPY_SAMPLE_BYTES`]-byte scan.
+fn entropy_sample_bits(token: &str) -> f64 {
+    if token.len() <= ENTROPY_SAMPLE_BYTES {
+        return token_shannon_entropy(token);
+    }
+    let step = (ENTROPY_SAMPLE_BYTES / 2).max(1);
+    let mut best = 0.0f64;
+    let mut start = 0usize;
+    loop {
+        while start < token.len() && !token.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut end = (start + ENTROPY_SAMPLE_BYTES).min(token.len());
+        while end > start && !token.is_char_boundary(end) {
+            end -= 1;
+        }
+        best = best.max(token_shannon_entropy(&token[start..end]));
+        if end >= token.len() {
+            break;
+        }
+        start += step;
+    }
+    best
+}
+
+/// Precomputed windowed-entropy measurements over a whole candidate, built
+/// once and reused across every `=`-split reading attempted on it.
+///
+/// A candidate can contain many `=`, and each one immediately preceded by
+/// what looks like a cue is trivial for an attacker to arrange (just repeat
+/// the cue text), so [`contextual_entropy_secret_ranges`] may need an answer
+/// to "what is the bounded entropy of the reading starting here?" many times
+/// for the SAME candidate. Recomputing [`entropy_sample_bits`] from scratch
+/// on every attempt is linear in the remaining candidate length each time --
+/// summed over many attempts on one long candidate, that is quadratic again,
+/// exactly what the cheap-gate ordering fix on [`is_cued_secret`] was meant
+/// to remove (that fix only removes the cost when there is no cue at all;
+/// this removes it when there is a cue at many positions). Building the
+/// window profile once, in one linear pass over the candidate, and answering
+/// every reading with an O(log windows) suffix-max lookup keeps total
+/// entropy work linear in the candidate's length however many `=` it
+/// contains or how many of them have a cue.
+struct EntropyWindowProfile<'a> {
+    candidate: &'a str,
+    /// Offset of `candidate`'s start within the larger `content` string that
+    /// [`is_cued_secret`] is called against, so callers can pass it an
+    /// absolute byte offset.
+    candidate_start: usize,
+    /// Window start offsets, relative to `candidate`, in ascending order.
+    starts: Vec<usize>,
+    /// `suffix_max[i]` is the largest entropy among `starts[i..]`'s windows.
+    suffix_max: Vec<f64>,
+}
+
+impl<'a> EntropyWindowProfile<'a> {
+    fn build(candidate: &'a str, candidate_start: usize) -> Self {
+        if candidate.len() <= ENTROPY_SAMPLE_BYTES {
+            return Self {
+                candidate,
+                candidate_start,
+                starts: vec![0],
+                suffix_max: vec![token_shannon_entropy(candidate)],
+            };
+        }
+        let step = (ENTROPY_SAMPLE_BYTES / 2).max(1);
+        let mut starts = Vec::new();
+        let mut bits = Vec::new();
+        let mut start = 0usize;
+        loop {
+            while start < candidate.len() && !candidate.is_char_boundary(start) {
+                start += 1;
+            }
+            let mut end = (start + ENTROPY_SAMPLE_BYTES).min(candidate.len());
+            while end > start && !candidate.is_char_boundary(end) {
+                end -= 1;
+            }
+            starts.push(start);
+            bits.push(token_shannon_entropy(&candidate[start..end]));
+            if end >= candidate.len() {
+                break;
+            }
+            start += step;
+        }
+        let mut suffix_max = vec![0.0f64; bits.len()];
+        let mut running = 0.0f64;
+        for i in (0..bits.len()).rev() {
+            running = running.max(bits[i]);
+            suffix_max[i] = running;
+        }
+        Self {
+            candidate,
+            candidate_start,
+            starts,
+            suffix_max,
+        }
+    }
+
+    /// Largest window entropy among windows that start at or after
+    /// `absolute_start` (a byte offset into the original `content`, not into
+    /// `candidate`), matching what a from-scratch [`entropy_sample_bits`]
+    /// call over `content[absolute_start..]` would report. Falls back to
+    /// measuring the exact remaining slice directly when `absolute_start`
+    /// falls after the last precomputed window start; that only happens
+    /// within the last window's span, so the fallback slice is short.
+    fn bits_from(&self, absolute_start: usize) -> f64 {
+        let from = absolute_start.saturating_sub(self.candidate_start);
+        let idx = self.starts.partition_point(|&s| s < from);
+        self.suffix_max.get(idx).copied().unwrap_or_else(|| {
+            token_shannon_entropy(&self.candidate[from.min(self.candidate.len())..])
+        })
+    }
+}
 
 /// Shannon entropy in bits/char over the token's byte distribution.
 fn token_shannon_entropy(s: &str) -> f64 {
@@ -2110,7 +2298,11 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
+        // Floor matches [`ENTROPY_MIN_LEN`] (8): shorter tokens never become
+        // candidates. Cue + allowlist + entropy gates still reject the vast
+        // majority; lowering from 16 closes #193 row 2 without scanning
+        // sub-8 noise.
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -2165,8 +2357,17 @@ fn is_pure_hex(s: &str) -> bool {
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, hex hash/sha, or this module's own report-metric label) rather
+/// prefix, short git sha, or this module's own report-metric label) rather
 /// than an opaque secret.
+///
+/// Content-hash shapes (lowercase hex ≥32, pure hex of length 40/64) are
+/// deliberately NOT allowlisted here. Those shapes are rarely cue-adjacent
+/// when they are real hashes, and when they *are* cue-adjacent they are
+/// indistinguishable from HMAC/AES key material (#193 row 4). Uncued hashes
+/// still survive because [`is_cued_secret`] requires a cue before any
+/// allowlist check runs. Short pure-hex of length 7 or 8 stays allowlisted
+/// even when cued: git short SHAs dominate that length and the FP cost of
+/// redacting them after a cue exceeds the recall gain.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -2180,54 +2381,138 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
-        return true;
-    }
-    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
-    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
-    if token.len() >= 32
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
+    // Git short SHAs (and similar). Longer pure-hex (40/64) used to live
+    // here too and is now redacted when cued — see #193 row 4.
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
         return true;
     }
     false
 }
 
-/// Byte ranges of high-entropy tokens that sit within [`CUE_WINDOW`] chars
-/// after a secret cue (authorization/bearer/api_key/secret/password/token/
-/// key=/: ...), excluding allowlisted ID/UUID/hash shapes. Fail-closed: when
-/// unsure whether a token is a structural identifier, it is redacted.
+/// Start of the cue window preceding `start`, snapped to a char boundary.
+fn cue_window_start(content: &str, start: usize) -> usize {
+    let mut window_start = start.saturating_sub(CUE_WINDOW);
+    while window_start > 0 && !content.is_char_boundary(window_start) {
+        window_start -= 1;
+    }
+    window_start
+}
+
+/// True when a secret cue sits within [`CUE_WINDOW`] chars before `start`.
+///
+/// Cheap and highly selective, so it runs before the length-proportional
+/// entropy scan: an ungated entropy pass over real transcripts flags on the
+/// order of 105k structural tokens against ~20 real secrets, and computing
+/// entropy for all of them is both wasted work and, on `=`-dense input where
+/// every suffix is retried, quadratic.
+fn has_secret_cue(content: &str, start: usize) -> bool {
+    secret_cue_regex().is_match(&content[cue_window_start(content, start)..start])
+}
+
+/// True when `content[start..end]` is preceded by a secret cue, long enough,
+/// opaque enough, and not a structural identifier. Fail-closed: when unsure
+/// whether a token is a structural identifier, it is redacted.
 ///
 /// This exists to catch secrets in formats not covered by
-/// [`secret_leak_patterns`] (unknown provider key shapes, ad hoc tokens,
-/// etc). Cue-gating is mandatory, not a nicety: an ungated entropy scan over
-/// real transcripts flags on the order of 105k tokens (message ids, base64
-/// content, UUIDs) against ~20 real secrets, which makes plain entropy
-/// scanning useless in practice.
+/// [`secret_leak_patterns`] (unknown provider key shapes, ad hoc tokens, etc).
+/// `bounded` measures entropy via [`entropy_sample_bits`]'s windowed scan
+/// instead of a single whole-token pass. It is set only for the readings this
+/// pass adds, never for the whole-token reading, so the pre-existing decision
+/// is reproduced exactly and no input that was redacted can stop being
+/// redacted.
+///
+/// The cheap gates (length, cue, allowlist) run FIRST and return early; entropy
+/// is measured only once all three have passed. Every `=` in the input starts
+/// another candidate reading, so on `=`-dense input the entropy scan -- a
+/// windowed pass over [`ENTROPY_SAMPLE_BYTES`]-sized chunks of the whole
+/// candidate -- would otherwise run once per `=` even though
+/// [`has_secret_cue`] rejects nearly all of them. Ordering the cheap checks
+/// first keeps the expensive path off that hot loop.
+///
+/// `profile`, when given, answers a bounded reading from a precomputed
+/// [`EntropyWindowProfile`] instead of rescanning the candidate from
+/// scratch; see that type for why. Pass `None` to measure directly, which
+/// [`contextual_entropy_secret_ranges`] only does before a profile exists to
+/// build.
+fn is_cued_secret(
+    content: &str,
+    start: usize,
+    end: usize,
+    bounded: bool,
+    profile: Option<&EntropyWindowProfile<'_>>,
+) -> bool {
+    let token = &content[start..end];
+    if token.len() < ENTROPY_MIN_LEN {
+        return false;
+    }
+    if !has_secret_cue(content, start) {
+        return false;
+    }
+    if is_allowlisted_entropy_candidate(token) {
+        return false;
+    }
+    let measured_bits = if bounded {
+        match profile {
+            Some(profile) => profile.bits_from(start),
+            None => entropy_sample_bits(token),
+        }
+    } else {
+        token_shannon_entropy(token)
+    };
+    measured_bits >= ENTROPY_BITS_MIN
+}
+
+/// Byte ranges of high-entropy tokens that a secret cue points at.
+///
+/// Scope: only unspaced `=` assignments (`api_key=<value>`) are re-anchored
+/// here. A literal zero-separator glue with no `=` at all (`api_keySECRET`,
+/// `BearerSECRET`) is NOT covered -- there is no `=` to split on, so the cue
+/// word and the value are one token and [`has_secret_cue`]'s window still
+/// never sees a cue word immediately before `start`. That is a deliberate
+/// accept under #193 row 1 (FP cost of splitting inside identifiers), not an
+/// untracked gap.
 fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     for candidate in entropy_candidate_regex().find_iter(content) {
-        let token = candidate.as_str();
-        if token.len() < ENTROPY_MIN_LEN {
-            continue;
+        // The candidate class contains `=`, so an unspaced assignment such as
+        // `api_key=<secret>` arrives as ONE token with the cue glued on. The
+        // cue then sits inside the token being judged instead of in the window
+        // before it, and [`secret_cue_regex`] — anchored to the end of that
+        // window — never sees it, so the value survives. The same secret with a
+        // space is redacted.
+        //
+        // Re-anchoring after each `=` puts the cue back into the window the
+        // existing regex already inspects, which also covers compound names
+        // (`OPENAI_API_KEY=`, `x-api-key=`) because that regex is unanchored on
+        // the left. The whole-token reading is tried FIRST, so this can only
+        // ever add coverage: every range the previous logic produced is still
+        // produced.
+        let candidate_str = candidate.as_str();
+        // Built lazily and at most once per candidate, the first time a
+        // bounded reading needs one -- see `EntropyWindowProfile`. Gating the
+        // build on `has_secret_cue` (not just `bounded`) keeps a candidate
+        // with many `=` but no cue anywhere (the DoS case the ordering fix on
+        // `is_cued_secret` targets) from paying even this one-time cost.
+        let mut profile: Option<EntropyWindowProfile<'_>> = None;
+        let cued_start = std::iter::once((candidate.start(), false))
+            .chain(
+                candidate_str
+                    .match_indices('=')
+                    .map(|(index, _)| (candidate.start() + index + 1, true)),
+            )
+            .find(|&(start, bounded)| {
+                if bounded && profile.is_none() && has_secret_cue(content, start) {
+                    profile = Some(EntropyWindowProfile::build(
+                        candidate_str,
+                        candidate.start(),
+                    ));
+                }
+                is_cued_secret(content, start, candidate.end(), bounded, profile.as_ref())
+            })
+            .map(|(start, _)| start);
+        if let Some(start) = cued_start {
+            ranges.push(start..candidate.end());
         }
-        if is_allowlisted_entropy_candidate(token) {
-            continue;
-        }
-        if token_shannon_entropy(token) < ENTROPY_BITS_MIN {
-            continue;
-        }
-        let mut window_start = candidate.start().saturating_sub(CUE_WINDOW);
-        while window_start > 0 && !content.is_char_boundary(window_start) {
-            window_start -= 1;
-        }
-        let window = &content[window_start..candidate.start()];
-        if !secret_cue_regex().is_match(window) {
-            continue;
-        }
-        ranges.push(candidate.start()..candidate.end());
     }
     ranges
 }
@@ -2306,6 +2591,34 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
+    /// Build a deterministic-only redactor with explicit path prefixes.
+    ///
+    /// Unlike `new`/`try_default`, this never reads
+    /// `TRACE_PRIVACY_FILTER_BACKEND` or adapter-specific environment
+    /// variables and can never attach a network or process-backed filter.
+    /// Pre-enrollment previews use this constructor to keep local trace data
+    /// offline even when the parent environment requests another backend.
+    pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
+        let mut known_path_prefixes: Vec<String> = known_path_prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        known_path_prefixes.dedup();
+
+        Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes,
+            privacy_filter: None,
+            privacy_filter_backend: PrivacyFilterBackendTag::None,
+        }
+    }
+
+    /// Detection-only redactor with no known path prefixes.
+    fn bare() -> Self {
+        Self::deterministic_only(Vec::new())
+    }
+
     pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
         let mut known_path_prefixes: Vec<String> = known_path_prefixes
             .into_iter()
@@ -2444,10 +2757,24 @@ impl DeterministicTraceRedactor {
         // named patterns above. Runs over the already-pattern-redacted text
         // so known secrets stay attributed to their named rule; dedupe
         // against ranges already flagged so a token isn't double-counted.
+        // Only the named-pattern ranges need the overlap check, and a single
+        // forward cursor suffices: both sequences are ordered by start, and two
+        // entropy ranges can never overlap each other because each comes from a
+        // distinct non-overlapping candidate. Comparing every new range against
+        // every range accumulated so far was quadratic, which a contribution
+        // with thousands of glued assignments could reach.
+        let named_range_count = ranges.len();
+        let mut named_cursor = 0usize;
         for entropy_range in contextual_entropy_secret_ranges(&redacted) {
-            let overlaps = ranges.iter().any(|existing| {
-                existing.start < entropy_range.end && entropy_range.start < existing.end
-            });
+            while named_cursor < named_range_count
+                && ranges[named_cursor].end <= entropy_range.start
+            {
+                named_cursor += 1;
+            }
+            let overlaps = ranges[named_cursor..named_range_count]
+                .iter()
+                .take_while(|existing| existing.start < entropy_range.end)
+                .any(|existing| entropy_range.start < existing.end);
             if overlaps {
                 continue;
             }
@@ -2731,7 +3058,55 @@ pub fn rescrub_trace_envelope_with(
         envelope.outcome.human_correction = Some(redacted);
     }
 
-    let blocked_secret_detected = report.blocked_secret_detected;
+    redact_envelope_side_channels(redactor, envelope, &mut report, &mut state);
+
+    // Detection-only backstop, run after every mutation above. The
+    // typed traversal can only cover fields it knows about, and the
+    // schema keeps growing; this catches whatever the traversal missed.
+    // It never mutates — anything it finds has already *survived*
+    // redaction, which is what makes it residual and why
+    // [`resolve_post_scrub_risk`] forces High on residual hits (not on
+    // secrets the scrub pass itself found and removed).
+    let residual = residual_envelope_scan(redactor, envelope);
+
+    // Derive the server-pass risk from what the pass actually found,
+    // before `report` is drained into the envelope below. Previously
+    // this was computed from an empty report, so only a blocked secret
+    // could raise the classification.
+    let server_pass_risk = residual_risk(&envelope.consent, &report);
+
+    let prior_risk = envelope.privacy.residual_pii_risk;
+    // No classifier runs on this path, so there is no classifier evidence and
+    // this assessment can never lower the prior risk.
+    //
+    // An earlier version set this `true` on the reasoning that the
+    // deterministic pass is a pure function and therefore self-evidencing.
+    // That is wrong, and it was a fail-open: being a pure function
+    // establishes *availability*, not detection completeness or the absence
+    // of PII. The prior risk is High because something already found cause
+    // for concern; the deterministic patterns failing to match is a proxy for
+    // cleanliness, not evidence of it. A High trace missed by the regex suite
+    // would have been published without NEAR AI ever examining it.
+    //
+    // The pass still *raises* risk freely -- `resolve_post_scrub_risk` falls
+    // back to `max_residual_risk`, and a residual finding still forces High.
+    // Only the downgrade direction requires classifier evidence.
+    let assessment = PostScrubAssessment {
+        complete_coverage: residual.is_ok(),
+        useful_classifier_result: false,
+        findings: report.clone(),
+        residual_findings: residual.clone().unwrap_or_default(),
+    };
+    envelope.privacy.residual_pii_risk = match residual {
+        Ok(_) => resolve_post_scrub_risk(prior_risk, server_pass_risk, &assessment),
+        Err(_) => {
+            // Fail closed: the residual scan could not run, so this pass
+            // cannot prove the envelope is clean. Never trust an empty
+            // report produced by a failed scan; force the worst case.
+            ResidualPiiRisk::High
+        }
+    };
+
     for (label, count) in report.counts {
         *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
     }
@@ -2741,17 +3116,6 @@ pub fn rescrub_trace_envelope_with(
         }
     }
 
-    let server_pass_risk = residual_risk(
-        &envelope.consent,
-        &RedactionReport {
-            counts: BTreeMap::new(),
-            pii_labels_present: Vec::new(),
-            warnings: Vec::new(),
-            blocked_secret_detected,
-        },
-    );
-    envelope.privacy.residual_pii_risk =
-        max_residual_risk(envelope.privacy.residual_pii_risk, server_pass_risk);
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -2777,9 +3141,652 @@ pub fn rescrub_trace_envelope_with(
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 }
 
-fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    if report.blocked_secret_detected {
+/// Byte/node/depth budgets for classifying `event.structured_payload` trees
+/// through the async classifier (Task 3). These bound the async classifier
+/// traffic and CPU work per envelope; hitting any of them makes coverage
+/// incomplete rather than silently skipping the rest of the tree.
+const STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES: usize = 400_000;
+const STRUCTURED_PAYLOAD_MAX_FIELD_BYTES: usize = 32_000;
+const STRUCTURED_PAYLOAD_MAX_NODES: usize = 4_000;
+const STRUCTURED_PAYLOAD_MAX_DEPTH: usize = 24;
+
+#[derive(Default)]
+struct StructuredPayloadBudget {
+    aggregate_bytes: usize,
+    nodes: usize,
+}
+
+/// Recursively classify every string leaf and object key inside a
+/// structured tool payload through the async classifier.
+///
+/// String *values* are replaced with the classifier's redacted text (same
+/// as the prose fields). Object *keys* are classified for detection only -
+/// they are never rewritten, because two distinct keys can classify to
+/// colliding redacted text and a key rewrite has no analogue to the
+/// collision guard `insert_without_collision` gives map values. A finding
+/// on a key therefore forces High via `RedactionReport::key_finding_detected`
+/// rather than being "resolved" by a rewrite that could silently drop data.
+///
+/// Returns `Ok(true)` when the whole subtree was covered within budget, or
+/// `Ok(false)` the moment any budget is exceeded (aggregate bytes, a single
+/// field's bytes, node count, or recursion depth) - the caller treats that
+/// as incomplete coverage, never as a silent skip.
+fn classify_structured_payload_node<'a>(
+    adapter: &'a dyn PrivacyFilterAdapter,
+    value: &'a mut Value,
+    depth: usize,
+    budget: &'a mut StructuredPayloadBudget,
+    report: &'a mut RedactionReport,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<bool, TraceContributionError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        if depth > STRUCTURED_PAYLOAD_MAX_DEPTH {
+            return Ok(false);
+        }
+        match value {
+            Value::String(text) => {
+                budget.nodes += 1;
+                if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
+                    return Ok(false);
+                }
+                if text.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
+                    return Ok(false);
+                }
+                budget.aggregate_bytes += text.len();
+                if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                    return Ok(false);
+                }
+                if let Some(redaction) = adapter.redact_text(text).await? {
+                    report.merge(redaction.report);
+                    *text = redaction.redacted_text;
+                }
+                Ok(true)
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() {
+                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Value::Object(entries) => {
+                for (key, item) in entries.iter_mut() {
+                    budget.nodes += 1;
+                    if budget.nodes > STRUCTURED_PAYLOAD_MAX_NODES {
+                        return Ok(false);
+                    }
+                    if key.len() > STRUCTURED_PAYLOAD_MAX_FIELD_BYTES {
+                        return Ok(false);
+                    }
+                    budget.aggregate_bytes += key.len();
+                    if budget.aggregate_bytes > STRUCTURED_PAYLOAD_MAX_AGGREGATE_BYTES {
+                        return Ok(false);
+                    }
+                    if let Some(redaction) = adapter.redact_text(key).await? {
+                        let has_finding = !redaction.report.counts.is_empty()
+                            || !redaction.report.pii_labels_present.is_empty()
+                            || redaction.report.blocked_secret_detected;
+                        if has_finding {
+                            report.key_finding_detected = true;
+                        }
+                    }
+                    if !classify_structured_payload_node(adapter, item, depth + 1, budget, report)
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    })
+}
+
+/// Runs an async prose-PII filter (e.g. the NEAR AI backstop) over an
+/// already-produced envelope's content-bearing fields:
+/// `events[*].redacted_content`, `events[*].structured_payload` (every
+/// string leaf and object key, within the budgets above), and
+/// `outcome.human_correction`.
+///
+/// Two-pass and atomic: every `adapter.redact_text` call is awaited and
+/// collected in the first pass, so any adapter error is returned before any
+/// field of `envelope` is mutated. The second pass applies the collected
+/// text replacements and metadata updates without further awaits.
+///
+/// A HIGH prior risk can be downgraded here ONLY when the reassessment is
+/// complete and convincing: every field was covered within budget, the
+/// classifier's result was evidence-backed (see the zero-finding canary
+/// check below), and a fresh residual scan came back clean. Any gap in that
+/// chain preserves the prior risk instead - see [`resolve_post_scrub_risk`].
+/// Free-text fields that carry contributor- or model-authored prose but that
+/// [`rescrub_envelope_prose_pii_with`] never submits to the classifier. The
+/// scrub pass covers only `events[*].redacted_content`,
+/// `events[*].structured_payload`, and `outcome.human_correction`; everything
+/// listed here is untouched by it, and the deterministic residual scan that
+/// follows only matches patterned secrets, not prose PII such as names or
+/// addresses.
+///
+/// So when any of these carries text, the reassessment did NOT see the whole
+/// envelope and must not claim complete coverage - a High prior risk stays
+/// High. Envelopes that leave these empty (the common case) are unaffected.
+///
+/// Only user-derived prose counts. Identifier-shaped strings are excluded
+/// (versions, enum tags, retention policies, revocation handles, tool
+/// categories, pseudonymous contributor refs), and so is system-authored
+/// text: `value.explanation`, `value_card.limitations`, and
+/// `value_card.user_visible_explanation` are written by the scorer, not by
+/// the contributor. `TraceValueCard::default()` in particular ships a fixed
+/// boilerplate `limitations` entry on every envelope, so counting it would
+/// block every downgrade and make the reassessment dead code. If the scorer
+/// ever begins quoting trace content into those fields, they belong here.
+///
+/// This list is explicit rather than derived, so a newly added prose field
+/// will not be accounted for until it is added here or covered by the scrub.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
+    fn has_text(values: &[String]) -> bool {
+        values.iter().any(|v| !v.trim().is_empty())
+    }
+
+    if has_text(&envelope.replay.replay_notes) {
+        return true;
+    }
+
+    if let Some(hindsight) = envelope.hindsight.as_ref() {
+        if hindsight
+            .original_goal_summary
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+            || has_text(&hindsight.achieved_subgoals)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+pub async fn rescrub_envelope_prose_pii_with(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), TraceContributionError> {
+    let mut event_updates: Vec<(usize, String)> = Vec::new();
+    let mut correction_update: Option<String> = None;
+    let mut structured_updates: Vec<(usize, Value)> = Vec::new();
+    let mut report = RedactionReport::default();
+    let mut summary: Option<SafePrivacyFilterSummary> = None;
+    let mut structured_complete = true;
+
+    for (index, event) in envelope.events.iter().enumerate() {
+        let Some(content) = event.redacted_content.as_deref() else {
+            continue;
+        };
+        if let Some(redaction) = adapter.redact_text(content).await? {
+            merge_privacy_filter_summary(&mut summary, &redaction.summary);
+            report.merge(redaction.report);
+            event_updates.push((index, redaction.redacted_text));
+        }
+    }
+
+    if let Some(correction) = envelope.outcome.human_correction.as_deref() {
+        if let Some(redaction) = adapter.redact_text(correction).await? {
+            merge_privacy_filter_summary(&mut summary, &redaction.summary);
+            report.merge(redaction.report);
+            correction_update = Some(redaction.redacted_text);
+        }
+    }
+
+    // Structured tool payloads (Task 3): classify every string leaf and
+    // object key of each event's `structured_payload`, working on a clone
+    // so a mid-traversal adapter error (propagated via `?`) leaves the real
+    // envelope untouched, matching the atomicity of the prose passes above.
+    {
+        let mut budget = StructuredPayloadBudget::default();
+        for (index, event) in envelope.events.iter().enumerate() {
+            if event.structured_payload.is_null() {
+                continue;
+            }
+            let mut clone = event.structured_payload.clone();
+            let covered =
+                classify_structured_payload_node(adapter, &mut clone, 0, &mut budget, &mut report)
+                    .await?;
+            structured_updates.push((index, clone));
+            if !covered {
+                structured_complete = false;
+                break;
+            }
+        }
+    }
+
+    // Second pass: no awaits below this line, so the updates collected
+    // above are applied atomically.
+    for (index, redacted_text) in event_updates {
+        envelope.events[index].redacted_content = Some(redacted_text);
+    }
+    if let Some(redacted_text) = correction_update {
+        envelope.outcome.human_correction = Some(redacted_text);
+    }
+    for (index, redacted_payload) in structured_updates {
+        envelope.events[index].structured_payload = redacted_payload;
+    }
+
+    for (label, count) in &report.counts {
+        *envelope
+            .privacy
+            .redaction_counts
+            .entry(label.clone())
+            .or_insert(0) += count;
+    }
+    for label in &report.pii_labels_present {
+        if !envelope.privacy.pii_labels_present.contains(label) {
+            envelope.privacy.pii_labels_present.push(label.clone());
+        }
+    }
+    if let Some(summary) = &summary {
+        merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, summary);
+    }
+
+    // Zero-finding responses are not automatically trustworthy (Task 2): a
+    // 200 with an empty span list is indistinguishable, on its own, from an
+    // unavailable, misconfigured, or systematically false-negative
+    // classifier. When this pass found *nothing at all* across every field
+    // it covered, demand a fresh, live canary round-trip as explicit
+    // evidence the classifier is actually working before trusting that
+    // emptiness. Any real finding is itself sufficient evidence the
+    // classifier ran for real, so the canary is skipped in that case.
+    let aggregate_empty = report.counts.is_empty()
+        && report.pii_labels_present.is_empty()
+        && !report.blocked_secret_detected
+        && !report.key_finding_detected;
+    // A healthy canary is a liveness signal, not evidence about arbitrary
+    // content: the canary is three static, public constants, so a classifier
+    // can recognise exactly those and miss everything real. This file's own
+    // `CanaryHealthyButFindsNoRealPii` fixture is that classifier, which is
+    // how we know the bypass is constructible. Findings are the only
+    // evidence: a classifier that found and removed PII demonstrably ran,
+    // which permits High -> Medium; one that returned nothing cannot be
+    // told apart from a broken one, so High stays High.
+    let useful_classifier_result = !aggregate_empty;
+
+    // Residual scan (Task 1/4): re-run the deterministic detection-only
+    // scan after the classifier's mutations, exactly as the sync server
+    // rescrub does. `bare()` is infallible and reads no env, since this
+    // scan only ever calls the plain `redact_text` and never touches an
+    // attached privacy-filter adapter.
+    let redactor = DeterministicTraceRedactor::bare();
+    let residual = residual_envelope_scan(&redactor, envelope).map_err(|_| {
+        TraceContributionError::RedactionFailed {
+            reason: "residual envelope scan failed after PII backstop pass".to_string(),
+        }
+    });
+
+    let prior_risk = envelope.privacy.residual_pii_risk;
+    envelope.privacy.residual_pii_risk = match residual {
+        Ok(residual_findings) => {
+            let backstop_pass_risk = residual_risk(&envelope.consent, &report);
+            let assessment = PostScrubAssessment {
+                complete_coverage: structured_complete && !uncovered_prose_present(envelope),
+                useful_classifier_result,
+                findings: report.clone(),
+                residual_findings,
+            };
+            resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment)
+        }
+        Err(_) => {
+            // Fail closed: could not verify the envelope is clean after
+            // this pass, so never trust it enough to downgrade or even
+            // hold steady on an empty report. Force the worst case.
+            ResidualPiiRisk::High
+        }
+    };
+    if !envelope
+        .privacy
+        .redaction_pipeline_version
+        .contains(NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX)
+    {
+        envelope.privacy.redaction_pipeline_version.push('+');
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .push_str(NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX);
+    }
+    envelope.trace_card.redaction_pipeline_version =
+        envelope.privacy.redaction_pipeline_version.clone();
+    merge_privacy_warnings(
+        &mut envelope.privacy.warnings,
+        privacy_warnings(envelope.privacy.residual_pii_risk),
+    );
+    envelope.privacy.redaction_hash =
+        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
+
+    Ok(())
+}
+
+/// Redact one owned string in place, folding its report into `report`.
+fn redact_string_in_place(
+    redactor: &DeterministicTraceRedactor,
+    value: &mut String,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    let (redacted, child_report) = redactor.redact_text_with_state(value, state);
+    report.merge(child_report);
+    *value = redacted;
+}
+
+fn redact_strings_in_place(
+    redactor: &DeterministicTraceRedactor,
+    values: &mut [String],
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    for value in values {
+        redact_string_in_place(redactor, value, report, state);
+    }
+}
+
+/// Redact the content-bearing fields outside the three surfaces the
+/// original pass covered (`event.redacted_content`,
+/// `event.structured_payload`, `outcome.human_correction`).
+///
+/// Everything here is attacker-controlled free text that reached
+/// accepted storage unscrubbed. Map *keys* are rewritten as well as
+/// values: a key is just as free-form as the string beside it, and no
+/// typed traversal reaches keys by default.
+///
+/// Structural fields are deliberately left alone - ids, hashes,
+/// versions, enum discriminants and revocation handles are server- or
+/// schema-controlled, and rewriting them would break lookups.
+fn redact_envelope_side_channels(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &mut TraceContributionEnvelope,
+    report: &mut RedactionReport,
+    state: &mut RedactionState,
+) {
+    if !envelope.ironclaw.feature_flags.is_empty() {
+        let flags = std::mem::take(&mut envelope.ironclaw.feature_flags);
+        for (key, mut value) in flags {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            redact_string_in_place(redactor, &mut value, report, state);
+            insert_without_collision(&mut envelope.ironclaw.feature_flags, key, value);
+        }
+    }
+    if let Some(model_name) = envelope.ironclaw.model_name.as_mut() {
+        redact_string_in_place(redactor, model_name, report, state);
+    }
+
+    for event in &mut envelope.events {
+        if let Some(tool_name) = event.tool_name.as_mut() {
+            redact_string_in_place(redactor, tool_name, report, state);
+        }
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.outcome.error_taxonomy,
+        report,
+        state,
+    );
+    for failure_mode in &mut envelope.outcome.failure_modes {
+        if let TraceFailureMode::Other(detail) = failure_mode {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    redact_strings_in_place(redactor, &mut envelope.replay.required_tools, report, state);
+    redact_strings_in_place(redactor, &mut envelope.replay.replay_notes, report, state);
+    if !envelope.replay.tool_manifest_hashes.is_empty() {
+        let manifest = std::mem::take(&mut envelope.replay.tool_manifest_hashes);
+        for (key, value) in manifest {
+            let mut key = key;
+            redact_string_in_place(redactor, &mut key, report, state);
+            insert_without_collision(&mut envelope.replay.tool_manifest_hashes, key, value);
+        }
+    }
+    for assertion in &mut envelope.replay.expected_assertions {
+        let (redacted, child_report) = redactor.redact_json_value(None, assertion, state);
+        report.merge(child_report);
+        *assertion = redacted;
+    }
+
+    if let Some(embedding) = envelope.embedding_analysis.as_mut() {
+        redact_strings_in_place(redactor, &mut embedding.coverage_tags, report, state);
+    }
+
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.trace_card.tool_categories,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.limitations,
+        report,
+        state,
+    );
+    redact_strings_in_place(
+        redactor,
+        &mut envelope.value_card.user_visible_explanation,
+        report,
+        state,
+    );
+
+    if let Some(hindsight) = envelope.hindsight.as_mut() {
+        if let Some(summary) = hindsight.original_goal_summary.as_mut() {
+            redact_string_in_place(redactor, summary, report, state);
+        }
+        redact_strings_in_place(redactor, &mut hindsight.achieved_subgoals, report, state);
+        if let Some(TraceFailureMode::Other(detail)) = hindsight.failure_type.as_mut() {
+            redact_string_in_place(redactor, detail, report, state);
+        }
+    }
+
+    if let Some(process_evaluation) = envelope.process_evaluation.as_mut() {
+        if let Some(evaluator_name) = process_evaluation.evaluator_name.as_mut() {
+            redact_string_in_place(redactor, evaluator_name, report, state);
+        }
+    }
+}
+
+/// Object keys never collide as long as `map` did not already contain the
+/// candidate key: rewriting a key (e.g. through deterministic redaction)
+/// can produce the same placeholder for two originally-distinct keys, and a
+/// plain `insert` would silently let the second overwrite the first. This
+/// disambiguates instead of losing data.
+fn insert_without_collision(map: &mut BTreeMap<String, String>, key: String, value: String) {
+    if let std::collections::btree_map::Entry::Vacant(entry) = map.entry(key.clone()) {
+        entry.insert(value);
+        return;
+    }
+    let mut suffix = 1u32;
+    loop {
+        let candidate = format!("{key}~dup{suffix}");
+        if let std::collections::btree_map::Entry::Vacant(entry) = map.entry(candidate) {
+            entry.insert(value);
+            return;
+        }
+        suffix += 1;
+    }
+}
+
+/// Node budget for [`residual_envelope_scan`]. The scan clones and
+/// re-serializes the whole envelope, so it needs its own explicit bound
+/// independent of whatever recursion limit `serde_json` enforces on the way
+/// in - relying on that limit implicitly was itself one of the findings
+/// this budget closes.
+const RESIDUAL_SCAN_MAX_DEPTH: usize = 64;
+const RESIDUAL_SCAN_MAX_NODES: usize = 100_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidualScanError {
+    SerializationFailed,
+    BudgetExceeded,
+}
+
+/// Detection-only scan of the whole envelope after redaction has run.
+///
+/// Each string is scanned *independently* - object keys separately from
+/// their values, one leaf at a time - rather than by scanning the
+/// serialized JSON text. That matters: contextual-entropy detection
+/// looks backwards a fixed window for a secret-shaped cue, so scanning
+/// concatenated JSON would let a key like `"vector_key"` act as the cue
+/// for the hash sitting next to it and flag every envelope. Per-leaf
+/// scanning removes that adjacency entirely.
+///
+/// Returns `Err` on a serialization failure or a budget overrun rather than
+/// silently reporting "nothing found" - an envelope this scan cannot
+/// actually cover must never be treated as verified clean.
+fn residual_envelope_scan(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> Result<RedactionReport, ResidualScanError> {
+    let mut report = RedactionReport::default();
+    let serialized =
+        serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+    let mut nodes = 0usize;
+    scan_json_leaves(redactor, &serialized, &mut report, 0, &mut nodes)?;
+    Ok(report)
+}
+
+fn scan_json_leaves(
+    redactor: &DeterministicTraceRedactor,
+    value: &Value,
+    report: &mut RedactionReport,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), ResidualScanError> {
+    if depth > RESIDUAL_SCAN_MAX_DEPTH {
+        return Err(ResidualScanError::BudgetExceeded);
+    }
+    match value {
+        Value::String(text) => {
+            *nodes += 1;
+            if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                return Err(ResidualScanError::BudgetExceeded);
+            }
+            let (_, child_report) = redactor.redact_text(text);
+            report.merge(child_report);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
+            }
+        }
+        Value::Object(entries) => {
+            for (key, item) in entries {
+                *nodes += 1;
+                if *nodes > RESIDUAL_SCAN_MAX_NODES {
+                    return Err(ResidualScanError::BudgetExceeded);
+                }
+                let (_, child_report) = redactor.redact_text(key);
+                report.merge(child_report);
+                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The result of attempting a complete, evidence-backed reassessment of an
+/// envelope's residual PII risk after a scrub pass.
+///
+/// Downgrade from the prior risk is permitted ONLY when every field here
+/// demonstrates it is safe: `complete_coverage` (every content-bearing
+/// field was processed, no budget was exceeded, no field was skipped),
+/// `useful_classifier_result` (the pass actually produced usable evidence,
+/// not just an unconvincing empty result), and a clean, successfully-run
+/// residual scan (`residual_findings` empty). Any ambiguity must leave this
+/// assessment unable to downgrade; [`resolve_post_scrub_risk`] then falls
+/// back to the old, safe, max-with-prior combination.
+#[derive(Debug, Clone)]
+struct PostScrubAssessment {
+    complete_coverage: bool,
+    useful_classifier_result: bool,
+    findings: RedactionReport,
+    residual_findings: RedactionReport,
+}
+
+impl PostScrubAssessment {
+    fn residual_clean(&self) -> bool {
+        self.residual_findings.counts.is_empty()
+            && self.residual_findings.pii_labels_present.is_empty()
+            && !self.residual_findings.blocked_secret_detected
+            && !self.residual_findings.key_finding_detected
+    }
+
+    fn can_downgrade(&self) -> bool {
+        self.complete_coverage && self.useful_classifier_result && self.residual_clean()
+    }
+}
+
+/// Combine a prior residual-PII risk with a post-scrub assessment's derived
+/// risk. Downgrade only when the assessment proves it is safe to do so;
+/// otherwise the prior risk is preserved (never lowered) via
+/// `max_residual_risk`, exactly as before this pass existed.
+///
+/// High is reserved for scrub *failure* / unredactable findings:
+/// - [`RedactionReport::key_finding_detected`] on the scrub pass (keys cannot
+///   be rewritten in place), or
+/// - any hit on the post-scrub residual scan (content that survived scrub).
+///
+/// A scrub-pass [`RedactionReport::blocked_secret_detected`] alone does **not**
+/// force High: that flag means a secret was found and removed. It flows
+/// through `derived_risk` as Medium so a proven-complete assessment can
+/// actually downgrade High → Medium (the contract #185 documented but which
+/// the previous `findings.blocked_secret_detected → High` short-circuit
+/// made unreachable for the dominant secret-bearing case). See issues
+/// #219 / #210.
+fn resolve_post_scrub_risk(
+    prior_risk: ResidualPiiRisk,
+    derived_risk: ResidualPiiRisk,
+    assessment: &PostScrubAssessment,
+) -> ResidualPiiRisk {
+    if assessment.findings.key_finding_detected
+        || assessment.residual_findings.blocked_secret_detected
+        || assessment.residual_findings.key_finding_detected
+    {
         return ResidualPiiRisk::High;
+    }
+    if assessment.can_downgrade() {
+        derived_risk
+    } else {
+        max_residual_risk(prior_risk, derived_risk)
+    }
+}
+
+fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
+    // Unredactable object-key findings still force High — keys cannot be
+    // rewritten without risking sibling collisions, so there is no scrub
+    // success to annotate.
+    if report.key_finding_detected {
+        return ResidualPiiRisk::High;
+    }
+
+    // PII / secrets the pass actually found and removed raise the floor to
+    // Medium regardless of what the consent flags claim. A contributor who
+    // under-reports risk should not land Accepted/Low just because the flags
+    // are clean; the pass has direct evidence the flags are wrong.
+    //
+    // `blocked_secret_detected` is included here (via counts, or alone) as
+    // Medium, not High: the detector's match ranges are collected and then
+    // `apply_redaction_ranges` removes them. Successful scrub is an
+    // annotation on a reviewable record, not terminal rejection. High is
+    // produced only by `key_finding_detected` above, or by a residual
+    // post-scrub scan hit in [`resolve_post_scrub_risk`]. Issue #219.
+    if report.blocked_secret_detected
+        || !report.counts.is_empty()
+        || !report.pii_labels_present.is_empty()
+    {
+        return ResidualPiiRisk::Medium;
     }
 
     if consent.message_text_included || consent.tool_payloads_included {
@@ -2810,10 +3817,10 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
+            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -3072,6 +4079,7 @@ fn side_effect_for(
     match event_type {
         TraceContributionEventType::UserMessage
         | TraceContributionEventType::AssistantMessage
+        | TraceContributionEventType::Reasoning
         | TraceContributionEventType::Feedback => SideEffectLevel::None,
         TraceContributionEventType::RoutingDecision => SideEffectLevel::None,
         TraceContributionEventType::ToolResult => SideEffectLevel::None,
@@ -4172,6 +5180,27 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_only_constructor_ignores_inherited_backend() {
+        use super::DeterministicTraceRedactor;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes process-environment mutation across
+        // every env-touching test in this crate.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
+        let has_filter = redactor.attached_privacy_filter().is_some();
+        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(!has_filter);
+        assert!(!redacted.contains("/Users/preview/private"));
+    }
+
+    #[test]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
@@ -4221,8 +5250,7 @@ mod tests {
         };
         use std::sync::Arc;
         let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::try_default()
-            .expect("default redactor")
+        let redactor = DeterministicTraceRedactor::bare()
             .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi);
         let mut report = RedactionReport::default();
         let mut summary = None;
@@ -4256,8 +5284,7 @@ mod tests {
         use super::{DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport};
         use std::sync::Arc;
         let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::try_default()
-            .expect("default redactor")
+        let redactor = DeterministicTraceRedactor::bare()
             .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
         let mut report = RedactionReport::default();
         let mut summary = None;
@@ -4341,7 +5368,7 @@ mod tests {
     #[test]
     fn redact_text_strips_broadened_secret_shapes() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // JWT (three base64url segments)
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
         let (out, rep) = r.redact_text(&format!("Authorization: Bearer {jwt}"));
@@ -4357,7 +5384,7 @@ mod tests {
     #[test]
     fn redact_text_removes_entire_pem_block_not_just_header() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234secretbody5678\nabcDEFghiJKL==\n-----END RSA PRIVATE KEY-----";
         let (out, rep) = r.redact_text(&format!("here is a key:\n{pem}\ntrailing"));
         assert!(
@@ -4375,7 +5402,7 @@ mod tests {
     #[test]
     fn redact_text_catches_orphan_pem_header_without_end() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAsecretbytes";
         let (out, _) = r.redact_text(truncated);
         assert!(
@@ -4387,7 +5414,7 @@ mod tests {
     #[test]
     fn contextual_entropy_redacts_unknown_key_after_cue() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // opaque high-entropy token, no known prefix, but preceded by a cue
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let (out, rep) = r.redact_text(&format!("api_key: {secret}"));
@@ -4396,23 +5423,528 @@ mod tests {
     }
 
     #[test]
-    fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
+    fn contextual_entropy_redacts_unspaced_assignment() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        // Same secret and cue as the spaced case above; only the space is gone.
+        // The cue is inside the candidate, so the window check cannot see it.
+        for text in [
+            format!("api_key={secret}"),
+            format!("password={secret}"),
+            // Compound names are the common real shape in an env dump.
+            format!("OPENAI_API_KEY={secret}"),
+            format!("x-api-key={secret}"),
+            format!("TRACE_SERVICE_ACCESS_TOKEN={secret}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(secret), "cue-glued secret survived: {out}");
+            assert!(
+                rep.blocked_secret_detected,
+                "glued secret did not set blocked_secret_detected: {text}"
+            );
+        }
+    }
+
+    // `contextual_entropy_keeps_outer_cue_when_inner_value_is_short` (a
+    // "password: api_key=<12-char value>" case) was removed here: the
+    // whole-token reading that catches it is [`has_secret_cue`]'s pre-existing
+    // cue-window check running against `candidate.start()`, which is
+    // unchanged by this pass's `=`-split addition and already caught this
+    // shape before it. Verified by reverting the split addition in
+    // `contextual_entropy_secret_ranges` back to a single whole-token read and
+    // confirming the case above still redacts. A genuinely split-dependent
+    // case needs the value to be reached ONLY via a split re-anchor, which
+    // `contextual_entropy_redacts_unspaced_assignment` and
+    // `contextual_entropy_still_redacts_credential_named_tokens_when_glued`
+    // already cover (self-cue immediately before the value, invisible to the
+    // whole-token window).
+
+    #[test]
+    fn contextual_entropy_redacts_cue_named_values_consistently_across_spellings() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Opaque cursors carry the `token` cue and are now redacted in the
+        // glued spelling too. That is over-redaction of non-secret content,
+        // which the redaction policy accepts: over-redaction is tolerable,
+        // under-redaction is the defect. It also makes the two spellings
+        // agree, since the spaced form is already redacted today.
+        let cursor = "eyJvZmZzZXQiOjEwMCwic29ydCI6ImFzYyJ9==";
+        for text in [
+            format!("page_token: {cursor}"),
+            format!("page_token={cursor}"),
+        ] {
+            let (out, _) = r.redact_text(&text);
+            assert_ne!(out, text, "cue-named value not redacted: {text}");
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_still_redacts_credential_named_tokens_when_glued() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for name in ["access_token", "refresh_token", "client_secret"] {
+            let (out, rep) = r.redact_text(&format!("{name}={secret}"));
+            assert!(!out.contains(secret), "{name} glued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_split_restores_the_identifier_allowlist() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // None of these has a cue before the whole candidate (the key name is
+        // glued to the value, so the candidate itself starts at the key
+        // name), so `redact_text` alone cannot tell whether the value
+        // survived because a split re-anchor found it and the allowlist
+        // correctly excluded it, or because no cue was ever found for it at
+        // all -- the old, pre-split detector produces the same "untouched"
+        // output for the latter reason, which is why an earlier version of
+        // this test (asserting only on `redact_text`'s output) passed
+        // unchanged on the pre-split code and proved nothing about the split
+        // path. Assert directly on the split position instead: a cue IS
+        // found there, and the allowlist excludes the narrowed value anyway.
+        //
+        // Content-hash hex is deliberately absent: #193 row 4 redacts cued
+        // lowercase hex ≥32 (including 40/64 shas). UUID and prefixed IDs
+        // stay allowlisted even when cued (~105k structural IDs vs ~20 real
+        // secrets in the prototype scan).
+        for text in [
+            "token=550e8400-e29b-41d4-a716-446655440000",
+            "api_key=550e8400-e29b-41d4-a716-446655440000",
+            "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
+        ] {
+            let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
+            assert!(
+                has_secret_cue(text, split),
+                "split position is not reached by a cue: {text}"
+            );
+            assert!(
+                !is_cued_secret(text, split, text.len(), true, None),
+                "split reading did not apply the identifier allowlist to the \
+                 narrowed value: {text}"
+            );
+            // End to end: the identifier must also survive the full pass.
+            let (out, _) = r.redact_text(text);
+            assert_eq!(out, text, "structural identifier was redacted: {out}");
+        }
+    }
+    #[test]
+    fn contextual_entropy_reads_past_junk_assignments_to_reach_the_cue() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Readings are not capped. A cap would let an attacker push the real
+        // cue past it with junk `k0=k1=...` prefixes and keep the secret,
+        // which the fail-closed rule forbids.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for count in [7usize, 8, 20, 64] {
+            let prefix: String = (0..count).map(|i| format!("k{i}=")).collect();
+            let (out, rep) = r.redact_text(&format!("{prefix}api_key={secret}"));
+            assert!(
+                !out.contains(secret),
+                "secret survived behind {count} junk assignments: {out}"
+            );
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_measures_material_beyond_the_sample_window() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // A value whose entropy sits past ENTROPY_SAMPLE_BYTES. The whole-token
+        // reading measures the whole token, so the spaced form keeps the
+        // decision it had before sampling existed; the re-anchored reading
+        // samples from the END, where a glued value lives, so the glued form is
+        // covered too. Sampling from the front instead published both.
+        let opaque: String = (0..4000)
+            .map(|index| {
+                const ALPHABET: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                ALPHABET[(index * 7 + 3) % ALPHABET.len()] as char
+            })
+            .collect();
+        let padding = "a".repeat(ENTROPY_SAMPLE_BYTES);
+        for text in [
+            format!("api_key: {padding}{opaque}"),
+            format!("api_key={padding}{opaque}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(&opaque),
+                "material beyond the sample window was published"
+            );
+            assert!(rep.blocked_secret_detected);
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_measures_both_ends_of_a_long_value() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // A single sample anchor has a blind spot at the opposite end. These
+        // three arrangements put the opaque material at the start, the end, and
+        // either side of a flat middle; all must be treated as secrets.
+        let opaque: String = (0..4000)
+            .map(|index| {
+                const ALPHABET: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                ALPHABET[(index * 7 + 3) % ALPHABET.len()] as char
+            })
+            .collect();
+        let flat = "a".repeat(ENTROPY_SAMPLE_BYTES);
+        for body in [
+            format!("{opaque}{flat}"),
+            format!("{flat}{opaque}"),
+            format!("{}{}{}", &opaque[..1000], flat, &opaque[1000..]),
+        ] {
+            for text in [format!("api_key: {body}"), format!("api_key={body}")] {
+                let (out, rep) = r.redact_text(&text);
+                assert_ne!(out, text, "long opaque value was published");
+                assert!(rep.blocked_secret_detected);
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_finds_a_secret_between_sample_windows_on_a_long_candidate() {
+        use super::*;
+        // A fixed number of windows spread evenly across a long candidate
+        // leaves a gap between windows that grows with the candidate's
+        // length: at ~500 KB with 16 fixed 512-byte windows the gap is
+        // roughly 33 KB, far wider than any real secret. An opaque value
+        // placed in that gap, surrounded by low-entropy filler, was never
+        // sampled at all. Use the glued (self-cue) form so the reading that
+        // measures this is the bounded, windowed one
+        // (`entropy_sample_bits`), not the whole-token unbounded reading.
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let filler = "a".repeat(250_000);
+        let body = format!("{filler}{secret}{filler}");
+        let text = format!("api_key={body}");
+        let (out, rep) = r.redact_text(&text);
+        assert!(
+            !out.contains(secret),
+            "secret buried in the middle of a long low-entropy candidate survived"
+        );
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Thousands of separate glued assignments, at the sidecar input limit.
+        // Each one contributes a range, and comparing every new range against
+        // every accumulated range was quadratic: a megabyte produced tens of
+        // thousands of ranges and on the order of a billion comparisons.
+        let unit = "api_key=Zx9Qk2Lm7Pv4Rt8Wy1 ";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_ne!(out, payload, "assigned values were published");
+        assert!(rep.blocked_secret_detected);
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "many-assignment input took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_on_equals_dense_input() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // At only 1024 repetitions these payloads are far too small to
+        // distinguish "entropy is bounded per reading" from "entropy is
+        // gated behind the cheap checks": both the sampled-but-ungated and
+        // the gated-and-sampled implementations finish quickly at this
+        // scale, so this only guards the sampling bound added earlier in
+        // this pass's history, not the ordering fixed below.
+        for payload in [
+            "QUJDREVGR0hJSktMTU5PUFFS=".repeat(1024),
+            "api_key=aaaa".repeat(1024),
+        ] {
+            let started = std::time::Instant::now();
+            let _ = r.redact_text(&payload);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "equals-dense input took {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_entropy_gates_on_cue_before_entropy_on_equals_dense_input_near_max_size() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Every `=` in the input starts another reading in
+        // `contextual_entropy_secret_ranges`, and the regex class
+        // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
+        // spanning nearly the whole input, so a payload at the sidecar's 1
+        // MiB input limit produces on the order of half a million readings.
+        // There is no cue word anywhere in "x=", so `is_cued_secret` must
+        // reject every one of them on the cheap length/cue/allowlist checks
+        // BEFORE computing entropy: computing entropy first, even a bounded
+        // sample, on every one of half a million readings is the CPU
+        // denial-of-service this test guards against. 1024 repetitions (the
+        // test above) is far too small to show the difference; this uses the
+        // real accepted maximum.
+        let unit = "x=";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        assert_eq!(
+            payload.len(),
+            PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
+        );
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out, payload,
+            "no cue anywhere in the payload, nothing should be redacted"
+        );
+        assert!(!rep.blocked_secret_detected);
+        // A loose tripwire for the ordering regression, not a benchmark:
+        // computing entropy before checking for a cue on this input took far
+        // longer than this bound; gating on the cue first keeps it well
+        // under even in an unoptimised build on slow CI.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "equals-dense input with no cue anywhere took {elapsed:?}; entropy is likely being \
+             computed before the cheap cue/length/allowlist gates"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_stays_bounded_when_a_cue_repeats_densely_through_a_long_candidate() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // Gating entropy on `has_secret_cue` (the fix above) only removes the
+        // cost when there is no cue at all. An attacker can trivially make a
+        // cue precede nearly every `=` in one long candidate just by
+        // repeating cue text, so the cheap gate alone does not bound cost:
+        // if each of those readings independently rescanned the whole
+        // remaining candidate for entropy, cost would still be quadratic in
+        // the number of repetitions, only gated on "has a cue" instead of
+        // "has an `=`". This candidate has no real secret anywhere (repeated
+        // cue text plus filler is not opaque), so nothing should be flagged,
+        // but the pass must still finish quickly -- it can only do that by
+        // reusing one per-candidate entropy profile across every reading
+        // instead of rebuilding it per `=`.
+        let unit = "api_key=";
+        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let started = std::time::Instant::now();
+        let (out, rep) = r.redact_text(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out, payload,
+            "no real secret in this payload, nothing should be redacted"
+        );
+        assert!(!rep.blocked_secret_detected);
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "cue-dense candidate with no real secret took {elapsed:?}; entropy is likely being \
+             recomputed from scratch per `=` instead of via a cached per-candidate profile"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_keeps_cue_name_when_redacting_assigned_value() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let (out, _) = r.redact_text(&format!("api_key={secret}"));
+        // The field name is diagnostic, not sensitive: keep it readable.
+        assert!(
+            out.contains("api_key="),
+            "cue name was consumed with the value: {out}"
+        );
+        assert!(!out.contains(secret));
+    }
+
+    #[test]
+    fn contextual_entropy_spares_ids_and_hashes_and_uncued_tokens() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
         // message id after a cue-shaped word must NOT be redacted (allowlisted prefix)
         let (o1, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
         assert!(
             o1.contains("msg_01ABCDEFghijklmnopqrstuvwx"),
             "allowlisted id got redacted: {o1}"
         );
-        // git sha after cue must survive (hex len 40)
+        // git sha with NO secret cue nearby must survive. Bare "key" is not
+        // in the cue list; cued shas are redacted under #193 row 4 (covered
+        // separately).
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let (o2, _) = r.redact_text(&format!("key {sha}"));
-        assert!(o2.contains(sha), "git sha got redacted: {o2}");
+        let (o2, _) = r.redact_text(&format!("commit {sha}"));
+        assert!(o2.contains(sha), "uncued git sha got redacted: {o2}");
         // high-entropy token with NO cue nearby must survive (avoids shredding base64 content)
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
+    }
+
+    /// #193 decision matrix for the shapes deferred by #187.
+    ///
+    /// Defects (must redact): row 2 short cued opaque, row 4 cued lowercase
+    /// hex ≥32. Deliberate survivals (must not redact): row 1 zero-separator
+    /// glue, row 3 UUID even when cued, sub-threshold entropy. Row 5
+    /// (spaced padding) is covered by the windowed-entropy tests above.
+    /// Rows 6–7 live in `redaction.rs` (structured JSON).
+    #[test]
+    fn contextual_entropy_applies_cued_secret_shape_decisions() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Row 1 — Accept, documented. No separator means no boundary without
+        // splitting inside arbitrary identifiers; FP cost is too high.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("secret={hex40}"),
+            format!("api_key: {hex64}"),
+            format!("api_key={hex64}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Sub-threshold entropy — still not opaque enough, even when cued.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
+    }
+
+    /// False-positive budget for the #193 row 2 / row 4 loosenings.
+    ///
+    /// Each fixture is a shape that must NOT be redacted after the floor and
+    /// hex-allowlist changes. If a future tweak makes any of these fire, the
+    /// FP cost has moved and needs an explicit decision — do not "fix" by
+    /// deleting the fixture.
+    #[test]
+    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // Uncued content hashes / shas must still survive (row 4 narrows the
+        // allowlist to the *cued* case only; uncued path never reached it).
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("commit {sha40}"),
+            format!("digest {sha64}"),
+            format!("blob {sha64} verified"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_eq!(out, text, "uncued hash was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // UUID stays allowlisted even when cued (row 3).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
+        }
+
+        // Prefixed structural IDs stay allowlisted even when cued.
+        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
+
+        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
+        // rate on `api_key: deadbeef`-style short hex dominates recall here.
+        for sha in ["deadbee", "deadbeef"] {
+            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
+            assert!(
+                out.contains(sha),
+                "short git sha was redacted (FP budget): {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Low-entropy short values after a cue must survive (row 2 lowers
+        // length, not the entropy floor).
+        for text in [
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            "secret: none1234",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Sub-floor length even with a cue and high opacity — still too short.
+        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
+        assert_eq!(out, "api_key=Zx9Qk2L");
+
+        // Uncued short opaque tokens must survive (candidate class is wider
+        // now, but the cue gate is the FP control).
+        let short = "Q7vM2xP9sL4nR8k";
+        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
+        assert!(
+            out.contains(short),
+            "uncued short opaque was redacted: {out}"
+        );
+        assert!(!rep.blocked_secret_detected);
+    }
+
+    /// This pass's re-anchoring after `=` only covers unspaced *assignment*
+    /// glue (`api_key=<secret>`). It documents that boundary against the
+    /// pre-existing evasions/exclusions rather than leaving it assumed.
+    /// Shape-level redact-vs-accept decisions for the remaining gaps live in
+    /// `contextual_entropy_applies_cued_secret_shape_decisions` (#193).
+    #[test]
+    fn contextual_entropy_documents_the_glued_assignment_boundary() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Zero-separator glue: no `=` between the cue word and the value,
+        // so there is nothing for this pass's re-anchoring to split on.
+        // Accepted as deliberate under #193 row 1.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
+        // as not opaque enough, even when cued and long enough.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
 
     /// Regression: the redaction report's own metric-key literals (as
@@ -4428,7 +5960,7 @@ mod tests {
     #[test]
     fn contextual_entropy_spares_its_own_report_metric_labels() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         for label in REPORT_METRIC_LABELS {
             let json_like = format!("\"secret:{label}\":1");
             let (out, rep) = r.redact_text(&json_like);
@@ -4441,5 +5973,1012 @@ mod tests {
                 "report metric label {label:?} wrongly tripped the fail-closed guard"
             );
         }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn sample_envelope_with_event_content(content: &str) -> super::TraceContributionEnvelope {
+        use super::*;
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some(content.to_string()),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn backstop_reredacts_prose_and_marks_pipeline() {
+        use crate::trace_contribution::*;
+        struct Stub;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for Stub {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if text.contains("jane@example.com") {
+                    // Mirrors NearAiPrivacyFilterAdapter::apply_spans: report.counts
+                    // uses the "privacy_filter:{label}" key while summary.by_label
+                    // uses the bare label for the SAME span, as two parallel tallies.
+                    let mut report = RedactionReport::default();
+                    report.increment("privacy_filter:private_email");
+                    report.add_pii_label("private_email");
+                    Ok(Some(SafePrivacyFilterRedaction {
+                        redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
+                        summary: SafePrivacyFilterSummary {
+                            schema_version: 1,
+                            output_mode: "redacted_text_only".into(),
+                            span_count: 1,
+                            by_label: std::collections::BTreeMap::from([(
+                                "private_email".into(),
+                                1,
+                            )]),
+                            decoded_mismatch: false,
+                        },
+                        report,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let mut env = sample_envelope_with_event_content("email jane@example.com now");
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert!(
+            env.events[0]
+                .redacted_content
+                .as_deref()
+                .unwrap()
+                .contains("[REDACTED:private_email]")
+        );
+        assert!(
+            env.privacy
+                .redaction_pipeline_version
+                .contains("near-ai-pii-backstop-v1")
+        );
+        assert!(
+            env.privacy
+                .pii_labels_present
+                .iter()
+                .any(|l| l == "private_email")
+        );
+        // report.counts (report-keyed) must be folded into redaction_counts exactly
+        // once, not doubled by also folding summary.by_label (which counts the same
+        // span under the bare label).
+        assert_eq!(
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(env.privacy.redaction_counts.get("private_email"), None);
+        // The summary itself must still be preserved, disjoint from redaction_counts.
+        let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
+        assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
+        // Idempotent suffix: running again does not double-append.
+        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.privacy
+                .redaction_pipeline_version
+                .matches("near-ai-pii-backstop-v1")
+                .count(),
+            1
+        );
+        // Second pass finds no more "jane@example.com" (already redacted), so the
+        // Stub returns None and the count stays at 1 — never doubled by summary
+        // folding on either pass.
+        assert_eq!(
+            env.privacy
+                .redaction_counts
+                .get("privacy_filter:private_email")
+                .copied(),
+            Some(1)
+        );
+    }
+
+    /// Builds a JSON value nested `depth` levels deep, used to trip the
+    /// residual scan's own depth budget without going anywhere near
+    /// `serde_json`'s recursion limit (which the old code relied on
+    /// implicitly - see the depth-budget finding this closes).
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn deeply_nested_json(depth: usize) -> serde_json::Value {
+        let mut value = serde_json::json!("deep leaf");
+        for _ in 0..depth {
+            value = serde_json::json!([value]);
+        }
+        value
+    }
+
+    /// Test 7 (required test list): when the residual scan itself cannot
+    /// complete - here, a depth budget overrun rather than a literal
+    /// serialization error, since `serde_json::to_value` silently maps
+    /// non-finite floats to `null` instead of erroring in this version -
+    /// the pass must force High rather than silently reporting clean. This
+    /// exercises the exact code path the serialization-failure branch
+    /// shares: `residual_envelope_scan` returning `Err`, not `Ok(default)`.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[test]
+    fn residual_scan_failure_forces_high_risk() {
+        use crate::trace_contribution::*;
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        // Nested well past RESIDUAL_SCAN_MAX_DEPTH, in a field the async
+        // structured-payload classifier never touches, so this isolates
+        // the residual-scan budget specifically.
+        env.replay
+            .expected_assertions
+            .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
+        let redactor = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Sanity: confirm the scan itself actually fails on this fixture,
+        // otherwise the test would vacuously pass for the wrong reason.
+        assert!(residual_envelope_scan(&redactor, &env).is_err());
+
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a residual scan that cannot complete must force High"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn residual_scan_failure_forces_high_in_async_backstop() {
+        use crate::trace_contribution::*;
+        struct NeverFindsAnything;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for NeverFindsAnything {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                Ok(None)
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        // Same isolation as the sync test above: nested in a field the
+        // structured-payload classifier never visits, so only the residual
+        // scan's own budget is exercised.
+        env.replay
+            .expected_assertions
+            .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
+
+        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "async backstop must force High when its residual scan cannot complete"
+        );
+    }
+
+    /// Test 3 (required test list): a classifier response that reports
+    /// "zero spans found" for everything it touched must NOT, by itself, be
+    /// trusted enough to downgrade a HIGH prior risk. Without corroborating
+    /// evidence (a healthy canary round-trip), the assessment stays
+    /// incomplete and the prior risk is preserved.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn zero_span_classifier_response_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct AlwaysEmptySpans;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for AlwaysEmptySpans {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                // Mirrors `{"data":[{"spans":[]}]}`: a real 200 response
+                // that found nothing, on both the real field AND the
+                // canary probe text. Text is returned unchanged.
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.to_string(),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 0,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report: RedactionReport::default(),
+                }))
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a zero-span response must not, by itself, downgrade a HIGH prior risk"
+        );
+    }
+
+    /// Test 4 (required test list): a classifier that returns `None` for
+    /// every field (no redaction ever produced, i.e. no result at all, not
+    /// even an explicit empty-spans response) must not be able to lower a
+    /// HIGH prior risk either. Same fail-closed floor as the zero-span case.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn missing_classifier_result_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct NeverFindsAnything;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for NeverFindsAnything {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                Ok(None)
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a classifier producing no result at all must not downgrade a HIGH prior risk"
+        );
+    }
+
+    /// A classifier that passes the canary but finds nothing in real content
+    /// must NOT downgrade a HIGH prior risk, even with complete coverage and
+    /// no budget overrun. Under the previous rule (healthy canary => trust the
+    /// emptiness) this case downgraded; findings are now the only evidence.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn canary_healthy_but_no_findings_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        struct CanaryHealthyButFindsNoRealPii;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let canary_values = synthetic_privacy_filter_canary_values();
+                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                    return Ok(None);
+                }
+                let mut redacted = text.to_string();
+                let mut report = RedactionReport::default();
+                for v in &canary_values {
+                    if redacted.contains(v.as_str()) {
+                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                        report.increment("privacy_filter:unknown");
+                        report.add_pii_label("unknown");
+                    }
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: redacted,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canary_values.len() as u32,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        // Ordinary content, well inside every budget, so coverage is
+        // complete: the only thing between this and a downgrade is whether a
+        // zero-finding pass counts as evidence.
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a healthy canary is liveness, not proof the content is clean"
+        );
+    }
+
+    /// Test 5 (required test list): exceeding the structured-payload budget
+    /// (depth, in this case) must mark coverage incomplete and refuse to
+    /// downgrade, even though nothing PII-shaped was ever found.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn structured_payload_budget_overrun_cannot_lower_high_risk() {
+        use crate::trace_contribution::*;
+        // A canary-aware stub: it DOES redact the synthetic canary probe
+        // (so a canary round-trip reports healthy) but never finds
+        // anything in real content. This isolates the budget/coverage gate
+        // from the zero-finding/canary gate (Task 2) - without a
+        // canary-aware stub, `NeverFindsAnything` would also fail the
+        // canary check on its own and the test would not distinguish
+        // "coverage incomplete" from "classifier result not useful".
+        struct CanaryHealthyButFindsNoRealPii;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for CanaryHealthyButFindsNoRealPii {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let canary_values = synthetic_privacy_filter_canary_values();
+                if !canary_values.iter().any(|v| text.contains(v.as_str())) {
+                    return Ok(None);
+                }
+                let mut redacted = text.to_string();
+                let mut report = RedactionReport::default();
+                for v in &canary_values {
+                    if redacted.contains(v.as_str()) {
+                        redacted = redacted.replace(v.as_str(), "[REDACTED:unknown]");
+                        report.increment("privacy_filter:unknown");
+                        report.add_pii_label("unknown");
+                    }
+                }
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: redacted,
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: canary_values.len() as u32,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        env.consent.message_text_included = false;
+        env.consent.tool_payloads_included = false;
+
+        // Nest well past STRUCTURED_PAYLOAD_MAX_DEPTH so the budget trips
+        // before any leaf is even reached.
+        let mut nested = serde_json::json!("deep leaf");
+        for _ in 0..(STRUCTURED_PAYLOAD_MAX_DEPTH + 4) {
+            nested = serde_json::json!([nested]);
+        }
+        env.events[0].structured_payload = nested;
+
+        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a structured-payload budget overrun must preserve, not lower, the prior risk"
+        );
+    }
+
+    /// Prose fields the scrub pass never submits to the classifier
+    /// (`replay.replay_notes` here) must block a downgrade when they carry
+    /// text. The classifier below DOES find real PII, so
+    /// `useful_classifier_result` is true and the structured budget is
+    /// untouched - coverage is the only thing standing between this envelope
+    /// and a downgrade.
+    ///
+    /// The note's PII is prose ("their mother Mary in Baltimore"), not a
+    /// patterned secret, so the deterministic residual scan cannot see it
+    /// either. Without the coverage gate it would ride through untouched
+    /// under a lowered risk label.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn uncovered_prose_field_blocks_downgrade() {
+        use crate::trace_contribution::*;
+        struct FindsRealEmail;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for FindsRealEmail {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if !text.contains("ada@example.com") {
+                    return Ok(None);
+                }
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:private_email");
+                report.add_pii_label("private_email");
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("ada@example.com", "[REDACTED:private_email]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let build = || {
+            let mut env = sample_envelope_with_event_content("mail ada@example.com");
+            env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+            env.consent.message_text_included = false;
+            env.consent.tool_payloads_included = false;
+            env
+        };
+
+        // Control: identical envelope with no uncovered prose. This must
+        // downgrade, which is what makes the assertion below non-vacuous -
+        // the only difference between the two cases is the note.
+        let mut clean = build();
+        clean.replay.replay_notes.clear();
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean)
+            .await
+            .unwrap();
+        assert_ne!(
+            clean.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "control: with full coverage and real findings this envelope downgrades"
+        );
+
+        let mut gapped = build();
+        gapped.replay.replay_notes =
+            vec!["they asked about their mother Mary in Baltimore".to_string()];
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped)
+            .await
+            .unwrap();
+        assert_eq!(
+            gapped.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "prose in a field the classifier never saw must block the downgrade"
+        );
+    }
+
+    /// Test 6 (required test list): string leaves AND object keys inside
+    /// `structured_payload` must reach the classifier. A leaf finding gets
+    /// redacted in place; a KEY finding cannot be safely rewritten (collision
+    /// risk), so it forces High instead.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn structured_payload_leaves_and_keys_reach_classifier() {
+        use crate::trace_contribution::*;
+        struct DetectsEmail;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for DetectsEmail {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if text.contains("alice@example.com") {
+                    let mut report = RedactionReport::default();
+                    report.increment("privacy_filter:private_email");
+                    report.add_pii_label("private_email");
+                    Ok(Some(SafePrivacyFilterRedaction {
+                        redacted_text: text
+                            .replace("alice@example.com", "[REDACTED:private_email]"),
+                        summary: SafePrivacyFilterSummary {
+                            schema_version: 1,
+                            output_mode: "redacted_text_only".into(),
+                            span_count: 1,
+                            by_label: std::collections::BTreeMap::from([(
+                                "private_email".into(),
+                                1,
+                            )]),
+                            decoded_mismatch: false,
+                        },
+                        report,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let mut env = sample_envelope_with_event_content("no prose PII here");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        env.events[0].structured_payload = serde_json::json!({
+            "reviewer_alice@example.com": "argument value with alice@example.com inside",
+        });
+
+        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env)
+            .await
+            .unwrap();
+
+        let payload = &env.events[0].structured_payload;
+        let value_text = payload
+            .get("reviewer_alice@example.com")
+            .and_then(Value::as_str)
+            .expect("key is left unrewritten by design");
+        assert!(
+            value_text.contains("[REDACTED:private_email]"),
+            "structured payload string leaf must reach the classifier and be redacted: {value_text}"
+        );
+        assert!(
+            !value_text.contains("alice@example.com"),
+            "the raw email must not survive in the leaf value: {value_text}"
+        );
+        // The key itself is a finding too (classifier flags it), but per the
+        // documented design choice it is not rewritten - it forces High
+        // instead of being silently dropped or losing sibling data to a
+        // rewrite collision.
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a classifier finding on an object KEY must force High"
+        );
+    }
+
+    /// Issue #219 / #210: `blocked_secret_detected` means found-and-removed.
+    /// That must raise Medium (reviewable), never High by itself.
+    #[test]
+    fn successfully_redacted_secret_is_medium_not_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([
+                ("secret".to_string(), 1),
+                ("secret:openai_api_key".to_string(), 1),
+            ]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must be Medium, not terminal High"
+        );
+    }
+
+    /// Key findings remain High — there is no scrub success to annotate.
+    #[test]
+    fn unredactable_key_finding_still_forces_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            key_finding_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::High,
+            "unredactable key findings must stay High"
+        );
+    }
+
+    /// Residual (post-scrub) secret hits still force High via the assessment
+    /// path — that is scrub *failure*, the polarity High is reserved for.
+    #[test]
+    fn residual_secret_hit_still_forces_high() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let residual_findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings,
+        };
+
+        assert_eq!(
+            resolve_post_scrub_risk(
+                ResidualPiiRisk::Medium,
+                ResidualPiiRisk::Medium,
+                &assessment
+            ),
+            ResidualPiiRisk::High,
+            "a post-scrub residual secret hit must force High"
+        );
+    }
+
+    /// Scrub-pass secret findings alone must not short-circuit High, so a
+    /// proven-complete assessment can actually land on the derived Medium
+    /// (the #185 downgrade contract that the old short-circuit made
+    /// unreachable for secret-bearing traces).
+    #[test]
+    fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings: RedactionReport::default(),
+        };
+
+        assert!(
+            assessment.can_downgrade(),
+            "clean residual + complete coverage must allow downgrade"
+        );
+        assert_eq!(
+            resolve_post_scrub_risk(ResidualPiiRisk::High, ResidualPiiRisk::Medium, &assessment),
+            ResidualPiiRisk::Medium,
+            "successful scrub must not pin High when residual scan is clean"
+        );
+    }
+
+    /// An envelope that differs only in residual privacy risk, for comparing
+    /// what the scorer does with each band.
+    fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
+        use super::*;
+
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: risk,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some("ordinary work".to_string()),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            // replayable: false is the realistic case for a recorded session,
+            // and it is what makes the medium band unreachable under the old
+            // formula: 0.20 of the weight is gone before anything is measured.
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    #[test]
+    fn privacy_gate_and_risk_score_are_the_same_signal() {
+        use super::*;
+        // The reason the subtractive term was redundant: these are
+        // complementary functions of one enum. If they ever stop being
+        // complementary, the argument for applying only the gate needs
+        // revisiting, so pin it.
+        for risk in [
+            ResidualPiiRisk::Low,
+            ResidualPiiRisk::Medium,
+            ResidualPiiRisk::High,
+        ] {
+            assert!(
+                (privacy_gate(risk) + privacy_risk_score(risk) - 1.0).abs() < f32::EPSILON,
+                "gate and risk score must remain complementary for {risk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn medium_risk_work_can_earn_credit() {
+        use super::*;
+        // Every medium-risk submission in the pilot corpus scored exactly
+        // zero - ten of ten - because risk was penalised twice: a 0.5 gate
+        // and a flat -0.30. Accepting medium-risk work while guaranteeing it
+        // earns nothing made the accept flag and the scorer disagree.
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "medium-risk work that is accepted must be able to earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    #[test]
+    fn dropping_the_double_penalty_leaves_low_risk_untouched() {
+        use super::*;
+        // The change is confined to the medium band, and this is why rather
+        // than a pinned number: the term that was removed evaluated to
+        // `0.60 * privacy_risk_score(Low)`, and that factor is zero. So the
+        // 331 low-risk submissions already in the corpus keep their scores
+        // by construction, not by coincidence of the current weights.
+        assert_eq!(
+            privacy_risk_score(ResidualPiiRisk::Low),
+            0.0,
+            "the removed subtraction was already inert for low risk"
+        );
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "low-risk work must still earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    #[test]
+    fn risk_bands_stay_ordered_and_high_earns_nothing() {
+        use super::*;
+        let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        let medium = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        let high = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::High));
+
+        assert!(
+            low.credit_points_estimate > medium.credit_points_estimate,
+            "low must still out-earn medium: {} vs {}",
+            low.credit_points_estimate,
+            medium.credit_points_estimate
+        );
+        assert_eq!(
+            high.credit_points_estimate, 0.0,
+            "high risk earns nothing regardless of quality"
+        );
+        // The blast-radius claim is about both outputs, not just credit.
+        // For high risk the gate is 0.0, so the quality terms contribute
+        // nothing and `raw` was negative before this change and is
+        // non-positive after; either way it clamps to 0. Asserting the score
+        // too keeps "only the medium band moves" honest.
+        // `submission_score` is the name this value carries once it reaches an
+        // envelope; on the scorecard itself the field is `online_score`
+        // (`let submission_score = scorecard.online_score` in
+        // `estimate_initial_credit`). The test was written against the
+        // downstream name, so it never compiled.
+        assert_eq!(
+            high.online_score, 0.0,
+            "high-risk submission score must clamp to zero either side of this change"
+        );
+    }
+
+    /// End-to-end: sync server re-scrub of an envelope whose only finding is a
+    /// successfully removed OpenAI key lands Medium, not High.
+    #[test]
+    fn rescrub_of_successfully_redacted_secret_lands_medium() {
+        use super::*;
+
+        let now = Utc::now();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some(format!("export OPENAI_API_KEY={secret}")),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        };
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        let content = env.events[0]
+            .redacted_content
+            .as_deref()
+            .expect("content present");
+        assert!(
+            !content.contains(secret),
+            "secret must be removed from stored content: {content}"
+        );
+        assert!(
+            env.privacy.redaction_counts.contains_key("secret")
+                || env
+                    .privacy
+                    .redaction_counts
+                    .keys()
+                    .any(|k| k.starts_with("secret:")),
+            "redaction telemetry must record the secret finding: {:?}",
+            env.privacy.redaction_counts
+        );
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must land Medium (quarantine-with-override), not High"
+        );
     }
 }

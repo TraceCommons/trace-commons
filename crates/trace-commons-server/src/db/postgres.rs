@@ -92,6 +92,17 @@ pub struct PgBackend {
     /// V36). `None` keeps the gate driver's enumeration path fail-closed.
     /// NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
+    /// enumeration query (server-side NEAR AI PII backstop). Built only when
+    /// `pii_backstop_driver_url` is configured; its DB user is the
+    /// operator-provisioned `trace_pii_backstop_driver` role (NOLOGIN base,
+    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
+    /// V38). `None` keeps the backstop driver's enumeration path fail-closed.
+    /// NEVER aliased to `pool`. Mirrors `gate_driver_pool`. Query methods
+    /// against this pool land in a follow-up task; this field is wired but
+    /// unused until then.
+    #[allow(dead_code)]
+    pii_backstop_driver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -104,6 +115,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_audit_events",
     "trace_credit_ledger",
     "trace_tombstones",
+    "trace_withdrawals",
     "trace_vector_entries",
     "trace_export_manifests",
     "trace_export_manifest_items",
@@ -248,10 +260,37 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small PII-backstop driver pool only when a
+        // distinct PII-backstop driver connection string is configured. This
+        // pool runs as the narrow `trace_pii_backstop_driver` role and is
+        // never aliased to the runtime pool. Mirrors the gate-driver pool
+        // above exactly.
+        let pii_backstop_driver_pool = match config.pii_backstop_driver_url() {
+            Some(pii_backstop_driver_url) => {
+                let pii_backstop_driver_config = pii_backstop_driver_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!(
+                            "invalid pii-backstop-driver PostgreSQL URL: {e}"
+                        ))
+                    })?;
+                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
+                    pii_backstop_driver_config,
+                    tokio_postgres::NoTls,
+                );
+                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
+                    .max_size(2)
+                    .build()?;
+                Some(pii_backstop_driver_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
             gate_driver_pool,
+            pii_backstop_driver_pool,
         })
     }
 
@@ -1153,6 +1192,31 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V38 ships with the server-side PII backstop. It is applied here
+        // out of numeric order relative to what a long-lived pilot may
+        // already hold (V39-V41 landed on main while this sat unmerged);
+        // that is safe because each block gates on its own version number,
+        // not on sequence position.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&38_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V38__trace_pii_backstop.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&38_i32, &"trace_pii_backstop"],
+                )
+                .await?;
+        }
         let already_applied = client
             .query_opt(
                 "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
@@ -1208,6 +1272,29 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&41_i32, &"trace_contributor_cap"],
+                )
+                .await?;
+        }
+        // V43 (not V42: that number is held by the unmerged
+        // db-authoritative-invites branch) adds the contributor-withdrawal
+        // tombstone and the trace_submissions.withdrawn_at column.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&43_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V43__trace_withdrawal.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&43_i32, &"trace_withdrawal"],
                 )
                 .await?;
         }
@@ -1676,6 +1763,35 @@ impl Database for PgBackend {
             min_cell_count: row.get("min_cell_count"),
             noise_seed_hash: row.get("noise_seed_hash"),
         })
+    }
+
+    async fn prune_leaderboard_snapshots(
+        &self,
+        window_label: &str,
+        metric: &str,
+        keep: i64,
+    ) -> Result<u64, DatabaseError> {
+        // Ordered by computed_at with snapshot_id as the tiebreak so the
+        // set kept is deterministic when two snapshots share a timestamp.
+        let client = self.trace_pool().get().await?;
+        let removed = client
+            .execute(
+                "DELETE FROM trace_leaderboard_snapshots
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND snapshot_id NOT IN (
+                        SELECT snapshot_id
+                          FROM trace_leaderboard_snapshots
+                         WHERE window_label = $1
+                           AND metric = $2
+                         ORDER BY computed_at DESC, snapshot_id DESC
+                         LIMIT $3
+                    )",
+                &[&window_label, &metric, &keep],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(removed)
     }
 
     async fn latest_leaderboard_snapshot(
@@ -3694,6 +3810,62 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_submissions_awaiting_pii_backstop(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_attempts: i32,
+        backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateWorkItem>, DatabaseError> {
+        let pool = self.pii_backstop_driver_pool.as_ref().ok_or_else(|| {
+            DatabaseError::Pool("pii-backstop-driver pool not configured".to_string())
+        })?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant context is set on this connection: the
+        // trace_pii_backstop_driver role's permissive cross-tenant SELECT
+        // policies (migration V38) are what authorize this read across every
+        // tenant's submissions.
+        let rows = client
+            .query(
+                // DISTINCT: a submission can carry more than one active
+                // submitted_envelope object ref, so the INNER JOIN can fan out
+                // to multiple rows per submission. Deduplicate to one work item
+                // per (tenant, submission) — otherwise a multi-ref submission
+                // wastes LIMIT slots and gets attempted concurrently more than
+                // once. `received_at` is included in the projection only so it
+                // is a legal DISTINCT + ORDER BY target; it is a per-submission
+                // constant, so it does not change dedup cardinality, and it is
+                // dropped when mapping to GateWorkItem.
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                 FROM trace_submissions s
+                 JOIN trace_object_refs o
+                   ON o.tenant_id = s.tenant_id
+                  AND o.submission_id = s.submission_id
+                  AND o.artifact_kind = 'submitted_envelope'
+                  AND o.invalidated_at IS NULL
+                  AND o.deleted_at IS NULL
+                 LEFT JOIN trace_pii_backstop a
+                   ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                 WHERE s.status = 'awaiting_pii_backstop'
+                   AND COALESCE(a.attempts, 0) < $1
+                   AND (a.last_attempt_at IS NULL
+                        OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                 ORDER BY s.received_at ASC
+                 LIMIT $4",
+                &[&max_attempts, &backoff_base_seconds, &now, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateWorkItem {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+            })
+            .collect())
+    }
+
     async fn list_submissions_with_gate_decision(
         &self,
         limit: i64,
@@ -3877,6 +4049,63 @@ impl Database for PgBackend {
                  -- picking an arbitrary row among ties on repeated reads.
                  ORDER BY submission_id, decided_at DESC, decision_id DESC",
                 &[&submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let perplexity_passed: bool = row.get("perplexity_passed");
+                let novelty_passed: bool = row.get("novelty_passed");
+                crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.get("submission_id"),
+                    credit_quality_micros: row.get("credit_quality_micros"),
+                    perplexity_micros: row.get("perplexity_micros"),
+                    novelty_score_micros: row.get("novelty_score_micros"),
+                    gate_passed: perplexity_passed && novelty_passed,
+                }
+            })
+            .collect())
+    }
+
+    async fn list_own_gate_decision_scores(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The `s.tenant_id = $1 AND
+        // s.auth_principal_ref = $2` predicates are what actually scope the
+        // read to the caller's own rows — both values come from the
+        // authenticated request context, never from a client-supplied
+        // parameter (see `trace_score_attestation` and the ingest binary's
+        // `score_attestation_handler`).
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (d.submission_id)
+                    d.submission_id,
+                    d.credit_quality_micros,
+                    d.perplexity_micros,
+                    d.novelty_score_micros,
+                    d.perplexity_passed,
+                    d.novelty_passed
+                 FROM trace_gate_decisions d
+                 JOIN trace_submissions s
+                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                 WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                 -- decision_id is the final, unique tiebreaker (mirrors
+                 -- list_scores_by_submission_ids) so decisions that share a
+                 -- decided_at sort deterministically instead of Postgres
+                 -- picking an arbitrary row among ties on repeated reads.
+                 ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                 LIMIT $3",
+                &[&tenant_id, &auth_principal_ref, &limit],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -4136,6 +4365,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -4151,6 +4381,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

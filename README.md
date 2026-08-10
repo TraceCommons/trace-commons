@@ -104,12 +104,16 @@ Authoritative contracts to read before changing anything substantive:
   contract
 - [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md) — phased
   open work and "Production Gap Queue"
+- [`docs/contributor-daemon-ipc-v1_1.md`](docs/contributor-daemon-ipc-v1_1.md) —
+  IPC contract between the contributor background daemon and the native
+  menu-bar and window applications
 
 ## Repository Layout
 
 ```
 crates/
 ├── trace-commons-protocol/      DTOs + redaction helpers shared with the client.
+├── trace-commons-gate-api/      Public gate contracts plus the reference scorer.
 ├── trace-commons-gate-enclave/  Scoring orchestrator (perplexity, embedder, vector index).
 │                                Two real perplexity backends: mistralrs (local CUDA,
 │                                feature `local-gpu-models`) and NEAR AI Cloud HTTP
@@ -186,6 +190,26 @@ time, and the resulting server-granted set — visible per-trace via
 consent on already-submitted traces are deferred to a future slice. See
 [`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`](docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md)
 for the full design.
+
+#### Contributing sessions from other harnesses
+
+The CLI reads Claude Code and Codex sessions natively. For any other harness
+covered by [Letta Trajectory](https://github.com/letta-ai/trajectory) —
+Hermes, Letta Code, OpenClaw, OpenHands, Pi, or Deep Agents — normalize the
+session first, then point the CLI at the result:
+
+```bash
+npx @letta-ai/trajectory > session.json
+trace-commons-contributor submit --trajectory session.json
+```
+
+`--trajectory` also accepts a directory, in which case every `*.json` and
+`*.jsonl` file directly inside it is offered. Trajectory files are never
+discovered implicitly; without `--trajectory` they are invisible to `list`
+and `submit`.
+
+Model reasoning is captured by default and redacted client-side like any
+other content. Pass `--no-reasoning` to exclude it from a submission.
 
 ### Run a Local Ingest Server
 

@@ -1,6 +1,7 @@
 //! Source model: the `TraceSource` trait, session/transcript types shared by
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -8,9 +9,11 @@ use sha2::{Digest, Sha256};
 
 pub mod claude_code;
 pub mod codex;
+pub mod trajectory;
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
+pub const SOURCE_TRAJECTORY: &str = "trajectory";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
@@ -26,6 +29,7 @@ pub struct SessionRef {
 pub enum SessionEventKind {
     User,
     Assistant,
+    Reasoning,
     ToolCall,
     ToolResult,
     Opaque,
@@ -43,7 +47,12 @@ pub struct SessionEvent {
 
 #[derive(Debug, Clone)]
 pub struct SessionTranscript {
-    pub source: &'static str,
+    /// Provenance: the harness that produced this session. For the native
+    /// adapters this equals the adapter name; for trajectory files it is the
+    /// file's own `meta.source`, so a session normalized from OpenHands is
+    /// attributed to OpenHands rather than to the trajectory reader.
+    /// Distinct from `SessionRef.source`, which is the adapter routing key.
+    pub source: Cow<'static, str>,
     pub agent_version: Option<String>,
     pub model: Option<String>,
     pub project: Option<String>, // basename
@@ -53,7 +62,10 @@ pub struct SessionTranscript {
     pub events: Vec<SessionEvent>,
 }
 
-pub trait TraceSource {
+/// `Send + Sync` because the background daemon holds source adapters across
+/// await points on a multi-threaded runtime. Every adapter is stateless --
+/// each one holds only a root path -- so this costs nothing.
+pub trait TraceSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
@@ -70,11 +82,31 @@ pub fn submission_id_for(session_hash: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, session_hash.as_bytes())
 }
 
+/// Deterministic pre-enrollment preview id derived from the session hash.
+///
+/// Real submission ids are UUIDv5. Preview ids use UUIDv8 with an explicit
+/// domain separator, so the UUID version bits make the two namespaces
+/// structurally disjoint even for the same session hash.
+pub fn preview_submission_id_for(session_hash: &str) -> uuid::Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"trace-commons:unenrolled-preview:v1\0");
+    hasher.update(session_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
 /// Construct the set of available `TraceSource` adapters, defaulting roots to
-/// `~/.claude/projects` and `~/.codex/sessions` when not overridden.
+/// `~/.claude/projects` and `~/.codex/sessions` when not overridden. The
+/// trajectory source is included only when an explicit path is supplied,
+/// because trajectory files have no conventional local store.
 pub fn all_sources(
     claude_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
+    trajectory_path: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
     let claude_root = claude_root.unwrap_or_else(|| {
         dirs::home_dir()
@@ -83,10 +115,13 @@ pub fn all_sources(
     });
     let codex_root =
         codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
-    let sources: Vec<Box<dyn TraceSource>> = vec![
+    let mut sources: Vec<Box<dyn TraceSource>> = vec![
         Box::new(claude_code::ClaudeCodeSource::new(claude_root)),
         Box::new(codex::CodexSource::new(codex_root)),
     ];
+    if let Some(path) = trajectory_path {
+        sources.push(Box::new(trajectory::TrajectorySource::new(path)));
+    }
     sources
 }
 
@@ -107,5 +142,15 @@ mod tests {
         let a = submission_id_for("sha256:aa");
         assert_eq!(a, submission_id_for("sha256:aa"));
         assert_ne!(a, submission_id_for("sha256:bb"));
+    }
+
+    #[test]
+    fn preview_ids_are_deterministic_and_disjoint_from_submission_ids() {
+        let preview = preview_submission_id_for("sha256:aa");
+        assert_eq!(preview, preview_submission_id_for("sha256:aa"));
+        assert_ne!(preview, preview_submission_id_for("sha256:bb"));
+        assert_ne!(preview, submission_id_for("sha256:aa"));
+        assert_eq!(preview.get_version_num(), 8);
+        assert_eq!(submission_id_for("sha256:aa").get_version_num(), 5);
     }
 }

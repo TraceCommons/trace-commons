@@ -47,6 +47,8 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url:
+            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
     })
 }
 
@@ -69,6 +71,7 @@ fn gate_driver_test_config() -> Option<DatabaseConfig> {
         ssl_mode: SslMode::Prefer,
         login_resolver_url: None,
         gate_driver_url: Some(SecretString::from(url)),
+        pii_backstop_driver_url: None,
     })
 }
 
@@ -198,6 +201,7 @@ fn expected_trace_rls_tables() -> Vec<&'static str> {
         "trace_ranking_preference_labels",
         "trace_ranking_calibration_runs",
         "trace_ranking_worker_runs",
+        "trace_pii_backstop",
     ]
 }
 
@@ -1457,6 +1461,10 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
             .expect("read NEAR account outbox production hardening migration"),
     );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
+            .expect("read PII backstop production hardening migration"),
+    );
     for table in expected_trace_rls_tables() {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
         assert!(
@@ -1476,6 +1484,10 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(
         &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
             .expect("read NEAR account outbox central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
+            .expect("read PII backstop central RLS policy migration"),
     );
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));

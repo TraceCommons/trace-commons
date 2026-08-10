@@ -131,6 +131,7 @@ procedure.
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
 | `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver`. See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
+| `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when `TRACE_COMMONS_PII_BACKSTOP_ENABLED=true` | (none, refuses boot) | Separate connection string for the narrow `trace_pii_backstop_driver` role pool (migration V38). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_pii_backstop_driver`. See [`pii-backstop.md`](pii-backstop.md). |
 
 ## 8. Auth / signed-token surface
 
@@ -169,6 +170,8 @@ procedure.
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS` | optional | — | Refuse epsilons above this. |
 | `TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED` | optional | `false` | Enables `/v1/community/*` profile, leaderboard, contributor, and analytics snapshot routes. Requires the DB mirror for real data. |
 | `TRACE_COMMONS_COMMUNITY_TENANT_IDS` | optional | — | Comma-separated tenant ids included in community snapshot recompute. Set this when the runtime DB role is non-bypassing and forced RLS would hide `trace_tenants` enumeration. |
+| `TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS` | optional | `approved_noise_mechanism` | What published corpus aggregates rest on. `approved_noise_mechanism` (default) withholds analytics until a calibrated mechanism is approved. `suppression_only` publishes under cell suppression alone — **no noise is applied and totals are not suppressed**, so at small corpus sizes the totals can still describe a handful of contributors closely. The min-cell floor is required either way and is never waived. Any user-facing description of the deployment must state which basis is in force. |
+| `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS` | optional | — | Recompute the community snapshot in-process on this interval. Unset, empty or `0` leaves recompute admin-triggered only. Minimum 60s. **Assumes a single writer**: the worker skips a tick when a snapshot is already fresh, but that is coordination, not mutual exclusion. On a multi-replica deployment either leave this unset and drive recompute from one elected scheduler, or accept duplicate aggregation work. Retention keeps the 96 most recent snapshots per window/metric. Without it the published leaderboard is only as fresh as the last manual POST to `/v1/admin/community/snapshots/recompute`. |
 | `TRACE_COMMONS_COMMUNITY_CORS_ORIGINS` | optional | `https://tracecommons.ai,http://localhost:8788,http://127.0.0.1:8788` | Comma-separated browser origins allowed to call `/v1/community/*`. Keep this to the public Pages site plus local preview origins. |
 
 ## 10. Credit / NEAR surface
@@ -322,6 +325,30 @@ runbook, including why the floor stays 0.
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Novelty-score threshold (micros) above which a submission is treated as a cache-cost duplicate and skipped. Clamped to `[0, 1000000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a scoring failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
+
+### 12b. Server-side NEAR AI PII backstop driver
+
+Off by default. When `TRACE_COMMONS_PII_BACKSTOP_ENABLED=true`, a Low-risk
+trace with `message_text_included` is held in corpus status
+`awaiting_pii_backstop` instead of `Accepted` until this driver re-redacts
+the message text via the NEAR AI privacy filter (§15) and releases it to
+`Accepted`/`Quarantined`. Folded into the perplexity-scoring driver task
+family; see [`pii-backstop.md`](pii-backstop.md) for the full enable
+checklist and drill.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_PII_BACKSTOP_ENABLED` | optional | `false` | Master toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. |
+| `TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE` | optional | `5` | Held submissions enumerated per tick. Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it (it stays held on `awaiting_pii_backstop`). Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a re-redaction failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when enabled | (none, refuses boot) | See §7 above and [`pii-backstop.md`](pii-backstop.md). |
+
+`TRACE_NEAR_AI_PRIVACY_API_KEY` (§15) is also required when this driver is
+enabled — the driver reuses the same NEAR AI privacy-filter credentials the
+submit-time filter uses. Fail-closed: enabling the backstop without either
+the driver database URL or the API key refuses at boot.
 
 ## 13. External worker adapter surface
 

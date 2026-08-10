@@ -30,6 +30,10 @@ pub enum TraceCorpusStatus {
     Received,
     Accepted,
     Quarantined,
+    /// Held state pending the NEAR AI PII backstop verdict. Never
+    /// consumer/export/credit eligible and never reviewer-eligible; distinct
+    /// from `Quarantined`. Wire form: `awaiting_pii_backstop`.
+    AwaitingPiiBackstop,
     Rejected,
     Revoked,
     Expired,
@@ -1892,6 +1896,28 @@ pub struct TraceScoreBySubmissionRow {
     pub gate_passed: bool,
 }
 
+/// Safe, label-only missing-control name returned when a storage backend has
+/// no real withdrawal implementation. Withdrawal deletes content and reports a
+/// distribution tier; a backend that cannot do either must refuse rather than
+/// degrade.
+pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
+
+/// The retained withdrawal tombstone (migration V43). Hash-only/label-only by
+/// construction: there is no content, no object path, and no contributor
+/// identity here, and there are no columns in the table to carry them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceWithdrawalRecord {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status the submission held immediately before
+    /// withdrawal, e.g. `quarantined` / `accepted`.
+    pub prior_status: String,
+    /// Which of the three withdrawal tiers applied. One of
+    /// `not_distributed`, `commons_not_distributed`, `commons_distributed`.
+    pub distribution_reach: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2009,6 +2035,66 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
         artifact_kind: TraceObjectArtifactKind,
     ) -> Result<Option<TraceObjectRefRecord>, DatabaseError>;
+
+    /// Invalidate every currently-active object ref of `artifact_kind` for a
+    /// submission by stamping `invalidated_at`. Used defensively by the PII
+    /// backstop driver to retire the pre-backstop `submitted_envelope` bytes
+    /// once the rescrubbed envelope ref is written, so no export-by-ref path
+    /// can resolve pre-backstop bytes. Returns the number of refs invalidated.
+    /// The default is a no-op (0); the Postgres store overrides it with a
+    /// scoped, tenant-context UPDATE.
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        Ok(0)
+    }
+
+    /// Atomically release a PII-backstop hold: flip `trace_submissions.status`
+    /// to the target Accepted/Quarantined status AND invalidate every active
+    /// `submitted_envelope` object ref for the submission, as a single
+    /// tenant-scoped operation. Both must succeed or neither may take effect:
+    ///
+    /// - If the status flip committed but the invalidation did not, the
+    ///   pre-backstop `submitted_envelope` ref stays active while the
+    ///   submission reads as released. By-ref consumers (e.g. export
+    ///   revalidation) select `SubmittedEnvelope` explicitly, so this would
+    ///   publish un-scrubbed, PII-bearing bytes with no re-enumeration path to
+    ///   heal it (enumeration only selects `awaiting_pii_backstop`).
+    /// - If the invalidation committed but the status flip did not, the
+    ///   submission becomes invisible to the driver's re-enumeration (which
+    ///   INNER JOINs an active `submitted_envelope` ref) while still reading
+    ///   `awaiting_pii_backstop` — it would stay held forever.
+    ///
+    /// Returns the number of object refs invalidated. The default
+    /// implementation composes the two existing calls non-atomically (used by
+    /// in-memory test doubles); the Postgres store overrides it with a single
+    /// transaction so the two effects are all-or-nothing.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            TraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
 
     async fn append_trace_derived_record(
         &self,
@@ -2172,6 +2258,90 @@ pub trait TraceCorpusStore: Send + Sync {
         submission_id: Uuid,
         vector_entry_id: Uuid,
     ) -> Result<u64, DatabaseError>;
+
+    // -- Contributor-initiated withdrawal (migration V43) --------------------
+    //
+    // Every method below defaults to a fail-closed error rather than a
+    // permissive no-op: a backend without a real implementation must refuse
+    // the withdrawal path with a safe missing-control name instead of
+    // reporting a success that deleted nothing or a distribution tier it
+    // could not actually determine.
+
+    /// Record a contributor withdrawal for `(tenant_id, submission_id)`.
+    ///
+    /// Idempotent by construction: the first call wins and later calls return
+    /// the ORIGINAL row unchanged, so `withdrawn_at`, `prior_status`, and
+    /// `distribution_reach` never drift across retries. Implementations MUST
+    /// also move the submission row out of consumer reach (status `revoked`,
+    /// `withdrawn_at` set, `purged_at` set because the content is gone) in the
+    /// same transaction as the tombstone insert.
+    async fn record_trace_withdrawal(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _withdrawn_at: DateTime<Utc>,
+        _prior_status: &str,
+        _distribution_reach: &str,
+    ) -> Result<TraceWithdrawalRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Read the withdrawal tombstone for `(tenant_id, submission_id)`, or
+    /// `None` when the submission has never been withdrawn.
+    async fn get_trace_withdrawal(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Option<TraceWithdrawalRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Count the export-manifest rows this submission was published in,
+    /// including manifests whose membership has already been invalidated —
+    /// an invalidated membership still means copies went out. Drives the
+    /// `commons_distributed` tier, so it must never under-report.
+    async fn count_trace_export_memberships(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Every vector-index entry id this submission participates in: the
+    /// `trace_vector_entries` rows, the legacy per-decision `vector_entry_id`,
+    /// and the per-chunk entries. Used to evict the trace from the gate
+    /// service's in-memory index, where the content survives in derived form
+    /// even after the DB rows are invalidated.
+    async fn list_trace_vector_entry_ids_for_submission(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Drop this submission's gate decisions out of any dedup cluster
+    /// (migration V40 columns back to NULL). Peer rows keep their own cluster
+    /// assignment; their `dedup_cluster_size` snapshot is refreshed by the
+    /// existing recluster pass.
+    async fn clear_trace_dedup_cluster_for_submission(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.to_string(),
+        ))
+    }
 
     async fn append_trace_audit_event(
         &self,
@@ -2571,6 +2741,28 @@ pub trait TraceCorpusStore: Send + Sync {
     ) -> Result<i32, DatabaseError> {
         Err(DatabaseError::Query(
             "bump_gate_evaluation_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Upsert per-`(tenant_id, submission_id)` PII-backstop attempt
+    /// bookkeeping used by the server-side NEAR AI PII backstop driver's
+    /// cost-control wrapper (Task 6). Increments the `attempts` counter and
+    /// stamps `last_attempt_at`/`last_error_label`, returning the new attempt
+    /// count. Implementations MUST scope the upsert by `tenant_id`
+    /// (migration V38 forces RLS on `trace_pii_backstop` bound to
+    /// `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn bump_pii_backstop_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        Err(DatabaseError::Query(
+            "bump_pii_backstop_attempt not implemented for this backend".to_string(),
         ))
     }
 

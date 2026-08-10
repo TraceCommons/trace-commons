@@ -36,7 +36,7 @@ human-readable normative companion.
 |---|---|---|
 | `schema_version` | `ironclaw.trace_contribution.v1` | The on-the-wire envelope schema. A submission whose `schema_version` does not match is treated as invalid (`schema_validity = 0`). |
 | `consent.policy_version` | `2026-04-24` | The consent policy the contributor agreed to. |
-| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v2` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v1`. |
+| `redaction_pipeline_version` | `ironclaw-deterministic-secret-path-v3` (+ optional suffixes) | The scrubbing pipeline that produced the envelope. Server re-scrub appends `+server-rescrub-v2`. |
 
 ## The contract in one paragraph
 
@@ -93,7 +93,11 @@ breaks the contributor's trust contract.
   `SafePrivacyFilterSummary` (redacted text + allow-listed label counts +
   warnings) may be carried.
 - **MUST** set `privacy.residual_pii_risk` honestly. Including message text or
-  tool payloads raises the floor to `medium`; a detected secret forces `high`.
+  tool payloads raises the floor to `medium`; a secret that was found **and
+  successfully redacted** also raises the floor to `medium` (reviewable
+  annotation, not terminal rejection). `high` is reserved for scrub *failure*:
+  an unredactable object-key finding, content that still matches after scrub
+  (residual scan), or a residual scan that could not complete.
 - **MUST** be hash-only in any identifier that could deanonymize: contributor
   identity is pseudonymous, the redaction is summarized as a `sha256:` hash, and
   no raw URLs, tokens, ARNs, account refs, or trace bodies appear in metadata
@@ -107,7 +111,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 |---|---|---|---|---|
 | `schema_version` | string | yes | client | Must equal `ironclaw.trace_contribution.v1`. |
 | `trace_id` | UUID | yes | client | Stable identity of the underlying trace. |
-| `submission_id` | UUID | yes | client | Identity of *this* submission; idempotency key for retries. |
+| `submission_id` | UUID | yes | client | Identity of *this* submission; idempotency key for retries. Derived from the underlying session hash on the contributor CLI so the same local session always maps to the same id. **Owned `quarantined` rows may be superseded** by a corrected envelope on the same id (remediation); `accepted` / `rejected` / `revoked` rows stay classic-idempotent. Do not mint a fresh id to "fix" a quarantine — that would create a second record competing with itself for novelty credit. |
 | `created_at` | RFC3339 datetime | yes | client | Envelope creation time. |
 | `ironclaw` | `IronclawTraceMetadata` | yes | client | Engine/channel provenance. |
 | `consent` | `ConsentMetadata` | yes | client | What the contributor agreed to. |
@@ -168,7 +172,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `redaction_pipeline_version` | string | yes | Pipeline that scrubbed the envelope. Server appends `+server-rescrub-v1`. |
+| `redaction_pipeline_version` | string | yes | Pipeline that scrubbed the envelope. Server appends `+server-rescrub-v2`. |
 | `redaction_counts` | map<string,u32> | optional | Per-label redaction counts (counts only, never content). |
 | `privacy_filter_summary` | `SafePrivacyFilterSummary?` | optional | Safe summary of a PII-filter pass. |
 | `pii_labels_present` | [string] | optional | Allow-listed labels that were found and redacted. |
@@ -177,9 +181,13 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 | `warnings` | [string] | optional | Human-readable redaction warnings. |
 
 **How `residual_pii_risk` is derived** (server recomputes this; clients must
-match): a detected secret forces `high`; otherwise including message text or
-tool payloads yields `medium`; otherwise `low`. Only `low`-risk accepted traces
-are eligible for consumer export.
+match): an unredactable object-key finding, a post-scrub residual secret hit,
+or a residual scan that cannot complete forces `high`. Otherwise a
+successfully-redacted secret, any other redaction finding, or including
+message text / tool payloads yields `medium`; otherwise `low`. Only
+`low`-risk accepted traces are eligible for consumer export. Successful
+redaction is an annotation on a reviewable record (Medium), not evidence
+against admission (High) — see issues #219 / #210.
 
 `SafePrivacyFilterSummary`: `schema_version`, `output_mode`, `span_count`,
 `by_label` (counts), `decoded_mismatch`. Never carries raw text or offsets.
@@ -287,7 +295,7 @@ Human-readable scorecard (`TraceValueScorecard`) with per-axis sub-scores
 
 When an envelope is submitted, the server:
 
-1. **Re-scrubs** the envelope (appends `+server-rescrub-v1` to the pipeline
+1. **Re-scrubs** the envelope (appends `+server-rescrub-v2` to the pipeline
    version, recomputes `redaction_hash` and `residual_pii_risk`, merges
    privacy warnings). Envelope contributor/tenant fields are treated as
    attribution only and normalized to the auth-derived tenant.
@@ -307,6 +315,24 @@ Both gates must pass. The resulting submission status is one of:
 | `revoked` | Contributor exercised revocation. | No; derived artifacts invalidated. |
 | `expired` | Retention window elapsed. | No. |
 | `purged` | Removed. | No. |
+
+### Quarantine remediation
+
+A contributor who owns a `quarantined` submission may re-POST a corrected
+envelope on the **same** `submission_id`. The server re-scrubs, reclassifies
+under current residual-risk rules, supersedes the stored artifact, clears any
+review lease, and preserves the original `received_at`. This is the way out of
+a quarantine caused by a bad client consent declaration or a subsequent rule
+change — not a fresh id.
+
+Operators (reviewer role) may also re-scrub stored quarantined envelopes in
+place without a new client upload:
+
+- `POST /v1/review/{submission_id}/rescrub`
+- `POST /v1/review/quarantine/rescrub` (bounded batch / dry-run)
+
+Both paths keep the content-addressed identity so a reclassified row does not
+compete with itself for novelty credit.
 
 Server-authored fields after gating: `embedding_analysis`, `value`,
 `value_card`, and (via evaluators) `process_evaluation`. Clients do not set
@@ -447,7 +473,10 @@ disagree, the crate is correct and this document must be corrected to match.
 
 Every field table, enum, mapping, and behavioral claim in this document was
 checked against `crates/trace-commons-protocol/src/trace_contribution.rs` and
-the server crate (`crates/trace-commons-server/src/`) on 2026-05-29.
+the server crate (`crates/trace-commons-server/src/`) on 2026-05-29. The
+redaction pipeline version constants below were re-checked on 2026-07-29, when
+they moved to `-v3` / `+server-rescrub-v2`; the rest of the audit still dates
+from 2026-05-29.
 
 - **Claim groups checked:** ~60 (covering 18 top-level envelope fields, every
   sub-struct, all enum variant sets, the consent→allowed-use matrix, the
@@ -456,7 +485,7 @@ the server crate (`crates/trace-commons-server/src/`) on 2026-05-29.
 - **Confirmed:** all schema field names, types, optionality, enum variants
   (incl. snake_case wire forms), version constants
   (`ironclaw.trace_contribution.v1`, policy `2026-04-24`,
-  `ironclaw-deterministic-secret-path-v2`, `+server-rescrub-v1`), the
+  `ironclaw-deterministic-secret-path-v3`, `+server-rescrub-v2`), the
   residual-risk derivation (secret→high, text/payloads→medium, else low), and
   the submission-status set (`accepted`/`quarantined`/`rejected`/`revoked`/
   `expired`/`purged`, all present in the server crate).

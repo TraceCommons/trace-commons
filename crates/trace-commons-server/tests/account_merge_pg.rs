@@ -107,6 +107,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         ssl_mode: SslMode::Prefer,
         login_resolver_url: DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url: DatabaseConfig::pii_backstop_driver_url_from_env(),
     })
 }
 

@@ -3,10 +3,11 @@
 //! Reads `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`
 //! session files and maps them into the shared `SessionTranscript` model.
 //! See `docs/superpowers/plans/` (Task 8) for the format facts and mapping
-//! rules; the key privacy invariant is that `Opaque` events (covering
-//! `reasoning`, `event_msg`, `web_search_call`, and any unknown payload/record
-//! type) carry only the record type string, never the record payload.
+//! rules; `Opaque` events (covering `event_msg`, `web_search_call`, and any
+//! unknown payload/record type) carry only a record-type marker, never a
+//! payload. `reasoning` items are captured as `Reasoning` events.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -92,10 +93,23 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
         let cwd = peek_cwd(&path);
+        // Derive the label from the cwd we just peeked, the same way
+        // `load_session` does further down. Leaving this `None` meant every
+        // Codex row in the picker rendered as `-`, so a contributor choosing
+        // what to submit could not tell one session from another - while the
+        // submitted envelope carried the correct project all along, because
+        // load_session computes it. `--project` filtering was unaffected too,
+        // since that matches on `cwd`. Only the thing a human reads was wrong.
+        let project = cwd
+            .as_deref()
+            .map(Path::new)
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
         sessions.push(SessionRef {
             source: SOURCE_CODEX,
             path,
-            project: None,
+            project,
             cwd,
             started_at,
             size_bytes: metadata.len(),
@@ -239,7 +253,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .map(|s| s.to_string());
 
     Ok(SessionTranscript {
-        source: SOURCE_CODEX,
+        source: Cow::Borrowed(SOURCE_CODEX),
         agent_version,
         model,
         project,
@@ -352,6 +366,34 @@ fn map_response_item(
                 token_counts: None,
             });
         }
+        "reasoning" => {
+            // Reasoning is captured as a first-class event and redacted
+            // through the same client-side pipeline as every other kind.
+            let mut parts = Vec::new();
+            for key in ["summary", "content"] {
+                if let Some(blocks) = payload.get(key).and_then(|v| v.as_array()) {
+                    for block in blocks {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // A reasoning item with no recoverable text carries no signal;
+            // emitting an empty event would only add noise to the transcript.
+            if !parts.is_empty() {
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Reasoning,
+                    timestamp,
+                    content: Some(parts.join("\n")),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                });
+            }
+        }
         other => {
             events.push(SessionEvent {
                 kind: SessionEventKind::Opaque,
@@ -384,6 +426,29 @@ mod tests {
     }
 
     #[test]
+    fn discovery_labels_the_project_not_just_load() {
+        // Discovery is what fills the picker a contributor chooses from. It
+        // used to hardcode `project: None`, so every Codex row rendered as
+        // `-` and one session was indistinguishable from another - even
+        // though `load()` derived the same value correctly from the same cwd,
+        // which is why submitted envelopes were right and only the list was
+        // wrong. Assert both agree.
+        let src = CodexSource::new(fixture_root());
+        let found = src.discover().unwrap();
+        assert_eq!(
+            found[0].project.as_deref(),
+            Some("otherproj"),
+            "discovery must label the project, not leave it for load()"
+        );
+        let loaded = src.load(&found[0]).unwrap();
+        assert_eq!(
+            found[0].project.as_deref(),
+            loaded.project.as_deref(),
+            "discovery and load must agree on the project label"
+        );
+    }
+
+    #[test]
     fn maps_response_items() {
         let src = CodexSource::new(fixture_root());
         let r = &src.discover().unwrap()[0];
@@ -396,15 +461,40 @@ mod tests {
             kinds,
             vec![
                 SessionEventKind::User,
-                SessionEventKind::Opaque, // reasoning
+                SessionEventKind::Reasoning,
                 SessionEventKind::ToolCall,
                 SessionEventKind::ToolResult,
                 SessionEventKind::Assistant,
             ]
         );
+        assert_eq!(t.events[1].content.as_deref(), Some("thinking about it"));
         assert_eq!(t.events[2].tool_name.as_deref(), Some("shell"));
         assert_eq!(t.events[2].structured["command"], "ls src/");
-        // Reasoning summary text must not survive.
-        assert!(!format!("{:?}", t.events).contains("thinking about it"));
+    }
+
+    #[test]
+    fn reasoning_items_become_reasoning_events() {
+        let payload = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": "planning the edit" }],
+            "content": [{ "type": "reasoning_text", "text": "file A needs a guard" }]
+        });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, SessionEventKind::Reasoning);
+        assert_eq!(
+            events[0].content.as_deref(),
+            Some("planning the edit\nfile A needs a guard")
+        );
+    }
+
+    #[test]
+    fn reasoning_items_with_no_text_are_dropped() {
+        let payload = serde_json::json!({ "type": "reasoning" });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&payload), None, &mut events);
+        assert!(events.is_empty());
     }
 }

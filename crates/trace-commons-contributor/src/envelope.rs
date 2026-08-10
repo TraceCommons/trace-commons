@@ -31,7 +31,8 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::ContributorConfig;
 use crate::source::{
-    SessionEvent, SessionEventKind, SessionTranscript, session_hash, submission_id_for,
+    SessionEvent, SessionEventKind, SessionTranscript, preview_submission_id_for, session_hash,
+    submission_id_for,
 };
 
 /// Envelopes larger than this are refused before submission (label-only
@@ -42,7 +43,10 @@ pub const MAX_ENVELOPE_BYTES: usize = 1_500_000;
 /// `near_ai_settings_from_env`, or injected directly by callers/tests so
 /// tests never have to touch process env (`set_var`/`remove_var` are
 /// `unsafe` in edition 2024 and racy under parallel test execution).
-#[derive(Debug, Clone)]
+/// `PartialEq` and the serde impls exist so the daemon can persist these in
+/// its 0600 settings file: a service-managed daemon has no shell environment
+/// to read them from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NearAiSettings {
     pub api_key: String,
     pub base_url: Option<String>,
@@ -88,14 +92,7 @@ pub fn build_redactor_with(
     transcript_cwd: Option<&str>,
     near_ai: Option<NearAiSettings>,
 ) -> Result<DeterministicTraceRedactor> {
-    let mut known_path_prefixes = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        known_path_prefixes.push(home.to_string_lossy().into_owned());
-    }
-    if let Some(cwd) = transcript_cwd {
-        known_path_prefixes.push(cwd.to_string());
-    }
-
+    let known_path_prefixes = known_path_prefixes(transcript_cwd);
     let redactor = DeterministicTraceRedactor::new(known_path_prefixes)
         .map_err(|_| anyhow::anyhow!("redactor-config-error"))?;
 
@@ -120,6 +117,26 @@ pub fn build_redactor_with(
         }
         Some(_) => Err(anyhow::anyhow!("unknown-pii-filter")),
     }
+}
+
+/// Build an environment-independent deterministic redactor for an
+/// unenrolled preview. This ignores both CLI/config filter selection and
+/// inherited backend variables by construction.
+pub fn build_deterministic_preview_redactor(
+    transcript_cwd: Option<&str>,
+) -> DeterministicTraceRedactor {
+    DeterministicTraceRedactor::deterministic_only(known_path_prefixes(transcript_cwd))
+}
+
+fn known_path_prefixes(transcript_cwd: Option<&str>) -> Vec<String> {
+    let mut known_path_prefixes = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        known_path_prefixes.push(home.to_string_lossy().into_owned());
+    }
+    if let Some(cwd) = transcript_cwd {
+        known_path_prefixes.push(cwd.to_string());
+    }
+    known_path_prefixes
 }
 
 /// Production entry point: thin wrapper over `build_redactor_with` that
@@ -230,22 +247,35 @@ pub fn envelope_has_residual_secret(
 /// networked privacy-filter pass on sessions that would be refused for size
 /// anyway; `envelope_size_ok` remains the authoritative post-redaction guard.
 pub fn raw_contribution_size_ok(raw: &RawTraceContribution) -> Result<usize> {
-    let bytes = serde_json::to_vec(raw).map_err(|_| anyhow::anyhow!("raw-serialize-failed"))?;
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    let size = raw_contribution_size(raw)?;
+    if size > MAX_ENVELOPE_BYTES {
         anyhow::bail!("session too large");
     }
-    Ok(bytes.len())
+    Ok(size)
+}
+
+/// Serialized size of a raw contribution before redaction.
+pub fn raw_contribution_size(raw: &RawTraceContribution) -> Result<usize> {
+    serde_json::to_vec(raw)
+        .map(|bytes| bytes.len())
+        .map_err(|_| anyhow::anyhow!("raw-serialize-failed"))
 }
 
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
-    let bytes =
-        serde_json::to_vec(envelope).map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    let size = envelope_size(envelope)?;
+    if size > MAX_ENVELOPE_BYTES {
         anyhow::bail!("session too large");
     }
-    Ok(bytes.len())
+    Ok(size)
+}
+
+/// Serialized size of a finished envelope before upload.
+pub fn envelope_size(envelope: &TraceContributionEnvelope) -> Result<usize> {
+    serde_json::to_vec(envelope)
+        .map(|bytes| bytes.len())
+        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))
 }
 
 /// Map a locally discovered transcript into a `RawTraceContribution` ready
@@ -255,6 +285,24 @@ pub fn build_raw_contribution(
     t: &SessionTranscript,
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
+) -> RawTraceContribution {
+    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash))
+}
+
+/// Build the same raw contribution shape with a disjoint preview id.
+pub fn build_preview_raw_contribution(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+) -> RawTraceContribution {
+    build_raw_contribution_with_id(t, cfg, now, preview_submission_id_for(&t.session_hash))
+}
+
+fn build_raw_contribution_with_id(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    submission_id: Uuid,
 ) -> RawTraceContribution {
     let mut feature_flags = BTreeMap::new();
     feature_flags.insert("agent".to_string(), t.source.to_string());
@@ -280,7 +328,7 @@ pub fn build_raw_contribution(
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
-        submission_id: submission_id_for(&t.session_hash),
+        submission_id,
         created_at: now,
         ironclaw: IronclawTraceMetadata {
             version: t
@@ -383,6 +431,11 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
         ),
         SessionEventKind::Assistant => (
             TraceContributionEventType::AssistantMessage,
+            e.content.clone(),
+            e.structured.clone(),
+        ),
+        SessionEventKind::Reasoning => (
+            TraceContributionEventType::Reasoning,
             e.content.clone(),
             e.structured.clone(),
         ),
@@ -690,5 +743,68 @@ mod tests {
 
         let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&small).is_ok());
+    }
+
+    #[test]
+    fn reasoning_events_map_to_the_reasoning_event_type() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Reasoning,
+            timestamp: None,
+            content: Some("weighing two approaches".to_string()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        };
+        let raw = super::raw_event_for(&event, chrono::Utc::now());
+        assert_eq!(
+            raw.event_type,
+            trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning
+        );
+        assert_eq!(raw.content.as_deref(), Some("weighing two approaches"));
+    }
+
+    #[test]
+    fn trajectory_session_builds_an_envelope_with_reasoning_and_no_cwd_leak() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // `cwd` is nested one level below the "secretproj" marker: the
+        // project field derived from the cwd basename ("workdir") is
+        // expected to survive into the raw contribution (same as every
+        // other source), but the full cwd path -- and therefore the
+        // "secretproj" marker itself -- must never appear in the
+        // serialized output. Only its hash (`cwd_hash`) may.
+        f.write_all(
+            br#"[
+              {"role":"meta","source":"openhands","cwd":"/home/dev/secretproj/workdir","model":"gpt-5"},
+              {"role":"user","content":"fix the bug","timestamp":"2026-07-10T12:00:00Z"},
+              {"role":"reasoning","content":"the guard clause is inverted","timestamp":"2026-07-10T12:00:01Z"},
+              {"role":"assistant","content":"Fixed it.","timestamp":"2026-07-10T12:00:02Z"}
+            ]"#,
+        )
+        .unwrap();
+
+        let src = crate::source::trajectory::TrajectorySource::new(path);
+        let r = &crate::source::TraceSource::discover(&src).unwrap()[0];
+        let t = crate::source::TraceSource::load(&src, r).unwrap();
+
+        assert_eq!(t.source.as_ref(), "openhands");
+
+        let cfg = test_config();
+        let raw = super::build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        assert!(
+            raw.events.iter().any(|e| {
+                e.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::Reasoning
+            }),
+            "reasoning must survive into the raw contribution"
+        );
+
+        let serialized = serde_json::to_string(&raw).unwrap();
+        assert!(
+            !serialized.contains("secretproj"),
+            "cwd must never be serialized"
+        );
     }
 }

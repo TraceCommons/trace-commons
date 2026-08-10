@@ -22,6 +22,8 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         login_resolver_url:
             trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url:
+            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -46,7 +48,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
     // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
     // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     Some(backend)
 }
 
@@ -2765,6 +2767,23 @@ async fn insert_account_test_submission(
     tenant_id: &str,
     auth_principal_ref: &str,
 ) -> Uuid {
+    insert_account_test_submission_with_status(
+        backend,
+        tenant_id,
+        auth_principal_ref,
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await
+}
+
+/// Same as [`insert_account_test_submission`], with an explicit corpus status
+/// so withdrawal-tier tests can stage `submitted` / `quarantined` rows.
+async fn insert_account_test_submission_with_status(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    status: StorageTraceCorpusStatus,
+) -> Uuid {
     use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
     let submission_id = Uuid::new_v4();
     let mut redaction_counts = BTreeMap::new();
@@ -2782,7 +2801,7 @@ async fn insert_account_test_submission(
             consent_scopes: vec!["debugging_evaluation".to_string()],
             allowed_uses: vec!["debugging".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
-            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            status,
             privacy_risk: "low".to_string(),
             redaction_pipeline_version: "deterministic-v1".to_string(),
             redaction_counts,
@@ -3219,6 +3238,506 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+// ---------------------------------------------------------------------------
+// Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
+// ---------------------------------------------------------------------------
+
+/// Stage a stub trace object at the production object-key layout for
+/// `(tenant, status, submission)` so withdrawal has real bytes to delete.
+fn stage_trace_object_file(
+    state: &AppState,
+    tenant_id: &str,
+    status: TraceCorpusStatus,
+    submission_id: Uuid,
+) -> PathBuf {
+    let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, b"{\"stub\":true}").expect("write stub object");
+    path
+}
+
+/// Read every column of the withdrawal tombstone row as text, so a test can
+/// assert the row leaks no content, path, or contributor identity.
+async fn read_withdrawal_tombstone_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<(String, String)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let rows = tx
+        .query(
+            "SELECT tenant_id, submission_id::TEXT AS submission_id,
+                    withdrawn_at::TEXT AS withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read tombstone");
+    tx.commit().await.expect("commit");
+    let mut out = Vec::new();
+    for row in rows {
+        for column in row.columns() {
+            let value: Option<String> = row.get(column.name());
+            out.push((column.name().to_string(), value.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// Read one scalar text column from a tenant-scoped table on the raw pool.
+async fn read_scalar_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    sql: &str,
+    submission_id: Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let row = tx
+        .query_opt(sql, &[&tenant_id, &submission_id])
+        .await
+        .expect("scalar read");
+    tx.commit().await.expect("commit");
+    row.and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_quarantined_deletes_content_and_is_idempotent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let object_path = stage_trace_object_file(
+        state.as_ref(),
+        "tenant-a",
+        TraceCorpusStatus::Quarantined,
+        owned,
+    );
+    assert!(object_path.exists(), "content is staged before withdrawal");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(first) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+    assert_eq!(first.submission_id, owned);
+    assert_eq!(first.prior_status, "quarantined");
+    assert_eq!(first.distribution_reach, "not_distributed");
+    assert!(!first.already_distributed);
+    assert!(
+        first.credit_retained,
+        "withdrawal must not claw back credit"
+    );
+
+    // The content is genuinely gone.
+    assert!(
+        !object_path.exists(),
+        "withdrawal must delete the stored content"
+    );
+
+    // Twice is a success, and reports the SAME tier and timestamp.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(second) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(second.withdrawn_at, first.withdrawn_at);
+    assert_eq!(second.distribution_reach, first.distribution_reach);
+    assert_eq!(second.prior_status, first.prior_status);
+
+    // The tombstone is hash-only/label-only: no content, no path, no identity.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", owned).await;
+    assert!(!columns.is_empty(), "a tombstone row is retained");
+    for (name, value) in &columns {
+        assert!(
+            !value.contains(&device_principal),
+            "tombstone column {name} must not carry contributor identity"
+        );
+        assert!(
+            !value.contains('/'),
+            "tombstone column {name} must not carry an object path"
+        );
+        assert!(
+            !value.contains("stub"),
+            "tombstone column {name} must not carry trace content"
+        );
+    }
+    let names = columns
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("submission_id"));
+    assert!(names.contains("withdrawn_at"));
+    assert!(names.contains("prior_status"));
+    assert!(names.contains("distribution_reach"));
+    assert!(
+        !names.contains("auth_principal_ref") && !names.contains("object_key"),
+        "the tombstone must not have identity or path columns at all"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("another contributor's trace -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+
+    // 404 and NOT 403: existence must not be disclosed.
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_ne!(unowned_err.0, StatusCode::FORBIDDEN);
+    assert_eq!(unowned_err.1.0.error, missing_err.1.0.error);
+
+    // The unowned row is untouched: no tombstone was written for it.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", unowned).await;
+    assert!(
+        columns.is_empty(),
+        "a rejected withdrawal must not write a tombstone"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_reports_each_distribution_tier() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Tier 1: not yet in the commons. `received` deliberately exercises a
+    // status the local corpus-status projection DROPS, proving withdrawal is
+    // driven by the storage record rather than that projection.
+    let received = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Received,
+    )
+    .await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier1) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(received))
+        .await
+        .expect("received withdraws");
+    assert_eq!(tier1.prior_status, "received");
+    assert_eq!(tier1.distribution_reach, "not_distributed");
+    assert!(!tier1.already_distributed);
+
+    // Tier 2: accepted into the commons, never used downstream.
+    let accepted =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier2) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(accepted))
+        .await
+        .expect("accepted withdraws");
+    assert_eq!(tier2.prior_status, "accepted");
+    assert_eq!(tier2.distribution_reach, "commons_not_distributed");
+    assert!(!tier2.already_distributed);
+
+    // Tier 3: accepted AND already published in an export manifest.
+    let exported =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let exported_record = backend
+        .get_trace_submission("tenant-a", exported)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+    let manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: None,
+            audit_event_id: None,
+            source_submission_ids: vec![exported],
+            source_submission_ids_hash: "sha256:manifest".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("manifest writes");
+    backend
+        .upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            submission_id: exported,
+            trace_id: exported_record.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Accepted,
+            source_hash_at_export: "sha256:source".to_string(),
+        })
+        .await
+        .expect("manifest item writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier3) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(exported))
+        .await
+        .expect("exported trace withdraws");
+    assert_eq!(tier3.distribution_reach, "commons_distributed");
+    assert!(
+        tier3.already_distributed,
+        "the API must say copies were already distributed"
+    );
+
+    // Going forward the item is excluded from the export.
+    let invalidation_reason = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT source_invalidation_reason FROM trace_export_manifest_items
+         WHERE tenant_id = $1 AND submission_id = $2",
+        exported,
+    )
+    .await;
+    assert_eq!(invalidation_reason.as_deref(), Some("revoked"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let record = backend
+        .get_trace_submission("tenant-a", owned)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+
+    let derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            trace_id: record.trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::Summary,
+            worker_version: "test-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:input".to_string(),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            task_success: None,
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            duplicate_score: None,
+            novelty_score: None,
+            cluster_id: None,
+        })
+        .await
+        .expect("derived record writes");
+
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:summary".to_string(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some("embedding:cluster".to_string()),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("vector entry writes");
+
+    let decision_id = Uuid::new_v4();
+    backend
+        .insert_trace_gate_decision(
+            "tenant-a",
+            StorageTraceGateDecisionRow {
+                decision_id,
+                submission_id: owned,
+                gate_policy_version: "test-policy".to_string(),
+                gate_version_hash: "sha256:gate".to_string(),
+                perplexity_micros: 7_000_000,
+                tail_fraction_micros: 0,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:evidence".to_string(),
+                attestation_chain_hash: "sha256:attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(vector_entry_id),
+                credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                chunks_capped: None,
+            },
+        )
+        .await
+        .expect("gate decision writes");
+    backend
+        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .await
+        .expect("dedup assignment writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(_) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+
+    // The vector index no longer returns the withdrawn trace.
+    let vector_status = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT status FROM trace_vector_entries
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(vector_status.as_deref(), Some("invalidated"));
+
+    // The dedup cluster no longer contains the withdrawn trace.
+    let dedup_cluster = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_cluster_id::TEXT FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_cluster, None,
+        "the withdrawn trace must leave its dedup cluster"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -3593,9 +4112,18 @@ fn test_state_with_submission_quota(
 }
 
 fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -> Arc<AppState> {
+    configure_unbounded_submit_limits_for_test(&tokens);
     let mut state = test_state(root);
     Arc::make_mut(&mut state).tokens = Arc::new(tokens);
     state
+}
+
+fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAuth>) {
+    for auth in tokens.values() {
+        let key =
+            submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+    }
 }
 
 fn mutate_test_signed_token_verifier(
@@ -3926,6 +4454,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
+    configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
         tokens: Arc::new(tokens),
@@ -3954,6 +4483,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -4010,6 +4542,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -4039,6 +4572,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -4082,6 +4616,46 @@ fn auth_headers(token: &str) -> HeaderMap {
         HeaderValue::from_str(&value).expect("valid auth header"),
     );
     headers
+}
+
+const SUBMIT_RATE_LIMIT_TOKEN_A: &str = "submit-rate-limit-token-a";
+const SUBMIT_RATE_LIMIT_TOKEN_B: &str = "submit-rate-limit-token-b";
+
+fn submit_rate_limit_test_state(root: PathBuf) -> Arc<AppState> {
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_A,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_B,
+        TokenRole::Contributor,
+    );
+    let mut state = test_state(root);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    state
+}
+
+fn submit_rate_limit_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn reset_account_rate_limiter_for_db_test() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+}
+
+fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
+    submit_principal_rate_limit_key(
+        tenant_id,
+        TraceAuthMethod::StaticToken,
+        &principal_storage_ref(token),
+    )
 }
 
 fn append_legacy_calibration_dataset_manifest_conflict(
@@ -4676,6 +5250,10 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
+    envelope.schema_version = "invalid.test.schema".to_string();
+}
+
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
     for event in &mut envelope.events {
         if event.event_type
@@ -4685,6 +5263,611 @@ fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, cont
             return;
         }
     }
+}
+
+// Server-pass risk derivation. The server re-scrub ran on every
+// submission but derived its risk from an empty RedactionReport, so
+// only a blocked secret could raise the classification.
+
+// Server-pass risk derivation. The server re-scrub ran on every
+// submission but threw away what it found: risk was recomputed from an
+// empty RedactionReport, so only a blocked secret could raise the
+// classification. PII the server itself found and redacted left the
+// envelope labelled Low, and Low maps straight to accepted storage.
+
+#[tokio::test]
+async fn server_rescrub_raises_risk_when_it_redacts_pii_the_client_under_reported() {
+    let mut envelope = sample_envelope().await;
+    // Consent flags claim no message text and no tool payloads, which
+    // is what drives the classification to Low. Then put contact
+    // details in the message anyway: this is the under-reporting case.
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_user_message(&mut envelope, "ping me at alice@personal-domain.test");
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    // Medium, not High: the pass found and removed the address, so the
+    // classification rises, but the residual scan must not then flag
+    // the redaction placeholder it just wrote and escalate to High.
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::Medium,
+        "server pass redacted PII, so it must not stay classified Low"
+    );
+}
+
+// The synchronous deterministic pass must NOT downgrade a prior HIGH.
+//
+// This test previously asserted the opposite, and that was a fail-open
+// found by security review: the pass set `useful_classifier_result: true`
+// on the reasoning that a pure function is self-evidencing. Being a pure
+// function establishes availability, not detection completeness. The prior
+// risk is HIGH because something already found cause for concern; the
+// deterministic patterns failing to match is a proxy for cleanliness, not
+// evidence of it, so a HIGH trace the regex suite missed would have been
+// published without any classifier examining it.
+#[tokio::test]
+async fn server_rescrub_does_not_downgrade_high_without_classifier_evidence() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    // Simulate a trace that arrived already classified HIGH (e.g. a
+    // contributor-side scan flagged it), but whose content is in fact
+    // clean once the server's own deterministic pass and residual scan
+    // run over it.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::High,
+        "the deterministic pass alone must never lower a prior HIGH: not matching \
+         its own patterns is not evidence the content is clean"
+    );
+}
+
+// The corollary of the test above: because the deterministic pass cannot
+// downgrade a prior HIGH, it cannot release a quarantined trace either.
+// Release requires classifier evidence, which only the async backstop path
+// can supply.
+#[tokio::test]
+async fn server_rescrub_alone_does_not_release_a_quarantined_trace() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "sanity: a HIGH-risk envelope must start out quarantined"
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        status_for_risk(envelope.privacy.residual_pii_risk, false),
+        TraceCorpusStatus::Quarantined,
+        "the deterministic pass must leave a quarantined trace quarantined"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
+    // Regression guard on the residual scan: the envelope is full of
+    // its own hashes, uuids and handles. None of them may be mistaken
+    // for secret material, or every trace quarantines.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        ResidualPiiRisk::Low,
+        "a clean metadata-only envelope must not be pushed above Low"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_redacts_feature_flag_keys_and_values() {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.ironclaw.feature_flags.insert(
+        "rollout_for_alice@personal-domain.test".to_string(),
+        "enabled for bob@personal-domain.test".to_string(),
+    );
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+    assert!(
+        !serialized.contains("alice@personal-domain.test"),
+        "feature-flag keys are attacker-controlled and must be scrubbed"
+    );
+    assert!(
+        !serialized.contains("bob@personal-domain.test"),
+        "feature-flag values are attacker-controlled and must be scrubbed"
+    );
+}
+
+#[tokio::test]
+async fn server_rescrub_redacts_free_text_side_channels() {
+    use trace_commons_protocol::trace_contribution::TraceFailureMode;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope
+        .outcome
+        .error_taxonomy
+        .push("auth failed for carol@personal-domain.test".to_string());
+    envelope.outcome.failure_modes.push(TraceFailureMode::Other(
+        "operator dave@personal-domain.test intervened".to_string(),
+    ));
+    envelope
+        .replay
+        .replay_notes
+        .push("rerun as erin@personal-domain.test".to_string());
+
+    rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+    for leaked in [
+        "carol@personal-domain.test",
+        "dave@personal-domain.test",
+        "erin@personal-domain.test",
+    ] {
+        assert!(
+            !serialized.contains(leaked),
+            "{leaked} survived the server re-scrub"
+        );
+    }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_is_per_authenticated_principal() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("invalid envelope reaches validation while under the rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal over the submission rate limit is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
+        Json(invalid),
+    )
+    .await
+    .expect_err("a different principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_handler_honors_explicit_test_override() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, 1, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("first request reaches validation under the configured test limit");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("second request exceeds the configured test limit");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let grant_db = Arc::new(DeviceGrantScopeTestDb::new());
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(grant_db as Arc<dyn Database>);
+    state_mut.require_tenant_access_grants = true;
+    let envelope = sample_envelope().await;
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, Json(error)) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grantless authenticated submission is forbidden under the rate limit");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error, "active tenant access grant required");
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await
+    .expect_err("grantless authenticated submission over the rate limit is denied early");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-collision-secret";
+    let state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let expires_at = (Utc::now() + Duration::minutes(5)).timestamp();
+    let token_a = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": expires_at
+        }),
+    );
+    let token_b = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a:b",
+            "role": "contributor",
+            "principal_ref": "c",
+            "exp": expires_at
+        }),
+    );
+    let principal_a = authenticate_ctx(state.as_ref(), &auth_headers(&token_a))
+        .expect("principal A authenticates");
+    let principal_b = authenticate_ctx(state.as_ref(), &auth_headers(&token_b))
+        .expect("principal B authenticates");
+    assert_eq!(
+        principal_a.principal_ref(),
+        principal_b.principal_ref(),
+        "the pre-existing signed-principal derivation collides for the review tuples"
+    );
+    let key_a = submit_principal_rate_limit_key(
+        principal_a.tenant_id(),
+        principal_a.safe_auth_method(),
+        principal_a.principal_ref(),
+    );
+    let key_b = submit_principal_rate_limit_key(
+        principal_b.tenant_id(),
+        principal_b.safe_auth_method(),
+        principal_b.principal_ref(),
+    );
+    assert_ne!(
+        key_a, key_b,
+        "tenant boundaries must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token_a),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("principal A reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&token_a),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal A exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(&token_b), Json(invalid))
+        .await
+        .expect_err("principal B retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-mixed-auth-secret";
+    let static_token = "signed:a:b:c";
+    let mut state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "a", static_token, TokenRole::Contributor);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let signed_token = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+        }),
+    );
+    let static_principal = authenticate_ctx(state.as_ref(), &auth_headers(static_token))
+        .expect("static principal authenticates");
+    let signed_principal = authenticate_ctx(state.as_ref(), &auth_headers(&signed_token))
+        .expect("signed principal authenticates");
+    assert_eq!(static_principal.tenant_id(), signed_principal.tenant_id());
+    assert_eq!(
+        static_principal.principal_ref(),
+        signed_principal.principal_ref(),
+        "the pre-existing principal derivation erases the authentication method"
+    );
+    let static_key = submit_principal_rate_limit_key(
+        static_principal.tenant_id(),
+        static_principal.safe_auth_method(),
+        static_principal.principal_ref(),
+    );
+    let signed_key = submit_principal_rate_limit_key(
+        signed_principal.tenant_id(),
+        signed_principal.safe_auth_method(),
+        signed_principal.principal_ref(),
+    );
+    assert_ne!(
+        static_key, signed_key,
+        "authentication methods must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&signed_token),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("signed principal reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&signed_token),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("signed principal exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(static_token), Json(invalid))
+        .await
+        .expect_err("static principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn db_backed_rate_limit_reset_waits_for_submit_test_lock() {
+    let lock = submit_rate_limit_test_lock().lock().await;
+    let mut reset = tokio::spawn(reset_account_rate_limiter_for_db_test());
+
+    tokio::time::timeout(StdDuration::from_millis(50), &mut reset)
+        .await
+        .expect_err("DB-backed reset must wait while a focused submit test owns the lock");
+
+    drop(lock);
+    tokio::time::timeout(StdDuration::from_secs(2), reset)
+        .await
+        .expect("DB-backed reset completes after the submit test releases the lock")
+        .expect("DB-backed reset task joins");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_caps_in_flight_requests() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key,
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let mut in_flight = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        let state = state.clone();
+        let envelope = invalid.clone();
+        in_flight.push(tokio::spawn(async move {
+            submit_trace_handler(
+                State(state),
+                auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+                Json(envelope),
+            )
+            .await
+        }));
+    }
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("in-flight submission reaches the test pause")
+            .expect("test pause sender remains open");
+    }
+
+    let (status, Json(error)) = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        ),
+    )
+    .await
+    .expect("request beyond the concurrency cap returns without entering the pause")
+    .expect_err("request beyond the concurrency cap is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(SUBMIT_PER_PRINCIPAL_CONCURRENCY as usize);
+    for task in in_flight {
+        let (status, _) = task
+            .await
+            .expect("in-flight submission task joins")
+            .expect_err("released invalid envelope reaches validation");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_releases_guard_when_request_completes() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, SUBMIT_PER_PRINCIPAL_LIMIT, 1);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key: key.clone(),
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let request = tokio::spawn(async move {
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        )
+        .await
+    });
+    tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+        .await
+        .expect("submission reaches the post-acquisition pause")
+        .expect("test pause sender remains open");
+
+    let handler_holds_only_slot = ACCOUNT_RATE_LIMITER.acquire(&key, 1).is_none();
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(1);
+    let (status, _) = request
+        .await
+        .expect("submission task joins")
+        .expect_err("released invalid envelope reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        handler_holds_only_slot,
+        "the in-flight handler must own the configured submission slot"
+    );
+    let _released_slot = ACCOUNT_RATE_LIMITER
+        .acquire(&key, 1)
+        .expect("completed request releases its submission slot");
+}
+
+#[tokio::test]
+async fn submit_authentication_precedes_rate_limit_accounting() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let principal_ref = principal_storage_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("unauthenticated submission is rejected");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        0
+    );
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("authenticated request reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        1
+    );
+}
+
+#[tokio::test]
+async fn submit_under_rate_limits_succeeds_end_to_end() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+
+    let Json(receipt) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission under both limits succeeds");
+
+    assert_eq!(receipt.status, "quarantined");
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .expect("submission record reads")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -4711,8 +5894,154 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     assert_eq!(record.status, TraceCorpusStatus::Quarantined);
     let stored = std::fs::read_to_string(temp.path().join(record.object_key))
         .expect("stored envelope reads");
-    assert!(stored.contains("server-rescrub-v1"));
+    // Reference the constant rather than the literal, so a pipeline-version
+    // bump does not require editing this assertion. What it is checking is
+    // that the server re-scrub stamp is present, not which revision it is.
+    assert!(
+        stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
+    );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+#[tokio::test]
+async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id() {
+    // #214: same content-addressed submission_id; owned quarantined rows are
+    // remediable. Fresh ids for the same session are deliberately not minted.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut first);
+    // Force Medium via consent flags so the first landing is quarantined.
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    let Json(first_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(first.clone()),
+    )
+    .await
+    .expect("first submission quarantines");
+    assert_eq!(first_receipt.status, "quarantined");
+    let prior = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let prior_received_at = prior.received_at;
+
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    // Keep the same submission_id — remediation supersedes in place.
+    assert_eq!(corrected.submission_id, first.submission_id);
+
+    let Json(remediated) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(corrected.clone()),
+    )
+    .await
+    .expect("owned quarantined remediation supersedes");
+    assert_eq!(remediated.status, "accepted");
+
+    let record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.privacy_risk, ResidualPiiRisk::Low);
+    assert_eq!(
+        record.received_at, prior_received_at,
+        "remediation must preserve the original receipt timestamp"
+    );
+    assert_eq!(record.auth_principal_ref, prior.auth_principal_ref);
+
+    // Without ownership, another principal still gets the conflict.
+    let blocked = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a-2"),
+        Json(corrected),
+    )
+    .await
+    .expect_err("other principal cannot remediate");
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+
+    // Accepted rows stay classic-idempotent: a further POST returns the
+    // stored receipt without rewriting.
+    let mut again = sample_envelope().await;
+    again.submission_id = first.submission_id;
+    make_metadata_only_low_risk(&mut again);
+    again.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
+        .await
+        .expect("accepted remains idempotent");
+    assert_eq!(idempotent.status, "accepted");
+    let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        final_record.privacy_risk,
+        ResidualPiiRisk::Low,
+        "idempotent retry must not rewrite an accepted record"
+    );
+}
+
+#[tokio::test]
+async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    // Path-bearing content → Medium → quarantined under default pilot config.
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("medium-risk submission quarantines");
+    assert_eq!(receipt.status, "quarantined");
+
+    // Flip the pilot override after the row is stuck, then operator-rescrub
+    // so the same stored envelope reclassifies under current rules.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let Json(result) = review_quarantine_rescrub_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest {
+            reason: Some("pilot backlog reclassify".into()),
+        }),
+    )
+    .await
+    .expect("operator rescrub succeeds");
+    assert_eq!(result.submission_id, envelope.submission_id);
+    assert_eq!(result.prior_status, "quarantined");
+    assert!(result.changed);
+    assert_eq!(result.status, "accepted");
+    assert_eq!(result.privacy_risk, "medium");
+
+    let updated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(updated.status, TraceCorpusStatus::Accepted);
+    assert_eq!(updated.privacy_risk, ResidualPiiRisk::Medium);
+
+    // Dry-run batch leaves the record untouched when already accepted... but
+    // accepted rows are skipped by the quarantined filter. Confirm contributor
+    // cannot call the reviewer route.
+    let denied = review_quarantine_rescrub_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest { reason: None }),
+    )
+    .await
+    .expect_err("contributor cannot operator-rescrub");
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -5737,6 +7066,48 @@ fn parses_analytics_min_cell_count() {
         error
             .to_string()
             .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+    );
+}
+
+#[test]
+fn community_snapshot_interval_defaults_to_admin_triggered_only() {
+    // Absent, empty and 0 all mean the same thing: no worker, recompute
+    // stays admin-triggered. That is what every deployment had before the
+    // worker existed, so it has to remain reachable without deleting the
+    // config line.
+    assert!(
+        parse_community_snapshot_interval("")
+            .expect("empty parses")
+            .is_none()
+            && parse_community_snapshot_interval("0")
+                .expect("zero parses")
+                .is_none()
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_a_pointlessly_tight_schedule() {
+    let error = parse_community_snapshot_interval("30")
+        .expect_err("below the floor should be rejected at boot, not at runtime");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
+    );
+    assert_eq!(
+        parse_community_snapshot_interval("900").expect("15 minutes parses"),
+        Some(StdDuration::from_secs(900))
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_nonsense() {
+    let error = parse_community_snapshot_interval("every 15 minutes")
+        .expect_err("a non-numeric interval is a config error");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
     );
 }
 
@@ -23387,6 +24758,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -23445,6 +24819,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         retention_maintenance_scheduler: None,
         vector_index_scheduler: None,
         perplexity_score_driver: None,
+        pii_backstop_driver: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -23474,6 +24849,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_near_config: None,
+        attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -47286,11 +48662,11 @@ async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_prof
     assert_eq!(scheduler.skipped_count, 1);
     assert_eq!(scheduler_value["eligible_count"].as_u64(), Some(0));
     assert_eq!(
-            scheduler_value["skipped_reason_counts"]
-                ["credit_settlement_central_issuer_profile_incomplete"]
-                .as_u64(),
-            Some(1)
-        );
+        scheduler_value["skipped_reason_counts"]
+            ["credit_settlement_central_issuer_profile_incomplete"]
+            .as_u64(),
+        Some(1)
+    );
     assert_eq!(
         scheduler_value["decisions"][0]["action"].as_str(),
         Some("skipped")
@@ -51403,6 +52779,54 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         outbox.near_call.args["source_list_hash"],
         serde_json::json!(line_item.source_list_hash)
     );
+}
+
+#[test]
+fn novelty_utility_credit_is_not_settlement_eligible() {
+    // Novelty is cheaply fabricated. The graded-credit design requires
+    // dedup, caps, reputation and delayed settlement before novelty can
+    // carry settlement-eligible value; none of those gate emission yet.
+    // Until they do, novelty credit accrues as a signal but must never
+    // reach on-chain issuance.
+    assert!(!trace_credit_event_type_is_settlement_eligible(
+        TraceCreditLedgerEventType::NoveltyUtility
+    ));
+}
+
+#[test]
+fn settlement_eligible_event_types_are_the_reviewed_set() {
+    // Pins the whole set so adding a new event type is a deliberate
+    // decision rather than something that inherits eligibility.
+    for event_type in [
+        TraceCreditLedgerEventType::BenchmarkConversion,
+        TraceCreditLedgerEventType::RegressionCatch,
+        TraceCreditLedgerEventType::TrainingUtility,
+        TraceCreditLedgerEventType::RankingUtility,
+    ] {
+        assert!(
+            trace_credit_event_type_is_settlement_eligible(event_type),
+            "{event_type:?} should stay settlement-eligible"
+        );
+    }
+    for event_type in [
+        TraceCreditLedgerEventType::NoveltyUtility,
+        TraceCreditLedgerEventType::ReviewerBonus,
+        TraceCreditLedgerEventType::AbusePenalty,
+    ] {
+        assert!(
+            !trace_credit_event_type_is_settlement_eligible(event_type),
+            "{event_type:?} should not be settlement-eligible"
+        );
+    }
+}
+
+#[test]
+fn novelty_utility_credit_points_delta_defaults_to_zero() {
+    // Emission pays a flat delta without consulting the credit_quality
+    // and contributor_cap signals that are computed and stored on every
+    // gate decision. Defaulting to zero keeps the accounting path warm
+    // without issuing value the quality signals never gated.
+    assert_eq!(DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA, 0.0);
 }
 
 #[test]
@@ -64575,6 +65999,68 @@ impl Database for PerplexityDriverTestDb {
             })
             .collect())
     }
+
+    /// In-memory analogue of the Postgres `list_own_gate_decision_scores`
+    /// read behind score attestations: joins each decision row to its
+    /// seeded submission (dropping decisions with no matching seeded
+    /// submission, like `list_contributor_cap_signals`), filters to the
+    /// requested `(tenant_id, auth_principal_ref)` — the caller-authenticated
+    /// identity, never a client-supplied filter — keeps the LATEST row per
+    /// submission by `(decided_at, decision_id)` (mirroring
+    /// `list_scores_by_submission_ids`), and projects the score fields.
+    async fn list_own_gate_decision_scores(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        limit: i64,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow>,
+        DatabaseError,
+    > {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let submissions = self.submissions.read().unwrap();
+        let mut latest: std::collections::HashMap<Uuid, &StorageTraceGateDecisionRow> =
+            std::collections::HashMap::new();
+        for (row_tenant_id, row) in decisions.iter() {
+            if row_tenant_id != tenant_id {
+                continue;
+            }
+            let owns_submission = submissions
+                .get(&(row_tenant_id.clone(), row.submission_id))
+                .is_some_and(|s| s.auth_principal_ref == auth_principal_ref);
+            if !owns_submission {
+                continue;
+            }
+            let candidate_key = (row.decided_at, row.decision_id);
+            match latest.get(&row.submission_id) {
+                Some(existing) if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                _ => {
+                    latest.insert(row.submission_id, row);
+                }
+            }
+        }
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow> =
+            latest
+                .into_values()
+                .map(|row| {
+                    let credit_quality_micros = credit
+                        .get(&(tenant_id.to_string(), row.decision_id))
+                        .map(|(q, _, _)| *q);
+                    trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                        submission_id: row.submission_id,
+                        credit_quality_micros,
+                        perplexity_micros: row.perplexity_micros,
+                        novelty_score_micros: row.novelty_score_micros,
+                        gate_passed: row.perplexity_passed && row.novelty_passed,
+                    }
+                })
+                .collect();
+        rows.sort_by_key(|row| row.submission_id);
+        rows.truncate(limit);
+        Ok(rows)
+    }
 }
 
 /// Build a `PerplexityDriverTestDb` seeded with `count` ungated submissions,
@@ -67396,6 +68882,497 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// Community publication privacy preconditions. The leaderboard path
+// published raw counts with a placeholder noise seed, suppression
+// disabled by default, and a single-tenant cohort. These lock the
+// fail-closed gate in place on both the write and read paths.
+
+// Community publication privacy preconditions. The leaderboard path
+// published raw counts with a placeholder noise seed, suppression
+// disabled by default, and a single-tenant cohort. These lock the
+// fail-closed gate in place on both the write and read paths.
+
+#[test]
+fn community_publication_blocks_when_min_cell_count_is_unset() {
+    // Absent config parses to 0, which disables suppression entirely.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        4,
+        true,
+    );
+    assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
+}
+
+#[test]
+fn community_publication_blocks_when_min_cell_count_is_one() {
+    // A threshold of 1 admits every opted-in row: the SQL HAVING
+    // clause is satisfied by a cell of size one.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        4,
+        true,
+    );
+    assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
+}
+
+#[test]
+fn community_roster_publishes_without_an_approved_noise_mechanism() {
+    // The whole point of the split. Everyone on the roster holds
+    // public_attribution consent: their handle and counts being public
+    // is what they asked for, so a mechanism that exists to protect
+    // people who made no such choice is not the control that applies.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "roster should publish on consent + cohort shape alone, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_analytics_still_blocks_where_the_roster_publishes() {
+    // Same inputs, opposite answer. If these two ever agree, the split
+    // has collapsed and analytics are riding out on the roster's gate.
+    let inputs = (2usize, 2usize, false);
+    let roster = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    let analytics = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    assert!(roster.is_empty());
+    assert_eq!(analytics, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn roster_payload_strips_aggregates_a_pregate_snapshot_still_carries() {
+    // The bug this exists to prevent, found in production: recompute
+    // writes analytics: null when they are withheld, but a snapshot
+    // written before that gate existed already has them populated. The
+    // roster's weaker gate would then hand out aggregates computed under
+    // no approved mechanism.
+    let stored = serde_json::json!({
+        "leaderboard": [{"display_handle": "someone", "rank": 1}],
+        "analytics": {"total_submissions": 41, "total_accepted": 40},
+    });
+    let redacted = redact_withheld_analytics(stored, &[COMMUNITY_NOISE_MECHANISM_CONTROL]);
+
+    assert_eq!(redacted["analytics"], serde_json::Value::Null);
+    assert_eq!(
+        redacted["privacy"]["analytics_withheld_controls"],
+        serde_json::json!([COMMUNITY_NOISE_MECHANISM_CONTROL]),
+        "a reader must be able to tell withheld from no activity"
+    );
+    // The roster itself is untouched: those people consented.
+    assert_eq!(redacted["leaderboard"][0]["display_handle"], "someone");
+}
+
+#[test]
+fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
+    let stored = serde_json::json!({"analytics": {"total_submissions": 41}});
+    let kept = redact_withheld_analytics(stored, &[]);
+    assert_eq!(kept["analytics"]["total_submissions"], 41);
+}
+
+fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSummary {
+    trace_commons_server::db::CorpusAnalyticsSummary {
+        total_submissions: 43,
+        total_accepted: 40,
+        total_rejected: 3,
+        accept_rate: 0.93,
+        novelty_histogram: vec![(0, 0), (100_000, 1), (200_000, 2), (300_000, 37)],
+        gate_outcomes: vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2),
+            ("perplexity_failed".to_string(), 1),
+            ("both_failed".to_string(), 0),
+        ],
+    }
+}
+
+#[test]
+fn publication_basis_defaults_to_requiring_a_mechanism() {
+    // Publishing without a mechanism must be something an operator opts
+    // into, never something a deployment falls into by leaving a variable
+    // unset or empty.
+    assert_eq!(
+        parse_community_analytics_publication_basis("").expect("empty parses"),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("approved_noise_mechanism").unwrap(),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("suppression_only").unwrap(),
+        CommunityAnalyticsPublicationBasis::SuppressionOnly
+    );
+    assert!(
+        parse_community_analytics_publication_basis("none").is_err(),
+        "an unrecognised basis must fail at boot rather than pick one"
+    );
+}
+
+#[test]
+fn suppression_only_waives_the_mechanism_but_never_the_cell_floor() {
+    // Under this basis cell suppression stops being one control among
+    // several and becomes the only thing between a published aggregate and
+    // a small group, so the floor is required, not relaxed.
+    assert!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            2,
+            1,
+            false,
+        )
+        .is_empty(),
+        "suppression_only should publish at min-cell 2 with one tenant and no mechanism"
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            1,
+            9,
+            true,
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT],
+        "the cell floor is never waived under suppression_only"
+    );
+}
+
+fn snapshot_row_with_privacy(
+    privacy: serde_json::Value,
+) -> trace_commons_server::db::LeaderboardSnapshotRow {
+    trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({ "privacy": privacy }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    }
+}
+
+#[test]
+fn a_malformed_publication_basis_falls_back_to_strict() {
+    // The serve gate parses the stored basis permissively and falls back to
+    // the strict one. That is deliberate: an unreadable provenance field must
+    // never be the reason aggregates publish. Pinned because the failure mode
+    // is silent by construction - nothing errors, it just gets stricter.
+    for malformed in [
+        serde_json::json!("banana"),
+        serde_json::json!(null),
+        serde_json::json!(7),
+        serde_json::json!({"nested": true}),
+    ] {
+        let row = snapshot_row_with_privacy(
+            serde_json::json!({"tenant_cohort_size": 9, "publication_basis": malformed}),
+        );
+        assert_eq!(
+            community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+            vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+            "a basis of {malformed} must be read as strict, not as permission to publish"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_keeps_the_basis_it_was_published_under() {
+    // The serve gate reads the stored snapshot, never live config, so
+    // changing the operator setting cannot retroactively re-license an
+    // artifact in either direction.
+    let permissive = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 1,
+        "publication_basis": "suppression_only",
+    }));
+    assert!(
+        community_snapshot_missing_controls(&permissive, CommunitySurface::Analytics).is_empty(),
+        "a snapshot published under suppression_only stays servable when config turns strict"
+    );
+
+    let strict = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 9,
+        "publication_basis": "approved_noise_mechanism",
+    }));
+    assert_eq!(
+        community_snapshot_missing_controls(&strict, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "a snapshot published under the strict basis is not loosened by permissive config"
+    );
+}
+
+#[test]
+fn a_pregate_snapshot_is_not_read_as_suppression_only() {
+    // The basis is absent on snapshots written before it existed. Defaulting
+    // those to the strict basis keeps an old artifact from being served as
+    // though someone had chosen to publish it without a mechanism.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"privacy": {"tenant_cohort_size": 9}}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "an absent basis must fall back to requiring a mechanism"
+    );
+}
+
+#[test]
+fn community_analytics_cells_below_the_floor_are_suppressed() {
+    // The floor gated whether analytics could publish, but nothing applied
+    // it to what was published: compute_corpus_analytics_summary takes no
+    // min-cell argument, so a bucket holding one record went out at its
+    // true count.
+    let mut summary = analytics_summary_fixture();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 2);
+
+    assert_eq!(suppressed, 4, "0, 1, 1 and 0 valued cells should all go");
+    assert_eq!(summary.novelty_histogram, vec![(200_000, 2), (300_000, 37)]);
+    assert_eq!(
+        summary.gate_outcomes,
+        vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2)
+        ]
+    );
+    // Totals are the top-level sums and are deliberately left alone.
+    assert_eq!(summary.total_submissions, 43);
+}
+
+#[test]
+fn a_floor_of_one_leaves_the_histogram_shape_intact() {
+    // A floor of 1 suppresses nothing by definition, and must not strip the
+    // empty buckets that give the distribution its shape. Getting this wrong
+    // would silently reshape every chart on the analytics page.
+    let mut summary = analytics_summary_fixture();
+    let before = summary.novelty_histogram.clone();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 1);
+
+    assert_eq!(suppressed, 0);
+    assert_eq!(summary.novelty_histogram, before);
+    assert_eq!(summary.gate_outcomes.len(), 4);
+}
+
+#[test]
+fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
+    // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
+    // person on the roster individually asked to be listed, so neither the
+    // cohort size nor a cell of one tells us anything about consent.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        1,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "a consented single-tenant roster should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_roster_still_blocks_a_zero_min_cell() {
+    // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
+    // contributors with nothing accepted in the window.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Roster,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            0,
+            2,
+            false
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_analytics_keeps_both_cohort_floors() {
+    // Everything the roster stopped enforcing is still enforced here,
+    // because these aggregates cover people who never opted into anything.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            1,
+            2,
+            true
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            2,
+            1,
+            true
+        ),
+        vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
+    );
+}
+
+#[test]
+fn community_publication_blocks_on_unapproved_noise_mechanism() {
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        4,
+        false,
+    );
+    assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn community_publication_blocks_single_tenant_cohort() {
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        1,
+        true,
+    );
+    assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
+}
+
+#[test]
+fn community_publication_reports_every_missing_control_at_once() {
+    // The pilot's actual configuration: no min-cell value, one tenant,
+    // placeholder seed. An operator should see all three, not just the
+    // first, so a single fix does not look like it unblocked the path.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        1,
+        false,
+    );
+    assert_eq!(
+        missing,
+        vec![
+            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
+            COMMUNITY_NOISE_MECHANISM_CONTROL,
+            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
+        ]
+    );
+}
+
+#[test]
+fn community_publication_allows_a_fully_configured_cohort() {
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        true,
+    );
+    assert!(
+        missing.is_empty(),
+        "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn no_noise_mechanism_is_approved_yet() {
+    // Guards against someone promoting the deterministic bounded
+    // jitter used elsewhere in this binary to "approved". It is keyed
+    // jitter, not a sensitivity-calibrated mechanism.
+    assert!(!community_noise_mechanism_approved(
+        COMMUNITY_LEADERBOARD_NOISE_SEED_HASH
+    ));
+    assert!(!community_noise_mechanism_approved(
+        "v1:bounded_jitter:abcd"
+    ));
+    assert!(!community_noise_mechanism_approved(""));
+}
+
+#[test]
+fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
+    // Snapshots already in the DB carry no privacy block. They must be
+    // treated as cohort-of-one and refused, not grandfathered in.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"leaderboard": []}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 0,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    let missing = community_snapshot_missing_controls(&row, CommunitySurface::Analytics);
+    assert_eq!(
+        missing,
+        vec![
+            TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT,
+            COMMUNITY_NOISE_MECHANISM_CONTROL,
+            TRACE_COMMONS_COMMUNITY_TENANT_IDS,
+        ]
+    );
+    // And the roster surface refuses it too, which is the point: the split
+    // must not become a way for a snapshot predating the privacy block to
+    // reach the public read path. It reports one control rather than two
+    // now that cohort size is an analytics concern, but a pre-gate snapshot
+    // records min_cell_count 0 and so is still refused.
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Roster),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
+    // min-cell and cohort are both satisfied from the stored snapshot,
+    // so the unapproved mechanism must be the only remaining block.
+    // That proves the cohort was read from the privacy block rather
+    // than defaulted to zero.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({
+            "privacy": {"tenant_cohort_size": 3},
+        }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
+    );
 }
 
 #[tokio::test]
@@ -76993,6 +78970,1976 @@ async fn revocation_enqueues_one_item_per_chunk_vector_entry() {
     assert_eq!(again, 0);
 }
 
+#[test]
+fn awaiting_pii_backstop_status_roundtrips_and_is_not_accepted() {
+    let s = TraceCorpusStatus::AwaitingPiiBackstop;
+    // Manual wire accessor mirrors the snake_case serde encoding.
+    assert_eq!(s.as_str(), "awaiting_pii_backstop");
+    let encoded = serde_json::to_string(&s).expect("encode status");
+    assert_eq!(encoded, "\"awaiting_pii_backstop\"");
+    let decoded: TraceCorpusStatus =
+        serde_json::from_str("\"awaiting_pii_backstop\"").expect("decode status");
+    assert_eq!(decoded, s);
+    // Held state must never be mistaken for the consumer-visible Accepted state.
+    assert_ne!(s, TraceCorpusStatus::Accepted);
+}
+
+// Task 4: PII backstop driver config. `TRACE_COMMONS_PII_BACKSTOP_ENABLED` is
+// unset in the default test process env, so the parse fn must return `None`
+// regardless of any other PII-backstop var. Run with --test-threads=1 like
+// the other env-var-driven config tests in this suite: a parallel test that
+// happens to set `TRACE_COMMONS_PII_BACKSTOP_ENABLED` would otherwise race
+// this one.
+#[test]
+fn pii_backstop_config_off_when_disabled() {
+    assert!(
+        parse_pii_backstop_driver_config_from_env()
+            .unwrap()
+            .is_none()
+    );
+}
+
+// Task 6: the driver's POST-backstop status transition is exactly
+// `status_for_risk` over the re-redacted envelope's residual risk. Low always
+// releases to Accepted; High always re-quarantines; Medium is gated on the
+// `accept_medium_risk_submissions` policy. A filter that fails to lower risk
+// therefore never silently accepts a still-risky trace. This is a pure-logic
+// check; the live re-redaction + release path is covered by Task 8.
+#[test]
+fn pii_backstop_target_status_follows_post_backstop_risk() {
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Low, false),
+        TraceCorpusStatus::Accepted
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::High, true),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, false),
+        TraceCorpusStatus::Quarantined
+    );
+    assert_eq!(
+        status_for_risk(ResidualPiiRisk::Medium, true),
+        TraceCorpusStatus::Accepted
+    );
+}
+
+// Task 7: the ingest hold decision. Only an Accepted, message-text-bearing
+// trace with the backstop driver enabled is held on `AwaitingPiiBackstop`;
+// flipping any one of the three conditions leaves the risk-derived status
+// unchanged. This is a pure-logic check; the full submit-handler + DB path
+// (that the held status is persisted and the trace stays out of the corpus)
+// is covered by Task 8.
+#[test]
+fn pii_backstop_hold_only_holds_accepted_message_text_when_enabled() {
+    // All three conditions true -> held.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, true),
+        TraceCorpusStatus::AwaitingPiiBackstop
+    );
+    // Backstop disabled -> unchanged (Accepted lands in the corpus as today).
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, false),
+        TraceCorpusStatus::Accepted
+    );
+    // No message text -> unchanged.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, false, true),
+        TraceCorpusStatus::Accepted
+    );
+    // Non-Accepted risk (Quarantined) is never rerouted, even with text + enabled.
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Quarantined, true, true),
+        TraceCorpusStatus::Quarantined
+    );
+}
+
+// Task 6: the per-tick tally starts empty and counts released vs. held items
+// independently.
+#[test]
+fn pii_backstop_tick_summary_defaults_and_tallies() {
+    let mut summary = PiiBackstopDriverTickSummary::default();
+    assert_eq!(summary.done, 0);
+    assert_eq!(summary.failed, 0);
+    summary.done += 2;
+    summary.failed += 1;
+    assert_eq!(summary.done, 2);
+    assert_eq!(summary.failed, 1);
+}
+
+// =======================================================================
+// Task 8: server-side NEAR AI PII backstop — end-to-end + release-gate
+// coverage. Tasks 1-7 were compile-only; these tests exercise the real
+// state transitions of the driver tick / process-one loop and prove the
+// held `AwaitingPiiBackstop` status is never consumer-visible.
+//
+// NEAR AI is mocked two ways:
+//   * `BackstopEmailStubAdapter` / `FailingBackstopAdapter` drive
+//     `process_one_pii_backstop` directly through the `PrivacyFilterAdapter`
+//     trait — deterministic, no env, no network. Used for the (a)/(b)
+//     process-one assertions.
+//   * A `wiremock` `MockServer` speaking the `/privacy/classify` contract
+//     backs the full `run_pii_backstop_driver_tick` path (adapter built from
+//     env, canary gate, enumeration, per-item bump). Used for the (a)/(b)/(c)
+//     tick-wrapper behavior. Env is serialized through `near_ai_env_lock()`.
+//
+// All tests here run in CI (no Postgres). A `#[ignore]` live-pg variant at
+// the end exercises the released-backstop trace through a
+// `require_object_refs` reader (the Task 7 finding) when
+// `TRACE_COMMONS_TEST_DATABASE_URL` is set.
+// =======================================================================
+
+/// Fail-atomicity marker used by the process-one fail test: an adapter that
+/// always errors, so `rescrub_envelope_prose_pii_with` returns before any
+/// envelope field is mutated and `process_one_pii_backstop` propagates the
+/// error without releasing the hold.
+struct FailingBackstopAdapter;
+
+#[async_trait::async_trait]
+impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for FailingBackstopAdapter {
+    async fn redact_text(
+        &self,
+        _text: &str,
+    ) -> Result<
+        Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+        trace_commons_protocol::trace_contribution::TraceContributionError,
+    > {
+        Err(
+            trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+                reason: "synthetic backstop failure".to_string(),
+            },
+        )
+    }
+}
+
+/// Prose-PII stub that removes exactly `needle`, tagging it `private_email`
+/// (a non-secret label, so post-backstop residual risk does not escalate to
+/// High). Mirrors `NearAiPrivacyFilterAdapter::apply_spans` book-keeping.
+struct BackstopEmailStubAdapter {
+    needle: String,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for BackstopEmailStubAdapter {
+    async fn redact_text(
+        &self,
+        text: &str,
+    ) -> Result<
+        Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+        trace_commons_protocol::trace_contribution::TraceContributionError,
+    > {
+        use trace_commons_protocol::trace_contribution::{
+            RedactionReport, SafePrivacyFilterRedaction, SafePrivacyFilterSummary,
+        };
+        if !text.contains(&self.needle) {
+            return Ok(None);
+        }
+        let report = RedactionReport {
+            counts: BTreeMap::from([("privacy_filter:private_email".to_string(), 1)]),
+            pii_labels_present: vec!["private_email".to_string()],
+            blocked_secret_detected: false,
+            ..Default::default()
+        };
+        Ok(Some(SafePrivacyFilterRedaction {
+            redacted_text: text.replace(&self.needle, "[REDACTED:private_email]"),
+            summary: SafePrivacyFilterSummary {
+                schema_version: 1,
+                output_mode: "redacted_text_only".to_string(),
+                span_count: 1,
+                by_label: BTreeMap::from([("private_email".to_string(), 1)]),
+                decoded_mismatch: false,
+            },
+            report,
+        }))
+    }
+}
+
+/// In-memory `Database` double for the PII backstop driver. Mirrors the shape
+/// of `PerplexityDriverTestDb` (every unrelated `TraceCorpusStore`/`Database`
+/// method is an unreachable stub) but overrides the methods the backstop path
+/// actually drives with real in-memory behavior: `upsert_trace_submission`,
+/// `append_trace_object_ref`, `update_trace_submission_status`,
+/// `invalidate_trace_object_refs_by_kind`, `list_submissions_awaiting_pii_backstop`,
+/// and `bump_pii_backstop_attempt`. Without these overrides the defaulted
+/// "not configured"/"not implemented" bodies would make the tick hit the error
+/// path and the tests would be vacuous.
+struct PiiBackstopDriverTestDb {
+    submissions:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
+    object_refs:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceObjectRefRecord>>,
+    gate_decisions: std::sync::RwLock<Vec<(String, StorageTraceGateDecisionRow)>>,
+    ungated: std::sync::RwLock<Vec<GateWorkItem>>,
+    derived_records: std::sync::RwLock<Vec<(String, StorageTraceDerivedRecord)>>,
+    gate_evaluation_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Authoritative corpus status per submission, updated by
+    /// `upsert_trace_submission` and `update_trace_submission_status`. The
+    /// backstop release flips `AwaitingPiiBackstop` -> `Accepted`/`Quarantined`.
+    statuses:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceCorpusStatus>>,
+    /// Object refs the driver appended on release (expected: a
+    /// `RescrubbedEnvelope`).
+    appended_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// Kinds the driver invalidated after release (expected: the pre-backstop
+    /// `SubmittedEnvelope`).
+    invalidated_kinds: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// Refs seeded as "active" at setup so `invalidate_trace_object_refs_by_kind`
+    /// can return a non-zero count for the pre-backstop ref.
+    seeded_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    /// The `awaiting_pii_backstop` backlog enumerated by the driver tick.
+    awaiting_pii_backstop: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Per-submission PII-backstop attempt bookkeeping bumped on redaction
+    /// failure.
+    pii_backstop_attempts:
+        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// When set, `release_pii_backstop_hold` simulates the invalidation half
+    /// of the atomic release failing (e.g. a transient DB error after the
+    /// status UPDATE would have applied). Neither the status flip nor the
+    /// invalidation bookkeeping may be observed in this case — that is
+    /// exactly the atomicity the fix under test provides.
+    fail_release_invalidation: std::sync::atomic::AtomicBool,
+}
+
+impl PiiBackstopDriverTestDb {
+    fn new() -> Self {
+        Self {
+            submissions: std::sync::RwLock::new(std::collections::HashMap::new()),
+            object_refs: std::sync::RwLock::new(std::collections::HashMap::new()),
+            gate_decisions: std::sync::RwLock::new(Vec::new()),
+            ungated: std::sync::RwLock::new(Vec::new()),
+            derived_records: std::sync::RwLock::new(Vec::new()),
+            gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            statuses: std::sync::RwLock::new(std::collections::HashMap::new()),
+            appended_refs: std::sync::RwLock::new(Vec::new()),
+            invalidated_kinds: std::sync::RwLock::new(Vec::new()),
+            seeded_refs: std::sync::RwLock::new(Vec::new()),
+            awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
+            pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
+            fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Arrange for the next `release_pii_backstop_hold` call to fail as if the
+    /// invalidation half of the atomic release hit a transient DB error.
+    fn set_fail_release_invalidation(&self, fail: bool) {
+        self.fail_release_invalidation
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Register a submission held on `AwaitingPiiBackstop`: seed its metadata
+    /// record, its status, an active `SubmittedEnvelope` ref (so invalidation
+    /// counts a real ref), and the awaiting backlog entry the tick enumerates.
+    fn seed_awaiting(&self, tenant_id: &str, submission_id: Uuid) {
+        let key = (tenant_id.to_string(), submission_id);
+        self.submissions.write().unwrap().insert(
+            key.clone(),
+            seeded_storage_submission_record(
+                tenant_id,
+                submission_id,
+                StorageTraceCorpusStatus::AwaitingPiiBackstop,
+            ),
+        );
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key, StorageTraceCorpusStatus::AwaitingPiiBackstop);
+        self.seeded_refs.write().unwrap().push((
+            tenant_id.to_string(),
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        ));
+        self.awaiting_pii_backstop
+            .write()
+            .unwrap()
+            .push(GateWorkItem {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+            });
+    }
+
+    fn status_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<StorageTraceCorpusStatus> {
+        self.statuses
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .copied()
+    }
+
+    fn pii_attempts_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<i32> {
+        self.pii_backstop_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .map(|(count, _)| *count)
+    }
+
+    fn appended_kinds(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<StorageTraceObjectArtifactKind> {
+        self.appended_refs
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, _)| t == tenant_id && *s == submission_id)
+            .map(|(_, _, kind)| *kind)
+            .collect()
+    }
+
+    fn invalidated_kinds_of(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<StorageTraceObjectArtifactKind> {
+        self.invalidated_kinds
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, _)| t == tenant_id && *s == submission_id)
+            .map(|(_, _, kind)| *kind)
+            .collect()
+    }
+}
+
+/// A fully-populated `StorageTraceSubmissionRecord` template used to seed the
+/// in-memory double. Mirrors the perplexity driver double's template; only the
+/// status varies per caller.
+fn seeded_storage_submission_record(
+    tenant_id: &str,
+    submission_id: Uuid,
+    status: StorageTraceCorpusStatus,
+) -> StorageTraceSubmissionRecord {
+    let now = Utc::now();
+    StorageTraceSubmissionRecord {
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        trace_id: Uuid::new_v4(),
+        status,
+        auth_principal_ref: principal_storage_ref("pii-backstop-test"),
+        contributor_pseudonym: Some("pii-backstop-test-pseudonym".to_string()),
+        submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+        schema_version: "trace_contribution.v1".to_string(),
+        consent_policy_version: "trace-consent-v1".to_string(),
+        consent_scopes: vec!["debugging_evaluation".to_string()],
+        allowed_uses: vec!["evaluation".to_string()],
+        retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+        privacy_risk: "medium".to_string(),
+        redaction_pipeline_version: "test-redactor-v1".to_string(),
+        redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+        redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+        canonical_summary_hash: None,
+        submission_score: None,
+        credit_points_pending: Some(1.0),
+        credit_points_final: None,
+        received_at: now,
+        updated_at: now,
+        reviewed_at: None,
+        review_assigned_to_principal_ref: None,
+        review_assigned_at: None,
+        review_lease_expires_at: None,
+        review_due_at: None,
+        revoked_at: None,
+        expires_at: None,
+        purged_at: None,
+    }
+}
+
+/// Build a held on-disk submission (metadata record + encrypted envelope) the
+/// way ingest would have persisted an `AwaitingPiiBackstop` trace, so the
+/// driver's file-backed `read_submission_record`/`read_envelope_by_record`
+/// path resolves it. The envelope is message-text-bearing and still carries
+/// `pii_marker` in prose the deterministic redactor left behind; the NEAR AI
+/// backstop is what must remove it. Returns the submission id.
+async fn seed_held_backstop_submission(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    pii_marker: &str,
+) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+    envelope.consent.message_text_included = true;
+    envelope.contributor.tenant_scope_ref = Some(tenant_storage_ref(tenant_id));
+    envelope.events[0].redacted_content = Some(format!("please contact {pii_marker} soon"));
+
+    let stored = store_envelope(
+        state.as_ref(),
+        tenant_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "submitted-envelope",
+        &envelope,
+    )
+    .expect("seed store_envelope");
+
+    let receipt_value = serde_json::to_value(
+        stored
+            .artifact_receipt
+            .as_ref()
+            .expect("seed artifact receipt present"),
+    )
+    .expect("receipt serializes");
+    let record_value = serde_json::json!({
+        "tenant_id": tenant_id,
+        "tenant_storage_ref": tenant_storage_ref(tenant_id),
+        "submitted_tenant_scope_ref": tenant_storage_ref(tenant_id),
+        "auth_principal_ref": principal_storage_ref("pii-backstop-test"),
+        "submission_id": submission_id,
+        "trace_id": Uuid::new_v4(),
+        "status": "awaiting_pii_backstop",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 1.0,
+        "consent_scopes": [],
+        "received_at": "2026-07-11T00:00:00Z",
+        "object_key": stored.object_key,
+        "artifact_receipt": receipt_value,
+        "artifact_object_store": stored.artifact_object_store,
+    });
+    let record: TraceCommonsSubmissionRecord =
+        serde_json::from_value(record_value).expect("held record deserializes");
+    write_submission_record(&state.root, &record).expect("seed write record");
+    submission_id
+}
+
+/// State wired for the backstop driver: in-memory DB double + encrypted
+/// artifact store + `accept_medium_risk_submissions` (the pilot config under
+/// which message-text traces are Accepted-then-held, then released back to
+/// Accepted once residual risk stays Medium after the backstop pass).
+fn backstop_driver_state(
+    root: PathBuf,
+    db: Arc<dyn Database>,
+    artifact_store: ConfiguredTraceArtifactStore,
+) -> Arc<AppState> {
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        root,
+        Some(db),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+    state
+}
+
+// --- NEAR AI `/privacy/classify` wiremock harness -----------------------
+
+#[derive(Clone, Copy)]
+enum ClassifierMode {
+    /// Span every known needle in every window -> canary healthy, submission
+    /// PII redacted.
+    Healthy,
+    /// Canary windows are spanned healthy, but any non-canary window (the real
+    /// submission) returns 500 after the adapter's own retries exhaust.
+    FailSubmission,
+    /// Return no spans for anything, so the canary's raw values survive and the
+    /// filter reports unhealthy -> the tick aborts before touching submissions.
+    UnhealthyCanary,
+}
+
+/// Codepoint-indexed spans (the NEAR AI wire contract) for every occurrence of
+/// each needle in `input`, tagged `private_email`.
+fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
+    let mut spans = Vec::new();
+    for needle in needles {
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0usize;
+        while let Some(rel) = input[from..].find(needle.as_str()) {
+            let byte = from + rel;
+            let start = input[..byte].chars().count();
+            let end = start + needle.chars().count();
+            spans.push(serde_json::json!({
+                "category": "private_email",
+                "start": start,
+                "end": end,
+                "score": 0.99,
+            }));
+            from = byte + needle.len();
+        }
+    }
+    spans
+}
+
+fn near_ai_classify_response(
+    input: &str,
+    marker: &str,
+    mode: ClassifierMode,
+) -> wiremock::ResponseTemplate {
+    let canary_values =
+        trace_commons_protocol::trace_contribution::synthetic_privacy_filter_canary_values();
+    let is_canary = canary_values
+        .iter()
+        .any(|value| input.contains(value.as_str()));
+    match mode {
+        ClassifierMode::UnhealthyCanary => wiremock::ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
+        ClassifierMode::FailSubmission if !is_canary => wiremock::ResponseTemplate::new(500)
+            .set_body_json(serde_json::json!({"error": "synthetic upstream failure"})),
+        _ => {
+            let mut needles = canary_values;
+            needles.push(marker.to_string());
+            let spans = near_ai_spans(input, &needles);
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"spans": spans}]}))
+        }
+    }
+}
+
+async fn mount_near_ai_classifier(
+    server: &wiremock::MockServer,
+    marker: &str,
+    mode: ClassifierMode,
+) {
+    let marker = marker.to_string();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/privacy/classify"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            near_ai_classify_response(input, &marker, mode)
+        })
+        .mount(server)
+        .await;
+}
+
+/// Process-global lock serializing the `TRACE_NEAR_AI_PRIVACY_*` env mutation
+/// that `build_from_env` reads. A `tokio::sync::Mutex` (not `std`) so the guard
+/// may be held across the tick's `.await`s without tripping
+/// `clippy::await_holding_lock`.
+fn near_ai_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+struct NearAiEnvGuard {
+    keys: Vec<&'static str>,
+}
+
+impl NearAiEnvGuard {
+    fn set(base_url: &str) -> Self {
+        let vars = [
+            ("TRACE_NEAR_AI_PRIVACY_API_KEY", "backstop-test-key"),
+            ("TRACE_NEAR_AI_PRIVACY_BASE_URL", base_url),
+        ];
+        for (key, value) in vars {
+            // SAFETY: all NEAR-AI env mutation is serialized through
+            // `near_ai_env_lock()`, held by the caller for the whole test.
+            unsafe { std::env::set_var(key, value) };
+        }
+        NearAiEnvGuard {
+            keys: vars.iter().map(|(k, _)| *k).collect(),
+        }
+    }
+}
+
+impl Drop for NearAiEnvGuard {
+    fn drop(&mut self) {
+        for key in &self.keys {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+}
+
+fn backstop_driver_config() -> PiiBackstopDriverConfig {
+    PiiBackstopDriverConfig {
+        interval: StdDuration::from_secs(30),
+        batch_size: 10,
+        max_attempts: 5,
+        backoff_base_seconds: 30,
+    }
+}
+
+// --- (a) process-one happy path ----------------------------------------
+
+/// (a) `process_one_pii_backstop` on a held, message-text Low/Medium trace:
+/// the NEAR AI prose filter removes the PII, the envelope is re-stored under
+/// the `near-ai-pii-backstop-v1` pipeline label, the DB hold is released to
+/// `Accepted`, a `RescrubbedEnvelope` ref is written, and the pre-backstop
+/// `SubmittedEnvelope` ref is invalidated. Deterministic — no env, no network.
+#[tokio::test]
+async fn pii_backstop_process_one_releases_and_scrubs_trace() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("process_one releases the hold");
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "hold must be released to Accepted"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id)
+            .contains(&StorageTraceObjectArtifactKind::RescrubbedEnvelope),
+        "a RescrubbedEnvelope ref must be written on release"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .contains(&StorageTraceObjectArtifactKind::SubmittedEnvelope),
+        "the pre-backstop SubmittedEnvelope ref must be invalidated"
+    );
+
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    let envelope = read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "rescrubbed envelope must carry the backstop pipeline label: {}",
+        envelope.privacy.redaction_pipeline_version
+    );
+    let prose: String = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.redacted_content.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!prose.contains(marker), "flagged PII must be gone: {prose}");
+    assert!(
+        prose.contains("[REDACTED:private_email]"),
+        "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
+}
+
+// --- release atomicity: a failing invalidation must not release the hold ---
+
+/// CRITICAL regression coverage: if the invalidation half of
+/// `release_pii_backstop_hold` fails (simulating a transient DB error), the
+/// submission MUST stay `AwaitingPiiBackstop` and re-enumerable — not
+/// "Accepted with the pre-backstop `submitted_envelope` ref still active",
+/// which would let an export-by-ref consumer publish un-scrubbed, PII-bearing
+/// bytes with no path back to healing. Before the fix, the status release and
+/// the ref invalidation were two independent DB calls; a failure of the
+/// second left exactly that inconsistent, unrecoverable state. The atomic
+/// `release_pii_backstop_hold` must make both effects all-or-nothing.
+#[tokio::test]
+async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_failure() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    // Simulate the invalidation half of the atomic release failing (e.g. a
+    // transient DB error after the status UPDATE would otherwise have
+    // applied).
+    db.set_fail_release_invalidation(true);
+
+    let outcome = process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter).await;
+    assert!(
+        outcome.is_err(),
+        "a failing atomic release must propagate an error"
+    );
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held, not Accepted-with-active-original, \
+         when the atomic release fails"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the pre-backstop SubmittedEnvelope ref must NOT be invalidated \
+         when the paired status release did not durably commit"
+    );
+
+    // The on-disk record must not have been flipped either — the write only
+    // happens after the atomic DB release succeeds.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        record.status,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "the on-disk record must stay held when the DB release fails"
+    );
+
+    // The submission must still satisfy the driver's own re-enumeration
+    // invariant: still `awaiting_pii_backstop` with the `SubmittedEnvelope`
+    // ref still active (the sole prerequisite the enumeration query INNER
+    // JOINs on), so the next tick will retry it rather than losing it.
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the submission must remain re-enumerable (submitted_envelope ref \
+         still active) so the next tick retries it"
+    );
+
+    // Retrying without the injected failure must succeed and release
+    // normally, proving the held state is not permanently stuck.
+    db.set_fail_release_invalidation(false);
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("retry succeeds once the transient failure clears");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the retried release must succeed and clear the hold"
+    );
+}
+
+// --- (b) process-one fail leaves the hold in place ----------------------
+
+/// (b, process-one half) A prose-filter error propagates out of
+/// `process_one_pii_backstop` WITHOUT releasing the hold or writing a
+/// rescrubbed ref — the submission stays `AwaitingPiiBackstop`. The attempt
+/// bump is the caller's (tick's) job, covered by the tick fail test below.
+#[tokio::test]
+async fn pii_backstop_process_one_error_leaves_submission_held() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+
+    let outcome =
+        process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &FailingBackstopAdapter).await;
+    assert!(outcome.is_err(), "a filter error must propagate");
+
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held on redaction failure"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "no rescrubbed ref may be written when redaction fails"
+    );
+}
+
+// --- (a) tick happy path (full wrapper: env + canary + enumerate) -------
+
+/// (a, tick half) One `run_pii_backstop_driver_tick` builds the NEAR AI
+/// adapter from env, passes the synthetic canary, enumerates the single held
+/// submission, re-redacts it through the wiremock classifier, and releases it
+/// to `Accepted`.
+#[tokio::test]
+async fn pii_backstop_driver_tick_releases_held_submission() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::Healthy).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
+        .await
+        .expect("healthy tick succeeds");
+    assert_eq!((summary.done, summary.failed), (1, 0), "{summary:?}");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the held submission must be released to Accepted"
+    );
+
+    // Read the re-stored envelope back to prove the redaction actually
+    // happened through the wiremock/`NearAiPrivacyFilterAdapter` span-decoding
+    // path, not just that status/summary read success.
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope = read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "rescrubbed envelope must carry the backstop pipeline label: {}",
+        envelope.privacy.redaction_pipeline_version
+    );
+    let prose: String = envelope
+        .events
+        .iter()
+        .filter_map(|event| event.redacted_content.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!prose.contains(marker), "flagged PII must be gone: {prose}");
+    assert!(
+        prose.contains("[REDACTED:private_email]"),
+        "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
+}
+
+// --- (b) tick fail path bumps the attempt counter and keeps the hold ----
+
+/// (b) The canary passes but the submission's classify returns 5xx (after the
+/// adapter's retries exhaust): the tick tallies a failure, the submission stays
+/// `AwaitingPiiBackstop`, and its attempt counter is bumped.
+#[tokio::test]
+async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
+        .await
+        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    assert_eq!((summary.done, summary.failed), (0, 1), "{summary:?}");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "a classifier failure must leave the submission held"
+    );
+    assert!(
+        db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0) >= 1,
+        "the failed attempt must be bumped"
+    );
+}
+
+// --- (c) canary failure aborts the tick without mutating anything -------
+
+/// (c) An unhealthy canary (the synthetic PII survives the filter) aborts the
+/// whole tick before any submission is loaded: the call errors, the held
+/// submission is untouched, and no attempt is bumped. This is the fail-closed
+/// guarantee — never run real traces through a broken filter.
+#[tokio::test]
+async fn pii_backstop_driver_tick_aborts_when_canary_unhealthy() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::UnhealthyCanary).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let outcome = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config()).await;
+    assert!(
+        outcome.is_err(),
+        "an unhealthy canary must abort the tick, got {outcome:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "no submission may be mutated when the canary is unhealthy"
+    );
+    assert!(
+        db.pii_attempts_of("tenant-a", submission_id).is_none(),
+        "no attempt may be bumped when the tick aborts on the canary"
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "no rescrubbed ref may be written when the tick aborts on the canary"
+    );
+}
+
+// --- (d) release-gate regression: held traces are never consumer-visible -
+
+/// (d) The security guarantee. A submission held on `AwaitingPiiBackstop` is
+/// excluded from BOTH the file-record export/benchmark eligibility gate
+/// (`is_export_eligible`) and the storage-record export-source gate
+/// (`storage_submission_is_export_source_eligible`); flipping the same record
+/// to `Accepted` (as the backstop release does) makes it eligible. This proves
+/// no consumer-selection path can leak a held, not-yet-rescrubbed trace.
+#[test]
+fn awaiting_pii_backstop_excluded_from_export_until_released() {
+    // File record path (is_export_eligible / is_benchmark_eligible).
+    let held: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": "tenant-a",
+        "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "awaiting_pii_backstop",
+        "privacy_risk": "medium",
+        "submission_score": 0.0,
+        "credit_points_pending": 1.0,
+        "consent_scopes": [],
+        "received_at": "2026-07-11T00:00:00Z",
+        "object_key": "obj/held",
+    }))
+    .expect("held record deserializes");
+    assert!(
+        !held.is_export_eligible(),
+        "a held trace must never be export-eligible"
+    );
+    assert!(
+        !held.is_benchmark_eligible(),
+        "a held trace must never be benchmark-eligible"
+    );
+
+    let mut released = held.clone();
+    released.status = TraceCorpusStatus::Accepted;
+    assert!(
+        released.is_export_eligible(),
+        "the released Accepted trace becomes export-eligible"
+    );
+
+    // Storage record path (storage_submission_is_export_source_eligible).
+    let submission_id = Uuid::new_v4();
+    let held_storage = seeded_storage_submission_record(
+        "tenant-a",
+        submission_id,
+        StorageTraceCorpusStatus::AwaitingPiiBackstop,
+    );
+    assert!(
+        !storage_submission_is_export_source_eligible(&held_storage),
+        "a held storage record must never be an export source"
+    );
+    let released_storage = seeded_storage_submission_record(
+        "tenant-a",
+        submission_id,
+        StorageTraceCorpusStatus::Accepted,
+    );
+    assert!(
+        storage_submission_is_export_source_eligible(&released_storage),
+        "the released Accepted storage record becomes an export source"
+    );
+}
+
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBackstopDriverTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        write: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        // The PII backstop driver mirrors the rescrubbed submission metadata
+        // here (status set to the target). Update the in-memory status and hand
+        // back the seeded record with the new status; the caller discards it.
+        let key = (write.tenant_id.clone(), write.submission_id);
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key.clone(), write.status);
+        let mut record = self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| panic!("upsert for unseeded submission"));
+        record.status = write.status;
+        Ok(record)
+    }
+    async fn get_trace_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        Ok(self
+            .submissions
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _: &str,
+        _: &str,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: StorageTraceCorpusStatus,
+        _actor_ref: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        // The backstop release transition. Record the new status so the test
+        // can assert the hold was cleared (Accepted/Quarantined) or left held.
+        self.statuses
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id), status);
+        Ok(())
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        write: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        // Record the rescrubbed-envelope ref the backstop mirrors on release.
+        self.appended_refs.write().unwrap().push((
+            write.tenant_id.clone(),
+            write.submission_id,
+            write.artifact_kind,
+        ));
+        Ok(())
+    }
+    async fn invalidate_trace_object_refs_by_kind(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        artifact_kind: StorageTraceObjectArtifactKind,
+    ) -> Result<u64, DatabaseError> {
+        // Retire the pre-backstop submitted-envelope ref. Count the seeded
+        // active ref(s) of this kind so the test can assert the invalidation
+        // fired against a real ref.
+        let matched = self
+            .seeded_refs
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, k)| t == tenant_id && *s == submission_id && *k == artifact_kind)
+            .count() as u64;
+        self.invalidated_kinds.write().unwrap().push((
+            tenant_id.to_string(),
+            submission_id,
+            artifact_kind,
+        ));
+        Ok(matched)
+    }
+    /// Override the trait default so the fault-injection flag can prove
+    /// atomicity: when `fail_release_invalidation` is set, this returns an
+    /// error WITHOUT recording the status flip or the invalidation, exactly
+    /// as the real Postgres transaction rolls back both writes together.
+    async fn release_pii_backstop_hold(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: StorageTraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        if self
+            .fail_release_invalidation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DatabaseError::Query(
+                "simulated-transient-release-failure".to_string(),
+            ));
+        }
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await?;
+        self.invalidate_trace_object_refs_by_kind(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        Ok(self
+            .object_refs
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .cloned())
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        Ok(self
+            .derived_records
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == tenant_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        let submission_id = decision.submission_id;
+        self.gate_decisions
+            .write()
+            .unwrap()
+            .push((tenant_id.to_string(), decision));
+        self.ungated
+            .write()
+            .unwrap()
+            .retain(|item| !(item.tenant_id == tenant_id && item.submission_id == submission_id));
+        Ok(())
+    }
+    /// Overrides the default "not implemented for this backend" error so
+    /// CI-running (non-PG) tests can exercise `score_one_submission`'s
+    /// failed-scorer cost-control branch: increments and records the
+    /// in-memory attempt counter for `(tenant_id, submission_id)`, returning
+    /// the new count the same way the real Postgres backend does.
+    async fn bump_gate_evaluation_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.gate_evaluation_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
+    }
+    /// Override the defaulted "not implemented" body so a driver-tick test can
+    /// assert the fail path bumped the PII-backstop attempt counter for a held
+    /// submission. Mirrors the real Postgres upsert's return of the new count.
+    async fn bump_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        _now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut attempts = self.pii_backstop_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new()));
+        entry.0 += 1;
+        entry.1 = error_label.to_string();
+        Ok(entry.0)
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for PiiBackstopDriverTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn list_submissions_needing_gate_decision(
+        &self,
+        _now: DateTime<Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        Ok(self
+            .ungated
+            .read()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    /// Override the defaulted "pool not configured" body: enumerate every
+    /// seeded submission still held on `AwaitingPiiBackstop` whose attempt
+    /// count is below `max_attempts`, mirroring the real cross-tenant query the
+    /// production driver runs. A released (Accepted/Quarantined) submission
+    /// drops out, so a second tick against a drained backlog returns empty.
+    async fn list_submissions_awaiting_pii_backstop(
+        &self,
+        _now: DateTime<Utc>,
+        max_attempts: i32,
+        _backoff_base_seconds: i64,
+        limit: i64,
+    ) -> Result<Vec<GateWorkItem>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let statuses = self.statuses.read().unwrap();
+        let attempts = self.pii_backstop_attempts.read().unwrap();
+        Ok(self
+            .awaiting_pii_backstop
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                statuses
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .copied()
+                    == Some(StorageTraceCorpusStatus::AwaitingPiiBackstop)
+            })
+            .filter(|item| {
+                attempts
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .map(|(count, _)| *count < max_attempts)
+                    .unwrap_or(true)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+// --- Live-PG variant (Task 7 read-path finding) ------------------------
+//
+// `#[ignore]`d and gated on a reachable Postgres (`postgres_backend_for_ingest_test`).
+// CI never runs Postgres, so this does not run in CI; it compiles under
+// `cargo test --no-run` and is meant for local/PG runs. It pins the Task 7
+// finding: a released-backstop trace (pre-backstop `SubmittedEnvelope` ref
+// invalidated, only a `RescrubbedEnvelope` ref active) must still be resolvable
+// by a `require_object_refs` reader via `read_envelope_from_active_db_object_ref`.
+#[tokio::test]
+#[ignore = "requires PostgreSQL (TRACE_COMMONS_PG_TEST_DATABASE_URL); not run in CI"]
+async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_temp.path().to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let mut state =
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+            false,
+        );
+    {
+        let state_mut = Arc::make_mut(&mut state);
+        // The hardening whose satisfiability the Task 7 fix restores.
+        state_mut.db_reviewer_require_object_refs = true;
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+            tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                BTreeSet::from(["tenant-a".to_string()]),
+            )])),
+        };
+    }
+
+    // A normal Accepted submission mirrors an active `SubmittedEnvelope` ref.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
+
+    // Before invalidation the read path resolves the submitted envelope.
+    read_envelope_from_active_db_object_ref(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("submitted read succeeds")
+        .expect("submitted envelope resolves before backstop release");
+
+    // Simulate the backstop release: write a rescrubbed envelope + ref, then
+    // invalidate the pre-backstop submitted ref (exactly what
+    // `process_one_pii_backstop` does).
+    let tenant_ref = tenant_storage_ref("tenant-a");
+    let store = state
+        .artifact_store
+        .as_ref()
+        .expect("artifact store configured");
+    let mut rescrubbed = sample_envelope().await;
+    make_metadata_only_low_risk(&mut rescrubbed);
+    rescrubbed.submission_id = submission_id;
+    rescrubbed.contributor.tenant_scope_ref = Some(tenant_ref.clone());
+    rescrubbed.privacy.redaction_pipeline_version = format!(
+        "{}+near-ai-pii-backstop-v1",
+        rescrubbed.privacy.redaction_pipeline_version
+    );
+    let rescrubbed_receipt = store
+        .put_json(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            "backstop-released-rescrubbed-envelope",
+            &rescrubbed,
+        )
+        .expect("rescrubbed envelope artifact writes");
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: store.object_store_name().to_string(),
+            object_key: rescrubbed_receipt.object_key,
+            content_sha256: format!("sha256:{}", rescrubbed_receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{tenant_ref}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("rescrubbed object ref writes");
+    backend
+        .invalidate_trace_object_refs_by_kind(
+            "tenant-a",
+            submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+        .expect("pre-backstop submitted ref invalidated");
+
+    // The Task 7 guarantee: with only the rescrubbed ref active, a
+    // require_object_refs reader still resolves the released-backstop trace,
+    // and it carries the backstop pipeline label.
+    let body = read_envelope_from_active_db_object_ref(state.as_ref(), "tenant-a", submission_id)
+        .await
+        .expect("released-backstop read succeeds")
+        .expect("rescrubbed envelope resolves after submitted ref invalidated");
+    assert!(
+        body.envelope
+            .privacy
+            .redaction_pipeline_version
+            .contains("near-ai-pii-backstop-v1"),
+        "resolved body must be the rescrubbed envelope"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// Handler-level test for the devfolio score read-back route
 /// (`POST /v1/admin/scores-by-submission`). Covers the scoped credential
 /// (`CompetitionReadWorker` admitted, contributor rejected), the batch cap,
@@ -77124,4 +81071,256 @@ async fn scores_by_submission_handler_serves_competition_worker_and_fails_closed
     .await
     .expect_err("no DB mirror fails closed");
     assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Attach a test attestation signing key (the same PKCS#8/SPKI Ed25519 pair
+/// used by the eddsa-signed-token tests) so
+/// `score_attestation_handler`/`attestation_keyset_handler` leave their
+/// fail-closed branch.
+fn test_state_with_attestation_signing(mut state: Arc<AppState>) -> Arc<AppState> {
+    let config = trace_commons_server::trace_score_attestation::AttestationConfig {
+        signing_private_key_pem: TEST_EDDSA_PRIVATE_KEY_PEM.to_string(),
+        signing_public_key_pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+        signing_kid: "test-attestation-kid".to_string(),
+        ttl_seconds: 3600,
+    };
+    let signing =
+        trace_commons_server::trace_score_attestation::AttestationSigningState::build(&config)
+            .expect("test attestation signing state builds");
+    Arc::make_mut(&mut state).attestation_signing = Some(Arc::new(signing));
+    state
+}
+
+/// Handler-level test for the score-attestation route
+/// (`GET /v1/contributors/me/score-attestation`). Covers the fail-closed 503
+/// when the signing key is unconfigured, the fail-closed 503 when no DB
+/// mirror is configured, a successful signed attestation that verifies
+/// against the published key and contains only the caller's own submission,
+/// and — the non-negotiable this endpoint exists to enforce — that a SECOND
+/// contributor authenticated with their own token gets their OWN scores back,
+/// never the first contributor's, even though both submissions live in the
+/// same tenant. `score_attestation_handler`'s signature takes only
+/// `State`/`HeaderMap` (no body, no query extractor), so there is no
+/// request parameter this test could even try to forge through — the
+/// property is structural, and this test pins the resulting behavior.
+#[tokio::test]
+async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+
+    let principal_a = principal_storage_ref("token-a");
+    let principal_a2 = principal_storage_ref("token-a-2");
+
+    let id1 = Uuid::new_v4();
+    let mut row1 = rescore_test_decision_row(id1);
+    row1.perplexity_passed = true;
+    row1.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.seed_submission_with_principal("tenant-a", id1, &principal_a);
+    db.update_trace_gate_decision_credit_quality("tenant-a", row1.decision_id, 750_000, 0, 1)
+        .await
+        .expect("seed row1 credit quality");
+
+    // A decision belonging to a DIFFERENT contributor in the SAME tenant —
+    // must never appear in token-a's attestation.
+    let id2 = Uuid::new_v4();
+    let mut row2 = rescore_test_decision_row(id2);
+    row2.perplexity_passed = true;
+    row2.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", row2.clone());
+    db.seed_submission_with_principal("tenant-a", id2, &principal_a2);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Fails closed when the attestation signing key is unconfigured — the
+    // endpoint must NEVER return an unsigned document.
+    let unconfigured = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect_err("unconfigured signing key fails closed");
+    assert_eq!(unconfigured.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unconfigured.1.0.error,
+        trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED
+    );
+
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("configured signing key succeeds");
+
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    let decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&response.attestation, &decoding_key, &validation)
+    .expect("attestation verifies against the published key");
+
+    assert_eq!(decoded.claims.tenant_id, "tenant-a");
+    assert_eq!(decoded.claims.auth_principal_ref, principal_a);
+    assert!(decoded.claims.expires_at > decoded.claims.issued_at);
+    assert_eq!(
+        decoded.claims.submissions.len(),
+        1,
+        "only the caller's own submission is attested: {:?}",
+        decoded.claims.submissions
+    );
+    assert_eq!(decoded.claims.submissions[0].submission_id, id1);
+    assert_eq!(
+        decoded.claims.submissions[0].credit_quality_micros,
+        Some(750_000)
+    );
+    assert!(decoded.claims.submissions[0].gate_passed);
+
+    // The second contributor's own request returns THEIR OWN scores, never
+    // token-a's — the resolution is auth-only, with no parameter through
+    // which either caller could name the other.
+    let Json(other_response) =
+        score_attestation_handler(State(state.clone()), auth_headers("token-a-2"))
+            .await
+            .expect("second contributor's own request succeeds");
+    let other_decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&other_response.attestation, &decoding_key, &validation)
+    .expect("second attestation verifies");
+    assert_eq!(other_decoded.claims.auth_principal_ref, principal_a2);
+    assert_eq!(other_decoded.claims.submissions.len(), 1);
+    assert_eq!(other_decoded.claims.submissions[0].submission_id, id2);
+
+    // Fails closed when no DB mirror is configured.
+    let no_mirror_state = test_state_with_attestation_signing(test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    ));
+    let unavailable = score_attestation_handler(State(no_mirror_state), auth_headers("token-a"))
+        .await
+        .expect_err("no DB mirror fails closed");
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// The attestation keyset endpoint fails closed (503, same missing-control
+/// label) when signing is unconfigured, and publishes the configured key
+/// under its `kid` otherwise — mirroring
+/// `trace_upload_claim_issuer::keyset_handler`'s shape exactly so a
+/// collector that already parses that response needs no new client code.
+#[tokio::test]
+async fn attestation_keyset_handler_fails_closed_then_publishes_the_key() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let unconfigured = attestation_keyset_handler(State(state.clone()))
+        .await
+        .expect_err("unconfigured signing key fails closed");
+    assert_eq!(unconfigured.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unconfigured.1.0.error,
+        trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED
+    );
+
+    let state = test_state_with_attestation_signing(state);
+    let Json(keyset) = attestation_keyset_handler(State(state))
+        .await
+        .expect("configured signing key publishes the keyset");
+    assert_eq!(keyset["keys"][0]["kid"], "test-attestation-kid");
+    assert_eq!(
+        keyset["keys"][0]["public_key_pem"].as_str(),
+        Some(TEST_EDDSA_PUBLIC_KEY_PEM)
+    );
+}
+
+#[test]
+fn settlement_cap_bounds_the_account_not_each_principal() {
+    fn event(principal: &str, points: f32) -> TraceCommonsCreditLedgerRecord {
+        TraceCommonsCreditLedgerRecord {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: principal.to_string(),
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: points,
+            reason: None,
+            external_ref: None,
+            actor_role: TokenRole::Admin,
+            actor_principal_ref: principal.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    // Three principals, each individually under a 1.0-point cap, all linked
+    // to one durable account. Together they are 1.8 points against that cap.
+    let events = vec![
+        event("principal-1", 0.6),
+        event("principal-2", 0.6),
+        event("principal-3", 0.6),
+    ];
+    let cap = Some(1_000_000); // 1.0 points in micros
+    let account = Uuid::new_v4();
+    let linked: HashMap<String, Uuid> = ["principal-1", "principal-2", "principal-3"]
+        .into_iter()
+        .map(|p| (p.to_string(), account))
+        .collect();
+
+    let (settled, excluded, reasons) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &linked);
+    assert!(
+        settled.is_empty(),
+        "the account is over cap, so none of its principals may settle"
+    );
+    assert_eq!(excluded, 3);
+    assert_eq!(
+        reasons.get("account_settlement_amount_exceeds_cap"),
+        Some(&3)
+    );
+
+    // Without account linkage there is nothing to fold up, so the legacy
+    // per-principal behaviour is preserved: each is under cap and settles.
+    let (settled_unlinked, excluded_unlinked, _) =
+        apply_credit_settlement_account_cap(events.clone(), cap, &HashMap::new());
+    assert_eq!(
+        settled_unlinked.len(),
+        3,
+        "unlinked principals are each under the cap and settle as before"
+    );
+    assert_eq!(excluded_unlinked, 0);
+
+    // A single principal over the cap is still blocked, linked or not.
+    let (over, over_excluded, _) =
+        apply_credit_settlement_account_cap(vec![event("solo", 1.5)], cap, &HashMap::new());
+    assert!(over.is_empty());
+    assert_eq!(over_excluded, 1);
+}
+
+/// The dedup index must be held as a trait object so Phase 2 can substitute a
+/// remote implementation without touching AppState's shape.
+///
+/// This is a compile-time assertion. `Option<Arc<UsearchVectorIndex>>` does NOT
+/// coerce to `Option<Arc<dyn VectorIndex>>` — unsizing does not reach through
+/// `Option` — so this fails to build until the builder's return type changes.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_vector_index_builder_returns_a_trait_object() {
+    use std::sync::Arc;
+    use trace_commons_gate_enclave::VectorIndex;
+
+    let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
 }

@@ -61,27 +61,95 @@ const DEFAULT_ALLOWLIST_MAX_STALE_SECONDS: u64 = 3600;
 const DEFAULT_DENIAL_COUNTER_WINDOW_SECONDS: u64 = 3600;
 const INVITE_LANDING_TEXT: &str = r#"Trace Commons invite link
 
-This GET route does not consume invites.
+You are reading this because someone opened a Trace Commons invite. This page
+is instructions, not an action. Fetching it (GET) consumes nothing; only the
+POST in step 2 does.
 
-Agents should onboard by sending a JSON POST to /v1/onboard on this origin:
+Onboarding enrolls a machine as a contributor to a corpus of coding-agent
+sessions. Before proceeding, tell the user plainly:
+
+  - Redacted records of their coding-agent sessions will be contributed
+  - Onboarding permanently spends one use of this invite, whether or not
+    they later submit anything
+  - Only contribute sessions from repositories they have the right to share
+
+Proceed only on an explicit yes.
+
+--------------------------------------------------------------------------
+1. Use the CLI if you can
+--------------------------------------------------------------------------
+
+trace-commons-contributor login --invite '<full invite link>'
+
+That registers a device key, redeems the code, and writes the config in one
+step. It is the supported path and everything below is what it does for you.
+
+The CLI ships as source in TraceCommons/trace-commons-server; build it with
+  cargo build --release -p trace-commons-contributor
+There is no published binary on npm, Homebrew, or PyPI.
+
+--------------------------------------------------------------------------
+2. Or POST /v1/onboard yourself
+--------------------------------------------------------------------------
+
+The code is the URL fragment: .../onboard#VQWWPGYSG8Y4LTP6 means the code is
+VQWWPGYSG8Y4LTP6. Fragments are not sent to servers, so this page cannot read
+it and cannot tell you whether it is valid. A ?code= query parameter also
+works.
+
+Generate an Ed25519 keypair if you do not have one, then POST its PUBLIC half:
+
+POST /v1/onboard
+content-type: application/json
 
 {
   "schema_version": "trace_commons.onboard_request.v1",
-  "invite_code": "<code from the invite URL fragment or code query parameter>",
-  "device_public_key": "<base64 Ed25519 public key>",
-  "client_info": {
-    "agent": "ironclaw",
-    "version": "<agent version>"
-  }
+  "invite_code": "<code from the invite URL>",
+  "device_public_key": "<base64 of the raw 32-byte Ed25519 public key>",
+  "client_info": { "agent": "<your client>", "version": "<your version>" }
 }
 
-After a successful response, store the returned device_key_id, tenant_id,
-issuer_url, ingest_url, and community URLs, then start Trace Commons trace
-submission using the registered device key.
+device_public_key is the raw key, base64-encoded. It is NOT a fingerprint,
+NOT a PEM block, and NOT a hash. If you are holding a device_key_id that
+looks like "sha256:...", that is a digest OF the key and will be rejected
+here.
 
-IronClaw users can run:
+THIS REQUEST IS NOT IDEMPOTENT. Every success spends one use of the invite,
+including re-registering a key that is already enrolled. Send it once.
 
-ironclaw traces onboard '<full invite link>'
+--------------------------------------------------------------------------
+3. Persist the response
+--------------------------------------------------------------------------
+
+The response carries tenant_id, ingest_url, issuer_url, audience,
+device_key_id, and community URLs. It is returned once and never again.
+
+Onboarding does not configure your client. Write the response to your
+client's configuration store immediately or the registration is unusable and
+the invite use is wasted. For trace-commons-contributor that means
+<config-dir>/contributor.json carrying issuer_url, ingest_url, audience,
+tenant_id, device_key_id, and consent_scopes.
+
+Confirm with `trace-commons-contributor whoami`. If it reports "not logged
+in", the config was not written and nothing will submit.
+
+--------------------------------------------------------------------------
+4. Stop there
+--------------------------------------------------------------------------
+
+Onboarding registers a device; it does not choose what to contribute.
+Submission is a separate, explicit decision. When the user asks for it, run
+`submit --dry-run` first and show them what the envelope contains: session
+transcripts routinely contain credentials pasted while working.
+
+--------------------------------------------------------------------------
+Errors
+--------------------------------------------------------------------------
+
+403 InviteNotValid        Code unknown or malformed. Re-read the fragment.
+                          Nothing was consumed; do not retry with guesses.
+403 InviteAlreadyConsumed Invite is exhausted. Ask for a new one.
+4xx schema error          Check device_public_key is base64 of 32 raw bytes.
 "#;
 
 pub const TRACE_COMMONS_ALLOWLIST_SOURCE_ENV: &str = "TRACE_COMMONS_ALLOWLIST_SOURCE";
@@ -785,6 +853,20 @@ impl IssuerError {
             message: "PilotAllowlistMalformed",
         }
     }
+
+    /// Tenant-binding refusal: the workload token carried no usable
+    /// `tenant_id`, so it conveys authority over no tenant at all.
+    ///
+    /// Forbidden rather than bad-request on purpose: the request is
+    /// well-formed, it is the presented credential that authorises nothing.
+    /// Naming the missing control keeps the refusal greppable without
+    /// echoing the token or the requested tenant.
+    fn workload_tenant_missing() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "WorkloadTenantMissing",
+        }
+    }
 }
 
 impl IntoResponse for IssuerError {
@@ -1404,20 +1486,42 @@ impl TraceUploadClaimIssuerState {
         // requests don't pay for schema/window/grant lookups.
         let policy_label = self.enforce_pilot_allowlist(workload)?;
         let now = self.validate_upload_claim_request(&request)?;
-        let tenant_id = normalized_required(
-            request
-                .tenant_id
-                .as_deref()
-                .or(workload.tenant_id.as_deref()),
-            "tenant_id is required",
-        )?;
-        if let Some(workload_tenant) = workload.tenant_id.as_deref().map(str::trim)
-            && !workload_tenant.is_empty()
-            && workload_tenant != tenant_id
-        {
-            return Err(IssuerError::forbidden(
-                "workload tenant does not match request",
-            ));
+        // The workload token is the ONLY authority for the tenant on this
+        // path. The request body is caller-controlled, so it may confirm the
+        // tenant but must never supply one: a token that carries no tenant
+        // conveys authority over no tenant, and falling back to the request
+        // would let any validly signed token mint a claim for any tenant.
+        //
+        // Refused before the request is consulted, and unconditionally --
+        // the binding below is the security property this function exists to
+        // enforce, so it must not be contingent on an optional field being
+        // present. Mirrors the device-key path, where `DeviceWorkloadClaims`
+        // takes a required `tenant_id` and `validate_device_workload_claims`
+        // compares it with no `is_some()` guard.
+        let Some(tenant_id) = workload
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|tenant| !tenant.is_empty())
+            .map(str::to_string)
+        else {
+            tracing::warn!(
+                error_class = "WorkloadTenantMissing",
+                "upload-claim refused: workload token carries no tenant_id"
+            );
+            return Err(IssuerError::workload_tenant_missing());
+        };
+        // Attribution only: when the request names a tenant it must agree
+        // exactly with the token's. A blank-but-present value stays a
+        // bad-request, as before.
+        if let Some(requested_tenant) = request.tenant_id.as_deref() {
+            let requested_tenant =
+                normalized_required(Some(requested_tenant), "tenant_id is required")?;
+            if requested_tenant != tenant_id {
+                return Err(IssuerError::forbidden(
+                    "workload tenant does not match request",
+                ));
+            }
         }
         enforce_subset(
             &request.consent_scopes,
@@ -2678,7 +2782,7 @@ fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
     Ok(trimmed.to_string())
 }
 
-fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2689,7 +2793,7 @@ fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     Ok(format!("{pem}\n"))
 }
 
-fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
+pub(crate) fn validate_eddsa_public_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
     anyhow::ensure!(
@@ -2715,11 +2819,11 @@ fn required_pem_or_file(
     }
 }
 
-fn required_env(name: &'static str) -> anyhow::Result<String> {
+pub(crate) fn required_env(name: &'static str) -> anyhow::Result<String> {
     optional_env(name)?.ok_or_else(|| anyhow::anyhow!("{name} is required"))
 }
 
-fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
+pub(crate) fn optional_env(name: &'static str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) => {
             let trimmed = value.trim();
@@ -3116,11 +3220,38 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Trace Commons invite link"));
-        assert!(body.contains("POST to /v1/onboard"));
+        assert!(body.contains("/v1/onboard"));
         assert!(body.contains("trace_commons.onboard_request.v1"));
         assert!(body.contains("invite_code"));
         assert!(body.contains("device_public_key"));
-        assert!(body.contains("ironclaw traces onboard"));
+
+        // The page points at the supported CLI entry point rather than
+        // leaving an agent to hand-roll the POST.
+        assert!(body.contains("login --invite"));
+
+        // Each of these is a step a real contributor got wrong by reading the
+        // source instead of this page. Losing any of them regresses the
+        // onboarding experience even though the route still returns 200.
+        assert!(
+            body.contains("NOT IDEMPOTENT"),
+            "must warn that a repeat POST spends another invite use"
+        );
+        assert!(
+            body.contains("sha256:"),
+            "must distinguish the raw public key from the device_key_id digest"
+        );
+        assert!(
+            body.contains("contributor.json"),
+            "must say where the response has to be persisted"
+        );
+        assert!(
+            body.contains("--dry-run"),
+            "must steer a first submit through a dry run"
+        );
+
+        // The landing page never echoes the invite code: the fragment is not
+        // sent to the server, and a code in a response body would be a
+        // credential in a log.
         assert!(!body.contains("INV9K3RT5FBQ72JX"));
     }
 
@@ -3418,6 +3549,116 @@ mod tests {
             requested_at: Utc::now(),
         };
         assert!(state.issue_claim(&workload, request).await.is_err());
+    }
+
+    /// Builds a workload token whose only interesting property is its
+    /// `tenant_id`. Scopes are wide enough that the request below is refused
+    /// for the tenant binding and nothing else.
+    fn workload_with_tenant(tenant_id: Option<&str>) -> WorkloadClaims {
+        WorkloadClaims {
+            sub: Some("principal:agent-1".to_string()),
+            principal_ref: None,
+            tenant_id: tenant_id.map(str::to_string),
+            iss: None,
+            aud: None,
+            exp: Utc::now().timestamp() + 60,
+            iat: Some(Utc::now().timestamp()),
+            allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            invite_code: None,
+        }
+    }
+
+    fn upload_claim_request(tenant_id: Option<&str>) -> TraceUploadClaimRequest {
+        TraceUploadClaimRequest {
+            schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: tenant_id.map(str::to_string),
+            audience: Some("trace-commons-upload".to_string()),
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            subject: None,
+            requested_at: Utc::now(),
+        }
+    }
+
+    /// A workload token that carries no `tenant_id` must not be able to mint
+    /// a claim for a tenant named only in the request body.
+    ///
+    /// `tenant_id` is `Option<String>` on `WorkloadClaims`, token validation
+    /// never requires it, and the default config here has no allowlist
+    /// source — so nothing upstream supplies the binding. Before the tenant
+    /// became authoritative this request succeeded and minted a claim for
+    /// whatever tenant the caller asked for.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_workload_token_carries_no_tenant() {
+        let state = test_config().build_state().expect("state builds");
+        let error = state
+            .issue_claim(
+                &workload_with_tenant(None),
+                upload_claim_request(Some("tenant-not-ours")),
+            )
+            .await
+            .expect_err("a token with no tenant authorises no tenant");
+        assert_eq!(error.message, "WorkloadTenantMissing");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    /// Same refusal for a present-but-blank tenant: whitespace is not a
+    /// tenant, and trimming it must not leave an empty binding that compares
+    /// equal to nothing.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_workload_tenant_is_blank() {
+        let state = test_config().build_state().expect("state builds");
+        for blank in ["", "   ", "\t"] {
+            let error = state
+                .issue_claim(
+                    &workload_with_tenant(Some(blank)),
+                    upload_claim_request(Some("tenant-not-ours")),
+                )
+                .await
+                .expect_err("blank workload tenant is refused");
+            assert_eq!(
+                error.message, "WorkloadTenantMissing",
+                "blank tenant {blank:?} must fail closed"
+            );
+        }
+    }
+
+    /// The token's tenant is authoritative, so a request that omits the
+    /// field is still bound to the token's tenant rather than being refused.
+    #[tokio::test]
+    async fn workload_tenant_is_authoritative_when_request_omits_tenant() {
+        let state = test_config().build_state().expect("state builds");
+        let response = state
+            .issue_claim(
+                &workload_with_tenant(Some("tenant-a")),
+                upload_claim_request(None),
+            )
+            .await
+            .expect("issue succeeds on the token's own tenant");
+        let payload = base64_url_decode(response.access_token.split('.').collect::<Vec<_>>()[1]);
+        assert!(
+            payload.contains("tenant-a"),
+            "claim is minted for the token's tenant: {payload}"
+        );
+    }
+
+    /// A request naming a different tenant than the token is still refused,
+    /// and now unconditionally rather than only when the token happened to
+    /// carry a tenant.
+    #[tokio::test]
+    async fn refuses_upload_claim_when_request_tenant_differs_from_workload() {
+        let state = test_config().build_state().expect("state builds");
+        let error = state
+            .issue_claim(
+                &workload_with_tenant(Some("tenant-a")),
+                upload_claim_request(Some("tenant-b")),
+            )
+            .await
+            .expect_err("cross-tenant request is refused");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -4145,6 +4386,7 @@ mod tests {
             ssl_mode: SslMode::Prefer,
             login_resolver_url: None,
             gate_driver_url: None,
+            pii_backstop_driver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
@@ -4463,6 +4705,7 @@ mod tests {
             ssl_mode: SslMode::Prefer,
             login_resolver_url: None,
             gate_driver_url: None,
+            pii_backstop_driver_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
