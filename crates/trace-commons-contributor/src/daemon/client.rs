@@ -28,19 +28,22 @@
 //! a CLI command has no use for the event stream.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 use super::ipc::Response;
-use crate::config::{ConfigStore, DAEMON_SOCK_FILE};
+use crate::config::ConfigStore;
+#[cfg(any(unix, test))]
+use crate::config::DAEMON_SOCK_FILE;
 
 /// How long to wait for a running daemon to answer. Generous because
 /// `"preview"` runs the whole redaction pipeline (and, when a privacy
 /// filter is configured, a network round trip) before it answers, and
 /// because the daemon answers requests on the same runtime that may
 /// currently be mid-scan.
+#[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Send one request to a running daemon and return its response.
@@ -61,18 +64,11 @@ pub fn try_call(
     method: &str,
     params: &serde_json::Value,
 ) -> Result<Option<Response>> {
-    let sock = store.daemon_path(DAEMON_SOCK_FILE);
-    if !sock.exists() {
-        return Ok(None);
-    }
-    let mut stream = match UnixStream::connect(&sock) {
-        Ok(s) => s,
-        // A socket file with nothing listening: a crashed daemon left it
-        // behind. Nothing is running.
-        Err(_) => return Ok(None),
+    let mut stream = match connect(store) {
+        Some(s) => s,
+        // Nothing listening: no daemon is running.
+        None => return Ok(None),
     };
-    stream.set_read_timeout(Some(REQUEST_TIMEOUT)).ok();
-    stream.set_write_timeout(Some(REQUEST_TIMEOUT)).ok();
 
     let mut line = serde_json::to_string(&serde_json::json!({
         "id": 1,
@@ -100,8 +96,63 @@ pub fn try_call(
 
 /// Whether a daemon is currently listening on this store's socket.
 pub fn is_running(store: &ConfigStore) -> bool {
+    connect(store).is_some()
+}
+
+/// Connect to a running daemon for the shutdown handshake.
+///
+/// `daemon stop` needs a raw connection rather than `try_call`, because it
+/// waits on the lock file afterwards rather than only on the reply. It goes
+/// through the same `connect` as everything else so the two transports never
+/// drift apart.
+pub(crate) fn connect_for_shutdown(store: &ConfigStore) -> Option<PlatformStream> {
+    connect(store)
+}
+
+/// The per-platform stream type: a unix socket, or a handle on a named pipe.
+#[cfg(unix)]
+pub(crate) type PlatformStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub(crate) type PlatformStream = std::fs::File;
+
+/// Connect to a running daemon, or `None` if none is listening.
+///
+/// `None` covers both "nothing was ever started" and "a crashed daemon left
+/// the endpoint behind" -- the caller treats both as "fall back to the state
+/// files", which is correct in either case.
+#[cfg(unix)]
+fn connect(store: &ConfigStore) -> Option<std::os::unix::net::UnixStream> {
     let sock = store.daemon_path(DAEMON_SOCK_FILE);
-    sock.exists() && UnixStream::connect(&sock).is_ok()
+    if !sock.exists() {
+        return None;
+    }
+    let stream = std::os::unix::net::UnixStream::connect(&sock).ok()?;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(REQUEST_TIMEOUT)).ok();
+    Some(stream)
+}
+
+/// The Windows endpoint is a named pipe, which a client opens as a file.
+///
+/// Two differences from the unix path, both deliberate:
+///
+/// - There is no socket file to stat first, so "is anything running" is
+///   answered by attempting the open. A pipe that does not exist fails
+///   immediately with `ERROR_FILE_NOT_FOUND`, so this is not a slow path.
+/// - `REQUEST_TIMEOUT` is not applied. A pipe handle opened this way has no
+///   equivalent of `set_read_timeout`, so a daemon that accepts a connection
+///   and then wedges will block this call rather than time out. That is a
+///   real behavioural difference from unix and is recorded here rather than
+///   papered over; it is acceptable because the caller is a one-shot CLI
+///   command a contributor can interrupt, not the daemon itself.
+#[cfg(windows)]
+fn connect(store: &ConfigStore) -> Option<std::fs::File> {
+    let name = super::win_pipe::pipe_name(store);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&name)
+        .ok()
 }
 
 #[cfg(test)]
