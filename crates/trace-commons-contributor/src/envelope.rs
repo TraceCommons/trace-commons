@@ -43,7 +43,10 @@ pub const MAX_ENVELOPE_BYTES: usize = 1_500_000;
 /// `near_ai_settings_from_env`, or injected directly by callers/tests so
 /// tests never have to touch process env (`set_var`/`remove_var` are
 /// `unsafe` in edition 2024 and racy under parallel test execution).
-#[derive(Debug, Clone)]
+/// `PartialEq` and the serde impls exist so the daemon can persist these in
+/// its 0600 settings file: a service-managed daemon has no shell environment
+/// to read them from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NearAiSettings {
     pub api_key: String,
     pub base_url: Option<String>,

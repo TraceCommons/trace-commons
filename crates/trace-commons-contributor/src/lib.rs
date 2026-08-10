@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod config;
 pub mod consent;
+pub mod daemon;
 pub mod envelope;
 pub mod identity;
 pub mod issuer_client;
