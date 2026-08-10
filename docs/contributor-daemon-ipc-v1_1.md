@@ -814,9 +814,29 @@ place where a plausible-sounding phrase becomes a false promise about erasure.
 Do not paraphrase per platform. Use these, adapted only for sentence case and
 platform punctuation conventions.
 
-Shown **before** the action, never as a result afterwards. A contributor
-deciding whether to withdraw needs to know what withdrawal will achieve while
-they can still change their mind.
+**The tier is not knowable before the call, and that shapes everything below.**
+The server computes `distribution_reach` during the withdrawal, from live
+export membership. A client holds only the local `status`. So:
+
+- local status `submitted` or `quarantined` maps to `not_distributed`
+  reliably -- that is the server's own rule, and its copy can be shown before
+  the action.
+- local status `accepted` may resolve to EITHER `commons_not_distributed` or
+  `commons_distributed`, and the client cannot tell which. It must show
+  **both** bodies before the action, with the `commons_distributed` one given
+  the greater weight, and must say plainly that the outcome is decided on the
+  server. Showing only the gentler one would be a promise the client is not in
+  a position to make.
+- an unrecognised status shows the `commons_distributed` body alone, on the
+  grounds that the furthest reach cannot be ruled out.
+
+After the call, report the tier the server actually applied, using that tier's
+body. Never a generic "withdrawn".
+
+A contributor deciding whether to withdraw needs to know what it will achieve
+while they can still change their mind -- which here means knowing the range
+of what it might achieve, honestly, rather than a single confident sentence
+the client cannot support.
 
 | tier | confirmation body |
 |---|---|
@@ -840,7 +860,11 @@ Rules that bind every application:
    therefore say something like "no trace with that id under your account",
    and must NOT say "that trace belongs to someone else" or "that trace does
    not exist" -- either phrasing leaks precisely what the server refuses to.
-5. **Bulk withdrawal spans tiers.** `withdraw_bulk` reports only counts, so a
+5. **`confirmation_prompt` in the Rust client takes a `reach` the caller does
+   not have pre-action.** It is usable for the after-the-fact message, or with
+   a deliberately chosen worst case; it is not a pre-action lookup. Do not
+   build a flow that assumes the tier is known before the request.
+6. **Bulk withdrawal spans tiers.** `withdraw_bulk` reports only counts, so a
    bulk confirmation cannot promise a per-tier outcome. It must say that the
    selected traces may fall into different tiers and that some may already
    have been distributed. If an application cannot say that clearly, it should
