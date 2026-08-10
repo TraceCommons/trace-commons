@@ -1,0 +1,98 @@
+# Flatpak manifest for the Linux contributor shell.
+#
+# UNBUILT. This manifest has not been run through flatpak-builder anywhere
+# in this pass -- not in the container this crate otherwise builds and runs
+# in (it has no flatpak-builder, no Flatpak runtimes, and no `flatpak`
+# command at all), and not on the macOS host, which cannot build Flatpaks
+# at all. It has been checked for shape and internal consistency against
+# the crate's actual Cargo.toml, the daemon's actual default session roots,
+# and the actual D-Bus surfaces this pass added (portal, notifications,
+# tray) -- not validated end to end. See
+# docs/superpowers/plans/linux-integration-report.md for exactly what would
+# need to run, on a real Linux machine with flatpak-builder installed, to
+# find out whether it actually builds.
+#
+# The one constraint that shapes this file: a Flatpak-confined process
+# cannot read `~/.claude/projects` or `~/.codex/sessions` -- the daemon's
+# actual default session roots (see
+# `trace-commons-contributor/src/source/mod.rs`) -- without an explicit
+# filesystem permission, and the whole point of Flatpak confinement is that
+# it must not get a blanket grant of `home` to do it. So `finish-args` below
+# names exactly those two directories, read-only, and nothing wider. The
+# design spec's wording for why -- "Trace Commons needs to read your Claude
+# Code and Codex session files. It asks for access to those folders only."
+# -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
+# ready for onboarding to show once onboarding exists (it does not yet;
+# see the report).
+#
+# A contributor who points the daemon at a non-default session root (the
+# `claude_root` / `codex_root` settings this app's own Settings view already
+# shows as configured-or-not, never as a path) would need a matching custom
+# `--filesystem` grant this manifest cannot predict. That is a real,
+# unresolved limitation of shipping this as a Flatpak, not an oversight;
+# the tarball distribution the design spec also asks for has no such limit,
+# because it is not confined.
+app-id: ai.tracecommons.Contributor
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: trace-commons-shell
+
+finish-args:
+  # GTK 4 display access. Wayland first, X11 as the fallback the runtime
+  # itself recommends; no direct device access is needed.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # Talks to org.freedesktop.Notifications (libnotify), the
+  # org.freedesktop.portal.* surfaces (background, and file-chooser if
+  # onboarding ever needs one), and org.kde.StatusNotifierWatcher for the
+  # bonus tray. All of these are session-bus services, not portals with
+  # their own finish-arg, except Notifications and the SNI watcher, which
+  # need this socket explicitly.
+  - --socket=session-bus
+  # The two session roots this daemon reads by default, and nothing wider.
+  # Read-only: this application only ever reads session files, and the
+  # queue/redaction/upload pipeline holds its own working state entirely
+  # under the app's private, automatically-writable config directory
+  # (`dirs::config_dir()`, which Flatpak already remaps to the sandboxed
+  # per-app location with no extra permission needed).
+  - --filesystem=~/.claude/projects:ro
+  - --filesystem=~/.codex/sessions:ro
+
+modules:
+  - name: trace-commons-shell
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/trace-commons-shell/cargo
+    build-commands:
+      # --offline requires a vendored source tree; see cargo-sources.json
+      # below and the report for the exact command that generates it. This
+      # manifest does not fabricate that file -- a plausible-looking but
+      # wrong one is worse than an honest gap, since it would silently
+      # pin the wrong checksums.
+      - cargo --offline build --release --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
+      - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
+    sources:
+      - type: dir
+        path: ../../..
+      # Generated, not written by hand: run
+      #   pip install aiohttp toml
+      #   python3 flatpak-cargo-generator.py \
+      #     crates/trace-commons-contributor-gtk/Cargo.lock \
+      #     -o crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json
+      # (flatpak-cargo-generator.py comes from
+      # https://github.com/flatpak/flatpak-builder-tools, and needs network
+      # access -- it downloads nothing itself, but resolves checksums for
+      # everything in the lockfile). Absent that file, the build-commands
+      # above will fail at the network-sandboxed `cargo build` step, which
+      # is the correct, honest failure rather than a silent full-network
+      # build that defeats the point of a reproducible Flatpak.
+      - type: file
+        path: cargo-sources.json
+        only-arches: []  # disabled until cargo-sources.json exists; see above

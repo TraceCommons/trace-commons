@@ -1,0 +1,265 @@
+/*
+ * Structure. The palette that this file references lives in `style.rs`, as
+ * two `@define-color` blocks prepended at load time -- GTK CSS has no
+ * `prefers-color-scheme` and `@define-color` cannot be scoped to a
+ * selector, so the scheme has to be chosen when the provider is loaded.
+ *
+ * Sizes are in px. GTK scales them with the desktop's text-scaling factor,
+ * so this still respects a person who has asked for larger text.
+ */
+
+/* --- Ground -------------------------------------------------------- */
+
+.tc-root {
+  background-color: @tc_bg;
+  color: @tc_ink;
+}
+
+/* The header carries the ground rather than a raised bar, so the window
+   reads as one sheet of paper with a rule across it. The site's topbar does
+   the same thing. */
+.tc-header {
+  background-color: @tc_bg;
+  border-bottom: 1px solid @tc_line;
+  box-shadow: none;
+}
+
+/* --- The mark ------------------------------------------------------
+   A transcription of `.brand-mark`:
+     linear-gradient(135deg, var(--green) 0 38%, transparent 38% 100%),
+     linear-gradient(45deg, transparent 0 45%, var(--blue) 45% 100%)
+   written with single-position stops, which every GTK 4 release parses. */
+
+.tc-brand-mark {
+  background-color: @tc_surface;
+  background-image:
+    linear-gradient(135deg, @tc_green 38%, transparent 38%),
+    linear-gradient(45deg, transparent 45%, @tc_blue 45%);
+  border: 1px solid @tc_line;
+}
+
+/* --- Type scale ----------------------------------------------------
+   Two rules carry the identity. Figures that describe what leaves the
+   machine are always monospaced and prose never is, so a payload size can
+   be found on any card without reading a word. And field labels are heavy,
+   uppercase and tracked, which is the site's `.eyebrow` treatment. */
+
+.tc-display {
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.tc-screen-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.tc-card-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.tc-body {
+  font-size: 14px;
+}
+
+.tc-meta {
+  font-size: 13px;
+  color: @tc_muted;
+}
+
+.tc-eyebrow {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: @tc_muted;
+}
+
+.tc-ledger {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tc-figure {
+  font-family: monospace;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.tc-mono {
+  font-family: monospace;
+  font-size: 13px;
+}
+
+/* --- Colour roles --------------------------------------------------
+   Type only. Fills, glyph strokes and rules keep the site's exact values;
+   these are the darkened light-mode twins that clear 4.5:1 as small text.
+   See the measured table in style.rs. */
+
+.tc-clear {
+  color: @tc_green_text;
+}
+
+.tc-attention {
+  color: @tc_gold_text;
+}
+
+.tc-held {
+  color: @tc_blue_text;
+}
+
+.tc-refused {
+  color: @tc_coral_text;
+}
+
+.tc-neutral {
+  color: @tc_muted;
+}
+
+/* --- Cards ---------------------------------------------------------
+   A face, a hairline, and nothing else. Flat fills of the same value
+   stacked down a window give the eye no edge to catch. */
+
+.tc-card {
+  background-color: @tc_surface;
+  border: 1px solid @tc_line;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+/* Reserved for a card a person should weigh before deciding -- today, one
+   whose scrubbing matched nothing at all. */
+.tc-card.tc-flagged {
+  border-color: @tc_gold;
+}
+
+/* --- The manifest strip -------------------------------------------
+   The same fields in the same order at the foot of every card. */
+
+.tc-manifest {
+  background-color: @tc_surface2;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+/* --- Pills --------------------------------------------------------- */
+
+.tc-tag {
+  border: 1px solid @tc_line;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tc-tag.tc-clear {
+  border-color: @tc_green;
+}
+
+.tc-tag.tc-attention {
+  border-color: @tc_gold;
+}
+
+.tc-tag.tc-held {
+  border-color: @tc_blue;
+}
+
+.tc-tag.tc-refused {
+  border-color: @tc_coral;
+}
+
+/* A recent search term. Small, quiet, and obviously pressable. */
+.tc-chip {
+  border-radius: 999px;
+  padding: 2px 12px;
+  min-height: 0;
+  font-size: 12px;
+  font-weight: 600;
+  background-color: @tc_surface2;
+  color: @tc_ink;
+  border: 1px solid @tc_line;
+  box-shadow: none;
+}
+
+.tc-chip:hover {
+  border-color: @tc_green;
+}
+
+/* --- Rules --------------------------------------------------------- */
+
+.tc-rule {
+  background-color: @tc_line;
+  min-height: 1px;
+}
+
+/* --- Actions -------------------------------------------------------
+   `.suggested-action` takes its fill from `accent_bg_color` and its label
+   from `accent_fg_color`, both of which style.rs sets to the measured
+   pair. This adds weight and metrics only -- it must never set a colour,
+   or the pair stops being the thing that decides legibility. */
+
+.tc-primary {
+  font-weight: 700;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* The secondary of a pair. Present, reachable, and not competing. */
+.tc-quiet {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  border: 1px solid @tc_line;
+  color: @tc_ink;
+  font-weight: 600;
+}
+
+.tc-quiet:hover {
+  background-color: @tc_surface2;
+}
+
+/* --- The caveat ----------------------------------------------------
+   Set as running text rather than as a warning box. A banner on every card
+   is how a warning becomes wallpaper; a sentence that changes with what
+   scrubbing actually did is read again each time because it says something
+   different each time. */
+
+.tc-caveat {
+  font-size: 13px;
+  color: @tc_muted;
+}
+
+.tc-caveat.tc-attention {
+  color: @tc_gold_text;
+}
+
+/* --- The health banner ---------------------------------------------
+   Gold, not coral. Every sentence it can carry ends in "nothing has been
+   lost"; this is something to weigh, not a failure. */
+
+.tc-banner {
+  background-color: @tc_surface;
+  border: 1px solid @tc_gold;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+/* --- The transcript ------------------------------------------------ */
+
+.tc-transcript {
+  background-color: @tc_surface;
+  color: @tc_ink;
+  font-size: 13px;
+}
+
+.tc-transcript text {
+  background-color: @tc_surface;
+  color: @tc_ink;
+}
+
+/* --- Empty state --------------------------------------------------- */
+
+.tc-empty {
+  background-color: @tc_bg;
+}
