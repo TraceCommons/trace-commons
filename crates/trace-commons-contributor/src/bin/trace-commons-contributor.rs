@@ -181,6 +181,15 @@ enum DaemonAction {
     },
     /// Decline one queued session
     Dismiss { entry_id: String },
+    /// Withdraw a submitted trace: content deleted, tier-dependent on how
+    /// far it had already gone. See
+    /// docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md.
+    Withdraw {
+        submission_id: Option<String>,
+        /// Withdraw every trace currently held for privacy review, not one
+        #[arg(long = "all-quarantined", conflicts_with = "submission_id")]
+        all_quarantined: bool,
+    },
     /// Stop queueing and uploading until resumed
     Pause,
     /// Resume after a pause
@@ -338,6 +347,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             DaemonAction::Dismiss { entry_id } => {
                 commands::daemon_dismiss(&store, &entry_id, cli.json)
             }
+            DaemonAction::Withdraw {
+                submission_id,
+                all_quarantined,
+            } => commands::daemon_withdraw(
+                &store,
+                submission_id.as_deref(),
+                all_quarantined,
+                cli.json,
+            ),
             DaemonAction::Pause => commands::daemon_pause(&store, true, cli.json),
             DaemonAction::Resume => commands::daemon_pause(&store, false, cli.json),
             DaemonAction::Projects => commands::daemon_projects(&store, cli.json),

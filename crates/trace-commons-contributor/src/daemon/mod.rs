@@ -39,6 +39,7 @@ pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
 pub mod win_pipe;
+pub mod withdraw;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
