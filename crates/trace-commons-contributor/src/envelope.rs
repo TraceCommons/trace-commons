@@ -264,9 +264,17 @@ pub fn build_raw_contribution(
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
     );
+    // The project basename is derived from the working directory and is
+    // identifying on its own (a repo or client name), so it is hashed for
+    // the same reason `cwd` is -- only its digest may cross the wire. Local
+    // `--project` matching uses the in-memory field, not this serialized
+    // flag, so hashing here costs nothing downstream.
     feature_flags.insert(
-        "project".to_string(),
-        t.project.clone().unwrap_or_else(|| "unknown".to_string()),
+        "project_hash".to_string(),
+        t.project
+            .as_ref()
+            .map(|project| session_hash(project.as_bytes()))
+            .unwrap_or_else(|| "unknown".to_string()),
     );
     feature_flags.insert(
         "cwd_hash".to_string(),
@@ -483,8 +491,11 @@ mod tests {
         assert!(!json.contains("sk-fake-fixture-secret-1234"));
         // The full local path prefix must not survive.
         assert!(!json.contains("/Users/testuser"));
-        // Project basename and agent tag do survive.
-        assert!(json.contains("myproj"));
+        // The project basename must not survive in the clear -- only its
+        // hash crosses the wire.
+        assert!(!json.contains("myproj"));
+        assert!(json.contains(&session_hash("myproj".as_bytes())));
+        // The agent tag does survive.
         assert!(json.contains("claude-code"));
     }
 
@@ -721,12 +732,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.json");
         let mut f = std::fs::File::create(&path).unwrap();
-        // `cwd` is nested one level below the "secretproj" marker: the
-        // project field derived from the cwd basename ("workdir") is
-        // expected to survive into the raw contribution (same as every
-        // other source), but the full cwd path -- and therefore the
-        // "secretproj" marker itself -- must never appear in the
-        // serialized output. Only its hash (`cwd_hash`) may.
+        // `cwd` is nested one level below the "secretproj" marker. Neither
+        // the full cwd path (and therefore the "secretproj" marker) nor the
+        // project basename ("workdir") may appear in the serialized output:
+        // both are identifying, so only their hashes (`cwd_hash`,
+        // `project_hash`) cross the wire.
         f.write_all(
             br#"[
               {"role":"meta","source":"openhands","cwd":"/home/dev/secretproj/workdir","model":"gpt-5"},
@@ -757,6 +767,19 @@ mod tests {
         assert!(
             !serialized.contains("secretproj"),
             "cwd must never be serialized"
+        );
+        assert!(
+            !serialized.contains("workdir"),
+            "project basename must never be serialized in the clear"
+        );
+        assert_eq!(
+            raw.ironclaw.feature_flags.get("project_hash"),
+            Some(&session_hash("workdir".as_bytes())),
+            "project must cross the wire only as its hash"
+        );
+        assert!(
+            !raw.ironclaw.feature_flags.contains_key("project"),
+            "the cleartext project flag must be gone"
         );
     }
 }
