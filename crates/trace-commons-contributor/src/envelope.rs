@@ -264,18 +264,31 @@ pub fn build_raw_contribution(
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
     );
-    // The project basename is derived from the working directory and is
-    // identifying on its own (a repo or client name), so it is hashed for
-    // the same reason `cwd` is -- only its digest may cross the wire. Local
-    // `--project` matching uses the in-memory field, not this serialized
-    // flag, so hashing here costs nothing downstream.
-    feature_flags.insert(
-        "project_hash".to_string(),
-        t.project
-            .as_ref()
-            .map(|project| session_hash(project.as_bytes()))
-            .unwrap_or_else(|| "unknown".to_string()),
-    );
+    // The project basename is NOT sent, in any form.
+    //
+    // It used to ship in the clear as `project`, which was the leak in #207:
+    // it is derived from the same working directory `cwd_hash` exists to
+    // protect, and a repo or client name identifies on its own.
+    //
+    // It is not hashed either, and that was a deliberate choice rather than
+    // an oversight. `session_hash` is unsalted SHA-256, and basenames are
+    // dictionary-shaped -- `dotfiles`, `api`, `backend`, `monorepo` -- so a
+    // wordlist inverts them in constant time. Worse, an unsalted digest is
+    // stable across every contributor forever, so it preserves exactly the
+    // cross-contributor linkage the cleartext field had (two people working
+    // on identically named repos are still linkable) while reading as though
+    // it were protected. Removing the evidence of a capability without
+    // removing the capability is worse than leaving it visible.
+    //
+    // Nothing server-side reads this key -- the only `"project"` in
+    // trace-commons-protocol is an unrelated issue-identity redaction rule --
+    // so there is no consumer to preserve. Local `--project` scoping matches
+    // on the in-memory field and never needed the serialized one.
+    //
+    // If per-project grouping is ever actually wanted, the answer is an HMAC
+    // keyed by the device key, which keeps a contributor's own traces
+    // groupable while destroying both the dictionary attack and the
+    // cross-contributor linkage. Do not reintroduce a bare hash.
     feature_flags.insert(
         "cwd_hash".to_string(),
         t.cwd
@@ -491,10 +504,11 @@ mod tests {
         assert!(!json.contains("sk-fake-fixture-secret-1234"));
         // The full local path prefix must not survive.
         assert!(!json.contains("/Users/testuser"));
-        // The project basename must not survive in the clear -- only its
-        // hash crosses the wire.
+        // The project basename must not survive at all -- not in the clear,
+        // and not as a digest either. See the note at the feature-flag block
+        // for why a bare hash of a dictionary-shaped basename was rejected.
         assert!(!json.contains("myproj"));
-        assert!(json.contains(&session_hash("myproj".as_bytes())));
+        assert!(!json.contains(&session_hash("myproj".as_bytes())));
         // The agent tag does survive.
         assert!(json.contains("claude-code"));
     }
@@ -734,9 +748,9 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         // `cwd` is nested one level below the "secretproj" marker. Neither
         // the full cwd path (and therefore the "secretproj" marker) nor the
-        // project basename ("workdir") may appear in the serialized output:
-        // both are identifying, so only their hashes (`cwd_hash`,
-        // `project_hash`) cross the wire.
+        // project basename ("workdir") may appear in the serialized output.
+        // The cwd crosses only as `cwd_hash`; the basename does not cross at
+        // all, in any form.
         f.write_all(
             br#"[
               {"role":"meta","source":"openhands","cwd":"/home/dev/secretproj/workdir","model":"gpt-5"},
@@ -772,14 +786,19 @@ mod tests {
             !serialized.contains("workdir"),
             "project basename must never be serialized in the clear"
         );
-        assert_eq!(
-            raw.ironclaw.feature_flags.get("project_hash"),
-            Some(&session_hash("workdir".as_bytes())),
-            "project must cross the wire only as its hash"
+        assert!(
+            !serialized.contains(&session_hash("workdir".as_bytes())),
+            "the basename must not cross as a digest either -- an unsalted \
+             hash of a dictionary-shaped name is reversible and is a stable \
+             cross-contributor identifier"
         );
         assert!(
             !raw.ironclaw.feature_flags.contains_key("project"),
             "the cleartext project flag must be gone"
+        );
+        assert!(
+            !raw.ironclaw.feature_flags.contains_key("project_hash"),
+            "and it must not have been replaced by a hashed one"
         );
     }
 }
