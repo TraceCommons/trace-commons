@@ -349,6 +349,8 @@ history record, audit entry, notification text, or IPC response.
 | `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
 | `subscribe` | — | `subscribed: true`, then a `snapshot` event | |
 | `shutdown` | — | `stopping: true` | |
+| `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
+| `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 
 ### `status`
 
@@ -779,6 +781,49 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+### Withdrawal
+
+`withdraw` and `withdraw_bulk` call the server's
+`POST /v1/account/traces/{submission_id}/withdraw` (see
+`docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md` for the full
+design and the three response tiers). A successful `withdraw` reports
+`distribution_reach`, one of:
+
+- `not_distributed` -- the trace was `submitted` or `quarantined` and never
+  entered the commons. Its content is simply deleted.
+- `in_commons` -- the trace was `accepted` but not yet used in any published
+  export or benchmark. Its content is deleted and it is excluded going
+  forward.
+- `distributed` -- the trace was `accepted` and already included in a
+  published export or benchmark. Its content is deleted and it is excluded
+  going forward, but copies already distributed cannot be recalled. An
+  application must show this distinction rather than a generic "withdrawn" --
+  see the design doc's exact confirmation copy for each tier.
+
+`withdraw_bulk` withdraws every submission currently at `status` in the
+local history cache (one of `submitted`, `quarantined`, or `accepted`; not
+`withdrawn` itself, and not the `other` bucket `history_rollup` reports,
+which covers statuses this client has no stable name for). It reports
+`withdrawn` and `failed` counts rather than per-submission detail -- a
+partial failure does not fail the whole call, and a contributor can retry
+individual traces with `withdraw` if some did not go through.
+
+Both update the local history cache immediately (the record's `status`
+becomes `withdrawn`) so a contributor sees the effect without needing a
+`refresh_history` round trip first.
+
+**Both methods answer `unavailable` / `account-session-required` today,
+always**, before ever attempting the call. Withdrawal is authenticated by an
+account session -- deliberately not the device key that authenticates every
+other call in this contract, so withdrawal survives losing the device that
+submitted the trace -- and this daemon does not yet acquire or store one; it
+only ever holds a device key. `account-session-required` is a distinct,
+documented error rather than a generic failure so a calling shell can route
+the contributor to account sign-in instead of showing a dead end, once
+account sign-in exists to route to. Acquiring an account session is separate
+work, tracked outside this document; nothing in this contract should be
+read as that flow already existing.
 
 ## Events
 
