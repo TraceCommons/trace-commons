@@ -58,9 +58,20 @@ else
   RENDERER_FLAG=()
 fi
 
+# --debug is required, not optional, on this weston: verified against
+# weston 13.0.0 (the version apt installs on ubuntu-latest/24.04) that
+# weston-screenshooter's capture request is refused with "unauthorized"
+# without it. weston's man page states plainly why: the output-capture
+# interface weston-screenshooter binds to is gated behind --debug, because
+# an unrestricted client could otherwise silently read every output's
+# pixels. That is a real production concern and exactly why this stays off
+# by default -- but this compositor is a throwaway, single-purpose CI
+# instance with nothing sensitive on it, torn down at the end of this
+# script, so the tradeoff --debug makes (screenshot access for any client)
+# costs nothing here.
 weston --backend=headless-backend.so --width=1280 --height=900 \
   "${RENDERER_FLAG[@]}" \
-  --socket="$WAYLAND_SOCKET" --idle-time=0 &
+  --socket="$WAYLAND_SOCKET" --idle-time=0 --debug &
 WESTON_PID=$!
 PIDS+=("$WESTON_PID")
 
