@@ -47,7 +47,7 @@ use crate::trace_corpus_storage::{
     TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
     TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceWithdrawalRecord, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -3573,6 +3573,165 @@ impl TraceCorpusStore for PgBackend {
                    AND submission_id = $2
                    AND source_invalidated_at IS NULL",
                 &[&tenant_id, &submission_id, &reason],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(updated)
+    }
+
+    async fn record_trace_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        withdrawn_at: DateTime<Utc>,
+        prior_status: &str,
+        distribution_reach: &str,
+    ) -> Result<TraceWithdrawalRecord, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // First writer wins. `DO NOTHING` + a RETURNING-less follow-up SELECT
+        // keeps a second withdrawal reporting the ORIGINAL tier and timestamp
+        // rather than silently restamping them.
+        tx.execute(
+            "INSERT INTO trace_withdrawals
+                 (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &submission_id,
+                &withdrawn_at,
+                &prior_status,
+                &distribution_reach,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        // The content is deleted by the caller, so the submission row goes to
+        // `revoked` (which every consumer/export predicate already excludes)
+        // and carries both `withdrawn_at` and `purged_at`. Credit columns are
+        // deliberately untouched: withdrawal is not a clawback.
+        tx.execute(
+            "UPDATE trace_submissions
+                SET status = 'revoked',
+                    withdrawn_at = COALESCE(withdrawn_at, $3),
+                    revoked_at = COALESCE(revoked_at, $3),
+                    purged_at = COALESCE(purged_at, $3),
+                    updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id, &withdrawn_at],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_one(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                 FROM trace_withdrawals
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(TraceWithdrawalRecord {
+            tenant_id: row.get("tenant_id"),
+            submission_id: row.get("submission_id"),
+            withdrawn_at: row.get("withdrawn_at"),
+            prior_status: row.get("prior_status"),
+            distribution_reach: row.get("distribution_reach"),
+        })
+    }
+
+    async fn get_trace_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<TraceWithdrawalRecord>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                 FROM trace_withdrawals
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| TraceWithdrawalRecord {
+            tenant_id: row.get("tenant_id"),
+            submission_id: row.get("submission_id"),
+            withdrawn_at: row.get("withdrawn_at"),
+            prior_status: row.get("prior_status"),
+            distribution_reach: row.get("distribution_reach"),
+        }))
+    }
+
+    async fn count_trace_export_memberships(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Deliberately counts invalidated memberships too: an export that was
+        // published and later invalidated still put copies in other hands.
+        let row = tx
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS membership_count
+                 FROM trace_export_manifest_items
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get("membership_count"))
+    }
+
+    async fn list_trace_vector_entry_ids_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT vector_entry_id FROM trace_vector_entries
+                   WHERE tenant_id = $1 AND submission_id = $2
+                 UNION
+                 SELECT vector_entry_id FROM trace_gate_decisions
+                   WHERE tenant_id = $1 AND submission_id = $2
+                     AND vector_entry_id IS NOT NULL
+                 UNION
+                 SELECT vector_entry_id FROM trace_gate_chunk_vector_entries
+                   WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn clear_trace_dedup_cluster_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
+                    SET dedup_simhash = NULL,
+                        dedup_cluster_id = NULL,
+                        dedup_cluster_size = NULL
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
