@@ -62,19 +62,30 @@ numbers were produced before the scrub.
 
 That inverts the guarantee the architecture rests on — that nothing but the
 scrubbed envelope leaves the contributor's machine, and that raw content is
-never sent out even to be scrubbed. Two ways out:
+never sent out even to be scrubbed. Three ways out:
 
 1. **Recompute logits over redacted text.** Coherent, and exactly what we do
    today, so it buys nothing.
 2. **Treat logits as precisely as sensitive as the raw prompt.** They never
    leave in the clear. Analysis goes to the data; only derived scores come
    back.
+3. **Redact before generation, not after.** If the substitution happens on the
+   request path, the model generates conditioned on placeholders, and the
+   logprobs describe the redacted text because there never was an unredacted
+   generation. See "The IronWire path" — this option is not hypothetical, and
+   it did not exist when the paragraph above was first written.
 
-Only (2) is both honest and new, and it is the same shape as the private
-contributor insight design (2026-08-07): computation inside an attested
-enclave, with the sensitive artifact never in the operator's hands.
+(2) is the general answer, and it is the same shape as the private contributor
+insight design (2026-08-07): computation inside an attested enclave, with the
+sensitive artifact never in the operator's hands.
 
-Anything else in this document is contingent on accepting (2).
+(3) is narrower but structurally stronger where it applies, because it removes
+the contradiction rather than containing it. Its limit is the quality of the
+pre-generation filter, which is a measurable-in-principle, unmeasured-in-fact
+false-negative rate — not a proof. It reduces the problem; it does not close
+it.
+
+Anything else in this document is contingent on accepting (2) or (3).
 
 ### Forgeability
 
@@ -167,6 +178,78 @@ inputs without committing the trace schema, without touching the submission
 path, and without any decision about what leaves the machine — because in this
 shape nothing does.
 
+## The IronWire path
+
+`nearai/ironwire` is a loopback proxy that sits at the inference boundary:
+agents point at `127.0.0.1` and it routes each conversation to whichever
+backend is available. That makes it a strictly better vehicle than patching one
+harness, and it changes two of the four conditions above.
+
+**It collapses condition 2.** The proxy sees every request from every harness —
+Claude Code, Codex, Aider, Cline — without any of them cooperating. Its own
+`docs/PRIVACY.md` puts it exactly right: it is "the one place in a coding
+agent's life where every byte destined for a model passes through code the user
+controls."
+
+**It is already meant to be a contributor.** `docs/DESIGN.md` §8 describes a
+trace ledger at `$IRONWIRE_HOME/ledger.sqlite`, local capture on by default and
+upload off, handing records to `ironclaw_trace_commons`. There is a pipeline to
+attach distributions to rather than one to invent. Note it is *designed, not
+built*: no `Cargo.toml` mentions the `contribute` feature, and ROADMAP M6 still
+lists wiring it as pending.
+
+### The lane split decides the cost
+
+`crates/ironwire_translate/src/request.rs:52`, `anthropic_to_chat_completions`,
+builds the outbound body **from scratch** — a fresh `Map` with `model`,
+`messages`, `stream`, `stream_options`, `max_tokens`, `stop`, `temperature`,
+`tools`, `tool_choice` inserted key by key. On that cross-family path,
+requesting logprobs is two inserts into a map that is already being
+constructed, and it breaks no guarantee.
+
+The **native** lane is the opposite. `docs/PROTOCOL.md` §2 enumerates exactly
+five permitted mutations and ends "Nothing else. The body is otherwise the
+bytes the client sent", pinned by `tests/passthrough.rs` — and even the `model`
+rewrite is "a targeted JSON edit of that one key — never a full re-serialize."
+Injecting sampling parameters there is a body mutation and would need the
+treatment their privacy filter got: off by default, permanently visible in
+`ironwire status`, marked per exchange in the ledger. Their reasoning transfers
+without modification — "an exchange that was filtered is not comparable to one
+that was not, and the log must not imply otherwise" is equally true of an
+exchange whose sampling parameters we changed.
+
+**So: cross-family lane only, and leave native passthrough alone.**
+
+### Why this resolves the privacy inversion
+
+IronWire's privacy filter substitutes sensitive values **on the way out**,
+before the request reaches the provider, and restores them on the way back. The
+upstream therefore generates conditioned on placeholders, and `docs/PRIVACY.md`
+§8 already records post-substitution bodies in the ledger.
+
+That is option (3) above, and it is the first configuration in which logits and
+redaction are consistent rather than contradictory — not because the leak is
+bounded after the fact, but because the unredacted generation never happened.
+It is worth being precise about the limit: the filter's tiers 1 and 2 are
+deterministic and reviewable, tier 3 is not started, and their own document
+insists the false-negative rate "cannot be measured on the user's actual data".
+This makes the problem tractable. It does not make it solved, and no interface
+built on it may say otherwise.
+
+### Two things to know before building
+
+- **Capture belongs on the observation tee, not the translated response.** The
+  Anthropic Messages shape has nowhere to put logprobs, so they are dropped
+  translating back to the client — which is fine, since the agent does not need
+  them. But `PROTOCOL.md` §2 says the tee "drops observations under pressure
+  rather than blocking bytes", so capture there is **lossy by design**.
+  Acceptable for an experiment; not acceptable for anything credit-bearing.
+- **The ceiling is unchanged.** Anthropic exposes no logprobs, and the native
+  Anthropic lane is Claude Code — still the dominant source. IronWire widens
+  coverage to NEAR AI, Ollama, local and other OpenAI-shaped backends. It does
+  not widen it to Claude. The `BackendKind::Local` path is the most interesting
+  of those: open weights, local inference, nobody to ask.
+
 ## Recommendation: measure before re-architecting
 
 Do not build any of this on the strength of the argument above. The argument
@@ -185,6 +268,13 @@ though Codex's provider also returns `top_logprobs`. We control both ends,
 the model is open-weight, and the TEE that condition 3 needs is already under
 the inference. Nothing about the experiment depends on that yet, but the
 follow-on work does, and the Codex path can never get there.
+
+IronWire is the wider version of the same experiment and should follow rather
+than replace it: it reaches Claude Code and Codex sessions too, provided they
+are routed to an OpenAI-shaped backend. Do Ironclaw first because it is the
+narrower change against a path we already understand; do IronWire second
+because it is where the volume is, and because its pre-generation substitution
+is the only mechanism here that makes capture and redaction consistent.
 
 **It succeeds if** entropy-derived ranking disagrees with the current scorecard
 in ways a reader judges to be improvements. **It fails if** it merely correlates
