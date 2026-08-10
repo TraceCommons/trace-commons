@@ -696,6 +696,42 @@ pub async fn set_profile(
         .context("setting public profile")
 }
 
+/// Response of `POST /v1/account/login-links`. `url` is a ROOT-RELATIVE path
+/// carrying a single-use code; it is a secret for the few minutes it lives.
+/// `account_id` is returned by the server but not used here.
+#[derive(Debug, Clone, Deserialize)]
+struct MintLoginLinkResponse {
+    url: String,
+}
+
+/// Mint a single-use account login link for this device's principal.
+///
+/// Used by `crate::account_auth::sign_in` to open the human's browser at the
+/// EXISTING redeem flow. This is the same device-authenticated endpoint the
+/// account slice has always exposed, called with the same empty-scope claim as
+/// `status`: minting a login link is an authority the device key already has,
+/// and the loopback flow adds none.
+///
+/// Returns the root-relative path only. The caller joins it onto the
+/// configured ingest base URL; it is never logged.
+pub async fn mint_account_login_link(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for account sign-in")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let minted: MintLoginLinkResponse = client
+        .call_json(Method::POST, "/v1/account/login-links", &[], None::<&()>)
+        .await
+        .context("minting an account login link")?;
+    Ok(minted.url)
+}
+
 /// Withdraw this contributor's public attribution.
 ///
 /// The row goes at the next snapshot. This is the action `/about/privacy`

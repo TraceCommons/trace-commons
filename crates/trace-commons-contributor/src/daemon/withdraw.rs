@@ -7,20 +7,21 @@
 //! tell the contributor the truth rather than a generic success. See
 //! `docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md`.
 //!
-//! # The account-session gap
+//! # The account session
 //!
 //! That endpoint is authenticated by an **account session**, not the device
-//! key this daemon actually holds (`ContributorConfig` stores a device key
-//! and the tenant/audience details minted against it -- see
-//! `config::ContributorConfig` -- and nothing else). Acquiring and storing an
-//! account session is separate, not-yet-built work; this module does not
-//! invent it. [`account_session_token`] is the single seam that would need
-//! to change when that work lands, and it always returns `None` today -- so
-//! both handlers below always fail closed with [`ERR_ACCOUNT_SESSION_REQUIRED`]
-//! immediately after validating their params, before ever attempting the
-//! call. That is a distinct, documented error rather than a generic failure
-//! so a calling shell can route the contributor to account sign-in instead
-//! of showing a dead end (once account sign-in exists to route to).
+//! key this daemon holds -- withdrawal is meant to survive losing the device
+//! that submitted a trace, and a stolen device key must not be worth the
+//! ability to delete someone's contribution history.
+//!
+//! The session comes from `crate::account_auth`: the human completes the
+//! ordinary browser login flow, and the browser hands this machine a
+//! short-lived bearer token on a loopback redirect. [`account_session_token`]
+//! reads that token, and treats an absent, unparseable, or expired one as
+//! absent -- so both handlers below fail closed with
+//! [`ERR_ACCOUNT_SESSION_REQUIRED`] rather than making a call that would 401.
+//! That is a distinct, documented error rather than a generic failure so a
+//! calling shell can route the contributor to `account login`.
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -33,11 +34,14 @@ use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Respons
 /// having to guess from a generic `unavailable`.
 pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 
-/// The account-session token this daemon would present to the withdrawal
-/// endpoint, if it had one. See this module's doc for why it always returns
-/// `None` today.
-fn account_session_token(_shared: &DaemonShared) -> Option<String> {
-    None
+/// The account-session token this daemon presents to the withdrawal endpoint.
+///
+/// `None` whenever the token is missing, unreadable, or expired (or about to
+/// be): the caller must then report [`ERR_ACCOUNT_SESSION_REQUIRED`] rather
+/// than fall back to the device key, which is deliberately not accepted for
+/// withdrawal.
+fn account_session_token(shared: &DaemonShared) -> Option<String> {
+    crate::account_auth::load_token(&shared.store)
 }
 
 fn parse_submission_id(params: &serde_json::Value) -> Result<Uuid, &'static str> {
@@ -264,11 +268,65 @@ mod tests {
     }
 
     #[test]
-    fn account_session_token_has_none_to_offer_today() {
-        // Pinned so this module's central claim -- "always None until
-        // account-session storage lands" -- breaks loudly if it ever
-        // silently stops being true.
+    fn account_session_token_is_none_until_the_contributor_signs_in() {
+        // Fail closed: a store with no account session offers no token, so
+        // withdrawal reports `account-session-required` rather than reaching
+        // for the device key.
         let s = shared();
         assert_eq!(account_session_token(&s), None);
+    }
+
+    #[test]
+    fn account_session_token_is_offered_once_a_live_session_is_stored() {
+        // The other half of the seam: with a live token on disk, withdrawal
+        // proceeds to the network call instead of the fail-closed error. If
+        // this ever silently stopped working, `withdraw` would look "safe"
+        // while being permanently broken.
+        let s = shared();
+        let session = crate::account_auth::AccountSession {
+            access_token: "tcn1_dGVuYW50.secret".to_string(),
+            expires_at: Utc::now() + chrono::TimeDelta::hours(6),
+            account_id: "acct".to_string(),
+        };
+        s.store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&session).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            account_session_token(&s).as_deref(),
+            Some("tcn1_dGVuYW50.secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn withdraw_with_an_expired_session_still_reports_account_session_required() {
+        // An expired token must not be presented and 401: the contributor is
+        // told to sign in again, which is the whole point of the distinct
+        // error code.
+        let s = shared();
+        let session = crate::account_auth::AccountSession {
+            access_token: "tcn1_dGVuYW50.secret".to_string(),
+            expires_at: Utc::now() - chrono::TimeDelta::hours(1),
+            account_id: "acct".to_string(),
+        };
+        s.store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&session).unwrap(),
+            )
+            .unwrap();
+        let r = handle_withdraw(
+            &s,
+            &req(
+                "withdraw",
+                serde_json::json!({"submission_id": Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        let err = r.error.unwrap();
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, ERR_ACCOUNT_SESSION_REQUIRED);
     }
 }

@@ -265,6 +265,88 @@ pub fn whoami(store: &ConfigStore, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Sign in to the contributor's ACCOUNT, as distinct from enrolling this
+/// device (`login`).
+///
+/// The device key can upload; it deliberately cannot withdraw traces or read
+/// account history, because a stolen device key must not be worth the ability
+/// to delete someone's contribution record. So withdrawal needs the account,
+/// and the account is proven the only way it can be: the human completes the
+/// ordinary browser login flow, and the browser hands this machine a
+/// short-lived token on a loopback redirect.
+///
+/// The printed URL is the headless path. It carries a single-use code, so it
+/// is treated as a secret: it is printed for the person at the keyboard and
+/// never logged.
+pub async fn account_login(store: &ConfigStore, no_browser: bool, json: bool) -> Result<()> {
+    let cfg = store
+        .load_config()?
+        .context("not enrolled: run `login` first")?;
+    let outcome = crate::account_auth::sign_in(store, &cfg, !no_browser, |url| {
+        if json {
+            // Machine-readable callers still need the URL: in --json mode the
+            // whole point is that a wrapper drives the browser itself.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": "trace_commons.account_login_url.v1",
+                    "url": url,
+                })
+            );
+        } else {
+            println!("Open this in your browser to finish signing in:\n\n  {url}\n");
+            println!("Waiting for the browser...");
+        }
+    })
+    .await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "trace_commons.account_login.v1",
+                "account_id": outcome.account_id,
+                "expires_at": outcome.expires_at,
+            }))?
+        );
+    } else {
+        println!("signed in; session expires {}", outcome.expires_at);
+    }
+    Ok(())
+}
+
+/// Report whether a live account session is stored, WITHOUT printing it.
+pub fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
+    let expires_at = crate::account_auth::session_status(store);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "trace_commons.account_status.v1",
+                "signed_in": expires_at.is_some(),
+                "expires_at": expires_at,
+            }))?
+        );
+    } else {
+        match expires_at {
+            Some(at) => println!("signed in; session expires {at}"),
+            None => println!("not signed in; run `account login`"),
+        }
+    }
+    Ok(())
+}
+
+/// Revoke the account session server-side and forget it locally. Leaves the
+/// device enrollment alone -- that is what `logout` is for.
+pub async fn account_logout(store: &ConfigStore) -> Result<()> {
+    let cfg = store
+        .load_config()?
+        .context("not enrolled: run `login` first")?;
+    crate::account_auth::sign_out(store, &cfg).await?;
+    println!("signed out of your account");
+    Ok(())
+}
+
 /// Delete all local contributor state (config, device key, receipts).
 pub fn logout(store: &ConfigStore) -> Result<()> {
     // Stop a running daemon first. It holds a minted claim that stays valid
@@ -1701,13 +1783,12 @@ pub fn daemon_dismiss(store: &ConfigStore, entry_id: &str, json: bool) -> Result
 /// daemon's `withdraw_bulk` IPC method accepts other statuses if a future
 /// caller needs them.
 ///
-/// Every call today answers `account-session-required`: withdrawal is
-/// authenticated by an account session, which this daemon does not yet
-/// acquire -- it only ever holds a device key (see `daemon::withdraw`'s
-/// module doc). That is printed as a specific explanation here rather than
-/// falling through to `render`'s generic `code: message` bail, so a
-/// contributor is not left staring at a bare error code with no idea what
-/// it means or what to do about it.
+/// Withdrawal is authenticated by an account session, not this device's key.
+/// When there is no live session the daemon answers
+/// `account-session-required`, and that is turned into a specific "run
+/// `account login`" instruction here rather than falling through to
+/// `render`'s generic `code: message` bail, so a contributor is not left
+/// staring at a bare error code with no idea what to do about it.
 pub fn daemon_withdraw(
     store: &ConfigStore,
     submission_id: Option<&str>,
@@ -1742,9 +1823,8 @@ pub fn daemon_withdraw(
                 );
             }
             anyhow::bail!(
-                "withdrawal needs signing in with your account, which this build does not \
-                 yet support (it only holds this device's key). This is a known gap, not a \
-                 bug -- see docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md."
+                "withdrawal needs your account, not just this device's key. Run \
+                 `trace-commons-contributor account login` and try again."
             );
         }
     }
