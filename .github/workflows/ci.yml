@@ -22,8 +22,12 @@ name: ci
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch. This repository uses stacked
+  # PRs, and a `branches: [main]` filter here means a PR targeting another
+  # branch gets no CI at all -- the work is only ever tested once it reaches
+  # main, which is exactly when a failure is most expensive to unwind. A PR
+  # should be tested against the branch it will actually merge into.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -217,3 +221,36 @@ jobs:
       # See docs/operator/operator-binaries.md.
       - name: Run operator-binaries smoke
         run: bash scripts/operator/operator-smoke.sh
+
+  windows-pipe-acl:
+    name: windows named-pipe ACL
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-pipe-acl-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-pipe-acl-
+      # On Windows the daemon's named-pipe DACL is the ONLY access control on
+      # the IPC socket -- there is no 0700 state directory doing that work as
+      # there is on unix, and behind the pipe are the contributor's coding
+      # transcripts, per-project auto-upload arming, and upload approval.
+      #
+      # Type-checking the transport proves the FFI shapes and the control
+      # flow and nothing about whether the descriptor denies anybody. This
+      # job is the observation: a second, non-administrator local account
+      # must be refused. Without it the control ships on an argument rather
+      # than evidence.
+      - name: Build the ACL probe
+        run: cargo build -p trace-commons-contributor --bin win-pipe-acl-probe
+      - name: Verify the pipe excludes a second local user
+        shell: pwsh
+        run: pwsh -File scripts/windows/verify-pipe-acl.ps1

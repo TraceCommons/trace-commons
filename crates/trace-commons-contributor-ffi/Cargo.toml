@@ -1,0 +1,19 @@
+[package]
+name = "trace-commons-contributor-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+trace-commons-contributor = { path = "../trace-commons-contributor" }
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"

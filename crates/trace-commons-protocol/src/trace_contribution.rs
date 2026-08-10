@@ -6867,9 +6867,14 @@ mod tests {
         // nothing and `raw` was negative before this change and is
         // non-positive after; either way it clamps to 0. Asserting the score
         // too keeps "only the medium band moves" honest.
+        // `submission_score` is the name this value carries once it reaches an
+        // envelope; on the scorecard itself the field is `online_score`
+        // (`let submission_score = scorecard.online_score` in
+        // `estimate_initial_credit`). The test was written against the
+        // downstream name, so it never compiled.
         assert_eq!(
-            high.submission_score, 0.0,
-            "high-risk submission_score must clamp to zero either side of this change"
+            high.online_score, 0.0,
+            "high-risk submission score must clamp to zero either side of this change"
         );
     }
 
