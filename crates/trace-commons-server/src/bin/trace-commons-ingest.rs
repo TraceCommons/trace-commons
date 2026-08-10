@@ -49697,6 +49697,18 @@ fn validate_envelope(envelope: &TraceContributionEnvelope) -> ApiResult<()> {
             "trace contribution requires a pseudonymous contributor id",
         ));
     }
+    // Contributor-supplied confidence aggregates. They already reach a tag on
+    // the corpus, so an out-of-range value would propagate rather than sit
+    // inert; reject at the boundary instead of teaching every later consumer
+    // to distrust the range.
+    if let Some(training_dynamics) = &envelope.training_dynamics
+        && let Some(field) = training_dynamics.validation_error()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("trace contribution training dynamics {field} must be between 0.0 and 1.0"),
+        ));
+    }
     Ok(())
 }
 

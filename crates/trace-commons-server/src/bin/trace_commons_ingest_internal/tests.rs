@@ -5254,6 +5254,59 @@ fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
     envelope.schema_version = "invalid.test.schema".to_string();
 }
 
+/// Confidence aggregates are contributor-supplied and already reach a corpus
+/// tag, so an out-of-range value would propagate rather than sit inert. The
+/// boundary is where that stops.
+#[tokio::test]
+async fn submit_rejects_out_of_range_training_dynamics() {
+    use trace_commons_protocol::trace_contribution::TrainingDynamicsSignals;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.training_dynamics = Some(TrainingDynamicsSignals {
+        mean_confidence: Some(42.0),
+        ..Default::default()
+    });
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await
+    .expect_err("out-of-range mean_confidence must be rejected");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The reduction's own output must pass the gate the server applies, or we
+/// have shipped a producer that fails our own validation.
+#[tokio::test]
+async fn submit_accepts_reduced_training_dynamics() {
+    use trace_commons_protocol::trace_contribution::reduce_token_confidences;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.training_dynamics = Some(reduce_token_confidences(&[0.9, 0.2, 0.7, 0.55]));
+
+    let result = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await;
+    if let Err((status, _)) = &result {
+        assert_ne!(
+            *status,
+            StatusCode::BAD_REQUEST,
+            "reduced signals were rejected by envelope validation"
+        );
+    }
+}
+
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
     for event in &mut envelope.events {
         if event.event_type
