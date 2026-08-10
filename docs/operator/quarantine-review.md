@@ -17,16 +17,21 @@ means two keys were *found and replaced* with `[REDACTED:...]`, not that two
 keys sit in the stored trace. Envelopes are stored as encrypted ciphertext of
 the already-redacted payload. There is nothing to purge.
 
-**So `privacy_risk = high` is a proxy for residual risk, not evidence of
-retained PII.** It says the redactor found a lot, which correlates with the
-possibility that it also missed something. Reviewing means judging that residual
-possibility, not deleting content that is still present.
+**So `privacy_risk = high` is reserved for scrub failure or unredactable
+findings** (a residual post-scrub scan still matching, an object key that
+cannot be rewritten, or a residual scan that could not complete). A secret the
+redactor found and removed is `medium`: the report is an annotation on a
+reviewable record, not evidence that live credentials remain. Reviewing a
+High still means judging residual possibility, not deleting content that is
+still present; reviewing a Medium is the same posture with an operator path
+(`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`) that High does not have.
 
 **Approval releases a high-risk trace without changing its risk level.**
 `review-decision --decision approve` sets `status = accepted` and leaves
 `privacy_risk = high`. This matters: clearing the backlog does **not** depend on
 the monotonic-risk work in the re-scrub path. The existing tooling is sufficient
-today.
+today. Re-scrubbing under the scrub-polarity rule (#219) can additionally move
+successful-secret cases from High to Medium without an approve decision.
 
 ## Prerequisites
 
@@ -154,10 +159,13 @@ Three levers, in rough order of leverage:
    HIGH may be firing too readily for some workloads. Worth measuring before
    assuming the contributor is at fault.
 3. **Automated re-scrub release.** The async backstop (#166) only intercepts
-   *new* submissions, and the re-scrub path cannot lower a HIGH risk, so neither
-   clears a backlog today. Work to make re-scrub drive risk classification would
-   change that — but note it must fix the zero-span classifier response in the
-   same change, or an unavailable classifier silently releases traces.
+   *new* submissions. For already-quarantined rows, operators can re-scrub and
+   reclassify in place (`POST /v1/review/quarantine/rescrub`, or
+   `POST /v1/review/{submission_id}/rescrub`) under current residual-risk rules
+   without minting a new submission id. Contributors who can ship a corrected
+   envelope (for example after fixing consent declarations) re-submit with
+   `trace-commons-contributor submit --remediate-quarantined`, which keeps the
+   same content-addressed `submission_id` and asks the server to supersede.
 
 ## What not to do
 

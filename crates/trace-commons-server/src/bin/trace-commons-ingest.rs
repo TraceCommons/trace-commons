@@ -166,6 +166,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
 use trace_commons_server::trace_gate_service::{
@@ -467,6 +468,10 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
+    "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1124,6 +1129,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
+    spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
@@ -1196,6 +1214,11 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    /// How often to recompute the community snapshot in-process. `None`
+    /// leaves recompute admin-triggered only, which is the behaviour
+    /// every deployment had before this existed.
+    community_snapshot_interval: Option<StdDuration>,
+    community_analytics_publication_basis: CommunityAnalyticsPublicationBasis,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -1341,8 +1364,7 @@ struct AppState {
     // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
     #[allow(dead_code)]
     #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-    dedup_vector_index:
-        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    dedup_vector_index: Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>>,
     /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
     /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
     /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
@@ -2604,6 +2626,15 @@ impl TenantCtx {
         event
     }
 
+    fn quarantine_remediated_audit_event(
+        &self,
+        record: &TraceCommonsSubmissionRecord,
+    ) -> TraceCommonsAuditEvent {
+        let mut event = TraceCommonsAuditEvent::quarantine_remediated(record, self.auth());
+        event.reason = Some(self.auth_method_reason());
+        event
+    }
+
     fn revoked_audit_event(&self, submission_id: Uuid, reason: &str) -> TraceCommonsAuditEvent {
         TraceCommonsAuditEvent::revoked(self.auth(), submission_id, reason)
     }
@@ -3489,6 +3520,9 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
+            community_analytics_publication_basis:
+                parse_community_analytics_publication_basis_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -5268,8 +5302,7 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 /// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-fn build_dedup_vector_index_from_env()
--> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
     use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
     let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
@@ -6673,6 +6706,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/traces/{submission_id}/content",
             get(account_trace_content_handler),
         )
+        .route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post(account_trace_withdraw_handler),
+        )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
             "/v1/account/sessions/revoke-all",
@@ -6855,6 +6892,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/review/{submission_id}/decision",
             post(review_decision_handler),
+        )
+        .route(
+            "/v1/review/{submission_id}/rescrub",
+            post(review_quarantine_rescrub_handler),
+        )
+        .route(
+            "/v1/review/quarantine/rescrub",
+            post(review_quarantine_rescrub_batch_handler),
         )
         .route(
             "/v1/review/leases/claim-next",
@@ -8357,6 +8402,169 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
 ) {
     if let Ok(mut verifier) = verifier.write() {
         verifier.managed_eddsa_keyset_last_refresh_failed_at = Some(Utc::now());
+    }
+}
+
+/// Minimum recompute interval. Each recompute is a full pass over the
+/// window for every tenant in the cohort, and the snapshot it produces is
+/// only read once per page load, so anything tighter costs database work
+/// nobody sees.
+const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
+
+/// Snapshots kept per window/metric. Only the newest is ever served; the
+/// rest are the record of what was published and under which controls, so
+/// this trims to a short history rather than to one. At the documented
+/// 900s interval that is a bit over a day.
+const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
+
+fn parse_community_analytics_publication_basis_from_env()
+-> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS) {
+        Ok(configured) => parse_community_analytics_publication_basis(&configured),
+        // Absent means the stricter basis. Publishing without a mechanism is
+        // a decision an operator has to make explicitly; it is never what a
+        // deployment falls into by not setting something.
+        Err(_) => Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism),
+    }
+}
+
+fn parse_community_analytics_publication_basis(
+    configured: &str,
+) -> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match configured.trim() {
+        "" | "approved_noise_mechanism" => {
+            Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism)
+        }
+        "suppression_only" => Ok(CommunityAnalyticsPublicationBasis::SuppressionOnly),
+        other => anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS} must be \
+             `approved_noise_mechanism` or `suppression_only`, got `{other}`"
+        ),
+    }
+}
+
+fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
+        Ok(configured) => parse_community_snapshot_interval(&configured),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_community_snapshot_interval(configured: &str) -> anyhow::Result<Option<StdDuration>> {
+    let trimmed = configured.trim();
+    // Empty and 0 both mean "admin-triggered only", so an operator can
+    // disable the worker without deleting the line.
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let seconds: u64 = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be a whole number of seconds"
+        )
+    })?;
+    if seconds < COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be at least {COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS} seconds"
+        );
+    }
+    Ok(Some(StdDuration::from_secs(seconds)))
+}
+
+/// Keep the published snapshot current without an operator POSTing to the
+/// admin route. Before this existed, a contributor who earned a row had no
+/// way for it to appear: the snapshot only moved when someone remembered
+/// to trigger it by hand.
+fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
+    if !state.community_leaderboard_enabled {
+        return;
+    }
+    let Some(interval) = state.community_snapshot_interval else {
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Each tick runs in its own task so a panic surfaces as a
+            // JoinError here rather than killing this loop. Without that,
+            // one panic leaves the process healthy and the snapshot
+            // silently frozen - the exact failure this worker exists to
+            // prevent, in the form least likely to be noticed.
+            let tick = tokio::spawn(community_snapshot_tick(state.clone(), interval));
+            if let Err(join_error) = tick.await {
+                tracing::error!(
+                    panicked = join_error.is_panic(),
+                    "community snapshot recompute tick did not complete; worker continuing"
+                );
+            }
+        }
+    });
+}
+
+/// One scheduled recompute, including the checks that make running this on
+/// a timer safe rather than merely automatic.
+async fn community_snapshot_tick(state: Arc<AppState>, interval: StdDuration) {
+    // Skip if something already produced a snapshot inside this interval:
+    // the admin route, or another process. This is a cheap coordination,
+    // not a mutual exclusion - two writers can still race inside the same
+    // instant. See the deployment note on the interval env var: the worker
+    // assumes a single writer, and a multi-replica deployment wanting
+    // stronger guarantees needs an elected scheduler or a distributed lock.
+    if let Some(db) = state.db_mirror.as_ref() {
+        if let Ok(Some(existing)) = db
+            .latest_leaderboard_snapshot(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+            )
+            .await
+        {
+            let age = Utc::now().signed_duration_since(existing.computed_at);
+            if age < chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::zero()) {
+                tracing::debug!("community snapshot already fresh; skipping scheduled recompute");
+                return;
+            }
+        }
+    }
+
+    let row = match recompute_community_snapshot(state.as_ref()).await {
+        Ok(row) => row,
+        // A 409 here is the publication gate refusing, which is a steady
+        // state rather than a fault: a deployment with controls
+        // unsatisfied would otherwise log an error every interval forever.
+        Err((status, _)) if status == StatusCode::CONFLICT => {
+            tracing::debug!(
+                "community snapshot recompute skipped: publication controls unsatisfied"
+            );
+            return;
+        }
+        Err((status, _)) => {
+            tracing::warn!(status = %status, "community snapshot recompute failed");
+            return;
+        }
+    };
+    tracing::info!(
+        snapshot_id = %row.snapshot_id,
+        "community snapshot recomputed on schedule"
+    );
+
+    // Retention runs after a successful write, so a failure here never
+    // costs the snapshot that was just published.
+    if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .prune_leaderboard_snapshots(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+                COMMUNITY_SNAPSHOT_RETAINED,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned superseded community snapshots"),
+            Err(error) => tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "pruning superseded community snapshots failed"
+            ),
+        }
     }
 }
 
@@ -11691,14 +11899,39 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authorize_tenant_access_grant_ctx(
-        state.as_ref(),
-        authenticate_ctx(state.as_ref(), &headers)?,
-    )
-    .await?;
+    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+
+    // Submission work includes the server re-scrub and gate preparation, so
+    // bound it before the tenant-access-grant query, envelope validation, or any
+    // submission-record read. Length-prefixing the authenticated tenant, method,
+    // and principal components makes every authentication boundary unambiguous.
+    // Static-token configuration has no stable caller identity beyond the
+    // credential, so that path is necessarily per credential; overlapping
+    // rotation credentials receive separate budgets.
+    let submit_key = submit_principal_rate_limit_key(
+        authenticated_tenant.tenant_id(),
+        authenticated_tenant.safe_auth_method(),
+        authenticated_tenant.principal_ref(),
+    );
+    let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
+    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
+        Some(guard) => guard,
+        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
+    };
+    #[cfg(test)]
+    pause_submit_after_rate_limit_for_test(&submit_key).await;
+    let tenant = authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?;
     validate_envelope(&envelope)?;
 
-    if let Some(existing) = tenant
+    // Idempotency: same submission_id always addresses the same record.
+    // Owned quarantined rows are the exception — a re-POST supersedes the
+    // stored envelope and reclassifies under current server rules (#214).
+    // Fresh submission ids for the same session are rejected: they would
+    // compete with themselves for novelty credit.
+    let remediating_prior = if let Some(existing) = tenant
         .read_submission_record(&state.root, envelope.submission_id)
         .map_err(internal_error)?
     {
@@ -11708,15 +11941,21 @@ async fn submit_trace_handler(
                 "submission id already belongs to another principal",
             ));
         }
-        let receipt = receipt_from_record(&existing);
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.idempotent_submit_audit_event(envelope.submission_id),
-        )
-        .map_err(internal_error)?;
-        return Ok(Json(receipt));
-    }
+        if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+            Some(existing)
+        } else {
+            let receipt = receipt_from_record(&existing);
+            append_audit_event(
+                &state.root,
+                tenant.tenant_id(),
+                tenant.idempotent_submit_audit_event(envelope.submission_id),
+            )
+            .map_err(internal_error)?;
+            return Ok(Json(receipt));
+        }
+    } else {
+        None
+    };
 
     let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
     enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
@@ -11742,7 +11981,11 @@ async fn submit_trace_handler(
         &envelope.privacy.redaction_hash,
         &derived_precheck.canonical_summary_hash,
     )?;
-    enforce_submission_quota(state.as_ref(), &tenant)?;
+    // Same-id quarantine remediation does not consume a new quota slot — the
+    // prior quarantined row already counted.
+    if remediating_prior.is_none() {
+        enforce_submission_quota(state.as_ref(), &tenant)?;
+    }
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     apply_credit_estimate_to_envelope(&mut envelope);
     let corpus_status = status_for_risk(
@@ -11772,11 +12015,16 @@ async fn submit_trace_handler(
         state.pii_backstop_driver.is_some(),
     );
 
+    let artifact_label = if remediating_prior.is_some() {
+        "remediated-envelope"
+    } else {
+        "submitted-envelope"
+    };
     let stored_envelope = store_envelope(
         &state,
         tenant.tenant_id(),
         corpus_status,
-        "submitted-envelope",
+        artifact_label,
         &envelope,
     )
     .map_err(internal_error)?;
@@ -11787,14 +12035,23 @@ async fn submit_trace_handler(
         derived_precheck,
     );
     let retention_policy = retention_policy_for_trace(&envelope);
-    let received_at = Utc::now();
+    // Preserve original receipt time on remediation so retention and hourly
+    // quota windows stay anchored to first receipt of this submission_id.
+    let received_at = remediating_prior
+        .as_ref()
+        .map(|prior| prior.received_at)
+        .unwrap_or_else(Utc::now);
     let expires_at = retention_policy
         .max_age_days
         .map(|days| received_at + Duration::days(i64::from(days)));
-    let record = TraceCommonsSubmissionRecord {
+    let auth_principal_ref = remediating_prior
+        .as_ref()
+        .map(|prior| prior.auth_principal_ref.clone())
+        .unwrap_or_else(|| tenant.principal_ref().to_string());
+    let mut record = TraceCommonsSubmissionRecord {
         tenant_id: tenant.tenant_id().to_string(),
         tenant_storage_ref: tenant.tenant_storage_ref(),
-        auth_principal_ref: tenant.principal_ref().to_string(),
+        auth_principal_ref,
         submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
         contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
         submission_id: envelope.submission_id,
@@ -11819,6 +12076,14 @@ async fn submit_trace_handler(
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
     };
+    // Remediating a quarantined row always clears any outstanding review lease;
+    // the prior assessment is obsolete.
+    clear_review_lease_metadata(&mut record);
+    let audit_event = if remediating_prior.is_some() {
+        tenant.quarantine_remediated_audit_event(&record)
+    } else {
+        tenant.submitted_audit_event(&record)
+    };
     if state.require_db_mirror_writes {
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
@@ -11835,21 +12100,11 @@ async fn submit_trace_handler(
             .map_err(internal_error)?;
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
     } else {
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
                 .await;
@@ -11862,6 +12117,24 @@ async fn submit_trace_handler(
         }
         enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Best-effort cleanup of the pre-remediation artifact once the new
+    // pointers are durable. Same-path overwrite (status stayed quarantined) is
+    // a no-op because object keys match.
+    if let Some(prior) = remediating_prior.as_ref() {
+        let object_moved = prior.object_key != record.object_key
+            || prior.artifact_receipt.as_ref().map(|r| &r.object_key)
+                != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+        if object_moved {
+            if let Err(error) = delete_trace_objects_for_record(state.as_ref(), prior) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons prior quarantine artifact cleanup failed after remediation"
+                );
+            }
+        }
     }
 
     Ok(Json(receipt_from_record(&record)))
@@ -12227,7 +12500,12 @@ struct CommunitySnapshotContents {
     privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
-    analytics: CommunityCorpusAnalytics,
+    /// `None` when the analytics gate was unsatisfied at recompute time.
+    /// The aggregates are then never computed at all, rather than
+    /// computed and withheld, so nothing un-noised is written to the
+    /// snapshot table. `privacy.analytics_withheld_controls` says why.
+    #[serde(default)]
+    analytics: Option<CommunityCorpusAnalytics>,
 }
 
 const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
@@ -12243,15 +12521,92 @@ const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
 /// is published. A cell of size one is the contributor.
 const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
 
+/// Roster floor. A leaderboard row is not an aggregate that might happen
+/// to identify someone — it is a named person who asked to be named, and
+/// suppressing a contributor for having contributed once hides a
+/// participant rather than protecting a bystander. All this floor does is
+/// keep the SQL honest: below 1, a contributor with nothing accepted in
+/// the window would still take a row.
+///
+/// Note that despite its name, `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT`
+/// is only ever applied to the leaderboard query's HAVING clause.
+/// `compute_corpus_analytics_summary` takes no min-cell argument at all,
+/// so the corpus aggregates have never been cell-suppressed. The
+/// [`COMMUNITY_MIN_CELL_COUNT_FLOOR`] check below therefore gates
+/// analytics publication without suppressing anything inside it — a real
+/// gap, but one that only matters once a noise mechanism exists, since
+/// nothing publishes until then.
+const COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR: usize = 1;
+
 /// Minimum number of distinct tenants in the community cohort before
-/// publication. A single-tenant cohort republishes one tenant's corpus
-/// under a "community" label, which the leaderboard design forbids.
+/// corpus aggregates are published. A single-tenant cohort republishes
+/// one tenant's corpus under a "community" label.
+///
+/// Analytics only. The roster carries no such implication: it is a list
+/// of people who individually chose to appear, and how many tenants they
+/// span changes nothing about who consented to what. The claim of breadth
+/// lives in the aggregates, so the control belongs there.
 const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 
 /// Label-only missing-control name for an unapproved noise mechanism.
 /// Not an env var: no configuration value can approve a mechanism that
 /// has not been implemented.
 const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// What a published set of corpus aggregates rests on.
+///
+/// This exists so the answer is recorded rather than inferred. Previously
+/// the only way to publish analytics was to satisfy a noise-mechanism
+/// control, so anything published implied a mechanism had been approved.
+/// An operator who wants to publish without one should have to say so, and
+/// the snapshot should carry which basis was used, rather than a reader of
+/// the code or the artifact assuming noise was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommunityAnalyticsPublicationBasis {
+    /// Aggregates publish only under an approved, calibrated mechanism.
+    /// The default, and the only basis that supports a privacy claim
+    /// stronger than cell suppression.
+    ApprovedNoiseMechanism,
+    /// Aggregates publish under cell suppression alone: cells below the
+    /// min-cell floor are dropped, and nothing else is done to them. This
+    /// is a real protection and it is not differential privacy. Totals are
+    /// not suppressed, so at small corpus sizes they can still describe a
+    /// handful of contributors closely. Anything user-facing that describes
+    /// this deployment must say which basis is in force.
+    SuppressionOnly,
+}
+
+impl CommunityAnalyticsPublicationBasis {
+    fn strict() -> Self {
+        Self::ApprovedNoiseMechanism
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovedNoiseMechanism => "approved_noise_mechanism",
+            Self::SuppressionOnly => "suppression_only",
+        }
+    }
+}
+
+/// The two community surfaces, which carry different disclosure risks
+/// and therefore different controls.
+///
+/// The split is not cosmetic. Everyone on the roster holds
+/// `public_attribution` consent: their handle and their counts being
+/// public is the thing they asked for, and perturbing those figures
+/// protects nobody while making the published number wrong. The
+/// analytics aggregates span every contributor, including those who
+/// never opted in, so they are an inference surface over people who
+/// made no such choice and need a mechanism before they can leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommunitySurface {
+    /// Leaderboard rows and contributor profiles.
+    Roster,
+    /// Corpus aggregates.
+    Analytics,
+}
 
 /// Noise-seed prefixes belonging to mechanisms approved for community
 /// publication.
@@ -12284,19 +12639,33 @@ fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
 /// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
 /// derive it with [`community_noise_mechanism_approved`].
 fn community_publication_missing_controls(
+    surface: CommunitySurface,
+    basis: CommunityAnalyticsPublicationBasis,
     min_cell_count: usize,
     tenant_cohort_size: usize,
     noise_mechanism_approved: bool,
 ) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+    let min_cell_floor = match surface {
+        CommunitySurface::Roster => COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR,
+        CommunitySurface::Analytics => COMMUNITY_MIN_CELL_COUNT_FLOOR,
+    };
+    // The min-cell floor is never waived for analytics. Under
+    // `SuppressionOnly` it stops being one control among several and becomes
+    // the only thing standing between a published aggregate and a small
+    // group, so it is required more strictly there, not less.
+    if min_cell_count < min_cell_floor {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if !noise_mechanism_approved {
-        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
-    }
-    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
-        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    if surface == CommunitySurface::Analytics
+        && basis == CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    {
+        if !noise_mechanism_approved {
+            missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+        }
+        if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+            missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+        }
     }
     missing
 }
@@ -12304,8 +12673,13 @@ fn community_publication_missing_controls(
 /// Recompute-path preconditions, evaluated against live config. The
 /// seed is the one recompute would stamp on the snapshot it is about to
 /// write.
-fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+fn community_publication_missing_controls_for_state(
+    state: &AppState,
+    surface: CommunitySurface,
+) -> Vec<&'static str> {
     community_publication_missing_controls(
+        surface,
+        state.community_analytics_publication_basis,
         state.analytics_min_cell_count,
         state.community_tenant_ids.len(),
         community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
@@ -12318,6 +12692,7 @@ fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'s
 /// rather than grandfathered in.
 fn community_snapshot_missing_controls(
     row: &trace_commons_server::db::LeaderboardSnapshotRow,
+    surface: CommunitySurface,
 ) -> Vec<&'static str> {
     let cohort_size = row
         .contents
@@ -12325,7 +12700,15 @@ fn community_snapshot_missing_controls(
         .and_then(|privacy| privacy.get("tenant_cohort_size"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
+    let basis = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("publication_basis"))
+        .and_then(|basis| serde_json::from_value(basis.clone()).ok())
+        .unwrap_or_else(CommunityAnalyticsPublicationBasis::strict);
     community_publication_missing_controls(
+        surface,
+        basis,
         usize::try_from(row.min_cell_count).unwrap_or(0),
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
@@ -12350,6 +12733,19 @@ struct CommunitySnapshotPrivacy {
     /// Per-contributor sensitivity the noise was calibrated to. `None`
     /// for the same reason.
     sensitivity: Option<f64>,
+    /// Empty when the aggregates were computed. Otherwise the
+    /// label-only control names that withheld them, in the same
+    /// convention as the serve path: no tenant ids, handles or counts,
+    /// so it is safe in a public body. A reader can tell "withheld"
+    /// from "no activity" from "bug", which a bare null cannot.
+    #[serde(default)]
+    analytics_withheld_controls: Vec<String>,
+    /// What the aggregates in this snapshot rest on. Absent on snapshots
+    /// written before the basis was explicit; those default to the strict
+    /// basis, so an old artifact is never read as having been published
+    /// under suppression alone.
+    #[serde(default = "CommunityAnalyticsPublicationBasis::strict")]
+    publication_basis: CommunityAnalyticsPublicationBasis,
 }
 
 impl CommunitySnapshotPrivacy {
@@ -12363,8 +12759,49 @@ impl CommunitySnapshotPrivacy {
             tenant_cohort_size: 0,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: Vec::new(),
+            publication_basis: CommunityAnalyticsPublicationBasis::strict(),
         }
     }
+}
+
+/// Drop disaggregated analytics cells below the configured minimum size.
+///
+/// A histogram bucket or gate outcome holding one or two records is a
+/// description of those records, and the whole point of a k-anonymity floor
+/// is that such a cell must not be published. `COMMUNITY_MIN_CELL_COUNT_FLOOR`
+/// already gates *whether* analytics publish; this applies the same number to
+/// *what* they contain, which nothing did before.
+///
+/// Suppression drops the cell rather than zeroing it, matching
+/// [`suppress_small_analytics_cells`] on the broad-release path. Dropping
+/// zero-count cells too is deliberate and is the stronger choice: an absent
+/// bucket is then indistinguishable between "no records" and "fewer records
+/// than the floor", where keeping the zeros would have told a reader which.
+///
+/// The totals are deliberately not suppressed: they are the top-level sums
+/// over everything, and blanking them would leave a page that says nothing
+/// while still claiming to be analytics. If a corpus is small enough that its
+/// totals are identifying, the control that should stop publication is the
+/// tenant-cohort floor, not this. Returns the number of cells removed.
+fn suppress_small_community_analytics_cells(
+    summary: &mut trace_commons_server::db::CorpusAnalyticsSummary,
+    min_cell_count: usize,
+) -> usize {
+    let floor = min_cell_count as i64;
+    if floor <= 1 {
+        // A floor of 0 or 1 suppresses nothing by definition: a cell of one
+        // already meets it. Leave the data alone rather than pretending to
+        // filter, and in particular do not strip the empty buckets that give
+        // the histogram its shape.
+        return 0;
+    }
+    let before = summary.novelty_histogram.len() + summary.gate_outcomes.len();
+    summary
+        .novelty_histogram
+        .retain(|(_, count)| *count >= floor);
+    summary.gate_outcomes.retain(|(_, count)| *count >= floor);
+    before.saturating_sub(summary.novelty_histogram.len() + summary.gate_outcomes.len())
 }
 
 /// Compute a fresh snapshot from current DB state and persist it.
@@ -12382,7 +12819,15 @@ async fn recompute_community_snapshot(
     // Fail closed before touching contributor data: a snapshot that
     // cannot be published is not worth computing, and computing it
     // anyway leaves un-noised aggregates sitting in the snapshot table.
-    let missing_controls = community_publication_missing_controls_for_state(state);
+    //
+    // That second clause is why the analytics gate is evaluated
+    // separately below rather than folded in here. When it fails we do
+    // not compute the aggregates at all, so there is nothing un-noised
+    // to sit anywhere — a stronger position than computing them and
+    // withholding at serve time. The roster has no such problem: it is
+    // published under consent, so failing its gate is still fatal here.
+    let missing_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Roster);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -12401,13 +12846,36 @@ async fn recompute_community_snapshot(
         )
         .await
         .map_err(internal_error)?;
-    let analytics = db
-        .compute_corpus_analytics_summary(
-            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
-            state.community_tenant_ids.as_ref(),
-        )
-        .await
-        .map_err(internal_error)?;
+    let analytics_withheld_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Analytics);
+    let analytics = if analytics_withheld_controls.is_empty() {
+        let mut summary = db
+            .compute_corpus_analytics_summary(
+                COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+                state.community_tenant_ids.as_ref(),
+            )
+            .await
+            .map_err(internal_error)?;
+        // The min-cell floor gates whether analytics may publish at all, but
+        // until now nothing applied it to what was published: the aggregation
+        // SQL takes no min-cell argument, so every bucket and gate outcome
+        // went out at its true count however small. Suppress here, where the
+        // configured floor is known.
+        let suppressed =
+            suppress_small_community_analytics_cells(&mut summary, state.analytics_min_cell_count);
+        if suppressed > 0 {
+            tracing::info!(
+                suppressed,
+                "suppressed community analytics cells below the min-cell floor"
+            );
+        }
+        Some(summary)
+    } else {
+        // Deliberately not computed. See the comment on the roster gate
+        // above: an aggregate that cannot be published is an aggregate
+        // that should never exist at rest.
+        None
+    };
 
     // Rank by novelty_credit (rolling 7d).
     let mut sorted = inputs;
@@ -12467,10 +12935,15 @@ async fn recompute_community_snapshot(
             tenant_cohort_size: state.community_tenant_ids.len() as i32,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: analytics_withheld_controls
+                .iter()
+                .map(|control| (*control).to_string())
+                .collect(),
+            publication_basis: state.community_analytics_publication_basis,
         },
         leaderboard,
         contributors,
-        analytics: CommunityCorpusAnalytics {
+        analytics: analytics.map(|analytics| CommunityCorpusAnalytics {
             window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
             total_submissions: analytics.total_submissions,
             total_accepted: analytics.total_accepted,
@@ -12485,7 +12958,7 @@ async fn recompute_community_snapshot(
                 })
                 .collect(),
             gate_outcomes: analytics.gate_outcomes.into_iter().collect(),
-        },
+        }),
     };
     let contents_json = serde_json::to_value(&contents).map_err(internal_error)?;
     let contents_canonical = serde_json::to_string(&contents).map_err(internal_error)?;
@@ -12511,8 +12984,13 @@ async fn recompute_community_snapshot(
 /// into one and forgotten on another, and so snapshots already sitting
 /// in the table from before the gate existed stop being served the
 /// moment this ships - without requiring a data migration.
+///
+/// `surface` selects which controls apply. A caller has to name the
+/// surface it is serving, so adding a route cannot silently inherit the
+/// weaker gate.
 async fn latest_publishable_community_snapshot(
     state: &AppState,
+    surface: CommunitySurface,
 ) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
     if !state.community_leaderboard_enabled {
         return Err(api_error(
@@ -12539,7 +13017,7 @@ async fn latest_publishable_community_snapshot(
                 "no community snapshot has been computed yet",
             )
         })?;
-    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    let missing_controls = community_snapshot_missing_controls(&snapshot, surface);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12578,15 +13056,67 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
-    Ok(Json(snapshot.contents))
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
+
+    // Recompute writes `analytics: null` when the analytics gate is
+    // unsatisfied, so a snapshot produced by current code already omits
+    // them. A snapshot written before that gate existed does not: it
+    // carries aggregates computed under no approved mechanism, and this
+    // handler would hand them out through the roster's weaker gate.
+    //
+    // So the gate is re-evaluated against the stored snapshot here rather
+    // than trusted from when it was written. Withheld aggregates are
+    // replaced with null and the reason recorded, matching what recompute
+    // would have produced, so a reader can still tell "withheld" from
+    // "no activity".
+    let withheld = community_snapshot_missing_controls(&snapshot, CommunitySurface::Analytics);
+    Ok(Json(redact_withheld_analytics(
+        snapshot.contents,
+        &withheld,
+    )))
+}
+
+/// Replace withheld aggregates with null and record why, matching what
+/// recompute would have written. Separate from the handler so the
+/// redaction is testable without standing up a database.
+fn redact_withheld_analytics(
+    mut contents: serde_json::Value,
+    withheld: &[&'static str],
+) -> serde_json::Value {
+    if withheld.is_empty() {
+        return contents;
+    }
+    let Some(object) = contents.as_object_mut() else {
+        return contents;
+    };
+    object.insert("analytics".to_string(), serde_json::Value::Null);
+    let reasons = serde_json::Value::Array(
+        withheld
+            .iter()
+            .map(|control| serde_json::Value::String((*control).to_string()))
+            .collect(),
+    );
+    match object.get_mut("privacy").and_then(|p| p.as_object_mut()) {
+        Some(privacy) => {
+            privacy.insert("analytics_withheld_controls".to_string(), reasons);
+        }
+        None => {
+            object.insert(
+                "privacy".to_string(),
+                serde_json::json!({ "analytics_withheld_controls": reasons }),
+            );
+        }
+    }
+    contents
 }
 
 async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12599,11 +13129,23 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Analytics).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    // The gate above passes against current config, but this snapshot may
+    // predate that config: it was computed while analytics were withheld,
+    // so the aggregates were never calculated. Refuse rather than serve an
+    // empty body, and name the fix, since a recompute is all it takes.
+    let analytics = parsed.analytics.ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "latest community snapshot was computed without analytics; \
+             recompute to publish them",
+        )
+    })?;
     Ok(Json(
-        serde_json::to_value(&parsed.analytics).map_err(internal_error)?,
+        serde_json::to_value(&analytics).map_err(internal_error)?,
     ))
 }
 
@@ -13660,6 +14202,335 @@ async fn account_trace_content_handler(
     Ok(response)
 }
 
+/// Label recorded on the withdrawal tombstone and returned to the client:
+/// the trace was never in the commons.
+const TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED: &str = "not_distributed";
+/// In the commons, but never published in an export or benchmark.
+const TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED: &str = "commons_not_distributed";
+/// In the commons AND already published. Copies cannot be recalled.
+const TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED: &str = "commons_distributed";
+
+/// Revocation reason recorded for a contributor-initiated withdrawal. Distinct
+/// from `contributor_revocation` so the audit trail separates "I revoked this
+/// submission" from "I withdrew my trace from the commons".
+const TRACE_WITHDRAWAL_REASON: &str = "contributor_withdrawal";
+
+/// Response body for `POST /v1/account/traces/{submission_id}/withdraw`.
+///
+/// The tier is reported explicitly so the client can tell the contributor the
+/// truth rather than a generic success. Nothing here is derived from the
+/// request body; every field comes from auth-derived tenant state.
+#[derive(Debug, Serialize)]
+struct AccountTraceWithdrawalResponse {
+    submission_id: Uuid,
+    withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status held immediately before withdrawal.
+    prior_status: String,
+    /// One of `not_distributed`, `commons_not_distributed`,
+    /// `commons_distributed`.
+    distribution_reach: String,
+    /// True only for `commons_distributed`. When true the content is deleted
+    /// and the trace is excluded going forward, but copies already distributed
+    /// cannot be recalled — and the API says so rather than implying otherwise.
+    already_distributed: bool,
+    /// Always true. Withdrawal is not a punishment: credit already awarded
+    /// stays awarded.
+    credit_retained: bool,
+}
+
+impl AccountTraceWithdrawalResponse {
+    fn from_record(record: StorageTraceWithdrawalRecord) -> Self {
+        let already_distributed =
+            record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
+        Self {
+            submission_id: record.submission_id,
+            withdrawn_at: record.withdrawn_at,
+            prior_status: record.prior_status,
+            distribution_reach: record.distribution_reach,
+            already_distributed,
+            credit_retained: true,
+        }
+    }
+}
+
+/// Wire label for a storage corpus status. Used for the tombstone's
+/// `prior_status`; deliberately independent of the local `TraceCorpusStatus`
+/// projection, which DROPS `received` and would make those traces
+/// un-withdrawable.
+fn storage_corpus_status_label(status: StorageTraceCorpusStatus) -> &'static str {
+    match status {
+        StorageTraceCorpusStatus::Received => "received",
+        StorageTraceCorpusStatus::Accepted => "accepted",
+        StorageTraceCorpusStatus::Quarantined => "quarantined",
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => "awaiting_pii_backstop",
+        StorageTraceCorpusStatus::Rejected => "rejected",
+        StorageTraceCorpusStatus::Revoked => "revoked",
+        StorageTraceCorpusStatus::Expired => "expired",
+        StorageTraceCorpusStatus::Purged => "purged",
+    }
+}
+
+/// Map a stored object-ref artifact kind onto the artifact-store kind carried
+/// on a receipt. Deletion keys on the object key, but the receipt is typed and
+/// the mapping is written out rather than guessed at the call site.
+fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> TraceArtifactKind {
+    match kind {
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+        | StorageTraceObjectArtifactKind::RescrubbedEnvelope => {
+            TraceArtifactKind::ContributionEnvelope
+        }
+        StorageTraceObjectArtifactKind::BenchmarkArtifact => TraceArtifactKind::BenchmarkConversion,
+        StorageTraceObjectArtifactKind::ExportArtifact => TraceArtifactKind::ReplayDatasetExport,
+        StorageTraceObjectArtifactKind::ReviewSnapshot
+        | StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::Other,
+    }
+}
+
+/// Delete every trace object this submission owns: the stored envelope and the
+/// encrypted artifact.
+///
+/// Three sources are swept, because no single one is complete:
+///
+/// 1. the file-side submission record, which is the ONLY place the encrypted
+///    artifact receipt survives (the DB projection drops it);
+/// 2. the `trace_object_refs` rows, so a submission with no file-side record
+///    still gets its encrypted artifact deleted;
+/// 3. every status-derived envelope path, because the object key encodes the
+///    corpus status and a transition may have left bytes at an earlier path.
+///
+/// Errors propagate: withdrawal must not report success while content survives.
+async fn delete_withdrawn_trace_objects(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
+        delete_trace_objects_for_record(state, &record)?;
+    }
+
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    for object_ref in db.list_trace_object_refs(tenant_id, submission_id).await? {
+        if object_ref.deleted_at.is_some() {
+            continue;
+        }
+        if object_ref.object_store == TRACE_COMMONS_FILE_OBJECT_STORE {
+            remove_file_if_exists(&state.root.join(&object_ref.object_key))?;
+        } else if let Some(store) = state.artifact_store.as_ref()
+            && object_ref.object_store == store.object_store_name()
+        {
+            let receipt = EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_ref.clone(),
+                artifact_kind: trace_artifact_kind_from_storage(object_ref.artifact_kind),
+                object_key: object_ref.object_key.clone(),
+                ciphertext_sha256: object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&object_ref.content_sha256)
+                    .to_string(),
+                encrypted_at: Utc::now(),
+            };
+            store.delete_artifact(&tenant_ref, &receipt)?;
+        }
+        db.mark_trace_object_ref_deleted(
+            tenant_id,
+            submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await?;
+    }
+
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
+    }
+    Ok(())
+}
+
+/// Evict a withdrawn trace from every derived surface that would otherwise
+/// keep its content alive in derived form: the vector index (both the DB rows
+/// and the gate service's in-memory ANN index), the dedup clusters, and future
+/// export / benchmark membership.
+async fn evict_withdrawn_trace_from_derived_surfaces(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let vector_entry_ids = db
+        .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
+    // Canonical tenant_storage_ref: it must match the form the gate worker
+    // used at insertion time, or a sharded index routes the delete to the
+    // wrong shard and the embedding survives.
+    let gate_tenant = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    for vector_entry_id in vector_entry_ids {
+        state
+            .gate_service
+            .invalidate_vector_entry(&gate_tenant, vector_entry_id)
+            .context("VectorInvalidationFailed")?;
+    }
+
+    db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
+        .await?;
+
+    db.invalidate_trace_submission_artifacts(
+        tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Revoked,
+    )
+    .await?;
+    db.invalidate_trace_export_manifests_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_export_manifest_items_for_submission(
+        tenant_id,
+        submission_id,
+        StorageTraceExportManifestItemInvalidationReason::Revoked,
+    )
+    .await?;
+    Ok(())
+}
+
+/// `POST /v1/account/traces/{submission_id}/withdraw` — contributor-initiated
+/// withdrawal, authenticated by the ACCOUNT SESSION (the same auth that guards
+/// the content read-back), not the device key: withdrawal is an account-level
+/// act and must survive losing a device.
+///
+/// Contract:
+///
+/// * Tenant-scoped through the auth-derived `AccountCtx`; ownership is checked
+///   against the account's active principal set BEFORE anything is touched.
+///   Not-found and not-owned collapse to the byte-identical `404` the detail
+///   and content handlers use — another tenant's submission id must not be
+///   distinguishable from one that never existed.
+/// * Idempotent. The tombstone is first-writer-wins, so withdrawing twice
+///   returns the same tier and the same `withdrawn_at`. Deletion and eviction
+///   are re-run on every call, so a partial failure converges on retry rather
+///   than leaving content behind under a tombstone that says it is gone.
+/// * Credit is NOT clawed back.
+/// * Fail-closed: any deletion or eviction failure is a generic label-only
+///   `500`. The withdrawal is not reported as complete while content or a
+///   derived copy may survive.
+async fn account_trace_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    // Ownership BEFORE any state change. The storage record is used directly
+    // rather than the local corpus-status projection, which drops `received`
+    // and would leave those traces permanently un-withdrawable.
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        _ => return Err(not_found()),
+    };
+
+    let withdrawal_failed = |error: &anyhow::Error| {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            %submission_id,
+            "Trace Commons trace withdrawal failed; failing closed"
+        );
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+    };
+
+    // Tier. An existing tombstone is authoritative: the reach recorded at the
+    // first withdrawal is the honest answer, and recomputing it against
+    // mutated export state could silently downgrade it.
+    let existing = db
+        .get_trace_withdrawal(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (prior_status, distribution_reach) = match existing.as_ref() {
+        Some(existing) => (
+            existing.prior_status.clone(),
+            existing.distribution_reach.clone(),
+        ),
+        None => {
+            let reach = if record.status != StorageTraceCorpusStatus::Accepted {
+                TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED
+            } else {
+                let memberships = db
+                    .count_trace_export_memberships(&ctx.tenant_id, submission_id)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+                if memberships > 0 {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED
+                } else {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED
+                }
+            };
+            (
+                storage_corpus_status_label(record.status).to_string(),
+                reach.to_string(),
+            )
+        }
+    };
+
+    // Tombstone + status FIRST, bytes second: a crash between the two leaves a
+    // tombstone whose retry deletes the content, never content with no record
+    // that it was withdrawn.
+    let tombstone = db
+        .record_trace_withdrawal(
+            &ctx.tenant_id,
+            submission_id,
+            Utc::now(),
+            &prior_status,
+            &distribution_reach,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+
+    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+
+    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
+    // account-actor ref, never contributor identity.
+    let audit_tenant = account_audit_tenant(&ctx);
+    let audit_event =
+        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
+    if let Err(error) = append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &audit_tenant,
+        audit_event,
+        StorageTraceAuditAction::Revoke,
+        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+    )
+    .await
+    {
+        // The content is already gone and the tombstone is durable; a failed
+        // audit append must not resurrect either. Log hash-only and continue.
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(&error),
+            %submission_id,
+            "Trace Commons withdrawal audit append failed"
+        );
+    }
+
+    Ok(Json(AccountTraceWithdrawalResponse::from_record(tombstone)))
+}
+
 /// Mint a single-use login link for the authenticated device's principal.
 ///
 /// Creates-or-reuses the durable account for the device principal, then issues
@@ -13860,6 +14731,62 @@ const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
+/// Per-principal cap on `POST /v1/traces` submissions per window. A submission
+/// performs more work than a content read, so this is half the content limit of
+/// 60 and matches the existing confirm-attempt ceiling of 30.
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+/// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
+/// path gets half the content-read concurrency allowance of 4.
+const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
+
+fn submit_principal_rate_limit_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    let auth_method = auth_method.storage_name();
+    format!(
+        "submit-principal:{}:{tenant_id}:{}:{auth_method}:{}:{principal_ref}",
+        tenant_id.len(),
+        auth_method.len(),
+        principal_ref.len()
+    )
+}
+
+// Most ingest unit tests share fixture principals while running in parallel.
+// Their state builders explicitly make those shared keys unbounded; focused
+// rate-limit tests leave their unique keys unset and therefore exercise these
+// production constants through the handler.
+static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
+> = std::sync::OnceLock::new();
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+        limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+    });
+    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+#[cfg(test)]
+fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
+    let limits = SUBMIT_RATE_LIMIT_TEST_LIMITS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    match limits.lock() {
+        Ok(mut limits) => {
+            limits.insert(key.to_string(), (rate, concurrency));
+        }
+        Err(poisoned) => {
+            poisoned
+                .into_inner()
+                .insert(key.to_string(), (rate, concurrency));
+        }
+    }
+}
 
 /// One fixed-window counter: a count and the instant the current window started.
 struct RateWindow {
@@ -13955,6 +14882,24 @@ impl AccountRateLimiter {
             Ok(mut concurrency) => concurrency.clear(),
             Err(poisoned) => poisoned.into_inner().clear(),
         }
+        if let Some(limits) = SUBMIT_RATE_LIMIT_TEST_LIMITS.get() {
+            match limits.lock() {
+                Ok(mut limits) => limits.clear(),
+                Err(poisoned) => poisoned.into_inner().clear(),
+            }
+        }
+        configure_submit_rate_limit_pause_for_test(None);
+    }
+
+    #[cfg(test)]
+    fn count_for_test(&self, key: &str) -> u32 {
+        match self.windows.lock() {
+            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .get(key)
+                .map_or(0, |window| window.count),
+        }
     }
 }
 
@@ -13967,7 +14912,56 @@ pub fn reset_account_rate_limiter_for_test() {
     ACCOUNT_RATE_LIMITER.reset_for_test();
 }
 
-/// RAII release of a per-account content concurrency slot.
+#[cfg(test)]
+fn submit_rate_limit_count_for_test(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> u32 {
+    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(
+        tenant_id,
+        auth_method,
+        principal_ref,
+    ))
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct SubmitRateLimitTestPause {
+    key: String,
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    proceed: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static SUBMIT_RATE_LIMIT_TEST_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<SubmitRateLimitTestPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn configure_submit_rate_limit_pause_for_test(pause: Option<SubmitRateLimitTestPause>) {
+    match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(mut configured) => *configured = pause,
+        Err(poisoned) => *poisoned.into_inner() = pause,
+    }
+}
+
+#[cfg(test)]
+async fn pause_submit_after_rate_limit_for_test(key: &str) {
+    let pause = match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(configured) => configured.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let Some(pause) = pause.filter(|pause| pause.key == key) else {
+        return;
+    };
+    let _ = pause.entered.send(());
+    if let Ok(permit) = pause.proceed.acquire().await {
+        permit.forget();
+    }
+}
+
+/// RAII release of a per-key concurrency slot.
 struct ConcurrencyGuard<'a> {
     limiter: &'a AccountRateLimiter,
     key: String,
@@ -13979,7 +14973,7 @@ impl Drop for ConcurrencyGuard<'_> {
     }
 }
 
-/// Process-global account-surface limiter. Single-instance (see module note).
+/// Process-global authenticated-surface limiter. Single-instance (see module note).
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
@@ -16512,6 +17506,310 @@ async fn review_quarantine_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(queue))
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubBatchRequest {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    submission_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubResult {
+    submission_id: Uuid,
+    prior_status: String,
+    prior_privacy_risk: String,
+    status: String,
+    privacy_risk: String,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubBatchSummary {
+    dry_run: bool,
+    scanned: usize,
+    changed: usize,
+    unchanged: usize,
+    failed: usize,
+    results: Vec<TraceQuarantineRescrubResult>,
+}
+
+/// Re-scrub a single quarantined submission under current server rules and
+/// reclassify its residual risk / corpus status in place (#214 operator path).
+async fn review_quarantine_rescrub_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+    Json(body): Json<TraceQuarantineRescrubRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubResult>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub");
+    let result = operator_rescrub_quarantined_submission(
+        state.as_ref(),
+        tenant.auth(),
+        submission_id,
+        reason,
+        false,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+/// Batch operator re-scrub over the reviewer's visible quarantine queue.
+/// Reclassifies under current residual-risk rules without minting new
+/// submission ids — the same content-addressed identity, version N+1.
+async fn review_quarantine_rescrub_batch_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceQuarantineRescrubBatchRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubBatchSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let limit = body.limit.unwrap_or(50).clamp(1, 500);
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub_batch");
+    let TraceCommonsMetadataView { records, .. } =
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
+    let requested: Option<BTreeSet<Uuid>> =
+        body.submission_ids.map(|ids| ids.into_iter().collect());
+    let candidates = records
+        .into_iter()
+        .filter(|record| record.status == TraceCorpusStatus::Quarantined)
+        .filter(|record| {
+            requested
+                .as_ref()
+                .is_none_or(|set| set.contains(&record.submission_id))
+        })
+        .take(limit)
+        .map(|record| record.submission_id)
+        .collect::<Vec<_>>();
+
+    let mut summary = TraceQuarantineRescrubBatchSummary {
+        dry_run,
+        scanned: 0,
+        changed: 0,
+        unchanged: 0,
+        failed: 0,
+        results: Vec::new(),
+    };
+    for submission_id in candidates {
+        summary.scanned += 1;
+        match operator_rescrub_quarantined_submission(
+            state.as_ref(),
+            tenant.auth(),
+            submission_id,
+            reason,
+            dry_run,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.changed {
+                    summary.changed += 1;
+                } else {
+                    summary.unchanged += 1;
+                }
+                summary.results.push(result);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %submission_id,
+                    status = %error.0,
+                    "Trace Commons quarantine operator rescrub failed"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(Json(summary))
+}
+
+async fn operator_rescrub_quarantined_submission(
+    state: &AppState,
+    auth: &TenantAuth,
+    submission_id: Uuid,
+    reason: &str,
+    dry_run: bool,
+) -> ApiResult<TraceQuarantineRescrubResult> {
+    let mut record = read_submission_record(&state.root, &auth.tenant_id, submission_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if !can_access_submission(auth, &record) {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    }
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "only quarantined trace submissions are eligible for operator rescrub",
+        ));
+    }
+
+    let prior_status = record.status;
+    let prior_privacy_risk = record.privacy_risk;
+    let mut envelope = read_envelope_by_record(state, &record).map_err(internal_error)?;
+    rescrub_trace_envelope(&mut envelope)
+        .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
+    let target_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
+    let target_status = corpus_status_with_pii_backstop_hold(
+        target_status,
+        envelope.consent.message_text_included,
+        state.pii_backstop_driver.is_some(),
+    );
+    let changed = target_status != prior_status
+        || envelope.privacy.residual_pii_risk != prior_privacy_risk
+        || envelope.privacy.redaction_counts != record.redaction_counts;
+
+    let result = TraceQuarantineRescrubResult {
+        submission_id,
+        prior_status: prior_status.as_str().to_string(),
+        prior_privacy_risk: residual_pii_risk_name(prior_privacy_risk).to_string(),
+        status: target_status.as_str().to_string(),
+        privacy_risk: residual_pii_risk_name(envelope.privacy.residual_pii_risk).to_string(),
+        changed,
+    };
+    if dry_run {
+        return Ok(result);
+    }
+
+    // Match submit: estimate credit from the post-rescrub envelope, then
+    // zero it unless the risk-derived status is Accepted (including the
+    // Accepted→AwaitingPiiBackstop hold, which keeps pending credit).
+    apply_credit_estimate_to_envelope(&mut envelope);
+    if target_status != TraceCorpusStatus::Accepted
+        && target_status != TraceCorpusStatus::AwaitingPiiBackstop
+    {
+        envelope.value.credit_points_pending = 0.0;
+        envelope.value.explanation = vec![
+            "Submission is quarantined until privacy review completes; credit is held at 0.0."
+                .to_string(),
+        ];
+        envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+    }
+
+    let prior_object_key = record.object_key.clone();
+    let prior_artifact = record.artifact_receipt.clone();
+    let stored = store_envelope(
+        state,
+        &auth.tenant_id,
+        target_status,
+        "operator-rescrubbed-envelope",
+        &envelope,
+    )
+    .map_err(internal_error)?;
+    record.status = target_status;
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
+    record.credit_points_pending = envelope.value.credit_points_pending;
+    record.credit_points_final = envelope.value.credit_points_final;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    clear_review_lease_metadata(&mut record);
+
+    let existing_derived = read_all_derived_records(&state.root, &auth.tenant_id)
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    let derived_record =
+        build_derived_record(&auth.tenant_id, target_status, &envelope, derived_precheck);
+
+    if state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+            if let Err(cleanup_error) = delete_trace_objects_for_record(state, &record) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&cleanup_error),
+                    %submission_id,
+                    "Trace Commons operator-rescrub envelope cleanup failed after DB mirror failure"
+                );
+            }
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    write_submission_record(&state.root, &record).map_err(internal_error)?;
+    write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+    append_audit_event(
+        &state.root,
+        &auth.tenant_id,
+        TraceCommonsAuditEvent::quarantine_operator_rescrub(
+            auth,
+            submission_id,
+            record.status,
+            Some(reason),
+        ),
+    )
+    .map_err(internal_error)?;
+
+    if !state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    let object_moved = prior_object_key != record.object_key
+        || prior_artifact.as_ref().map(|r| &r.object_key)
+            != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+    if object_moved {
+        let prior_cleanup = TraceCommonsSubmissionRecord {
+            object_key: prior_object_key,
+            artifact_receipt: prior_artifact,
+            ..record.clone()
+        };
+        if let Err(error) = delete_trace_objects_for_record(state, &prior_cleanup) {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                %submission_id,
+                "Trace Commons prior quarantine artifact cleanup failed after operator rescrub"
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 async fn review_routing_summary_handler(
@@ -21442,6 +22740,32 @@ async fn run_credit_settlement(
         }
     }
     let eligible_source_event_count = selected_events.len();
+
+    // Resolve principals to their durable accounts BEFORE capping. The cap is
+    // a per-account bound, and principals fold into accounts a few lines
+    // below; capping first would bound each principal separately and then
+    // merge them, so a contributor holding N principals under one account
+    // would settle up to N times the cap in a single account line item.
+    // Resolving first makes the cap key and the payout key the same key.
+    //
+    // The resolve only runs when a DB mirror is present; without one there is
+    // no account linkage to fold up, the map stays empty, and both the cap and
+    // the grouping fall back to per-principal exactly as before.
+    let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
+        let distinct_refs = selected_events
+            .iter()
+            .map(|event| event.auth_principal_ref.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        db.resolve_principals_to_accounts(&tenant.tenant_id, &distinct_refs)
+            .await
+            .context("failed to resolve contributor principals to accounts for settlement")
+            .map_err(internal_error)?
+    } else {
+        HashMap::new()
+    };
+
     let (
         mut selected_events,
         settlement_policy_excluded_source_event_count,
@@ -21449,6 +22773,7 @@ async fn run_credit_settlement(
     ) = apply_credit_settlement_account_cap(
         selected_events,
         state.credit_settlement_max_micros_per_account,
+        &principal_to_account,
     );
     selected_events.sort_by_key(|event| event.event_id);
     if let Some(limit) = limit {
@@ -21491,31 +22816,11 @@ async fn run_credit_settlement(
     // mirror is present; without one there is no account linkage to fold up and we
     // preserve the legacy per-principal behavior.
     //
-    // A single shared prefix for both the account-group build site and the parse
-    // site below: drift between the two literals would silently route every
-    // account group down the unlinked path and misroute the on-chain payout.
     const ACCOUNT_KEY_PREFIX: &str = ACCOUNT_SETTLEMENT_KEY_PREFIX;
-    let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
-        let distinct_refs = selected_events
-            .iter()
-            .map(|event| event.auth_principal_ref.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        db.resolve_principals_to_accounts(&tenant.tenant_id, &distinct_refs)
-            .await
-            .context("failed to resolve contributor principals to accounts for settlement")
-            .map_err(internal_error)?
-    } else {
-        HashMap::new()
-    };
 
     let mut grouped = BTreeMap::<String, Vec<TraceCommonsCreditLedgerRecord>>::new();
     for event in selected_events {
-        let resolved_key = principal_to_account
-            .get(&event.auth_principal_ref)
-            .map(|account_id| format!("{ACCOUNT_KEY_PREFIX}{account_id}"))
-            .unwrap_or_else(|| event.auth_principal_ref.clone());
+        let resolved_key = settlement_group_key(&event.auth_principal_ref, &principal_to_account);
         grouped.entry(resolved_key).or_default().push(event);
     }
 
@@ -21762,9 +23067,28 @@ fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult
     Ok(limit)
 }
 
+/// The key a credit event settles under: its contributor account when the
+/// principal resolves to one, else the raw principal.
+///
+/// Single definition on purpose. The settlement cap and the line-item
+/// grouping must agree on this key exactly -- if the cap groups by principal
+/// while the payout groups by account, a contributor holding several
+/// principals under one account is capped once per principal and paid once
+/// per account.
+fn settlement_group_key(
+    auth_principal_ref: &str,
+    principal_to_account: &HashMap<String, Uuid>,
+) -> String {
+    principal_to_account
+        .get(auth_principal_ref)
+        .map(|account_id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}"))
+        .unwrap_or_else(|| auth_principal_ref.to_string())
+}
+
 fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,
+    principal_to_account: &HashMap<String, Uuid>,
 ) -> (
     Vec<TraceCommonsCreditLedgerRecord>,
     usize,
@@ -21776,7 +23100,10 @@ fn apply_credit_settlement_account_cap(
     let mut account_totals = BTreeMap::<String, i64>::new();
     for event in &events {
         *account_totals
-            .entry(event.auth_principal_ref.clone())
+            .entry(settlement_group_key(
+                &event.auth_principal_ref,
+                principal_to_account,
+            ))
             .or_insert(0) += credit_delta_micros(event.credit_points_delta);
     }
     let blocked_accounts = account_totals
@@ -21790,7 +23117,10 @@ fn apply_credit_settlement_account_cap(
     let selected = events
         .into_iter()
         .filter(|event| {
-            let excluded = blocked_accounts.contains(&event.auth_principal_ref);
+            let excluded = blocked_accounts.contains(&settlement_group_key(
+                &event.auth_principal_ref,
+                principal_to_account,
+            ));
             if excluded {
                 excluded_count += 1;
             }
@@ -49704,6 +51034,17 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(&auth.principal_ref, record)
 }
 
+/// Owned quarantined submissions may be superseded by a corrected envelope on
+/// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
+/// classic-idempotent; reviewers use the dedicated rescrub route instead.
+fn principal_can_remediate_quarantined(
+    auth: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> bool {
+    record.status == TraceCorpusStatus::Quarantined
+        && principal_can_self_revoke_submission(auth, record)
+}
+
 fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
     auth.role.can_review() || principal_owns_storage_submission(&auth.principal_ref, record)
 }
@@ -65631,6 +66972,49 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: None,
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_remediated(record: &TraceCommonsSubmissionRecord, auth: &TenantAuth) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            kind: "quarantine_remediated".to_string(),
+            created_at: Utc::now(),
+            status: Some(record.status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(record.auth_principal_ref.clone()),
+            reason: Some(format!("auth_method={}", auth.auth_method.storage_name())),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_operator_rescrub(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        reason: Option<&str>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "quarantine_operator_rescrub".to_string(),
+            created_at: Utc::now(),
+            status: Some(status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: reason.map(ToOwned::to_owned),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
