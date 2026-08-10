@@ -28,44 +28,112 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
-/// Enroll this device with an instance-signed grant, or (with no grant)
-/// print this device's key id so an instance operator can mint one.
+const UNENROLLED_PREVIEW_NOTICE: &str = "unenrolled preview: deterministic-only redaction; identity \
+    fields are placeholders, external privacy filters are ignored to keep pre-enrollment data \
+    offline, and nothing was submitted";
+const NEAR_AI_FIRST_USE_NOTICE: &str = "notice: this will send redacted-but-unscrubbed message text \
+    to NEAR AI under your API key (one-time notice; see `--pii-filter near-ai` in the README for \
+    scope).";
+
+// These explicit placeholders exist only so an unenrolled preview can build
+// the same local envelope shape without claiming a real contributor identity.
+const PREVIEW_ISSUER_URL: &str = "https://unenrolled-preview.invalid";
+const PREVIEW_INGEST_URL: &str = "https://unenrolled-preview.invalid";
+const PREVIEW_AUDIENCE: &str = "unenrolled-preview-placeholder";
+// Canonical tenant ids are `tenant-` plus a SHA-256 hex digest. Keeping the
+// placeholder at that exact serialized width makes the envelope size boundary
+// independent of whether enrollment has happened.
+const PREVIEW_TENANT_ID: &str =
+    "tenant-0000000000000000000000000000000000000000000000000000000000000000";
+const PREVIEW_INSTANCE_ID: &str = "unenrolled-preview-placeholder";
+const PREVIEW_USER_SUBJECT: &str = "unenrolled-preview-placeholder";
+const PREVIEW_DEVICE_KEY_ID: &str = "unenrolled-preview-placeholder";
+
+pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
+    ContributorConfig {
+        schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+        issuer_url: PREVIEW_ISSUER_URL.to_string(),
+        ingest_url: PREVIEW_INGEST_URL.to_string(),
+        audience: PREVIEW_AUDIENCE.to_string(),
+        tenant_id: PREVIEW_TENANT_ID.to_string(),
+        instance_id: PREVIEW_INSTANCE_ID.to_string(),
+        user_subject: PREVIEW_USER_SUBJECT.to_string(),
+        device_key_id: PREVIEW_DEVICE_KEY_ID.to_string(),
+        consent_scopes: vec!["debugging_evaluation".to_string()],
+        pii_filter: None,
+        allowed_hosts: None,
+    }
+}
+
+/// Signals that a JSON submit result has already been rendered to stdout.
+/// The binary uses this to return a failing exit status without appending a
+/// second JSON document.
+#[derive(Debug, thiserror::Error)]
+#[error("one or more sessions were refused or failed")]
+pub struct RenderedSubmitFailure;
+
+/// The result of a non-interactive enrollment attempt.
+///
+/// The grant path can be run with no grant in hand yet, in which case it
+/// only records this device's identity so an instance operator can vouch
+/// for it; every other path produces a saved, usable config.
+pub(crate) enum EnrollOutcome {
+    Enrolled(Box<ContributorConfig>),
+    AwaitingGrant { device_key_id: String },
+}
+
+/// Enroll this device with an instance-signed grant or an invite link, with
+/// no interaction: `consent_scopes` must already be resolved, since nothing
+/// here can prompt a terminal.
+///
+/// This is the single enrollment implementation shared by the interactive
+/// `login` command and the daemon's `enroll` IPC method, so a socket caller
+/// (a native application) and a terminal caller enrol identically rather
+/// than through two hand-maintained copies of the same network calls.
 ///
 /// When `allowed_hosts` is provided it takes precedence over the
 /// `TRACE_COMMONS_ALLOWED_HOSTS` env fallback and is persisted into the
 /// saved config so every later command enforces it.
-///
-/// `scopes` (a CSV of wire-name consent scopes) is validated before any
-/// network call. When absent, an interactive terminal prompts for consent
-/// choices; a non-interactive session falls back to the
-/// `debugging_evaluation` floor only.
-pub async fn login(
+pub(crate) async fn enroll_core(
     store: &ConfigStore,
     grant_b64: Option<&str>,
     invite: Option<&str>,
     allowed_hosts: Option<&str>,
-    scopes: Option<&str>,
-) -> Result<()> {
+    consent_scopes: Vec<String>,
+) -> Result<EnrollOutcome> {
     if grant_b64.is_some() && invite.is_some() {
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
     }
-    let consent_scopes = resolve_consent_scopes(scopes)?;
 
     let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
 
     if let Some(invite) = invite {
-        return login_with_invite(store, invite, allowed_hosts, &device, consent_scopes).await;
+        let cfg =
+            enroll_with_invite_core(store, invite, allowed_hosts, &device, consent_scopes).await?;
+        return Ok(EnrollOutcome::Enrolled(Box::new(cfg)));
     }
 
     let Some(grant_b64) = grant_b64 else {
-        println!("device_key_id: {}", device.device_key_id);
-        println!(
-            "give this to your instance to mint an enrollment grant, then re-run \
-             `login --grant <grant>` -- or, if you were handed an invite link, run \
-             `login --invite <url>`"
-        );
-        return Ok(());
+        return Ok(EnrollOutcome::AwaitingGrant {
+            device_key_id: device.device_key_id,
+        });
     };
+
+    // Refuse to overwrite an existing enrollment, exactly like the invite
+    // path. `enroll` is now socket-reachable on a continuously-uploading
+    // daemon, so without this check a single call could repoint a running
+    // daemon's issuer/ingest/tenant out from under it. There is no
+    // legitimate re-enrollment flow that needs this to silently overwrite;
+    // `logout` first if re-enrolling is actually intended.
+    if store
+        .load_config()
+        .context("loading contributor config")?
+        .is_some()
+    {
+        anyhow::bail!(
+            "this device is already enrolled; run `logout` first if you intend to re-enroll"
+        );
+    }
 
     let grant = EnrollmentGrant::decode(grant_b64).context("decoding enrollment grant")?;
     let req = build_enroll_request(&grant, &device).context("building enroll request")?;
@@ -85,22 +153,59 @@ pub async fn login(
         instance_id: grant.attestation.instance_id.clone(),
         user_subject: grant.attestation.user_subject.clone(),
         device_key_id: response.device_key_id,
-        consent_scopes: consent_scopes.clone(),
+        consent_scopes,
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
     };
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
+    Ok(EnrollOutcome::Enrolled(Box::new(cfg)))
+}
 
-    println!("enrolled: tenant_id={}", cfg.tenant_id);
-    println!(
-        "Traces you submit carry the {} consent scope(s); secrets are removed locally \
-         (including tool payloads), and the server re-applies the same deterministic \
-         redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
-         message text only.",
-        consent_scopes.join(", ")
-    );
+/// Enroll this device with an instance-signed grant, or (with no grant)
+/// print this device's key id so an instance operator can mint one.
+///
+/// `scopes` (a CSV of wire-name consent scopes) is validated before any
+/// network call. When absent, an interactive terminal prompts for consent
+/// choices; a non-interactive session falls back to the
+/// `debugging_evaluation` floor only.
+pub async fn login(
+    store: &ConfigStore,
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    allowed_hosts: Option<&str>,
+    scopes: Option<&str>,
+) -> Result<()> {
+    let consent_scopes = resolve_consent_scopes(scopes)?;
+    let used_invite = invite.is_some();
+    match enroll_core(store, grant_b64, invite, allowed_hosts, consent_scopes).await? {
+        EnrollOutcome::AwaitingGrant { device_key_id } => {
+            println!("device_key_id: {device_key_id}");
+            println!(
+                "give this to your instance to mint an enrollment grant, then re-run \
+                 `login --grant <grant>` -- or, if you were handed an invite link, run \
+                 `login --invite <url>`"
+            );
+        }
+        EnrollOutcome::Enrolled(cfg) if used_invite => {
+            println!("enrolled: tenant_id={}", cfg.tenant_id);
+            println!("this invite use is now spent");
+            println!(
+                "run `whoami` to confirm, then `submit --dry-run` before contributing anything"
+            );
+        }
+        EnrollOutcome::Enrolled(cfg) => {
+            println!("enrolled: tenant_id={}", cfg.tenant_id);
+            println!(
+                "Traces you submit carry the {} consent scope(s); secrets are removed locally \
+                 (including tool payloads), and the server re-applies the same deterministic \
+                 redaction on receipt. The optional NEAR AI PII pass (--pii-filter near-ai) covers \
+                 message text only.",
+                cfg.consent_scopes.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -162,9 +267,115 @@ pub fn whoami(store: &ConfigStore, json: bool) -> Result<()> {
 
 /// Delete all local contributor state (config, device key, receipts).
 pub fn logout(store: &ConfigStore) -> Result<()> {
+    // Stop a running daemon first. It holds a minted claim that stays valid
+    // for minutes, so wiping the state out from under it would leave it
+    // uploading against an enrollment the contributor has just revoked, into
+    // a receipts file that no longer exists.
+    match stop_running_daemon(store) {
+        Ok(DaemonStopOutcome::NotRunning) => {}
+        Ok(DaemonStopOutcome::Stopped) => println!("stopped the background daemon"),
+        Ok(DaemonStopOutcome::AcknowledgedButStillHoldingTheLock) => {
+            // Not a failure, and not worth an alarming warning. An
+            // FFI-hosted daemon releases `daemon.lock` only in
+            // `tc_handle_free` / `tc_daemon_stop`, never on the socket's
+            // `"shutdown"` -- so the supervise loop really has stopped, the
+            // lock is simply still held by the hosting application. Logout
+            // against an embedded daemon therefore *always* waited out the
+            // full deadline and then printed a warning about a stop that
+            // had in fact happened.
+            println!(
+                "the background daemon stopped its upload loop; the application \
+                 hosting it still holds the state directory and will release it \
+                 when it exits."
+            );
+        }
+        Err(_e) => {
+            // Never block a logout on this: the wipe below removes the device
+            // key, and the daemon refuses to upload without one. A fixed
+            // label, not the error text, which can carry a state-directory
+            // path.
+            tracing::warn!("could not signal the daemon");
+            // Say what is actually true: the credentials are gone either way,
+            // and the daemon refuses to upload without them.
+            println!(
+                "warning: the background daemon did not confirm it stopped. Local \
+                 credentials have been removed regardless, so it cannot upload \
+                 anything; it will exit on its next pass."
+            );
+        }
+    }
     store.wipe().context("wiping contributor state")?;
+    let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
+    let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);
     println!("logged out; local state removed");
     Ok(())
+}
+
+/// What actually happened when logout asked a running daemon to stop.
+///
+/// The distinction that matters is the last variant. A daemon embedded in a
+/// native application via the C ABI releases `daemon.lock` only in
+/// `tc_handle_free` / `tc_daemon_stop` -- never in response to the socket's
+/// `"shutdown"`, which stops the supervise loop and nothing else. Treating
+/// a still-held lock as "did not confirm it stopped" made logout against an
+/// FFI-hosted daemon wait out the full deadline every single time and then
+/// print an alarming warning about a stop that had in fact happened.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DaemonStopOutcome {
+    /// No socket, or a stale one from a crashed daemon.
+    NotRunning,
+    /// It acknowledged and released its lock: fully gone.
+    Stopped,
+    /// It acknowledged the stop -- so its upload loop has stopped -- but
+    /// the lock is still held, which is what an embedded daemon looks like.
+    AcknowledgedButStillHoldingTheLock,
+}
+
+/// Ask a running daemon to stop, and wait briefly for it to let go of its
+/// lock. Reports which of the three things above happened.
+fn stop_running_daemon(store: &ConfigStore) -> Result<DaemonStopOutcome> {
+    use std::io::{BufRead, BufReader, Write};
+
+    // Both transports are reached the same way the one-shot client reaches
+    // them, so this cannot drift from `daemon::client` when one of them
+    // changes.
+    let mut stream = match crate::daemon::client::connect_for_shutdown(store) {
+        Some(s) => s,
+        // Nothing listening, or a stale endpoint from a crashed daemon.
+        None => return Ok(DaemonStopOutcome::NotRunning),
+    };
+    stream
+        .write_all(b"{\"id\":0,\"method\":\"shutdown\"}\n")
+        .context("sending shutdown")?;
+    stream.flush().ok();
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).ok();
+    let acknowledged = serde_json::from_str::<crate::daemon::ipc::Response>(reply.trim())
+        .map(|r| r.error.is_none())
+        .unwrap_or(false);
+
+    // Wait for the lock to be released, which is the daemon actually gone
+    // rather than merely acknowledging.
+    let lock_path = store.daemon_path(crate::config::DAEMON_LOCK_FILE);
+    // Generous, because a standalone daemon finishes the pass it is in
+    // before it stops, and a large session store makes that pass take a few
+    // seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        if !lock_path.exists() {
+            return Ok(DaemonStopOutcome::Stopped);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&lock_path) {
+            if f.try_lock().is_ok() {
+                return Ok(DaemonStopOutcome::Stopped);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if acknowledged {
+        return Ok(DaemonStopOutcome::AcknowledgedButStillHoldingTheLock);
+    }
+    anyhow::bail!("daemon did not exit within 15s")
 }
 
 /// Operator/dogfood tool: mint an enrollment grant with an instance private
@@ -440,6 +651,9 @@ pub struct SubmitSelection<'a> {
     pub json: bool,
     /// Drop model reasoning from this run. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Re-submit corrected envelopes for locally-known quarantined sessions
+    /// under the same submission_id (server supersedes; see #214).
+    pub remediate_quarantined: bool,
 }
 
 /// Drop reasoning events before envelope construction. Reasoning is captured
@@ -451,7 +665,7 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
-/// error (nonzero exit) if any outcome was refused or failed.
+/// error (nonzero exit) if a real submission is refused or any run fails.
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
@@ -462,10 +676,28 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
              so its envelope ids would never exist server-side"
         );
     }
-    let cfg = store
-        .load_config()
-        .context("loading contributor config")?
-        .context("not logged in; run `login` first")?;
+    let saved_cfg = store.load_config().context("loading contributor config")?;
+    let (cfg, unenrolled_preview) = match saved_cfg {
+        Some(cfg) => (cfg, false),
+        None if sel.dry_run => (unenrolled_preview_config(), true),
+        None => anyhow::bail!("not logged in; run `login` first"),
+    };
+
+    let selected_filter = sel.pii_filter.or(cfg.pii_filter.as_deref());
+    let near_ai_notice =
+        !unenrolled_preview && selected_filter == Some("near-ai") && !store.near_ai_notice_shown();
+    let mut notices = Vec::new();
+    if unenrolled_preview {
+        notices.push(UNENROLLED_PREVIEW_NOTICE);
+    }
+    if near_ai_notice {
+        notices.push(NEAR_AI_FIRST_USE_NOTICE);
+    }
+    if !sel.json {
+        for notice in &notices {
+            println!("{notice}");
+        }
+    }
 
     let since = sel.since.map(picker::parse_since).transpose()?;
     let mut refs = discover_filtered(sel.source, sel.project, since, sel.trajectory)?;
@@ -517,6 +749,9 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
         no_reasoning: sel.no_reasoning,
+        machine_readable: sel.json,
+        unenrolled_preview,
+        remediate_quarantined: sel.remediate_quarantined,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -529,32 +764,30 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     }
 
     if sel.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&submit::outcomes_to_json(&outcomes))?
-        );
-        // Still fail the process on a refusal or failure: an automating
-        // caller that ignores the body must not read exit 0 as success.
-        let had_failure = outcomes.iter().any(|o| {
-            matches!(
-                o,
-                SubmitOutcome::Refused { .. } | SubmitOutcome::Failed { .. }
-            )
-        });
-        if had_failure {
-            anyhow::bail!("one or more sessions were refused or failed");
+        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
+            return Err(RenderedSubmitFailure.into());
         }
         return Ok(());
     }
 
-    let mut had_failure = false;
+    let preview_prefix = if unenrolled_preview {
+        "unenrolled-preview "
+    } else {
+        ""
+    };
     for outcome in &outcomes {
         match outcome {
             SubmitOutcome::Submitted {
                 submission_id,
                 status,
             } => {
-                println!("submitted {submission_id} {status}");
+                if unenrolled_preview {
+                    println!("{preview_prefix}previewed {submission_id} {status}");
+                } else {
+                    println!("submitted {submission_id} {status}");
+                }
                 // "quarantined" reads as rejection to a first-time
                 // contributor. It is not: the trace was delivered and is
                 // held pending operator privacy review. Say so at the moment
@@ -573,23 +806,33 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 // Name the status it already has. "already-submitted" alone
                 // reads as a failure when it usually means the trace was
                 // accepted on an earlier run.
-                println!("already-submitted {submission_id} ({prior_status})");
+                println!("{preview_prefix}already-submitted {submission_id} ({prior_status})");
             }
             SubmitOutcome::SkippedParseFailure { reason_label } => {
-                println!("skipped ({reason_label})");
+                println!("{preview_prefix}skipped ({reason_label})");
             }
-            SubmitOutcome::Refused { reason_label } => {
-                println!("refused ({reason_label})");
-                had_failure = true;
+            SubmitOutcome::Refused {
+                reason_label,
+                session_ref,
+                size_bytes,
+                limit_bytes,
+            } => {
+                if let (Some(size), Some(limit)) = (size_bytes, limit_bytes) {
+                    println!(
+                        "{preview_prefix}refused ({reason_label}) session={session_ref} \
+                         size={size} limit={limit}"
+                    );
+                } else {
+                    println!("{preview_prefix}refused ({reason_label}) session={session_ref}");
+                }
             }
             SubmitOutcome::Failed { reason_label } => {
-                println!("failed ({reason_label})");
-                had_failure = true;
+                println!("{preview_prefix}failed ({reason_label})");
             }
         }
     }
 
-    if had_failure {
+    if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
         anyhow::bail!("one or more sessions were refused or failed to submit");
     }
     Ok(())
@@ -614,6 +857,74 @@ pub(crate) fn scopes_cell(scopes: &[ConsentScope]) -> String {
 }
 
 /// Print server-side status for every locally recorded submission receipt.
+pub async fn profile(
+    store: &ConfigStore,
+    handle: Option<&str>,
+    bio: Option<&str>,
+    no_bio: bool,
+    withdraw: bool,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+
+    // Deliberately no local public_attribution check. `cfg.consent_scopes`
+    // records what was selected for submissions, while these calls mint an
+    // empty-scope claim that the issuer resolves to the caller's full grant
+    // ceiling - so the local set can be narrower than what the credential
+    // actually carries, and checking it here would refuse contributors the
+    // server would have allowed. The server is the authority; the context
+    // below carries the remedy if it refuses.
+
+    if withdraw {
+        submit::clear_profile(store, &cfg).await?;
+        if json {
+            println!("{}", serde_json::json!({"withdrawn": true}));
+        } else {
+            println!("public attribution withdrawn; the row goes at the next snapshot");
+        }
+        return Ok(());
+    }
+
+    let Some(handle) = handle else {
+        anyhow::bail!("nothing to do: pass --handle <name> or --withdraw");
+    };
+    // The server upserts with `bio = excluded.bio`, so this call replaces the
+    // whole profile - there is no "leave the bio alone". Requiring the choice
+    // is the difference between clearing a published bio because you were
+    // asked, and clearing it because you renamed your handle.
+    if bio.is_none() && !no_bio {
+        anyhow::bail!(
+            "setting a handle replaces your whole public profile: pass --bio <text> \
+             to publish one, or --no-bio to publish none"
+        );
+    }
+
+    let profile = submit::set_profile(store, &cfg, handle, bio)
+        .await
+        .context(
+            "setting your public handle (this needs the public_attribution scope; if the \
+             server refuses, re-run `login` with --scopes debugging_evaluation,public_attribution)",
+        )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "display_handle": profile.display_handle,
+                "bio": profile.bio,
+                "public_since": profile.public_since,
+            })
+        );
+    } else {
+        println!("public handle: {}", profile.display_handle);
+        println!("public since: {}", profile.public_since);
+        println!("your handle appears once an accepted submission lands in the window");
+    }
+    Ok(())
+}
+
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()
@@ -783,6 +1094,56 @@ mod tests {
         assert!(store.load_config().unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn a_grant_enrollment_refuses_to_overwrite_an_existing_one() {
+        // `enroll` is socket-reachable on a continuously-uploading daemon
+        // now; without this check, one call could repoint a running
+        // daemon's issuer/ingest/tenant out from under it. The grant path
+        // used to overwrite silently while the invite path already refused
+        // -- this closes that gap.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let existing = ContributorConfig {
+            schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.original.invalid".to_string(),
+            ingest_url: "https://ingest.original.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-original".to_string(),
+            instance_id: "instance-original".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        store.save_config(&existing).unwrap();
+
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let grant = mint_grant(
+            doc.as_ref(),
+            "https://issuer.attacker.invalid",
+            "instance-attacker",
+            "alice",
+            "aud",
+            &device.device_key_id,
+            300,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let err = login(&store, Some(&grant.encode()), None, None, None)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("already enrolled"), "{msg}");
+        // The original config must survive untouched: no repointing to a
+        // different issuer/ingest/tenant.
+        let cfg = store.load_config().unwrap().unwrap();
+        assert_eq!(cfg.issuer_url, "https://issuer.original.invalid");
+        assert_eq!(cfg.tenant_id, "tenant-original");
+    }
+
     #[test]
     fn strip_reasoning_removes_only_reasoning_events() {
         use crate::source::{SessionEvent, SessionEventKind};
@@ -842,6 +1203,7 @@ mod project_filter_tests {
             trajectory: None,
             json: false,
             no_reasoning: false,
+            remediate_quarantined: false,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");
@@ -965,13 +1327,13 @@ mod project_filter_tests {
 /// base64 a raw Ed25519 public key, and then know that the response has to be
 /// persisted. Every one of those was a step contributors got wrong by reading
 /// the source instead of a document.
-async fn login_with_invite(
+async fn enroll_with_invite_core(
     store: &ConfigStore,
     invite: &str,
     allowed_hosts: Option<&str>,
     device: &DeviceIdentity,
     consent_scopes: Vec<String>,
-) -> Result<()> {
+) -> Result<ContributorConfig> {
     let parsed = parse_invite(invite)?;
 
     // Redeeming spends one use of the invite whether or not the config write
@@ -1022,11 +1384,7 @@ async fn login_with_invite(
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
-
-    println!("enrolled: tenant_id={}", cfg.tenant_id);
-    println!("this invite use is now spent");
-    println!("run `whoami` to confirm, then `submit --dry-run` before contributing anything");
-    Ok(())
+    Ok(cfg)
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores and
@@ -1147,5 +1505,749 @@ mod invite_tests {
     #[test]
     fn rejects_a_non_http_scheme() {
         assert!(parse_invite("file:///etc/passwd#CODE").is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background daemon control
+//
+// These drive the same request handlers the IPC socket exposes. When a daemon
+// is running they are sent to *it*, over that socket; only when nothing is
+// running do they fall back to reading and writing the state files in-process.
+// Both paths reach `ipc::handle_request_async`, so a CLI caller and a native
+// application get identical answers to the same request.
+//
+// Every method here is reachable over the socket too. There is no
+// terminal-only carve-out: arming a project for automatic upload and
+// approving the whole queue at once are both available to a socket caller,
+// and both append a local audit entry instead (see `daemon::audit` and the
+// `ipc` module doc's "Authorization" section for why the old gate did not
+// survive scrutiny). `daemon audit` is how a contributor reads that log.
+// ---------------------------------------------------------------------------
+
+use crate::daemon::ipc::{DaemonShared, ERR_UNAVAILABLE, Response, handle_local};
+use crate::daemon::policy::ProjectMode;
+use crate::daemon::withdraw::ERR_ACCOUNT_SESSION_REQUIRED;
+
+/// Load daemon state for a one-shot command against a *stopped* daemon.
+///
+/// Only ever reached through `daemon_call`'s no-daemon-running fallback.
+/// Writing the state files is the right thing to do there -- it primes the
+/// next daemon start -- and is exactly the wrong thing to do while one is
+/// running, which is what `daemon_call` is for. See `daemon::client`.
+fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
+    DaemonShared::load(ConfigStore::open(store.dir().to_path_buf())?)
+        .context("loading daemon state")
+}
+
+/// Answer one daemon request: from the running daemon over its socket when
+/// there is one, otherwise from the on-disk state directly.
+///
+/// The socket is not an optimization here, it is the only correct path when
+/// a daemon is running: the running daemon holds the authoritative queue,
+/// policy, pause flag and health in memory, re-reads none of them, and
+/// overwrites the files from its own copy on its next pass. See
+/// `daemon::client`'s module doc for the full list of what silently did not
+/// work before this.
+fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> Result<Response> {
+    match crate::daemon::client::try_call(store, method, &params)? {
+        Some(resp) => Ok(resp),
+        None => {
+            let shared = daemon_shared(store)?;
+            Ok(handle_local(&shared, method, params))
+        }
+    }
+}
+
+/// Render an IPC response for a human or for a script.
+fn render(resp: Response, json: bool, table: impl FnOnce(&serde_json::Value)) -> Result<()> {
+    if let Some(err) = resp.error {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "trace_commons.cli_error.v1",
+                    "error": err.code,
+                    "detail": err.message,
+                }))?
+            );
+        }
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    let result = resp.result.unwrap_or(serde_json::Value::Null);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        table(&result);
+    }
+    Ok(())
+}
+
+/// Show what the daemon is doing and whether anything is wrong.
+///
+/// Goes through `daemon_call`, so the health line reports the *running*
+/// daemon's real health. It used to be answered from a fresh
+/// `DaemonShared::load`, whose `HealthState` is always
+/// `HealthState::default()` -- `HealthState` is in-memory only and is never
+/// persisted -- so this command printed `health: ok` unconditionally, even
+/// while the daemon was refusing every upload.
+pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
+    let resp = daemon_call(store, "status", serde_json::json!({}))?;
+    render(resp, json, |v| {
+        let health = &v["health"];
+        println!(
+            "logged in:   {}",
+            if v["logged_in"] == true { "yes" } else { "no" }
+        );
+        println!(
+            "paused:      {}",
+            if v["paused"] == true { "yes" } else { "no" }
+        );
+        println!("pending:     {}", v["queue_depth"]);
+        match health["last_error_label"].as_str() {
+            Some(label) => println!(
+                "health:      {label} (since {})",
+                health["since"].as_str().unwrap_or("unknown")
+            ),
+            None => println!("health:      ok"),
+        }
+    })
+}
+
+pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
+    let resp = daemon_call(store, "list_pending", serde_json::json!({}))?;
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let entries = v["pending"].as_array().unwrap_or(&empty);
+        if entries.is_empty() {
+            println!("nothing waiting");
+            return;
+        }
+        let rows: Vec<Vec<String>> = entries
+            .iter()
+            .map(|e| {
+                vec![
+                    e["entry_id"].as_str().unwrap_or("-").to_string(),
+                    e["project_label"].as_str().unwrap_or("-").to_string(),
+                    e["source"].as_str().unwrap_or("-").to_string(),
+                    format!("{}", e["size_bytes"].as_u64().unwrap_or(0)),
+                    e["discovered_at"].as_str().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["ENTRY", "PROJECT", "SOURCE", "BYTES", "READY SINCE"],
+            &rows,
+        );
+    })
+}
+
+pub fn daemon_preview(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
+    let resp = daemon_call(
+        store,
+        "preview",
+        serde_json::json!({ "entry_id": entry_id }),
+    )?;
+    render(resp, json, |v| {
+        println!(
+            "project: {}",
+            v["entry"]["project_label"].as_str().unwrap_or("-")
+        );
+        println!("source:  {}", v["entry"]["source"].as_str().unwrap_or("-"));
+        println!("bytes:   {}", v["would_send_bytes"]);
+        println!(
+            "hash:    {}",
+            v["entry"]["session_hash"].as_str().unwrap_or("-")
+        );
+    })
+}
+
+pub fn daemon_approve(
+    store: &ConfigStore,
+    entry_id: Option<&str>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
+    if !all && entry_id.is_none() {
+        anyhow::bail!("give an entry id, or --all");
+    }
+    let params = if all {
+        serde_json::json!({ "all": true })
+    } else {
+        serde_json::json!({ "entry_id": entry_id })
+    };
+    let resp = daemon_call(store, "approve", params)?;
+    render(resp, json, |v| {
+        println!("approved {}", v["approved"]);
+    })
+}
+
+pub fn daemon_dismiss(store: &ConfigStore, entry_id: &str, json: bool) -> Result<()> {
+    let resp = daemon_call(
+        store,
+        "dismiss",
+        serde_json::json!({ "entry_id": entry_id }),
+    )?;
+    render(resp, json, |_| println!("dismissed"))
+}
+
+/// Withdraw one submitted trace, or every quarantined one at once.
+///
+/// `--all-quarantined` rather than a generic `--all-status <status>`:
+/// "take back everything held for privacy review" is the realistic bulk
+/// case this feature exists to answer (see
+/// `docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md`), and the
+/// daemon's `withdraw_bulk` IPC method accepts other statuses if a future
+/// caller needs them.
+///
+/// Every call today answers `account-session-required`: withdrawal is
+/// authenticated by an account session, which this daemon does not yet
+/// acquire -- it only ever holds a device key (see `daemon::withdraw`'s
+/// module doc). That is printed as a specific explanation here rather than
+/// falling through to `render`'s generic `code: message` bail, so a
+/// contributor is not left staring at a bare error code with no idea what
+/// it means or what to do about it.
+pub fn daemon_withdraw(
+    store: &ConfigStore,
+    submission_id: Option<&str>,
+    all_quarantined: bool,
+    json: bool,
+) -> Result<()> {
+    if !all_quarantined && submission_id.is_none() {
+        anyhow::bail!("give a submission id, or --all-quarantined");
+    }
+    let (method, params) = if all_quarantined {
+        (
+            "withdraw_bulk",
+            serde_json::json!({ "status": "quarantined" }),
+        )
+    } else {
+        (
+            "withdraw",
+            serde_json::json!({ "submission_id": submission_id }),
+        )
+    };
+    let resp = daemon_call(store, method, params)?;
+    if let Some(err) = &resp.error {
+        if err.code == ERR_UNAVAILABLE && err.message == ERR_ACCOUNT_SESSION_REQUIRED {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": "trace_commons.cli_error.v1",
+                        "error": err.code,
+                        "detail": err.message,
+                    }))?
+                );
+            }
+            anyhow::bail!(
+                "withdrawal needs signing in with your account, which this build does not \
+                 yet support (it only holds this device's key). This is a known gap, not a \
+                 bug -- see docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md."
+            );
+        }
+    }
+    render(resp, json, |v| {
+        if all_quarantined {
+            println!(
+                "withdrawn {} quarantined trace(s); {} failed",
+                v["withdrawn"], v["failed"]
+            );
+        } else {
+            println!(
+                "withdrawn: {}",
+                v["distribution_reach"].as_str().unwrap_or("-")
+            );
+        }
+    })
+}
+
+/// Read the local audit log: when autonomy was armed, when the queue was
+/// bulk-approved, when consent scopes changed, when the NEAR AI notice was
+/// acknowledged.
+///
+/// This log is the stated replacement for a removed terminal-only
+/// restriction (see `daemon::audit`), and until this command existed it was
+/// reachable only over IPC -- and no native application ships in this
+/// branch. A replacement nobody can read is not a replacement.
+pub fn daemon_audit(store: &ConfigStore, limit: usize, json: bool) -> Result<()> {
+    let resp = daemon_call(store, "list_audit", serde_json::json!({ "limit": limit }))?;
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let entries = v["entries"].as_array().unwrap_or(&empty);
+        if entries.is_empty() {
+            println!("nothing audited yet");
+            return;
+        }
+        let rows: Vec<Vec<String>> = entries
+            .iter()
+            .map(|e| {
+                vec![
+                    e["at"].as_str().unwrap_or("-").to_string(),
+                    e["action"].as_str().unwrap_or("-").to_string(),
+                    e["project_label"].as_str().unwrap_or("-").to_string(),
+                    e["detail"].as_str().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["WHEN", "ACTION", "PROJECT", "DETAIL"],
+            &rows,
+        );
+    })
+}
+
+pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> {
+    let resp = daemon_call(
+        store,
+        if pause { "pause" } else { "resume" },
+        serde_json::json!({}),
+    )?;
+    render(resp, json, |v| {
+        println!(
+            "{}",
+            if v["paused"] == true {
+                "paused"
+            } else {
+                "running"
+            }
+        );
+    })
+}
+
+pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
+    let resp = daemon_call(store, "list_projects", serde_json::json!({}))?;
+    render(resp, json, |v| {
+        let empty = Vec::new();
+        let projects = v["projects"].as_array().unwrap_or(&empty);
+        if projects.is_empty() {
+            println!("no projects known yet; everything defaults to notify-only");
+            return;
+        }
+        // `list_projects` reports discovered-but-unruled projects too, so
+        // the mode column alone would not say whether a `notify_only` row
+        // is a decision the contributor made or just the default in force.
+        // The third column says which.
+        let rows: Vec<Vec<String>> = projects
+            .iter()
+            .map(|p| {
+                vec![
+                    p["project_label"].as_str().unwrap_or("-").to_string(),
+                    p["mode"].as_str().unwrap_or("-").to_string(),
+                    if p["configured"].as_bool().unwrap_or(true) {
+                        "configured".to_string()
+                    } else {
+                        "discovered".to_string()
+                    },
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["PROJECT", "MODE", "SOURCE"],
+            &rows,
+        );
+    })
+}
+
+/// Parse the CLI's short mode words into policy modes.
+pub(crate) fn parse_project_mode(s: &str) -> Result<ProjectMode> {
+    match s {
+        "auto" | "auto_upload" => Ok(ProjectMode::AutoUpload),
+        "notify" | "notify_only" => Ok(ProjectMode::NotifyOnly),
+        "ignore" => Ok(ProjectMode::Ignore),
+        other => anyhow::bail!("unknown mode {other}: expected auto, notify, or ignore"),
+    }
+}
+
+/// Resolve a `daemon project` path argument into a policy key.
+///
+/// The watcher keys policy off the session's *recorded* working directory,
+/// which is always absolute and fully resolved. A relative path, a trailing
+/// slash, a `.`, or a path crossing a symlink produces a key that matches
+/// no session at all -- and the command still printed success. The
+/// dangerous direction is `--mode ignore` silently not applying, so the
+/// path is resolved against the real filesystem here, exactly as
+/// `discover_filtered` already does for `submit --project`.
+///
+/// The locked unknown-cwd bucket is a sentinel, not a path, and is passed
+/// through untouched so `policy::set_mode` can refuse to arm it by name.
+fn resolve_project_key(path: &Path) -> Result<String> {
+    let raw = path.to_string_lossy().to_string();
+    if raw == crate::daemon::policy::UNKNOWN_PROJECT_KEY {
+        return Ok(raw);
+    }
+    let resolved = std::fs::canonicalize(path)
+        .with_context(|| format!("resolving project path {} (does it exist?)", path.display()))?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+pub fn daemon_set_project(store: &ConfigStore, path: &Path, mode: &str, json: bool) -> Result<()> {
+    let mode = parse_project_mode(mode)?;
+    let key = resolve_project_key(path)?;
+    // No `label` is sent. The daemon derives it from the key -- it ignores
+    // any label a client supplies, because a caller-chosen string reaching
+    // `list_projects` and `daemon-audit.jsonl` was an injection path into
+    // both. This is the same bare basename the daemon will store;
+    // disambiguation happens at render time (here, and in `daemon projects`
+    // / the queue) against the current known-key set, so a stored label
+    // never goes stale when a colliding project shows up later.
+    let label = crate::daemon::policy::project_label_for(&key);
+    let resp = daemon_call(
+        store,
+        "set_project_mode",
+        serde_json::json!({ "project_key": key, "mode": mode }),
+    )?;
+    // Ask the same daemon that just applied the edit what it now knows, so
+    // the label shown is disambiguated against the authoritative known-key
+    // set rather than against a private copy loaded from disk.
+    let known_labels = daemon_call(store, "list_projects", serde_json::json!({}))
+        .ok()
+        .and_then(|r| r.result)
+        .map(|v| {
+            v["projects"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p["project_label"].as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let display_label = known_labels
+        .iter()
+        .find(|l| l.as_str() == label || l.starts_with(&format!("{label} (")))
+        .cloned()
+        .unwrap_or_else(|| label.clone());
+
+    // A key that matches nothing the daemon has ever seen is very likely a
+    // typo, and a typo'd `--mode ignore` reads as "this project is now
+    // silenced" while silencing nothing at all. Say so rather than printing
+    // an unqualified success.
+    let matches_nothing = daemon_call(store, "list_pending", serde_json::json!({}))
+        .ok()
+        .and_then(|r| r.result)
+        .map(|v| {
+            v["pending"]
+                .as_array()
+                .map(|a| {
+                    !a.iter()
+                        .any(|e| e["project_label"].as_str() == Some(display_label.as_str()))
+                })
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
+    render(resp, json, |_| {
+        println!(
+            "{display_label}: {}",
+            serde_json::to_string(&mode).unwrap_or_default()
+        );
+        if matches_nothing {
+            println!(
+                "note: no session the daemon currently knows about comes from this \
+                 project. If you meant an already-queued project, check `daemon \
+                 pending` -- the mode applies to the session's recorded working \
+                 directory, not to the directory you happen to be standing in."
+            );
+        }
+    })
+}
+
+pub async fn daemon_history(
+    store: &ConfigStore,
+    limit: usize,
+    refresh: bool,
+    json: bool,
+) -> Result<()> {
+    if refresh {
+        // Refreshing needs the network and an enrollment, so it happens here
+        // rather than inside the request handler.
+        refresh_history_cache(store).await?;
+    }
+    let resp = daemon_call(store, "list_history", serde_json::json!({ "limit": limit }))?;
+    if json {
+        // Emit history and rollup together so a caller gets one document.
+        let rollup = daemon_call(store, "history_rollup", serde_json::json!({}))?;
+        let out = serde_json::json!({
+            "history": resp.result.unwrap_or(serde_json::Value::Null)["history"],
+            "rollup": rollup.result.unwrap_or(serde_json::Value::Null),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    render(resp, false, |v| {
+        let empty = Vec::new();
+        let records = v["history"].as_array().unwrap_or(&empty);
+        if records.is_empty() {
+            println!("no contributions yet");
+            return;
+        }
+        let rows: Vec<Vec<String>> = records
+            .iter()
+            .map(|r| {
+                vec![
+                    r["submitted_at"].as_str().unwrap_or("-").to_string(),
+                    r["project_label"].as_str().unwrap_or("-").to_string(),
+                    r["status"].as_str().unwrap_or("-").to_string(),
+                    format!("{:.2}", r["credit_points_pending"].as_f64().unwrap_or(0.0)),
+                    r["credit_points_final"]
+                        .as_f64()
+                        .map(|f| format!("{f:.2}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                ]
+            })
+            .collect();
+        let _ = print_table(
+            &mut std::io::stdout(),
+            &["WHEN", "PROJECT", "STATUS", "PENDING", "FINAL"],
+            &rows,
+        );
+    })?;
+
+    let rollup = daemon_call(store, "history_rollup", serde_json::json!({}))?;
+    if let Some(v) = rollup.result {
+        println!();
+        println!(
+            "this week: {} | this month: {} | all time: {}",
+            v["week"]["accepted"].as_u64().unwrap_or(0)
+                + v["week"]["submitted"].as_u64().unwrap_or(0)
+                + v["week"]["quarantined"].as_u64().unwrap_or(0),
+            v["month"]["accepted"].as_u64().unwrap_or(0)
+                + v["month"]["submitted"].as_u64().unwrap_or(0)
+                + v["month"]["quarantined"].as_u64().unwrap_or(0),
+            v["all_time"]["accepted"].as_u64().unwrap_or(0)
+                + v["all_time"]["submitted"].as_u64().unwrap_or(0)
+                + v["all_time"]["quarantined"].as_u64().unwrap_or(0),
+        );
+        println!(
+            "credit: {:.2} pending, {:.2} final",
+            v["credit_pending"].as_f64().unwrap_or(0.0),
+            v["credit_final"].as_f64().unwrap_or(0.0),
+        );
+        let quarantined = v["quarantined"].as_u64().unwrap_or(0);
+        if quarantined > 0 {
+            // Quarantine is "held for operator privacy review", not rejected.
+            println!(
+                "{quarantined} held for privacy review (not rejected; an operator \
+                 has to look at these)"
+            );
+        }
+        if let Some(t) = v["last_refreshed_at"].as_str() {
+            println!("last refreshed {t}");
+        } else {
+            println!("never refreshed from the server; run with --refresh");
+        }
+    }
+    Ok(())
+}
+
+/// Poll the server for submission status and rewrite the history cache.
+async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
+    let cfg = store
+        .load_config()
+        .context("loading contributor config")?
+        .context("not logged in; run `login` first")?;
+    let updates = submit::status(store, &cfg).await?;
+    let receipts = store.load_receipts().context("loading receipts")?;
+    let labels = {
+        let queue = crate::daemon::queue::Queue::load(store)?;
+        let mut m = std::collections::BTreeMap::new();
+        for e in queue.all() {
+            if let Some(id) = e.submission_id {
+                m.insert(id, e.project_label.clone());
+            }
+        }
+        m
+    };
+    let records = crate::daemon::history::join(&receipts, &updates, &labels, Utc::now());
+    crate::daemon::history::HistoryCache::save(store, &records)
+}
+
+pub fn daemon_settings(store: &ConfigStore, set: &[String], json: bool) -> Result<()> {
+    if set.is_empty() {
+        let resp = daemon_call(store, "get_settings", serde_json::json!({}))?;
+        return render(resp, json, |v| {
+            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        });
+    }
+    let mut params = serde_json::Map::new();
+    for pair in set {
+        let (k, v) = pair
+            .split_once('=')
+            .with_context(|| format!("expected KEY=VALUE, got {pair}"))?;
+        let value = if let Ok(b) = v.parse::<bool>() {
+            serde_json::Value::Bool(b)
+        } else if let Ok(n) = v.parse::<u64>() {
+            serde_json::Value::from(n)
+        } else {
+            serde_json::Value::String(v.to_string())
+        };
+        params.insert(k.to_string(), value);
+    }
+    let resp = daemon_call(store, "set_settings", serde_json::Value::Object(params))?;
+    render(resp, json, |v| {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    })
+}
+
+pub fn daemon_install(store: &ConfigStore) -> Result<()> {
+    crate::daemon::install::install(store)
+}
+
+pub fn daemon_uninstall() -> Result<()> {
+    crate::daemon::install::uninstall()
+}
+
+#[cfg(test)]
+mod daemon_command_tests {
+    use super::*;
+
+    #[test]
+    fn project_mode_words_parse_to_policy_modes() {
+        assert_eq!(parse_project_mode("auto").unwrap(), ProjectMode::AutoUpload);
+        assert_eq!(
+            parse_project_mode("auto_upload").unwrap(),
+            ProjectMode::AutoUpload
+        );
+        assert_eq!(
+            parse_project_mode("notify").unwrap(),
+            ProjectMode::NotifyOnly
+        );
+        assert_eq!(parse_project_mode("ignore").unwrap(), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn an_unknown_mode_word_is_rejected_with_the_valid_ones_named() {
+        let err = parse_project_mode("yolo").unwrap_err();
+        assert!(err.to_string().contains("auto"), "{err}");
+        assert!(err.to_string().contains("notify"), "{err}");
+        assert!(err.to_string().contains("ignore"), "{err}");
+    }
+
+    #[test]
+    fn arming_the_unknown_bucket_is_refused_from_the_cli_too() {
+        // The terminal carve-out grants autonomy over real projects, not over
+        // sessions whose project could not be identified.
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let err = daemon_set_project(
+            &store,
+            std::path::Path::new(crate::daemon::policy::UNKNOWN_PROJECT_KEY),
+            "auto",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown-project"), "{err}");
+    }
+
+    #[test]
+    fn approving_with_neither_an_id_nor_all_is_an_error() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let err = daemon_approve(&store, None, false, false).unwrap_err();
+        assert!(err.to_string().contains("--all"), "{err}");
+    }
+
+    #[test]
+    fn setting_a_project_to_auto_from_the_cli_is_persisted() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let project = tempfile::tempdir().unwrap();
+        daemon_set_project(&store, project.path(), "auto", false).unwrap();
+        let key = std::fs::canonicalize(project.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
+        assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
+    }
+
+    #[test]
+    fn a_project_path_is_canonicalized_before_it_becomes_a_policy_key() {
+        // The watcher keys off the session's recorded cwd, which is always
+        // absolute and resolved. A trailing slash, a `.`, or a symlinked
+        // path produced a key matching no session at all -- and `--mode
+        // ignore` still printed success while silencing nothing.
+        let project = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+
+        let with_trailing_slash =
+            std::path::PathBuf::from(format!("{}/", project.path().display()));
+        assert_eq!(
+            resolve_project_key(&with_trailing_slash).unwrap(),
+            canonical.to_string_lossy()
+        );
+
+        let with_dot = project.path().join(".");
+        assert_eq!(
+            resolve_project_key(&with_dot).unwrap(),
+            canonical.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn a_project_path_that_does_not_exist_is_an_error_rather_than_a_silent_no_op() {
+        let missing = std::path::Path::new("/nonexistent-trace-commons-project-xyz");
+        let err = resolve_project_key(missing).unwrap_err();
+        assert!(err.to_string().contains("does it exist?"), "{err}");
+    }
+
+    #[test]
+    fn logout_distinguishes_an_embedded_daemon_from_one_that_never_answered() {
+        // `start_embedded` is exactly the shape the C ABI hosts: it takes
+        // the lock and serves the socket, and the socket's `"shutdown"`
+        // stops the supervise loop without releasing that lock (only
+        // `tc_handle_free` / `tc_daemon_stop` do). Logout used to read that
+        // as "did not confirm it stopped", waiting out the full deadline
+        // and then printing an alarming warning about a stop that had in
+        // fact happened.
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let embedded = rt
+            .block_on(crate::daemon::start_embedded(
+                ConfigStore::open(dir.path().to_path_buf()).unwrap(),
+            ))
+            .unwrap();
+
+        let outcome = stop_running_daemon(&store).unwrap();
+        assert_eq!(
+            outcome,
+            DaemonStopOutcome::AcknowledgedButStillHoldingTheLock,
+            "an embedded daemon acknowledges and keeps its lock; that is not \
+             a failure to stop"
+        );
+        assert!(
+            embedded
+                .shared
+                .shutdown
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "and it really did receive the stop request"
+        );
+        embedded.close();
+    }
+
+    #[test]
+    fn logout_reports_no_daemon_when_none_is_running() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        assert_eq!(
+            stop_running_daemon(&store).unwrap(),
+            DaemonStopOutcome::NotRunning
+        );
+    }
+
+    #[test]
+    fn the_unknown_bucket_sentinel_is_not_treated_as_a_filesystem_path() {
+        assert_eq!(
+            resolve_project_key(std::path::Path::new(
+                crate::daemon::policy::UNKNOWN_PROJECT_KEY
+            ))
+            .unwrap(),
+            crate::daemon::policy::UNKNOWN_PROJECT_KEY
+        );
     }
 }
