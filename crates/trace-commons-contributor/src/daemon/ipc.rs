@@ -177,7 +177,7 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 25] = [
+pub const METHODS: [&str; 27] = [
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
@@ -203,6 +203,8 @@ pub const METHODS: [&str; 25] = [
     "shutdown",
     "status",
     "subscribe",
+    "withdraw",
+    "withdraw_bulk",
 ];
 
 pub const EVENT_SNAPSHOT: &str = "snapshot";
@@ -1031,23 +1033,30 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         // subscribe is handled by the connection loop, which owns the stream.
         "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+        // Real network I/O when an account session exists to make the call
+        // with (it never does today -- see `daemon::withdraw`'s module doc);
+        // only handled for real by `handle_request_async`, same as
+        // `"enroll"` above.
+        "withdraw" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
+        "withdraw_bulk" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
         _ => Response::err(req.id, ERR_UNKNOWN_METHOD, "unknown-method"),
     }
 }
 
 /// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"preview_body"`, `"enroll"`) for real and delegates every other method,
-/// unchanged, to the
-/// synchronous `handle_request`. See the module doc's "Sync vs. async
-/// dispatch" section for why this is the only place that decides which
-/// methods are async, and why both real callers (the socket loop and
-/// `handle_local`) always go through this function rather than
-/// `handle_request` directly.
+/// `"preview_body"`, `"enroll"`, `"withdraw"`, `"withdraw_bulk"`) for real
+/// and delegates every other method, unchanged, to the synchronous
+/// `handle_request`. See the module doc's "Sync vs. async dispatch" section
+/// for why this is the only place that decides which methods are async, and
+/// why both real callers (the socket loop and `handle_local`) always go
+/// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
+        "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
+        "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
         _ => handle_request(shared, req),
     }
 }

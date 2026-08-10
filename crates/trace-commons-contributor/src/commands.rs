@@ -1525,8 +1525,9 @@ mod invite_tests {
 // survive scrutiny). `daemon audit` is how a contributor reads that log.
 // ---------------------------------------------------------------------------
 
-use crate::daemon::ipc::{DaemonShared, Response, handle_local};
+use crate::daemon::ipc::{DaemonShared, ERR_UNAVAILABLE, Response, handle_local};
 use crate::daemon::policy::ProjectMode;
+use crate::daemon::withdraw::ERR_ACCOUNT_SESSION_REQUIRED;
 
 /// Load daemon state for a one-shot command against a *stopped* daemon.
 ///
@@ -1689,6 +1690,77 @@ pub fn daemon_dismiss(store: &ConfigStore, entry_id: &str, json: bool) -> Result
         serde_json::json!({ "entry_id": entry_id }),
     )?;
     render(resp, json, |_| println!("dismissed"))
+}
+
+/// Withdraw one submitted trace, or every quarantined one at once.
+///
+/// `--all-quarantined` rather than a generic `--all-status <status>`:
+/// "take back everything held for privacy review" is the realistic bulk
+/// case this feature exists to answer (see
+/// `docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md`), and the
+/// daemon's `withdraw_bulk` IPC method accepts other statuses if a future
+/// caller needs them.
+///
+/// Every call today answers `account-session-required`: withdrawal is
+/// authenticated by an account session, which this daemon does not yet
+/// acquire -- it only ever holds a device key (see `daemon::withdraw`'s
+/// module doc). That is printed as a specific explanation here rather than
+/// falling through to `render`'s generic `code: message` bail, so a
+/// contributor is not left staring at a bare error code with no idea what
+/// it means or what to do about it.
+pub fn daemon_withdraw(
+    store: &ConfigStore,
+    submission_id: Option<&str>,
+    all_quarantined: bool,
+    json: bool,
+) -> Result<()> {
+    if !all_quarantined && submission_id.is_none() {
+        anyhow::bail!("give a submission id, or --all-quarantined");
+    }
+    let (method, params) = if all_quarantined {
+        (
+            "withdraw_bulk",
+            serde_json::json!({ "status": "quarantined" }),
+        )
+    } else {
+        (
+            "withdraw",
+            serde_json::json!({ "submission_id": submission_id }),
+        )
+    };
+    let resp = daemon_call(store, method, params)?;
+    if let Some(err) = &resp.error {
+        if err.code == ERR_UNAVAILABLE && err.message == ERR_ACCOUNT_SESSION_REQUIRED {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": "trace_commons.cli_error.v1",
+                        "error": err.code,
+                        "detail": err.message,
+                    }))?
+                );
+            }
+            anyhow::bail!(
+                "withdrawal needs signing in with your account, which this build does not \
+                 yet support (it only holds this device's key). This is a known gap, not a \
+                 bug -- see docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md."
+            );
+        }
+    }
+    render(resp, json, |v| {
+        if all_quarantined {
+            println!(
+                "withdrawn {} quarantined trace(s); {} failed",
+                v["withdrawn"], v["failed"]
+            );
+        } else {
+            println!(
+                "withdrawn: {}",
+                v["distribution_reach"].as_str().unwrap_or("-")
+            );
+        }
+    })
 }
 
 /// Read the local audit log: when autonomy was armed, when the queue was
