@@ -553,6 +553,14 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
         std::sync::atomic::AtomicBool::new(false);
     static REFUSED_CORRECTLY: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
+    // Set LAST, after `REFUSED_CORRECTLY` has been written. The test waits on
+    // this rather than on `SELF_UNSUBSCRIBE_ATTEMPTED`, which is set on entry:
+    // waiting on the entry flag let the test observe "the callback started"
+    // and then assert on a value the callback had not stored yet, so the
+    // refusal assertion failed intermittently on a callback that was in fact
+    // about to refuse correctly.
+    static SELF_UNSUBSCRIBE_DONE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     static TOKEN: AtomicU64 = AtomicU64::new(0);
 
     extern "C" fn self_unsubscribe_cb(_event_json: *const c_char, ctx: *mut c_void) {
@@ -579,6 +587,8 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
                 .map(|s| s == "unsubscribe-refused-inside-runtime-context")
                 .unwrap_or(false);
         REFUSED_CORRECTLY.store(refused, Ordering::SeqCst);
+        // Publish completion only after the verdict above is visible.
+        SELF_UNSUBSCRIBE_DONE.store(true, Ordering::SeqCst);
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -589,7 +599,7 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
 
     let _ = call(h, "resume", "{}");
     for _ in 0..100 {
-        if SELF_UNSUBSCRIBE_ATTEMPTED.load(Ordering::SeqCst) {
+        if SELF_UNSUBSCRIBE_DONE.load(Ordering::SeqCst) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

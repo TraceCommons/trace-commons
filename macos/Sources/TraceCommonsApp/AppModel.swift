@@ -474,6 +474,64 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Withdrawal
+
+    /// What a withdrawal attempt did, kept per submission so the row that
+    /// was acted on can say it rather than a screen-level banner saying it
+    /// about nothing in particular.
+    enum WithdrawalResult: Equatable {
+        /// The server withdrew it, and reported this tier. `nil` reach means
+        /// the daemon sent a label this build does not know -- which is
+        /// reported as not-knowable, never smoothed into the mild answer.
+        case withdrawn(WithdrawalReach?)
+        /// The daemon has no account session, so the request was never made.
+        case noAccountSession
+        /// Anything else. Carries the daemon's fixed label, which by
+        /// contract is never a path, a token, or a response body.
+        case failed(String)
+    }
+
+    @Published private(set) var withdrawals: [String: WithdrawalResult] = [:]
+    @Published private(set) var withdrawing: Set<String> = []
+
+    /// Withdraws one trace.
+    ///
+    /// Bypasses `perform` deliberately, like `enroll` does. That helper
+    /// funnels every failure into `lastActionError` as `"withdraw:
+    /// account-session-required"`, and the two things wrong with that here
+    /// are that the label is not a sentence anybody can act on, and that a
+    /// screen-level error next to a row that still says "In the commons"
+    /// leaves it genuinely ambiguous whether the trace was withdrawn. Both
+    /// outcomes are recorded against the submission instead, and the view
+    /// states them in words on that row.
+    ///
+    /// On success the daemon has already updated its own history cache, so
+    /// `refreshHistory` is what turns the row over to `withdrawn` -- the
+    /// status is re-read rather than assumed here.
+    func withdraw(_ record: HistoryRecord) {
+        guard let client else { return }
+        let id = record.submissionID
+        guard !withdrawing.contains(id) else { return }
+        withdrawing.insert(id)
+        withdrawals[id] = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.withdraw(submissionID: id) }
+            await MainActor.run {
+                self.withdrawing.remove(id)
+                switch outcome {
+                case .success(let value):
+                    self.withdrawals[id] = .withdrawn(value.distributionReach)
+                    self.refreshHistory()
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? "withdraw-failed"
+                    self.withdrawals[id] = label == "account-session-required"
+                        ? .noAccountSession
+                        : .failed(label)
+                }
+            }
+        }
+    }
+
     // MARK: - Pause
 
     func pause(until: Date?) {

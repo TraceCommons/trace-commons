@@ -6,19 +6,12 @@
 //! authenticates every other call this crate makes -- withdrawal is meant to
 //! survive losing the device that submitted a trace.
 //!
-//! Nothing in this crate currently acquires or stores an account session
-//! (see `daemon::withdraw`'s module doc for the consequence: the daemon
-//! methods that would call this always report `account-session-required`
-//! rather than getting this far). This function exists and is tested
-//! against a stub server, here, so that whichever future change adds
-//! account-session storage has a client ready to call rather than a spec to
-//! reimplement from scratch.
-//!
-//! The server endpoint itself is not part of this worktree -- it and its
-//! migration are built in a sibling worktree in parallel. The wire shapes
-//! below are this client's own reading of the design doc's response
-//! contract (a `distribution_reach` label; see the doc's "What withdrawal
-//! means" table); reconcile them against the real server once both land.
+//! The session is acquired by `crate::account_auth`: the human completes the
+//! ordinary browser login flow and the browser hands this machine a
+//! short-lived bearer token on a loopback redirect. `daemon::withdraw` reads
+//! that token and fails closed with `account-session-required` when there
+//! isn't a live one, so this function is only ever called with a session the
+//! contributor actually established.
 //!
 //! Never logs or returns a path, a token, or trace content: errors here are
 //! fixed labels, matching every other boundary in this crate.
