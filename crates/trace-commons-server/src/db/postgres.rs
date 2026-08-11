@@ -1361,6 +1361,55 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V44 widens the trace_sessions.client_kind CHECK to admit 'native',
+        // the client_kind of a loopback native-app session token.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&44_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V44__native_session_client_kind.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&44_i32, &"native_session_client_kind"],
+                )
+                .await?;
+        }
+        // V46 evicts withdrawn contributors from published community
+        // snapshots.
+        //
+        // Renumbered from V42 on merge: V42 is held by the unmerged
+        // db-authoritative-invites branch, V43/V44 landed on main while this
+        // branch was open, and V45 is taken by the gate-driver column-grants
+        // branch.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&46_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V46__community_snapshot_withdrawal_eviction.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&46_i32, &"community_snapshot_withdrawal_eviction"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -1571,21 +1620,157 @@ impl Database for PgBackend {
         &self,
         tenant_id: &str,
         principal_ref: &str,
-    ) -> Result<bool, DatabaseError> {
+        window_label: &str,
+        metric: &str,
+    ) -> Result<Option<crate::db::CommunityWithdrawalEvictionRow>, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let affected = tx
-            .execute(
-                "UPDATE trace_contributor_profiles
-                    SET withdrawn_at = NOW(), last_updated_at = NOW()
-                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL",
+        let profile = tx
+            .query_opt(
+                "SELECT display_handle, handle_normalized
+                   FROM trace_contributor_profiles
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL
+                  FOR UPDATE",
                 &[&tenant_id, &principal_ref],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let Some(profile) = profile else {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let display_handle: String = profile.get("display_handle");
+        let handle_normalized: String = profile.get("handle_normalized");
+        let withdrawn = tx
+            .query_one(
+                "UPDATE trace_contributor_profiles
+                    SET withdrawn_at = NOW(), last_updated_at = NOW()
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL
+              RETURNING withdrawn_at",
+                &[&tenant_id, &principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let withdrawn_at: chrono::DateTime<chrono::Utc> = withdrawn.get("withdrawn_at");
+        // Coalesce by (window, metric): N withdrawals in a window share one
+        // rebuild. Keep the latest pending_requested_at so a snapshot that
+        // finished before the newest withdrawal stays refused.
+        let invalidation = tx
+            .query_one(
+                "INSERT INTO trace_community_snapshot_invalidations (
+                    window_label, metric, pending_requested_at, pending_withdrawal_count
+                 ) VALUES ($1, $2, $3, 1)
+                 ON CONFLICT (window_label, metric) DO UPDATE SET
+                    pending_requested_at = EXCLUDED.pending_requested_at,
+                    pending_withdrawal_count = CASE
+                        WHEN trace_community_snapshot_invalidations.pending_requested_at IS NULL
+                            THEN 1
+                        ELSE trace_community_snapshot_invalidations.pending_withdrawal_count + 1
+                    END
+                 RETURNING pending_requested_at",
+                &[&window_label, &metric, &withdrawn_at],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let invalidation_requested_at: chrono::DateTime<chrono::Utc> =
+            invalidation.get("pending_requested_at");
+        let eviction_id = uuid::Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_community_withdrawal_evictions (
+                eviction_id, tenant_id, principal_ref, display_handle, handle_normalized,
+                withdrawn_at, invalidation_requested_at, window_label, metric
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &eviction_id,
+                &tenant_id,
+                &principal_ref,
+                &display_handle,
+                &handle_normalized,
+                &withdrawn_at,
+                &invalidation_requested_at,
+                &window_label,
+                &metric,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(affected > 0)
+        Ok(Some(crate::db::CommunityWithdrawalEvictionRow {
+            eviction_id,
+            tenant_id: tenant_id.to_string(),
+            principal_ref: principal_ref.to_string(),
+            display_handle: Some(display_handle),
+            handle_normalized: Some(handle_normalized),
+            withdrawn_at,
+            invalidation_requested_at,
+            window_label: window_label.to_string(),
+            metric: metric.to_string(),
+        }))
+    }
+
+    async fn pending_community_snapshot_invalidation(
+        &self,
+        window_label: &str,
+        metric: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_opt(
+                "SELECT pending_requested_at
+                   FROM trace_community_snapshot_invalidations
+                  WHERE window_label = $1 AND metric = $2
+                    AND pending_requested_at IS NOT NULL",
+                &[&window_label, &metric],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| row.get("pending_requested_at")))
+    }
+
+    async fn drain_community_snapshot_invalidation(
+        &self,
+        window_label: &str,
+        metric: &str,
+        snapshot_id: uuid::Uuid,
+        snapshot_computed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let drained = tx
+            .execute(
+                "UPDATE trace_community_snapshot_invalidations
+                    SET pending_requested_at = NULL,
+                        pending_withdrawal_count = 0,
+                        last_drained_at = $3,
+                        last_drained_snapshot_id = $4
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND pending_requested_at IS NOT NULL
+                    AND pending_requested_at <= $3",
+                &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if drained > 0 {
+            tx.execute(
+                "UPDATE trace_community_withdrawal_evictions
+                    SET drained_at = $3,
+                        drained_snapshot_id = $4
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND drained_at IS NULL
+                    AND invalidation_requested_at <= $3",
+                &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(drained > 0)
     }
 
     async fn append_contributor_profile_audit(
@@ -3001,6 +3186,58 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn issue_native_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: no ensure_trace_tenant, for the same reason as
+        // issue_passkey_session. The tenant here came from a login link a human
+        // just redeemed in a browser; the session insert is FK-bound to
+        // (tenant_id, account_id), so a bogus pair fails the insert rather than
+        // writing a tenant row.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // auth_credential_id is left NULL: a native session is authenticated by
+        // the browser login that approved it, not by a passkey or wallet key.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), now(), $5
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
