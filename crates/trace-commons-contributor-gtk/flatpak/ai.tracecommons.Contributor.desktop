@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Trace Commons
+Comment=Review and contribute Claude Code and Codex sessions
+Exec=trace-commons-shell
+Icon=ai.tracecommons.Contributor
+Terminal=false
+Categories=Utility;
+X-Flatpak=ai.tracecommons.Contributor

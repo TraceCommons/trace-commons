@@ -242,6 +242,10 @@ def main():
                     help="headroom multiplier (default 0.5)")
     ap.add_argument("--candidate", default=None,
                     help="select a specific eligible candidate by id")
+    ap.add_argument("--auc-tolerance", type=float, default=1e-6,
+                    help="max |reported - recomputed| discrimination AUC "
+                         "divergence tolerated before refusing to "
+                         "calibrate (default 1e-6)")
     args = ap.parse_args()
 
     with open(args.report) as f:
@@ -284,6 +288,22 @@ def main():
 
     auc_reported = target["discrimination_auc"]
     auc_recomputed = auc_from_scores(novel, duplicate)
+    # `discrimination_auc` is an assertion the report makes about itself;
+    # `per_trace_scores` is the evidence. They were emitted side by side but
+    # never compared, so a stale or edited AUC would pass through silently.
+    # It does not enter the floor arithmetic below -- that is computed from
+    # the scores -- but it does decide eligibility and the worst-of-passing
+    # sort, so it selects WHICH candidate sets the floor. Refuse to
+    # calibrate from a report that disagrees with its own baselines.
+    if not math.isnan(auc_recomputed) and \
+            abs(auc_reported - auc_recomputed) > args.auc_tolerance:
+        print(f"error: candidate '{target['id']}' reports "
+              f"discrimination_auc={auc_reported!r} but its "
+              f"per_trace_scores recompute to {auc_recomputed!r} "
+              f"(tolerance {args.auc_tolerance}); refusing to calibrate "
+              f"from a report that disagrees with its own baselines",
+              file=sys.stderr)
+        sys.exit(2)
     j_optimum = youden_j_optimum(novel, duplicate)
     p10_novel = percentile(novel, 10)
     median_novel = percentile(novel, 50)
