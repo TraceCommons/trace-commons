@@ -150,15 +150,52 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Soft-delete by stamping `withdrawn_at = NOW()`. Idempotent. Returns
-    /// `Ok(false)` if no row exists for `(tenant_id, principal_ref)`.
+    /// Soft-delete by stamping `withdrawn_at = NOW()`, enqueue a coalesced
+    /// community-snapshot invalidation for `(window_label, metric)`, and
+    /// record an eviction receipt — all in one transaction.
+    ///
+    /// Idempotent: returns `Ok(None)` when no active profile row exists for
+    /// `(tenant_id, principal_ref)`. A successful withdrawal returns the
+    /// eviction receipt so callers can audit that the published surface was
+    /// asked to drop the contributor.
     async fn withdraw_contributor_profile(
         &self,
         _tenant_id: &str,
         _principal_ref: &str,
-    ) -> Result<bool, DatabaseError> {
+        _window_label: &str,
+        _metric: &str,
+    ) -> Result<Option<CommunityWithdrawalEvictionRow>, DatabaseError> {
         Err(DatabaseError::Pool(
             "withdraw_contributor_profile not implemented".to_string(),
+        ))
+    }
+
+    /// Latest undrained community-snapshot invalidation watermark, if any.
+    /// Public reads refuse snapshots whose `computed_at` is strictly before
+    /// this instant.
+    async fn pending_community_snapshot_invalidation(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "pending_community_snapshot_invalidation not implemented".to_string(),
+        ))
+    }
+
+    /// Clear a pending invalidation after a snapshot whose `computed_at` is
+    /// at or after the pending watermark has been written. Returns `true`
+    /// when a pending row was drained. Concurrent withdrawals that land
+    /// after `snapshot_computed_at` leave the pending flag set.
+    async fn drain_community_snapshot_invalidation(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+        _snapshot_id: uuid::Uuid,
+        _snapshot_computed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "drain_community_snapshot_invalidation not implemented".to_string(),
         ))
     }
 
@@ -624,6 +661,29 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "update_webauthn_credential_after_login not implemented".to_string(),
+        ))
+    }
+
+    /// Issue a session for a native-app loopback sign-in whose one-time code and
+    /// PKCE verifier have ALREADY been checked. Mirrors
+    /// [`Database::issue_passkey_session`] except `client_kind = 'native'` and
+    /// `auth_credential_id` is NULL: no passkey or wallet key authenticated this
+    /// session, the human's browser login did.
+    ///
+    /// As with the passkey/NEAR paths there is NO `ensure_trace_tenant` here.
+    /// The tenant came from a login link that a human already redeemed in a
+    /// browser, so the account row provably exists; the insert is FK-bound to
+    /// `(tenant_id, account_id)` and a bogus pair simply fails rather than
+    /// writing anything. The raw session secret never reaches the database.
+    async fn issue_native_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session: NewSession<'_>,
+        _audit: RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "issue_native_session not implemented".to_string(),
         ))
     }
 
@@ -1336,6 +1396,22 @@ pub struct ContributorProfileRow {
     pub public_since: chrono::DateTime<chrono::Utc>,
     pub last_updated_at: chrono::DateTime<chrono::Utc>,
     pub update_count: i32,
+}
+
+/// Eviction receipt written atomically with a community-profile
+/// withdrawal. Proves the published snapshot surface was asked to drop
+/// the contributor rather than relying on an assumed cache TTL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityWithdrawalEvictionRow {
+    pub eviction_id: uuid::Uuid,
+    pub tenant_id: String,
+    pub principal_ref: String,
+    pub display_handle: Option<String>,
+    pub handle_normalized: Option<String>,
+    pub withdrawn_at: chrono::DateTime<chrono::Utc>,
+    pub invalidation_requested_at: chrono::DateTime<chrono::Utc>,
+    pub window_label: String,
+    pub metric: String,
 }
 
 #[derive(Debug, Clone)]
