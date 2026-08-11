@@ -413,7 +413,7 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES` | optional | (sidecar default) | Max stdout bytes. Legacy: `IRONCLAW_*`. |
 | `TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES` | optional | (sidecar default) | Max stderr bytes. Legacy: `IRONCLAW_*`. |
 | `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
-| `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports `privacy-filter.completions.near.ai/v1` faster path. |
+| `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports the `https://privacy-filter.completions.near.ai/v1` faster path. Must include the scheme and must be `https`, or `http` against loopback (local sidecars, tests) -- the API key rides on every request as a bearer token, so a plaintext non-loopback endpoint is refused at construction. |
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
 | `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
