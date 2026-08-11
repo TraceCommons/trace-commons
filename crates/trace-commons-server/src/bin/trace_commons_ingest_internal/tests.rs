@@ -4406,6 +4406,18 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -24741,6 +24753,18 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
         tokens: Arc::new(tokens),
@@ -51675,6 +51699,18 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -82627,14 +82663,20 @@ async fn credit_settlement_in_process_lock_rejects_concurrent_live_runs() {
     let state = test_state(temp.path().to_path_buf());
 
     // Hold the in-process lock the way a live settlement run would.
-    let held = credit_settlement_in_process_lock("tenant-a");
+    //
+    // tenant-lock, not tenant-a: this lock is process-global and keyed by
+    // tenant, and holding tenant-a's for the length of this test fails every
+    // other settlement test that happens to run in parallel with it. The
+    // contention under test is unchanged -- the handler below runs as
+    // tenant-lock and finds the lock already held.
+    let held = credit_settlement_in_process_lock("tenant-lock");
     let _guard = held
         .try_lock_owned()
         .expect("test acquires the settlement lock");
 
     let err = credit_settlement_handler(
         State(state),
-        auth_headers("admin-token-a"),
+        auth_headers("admin-token-lock"),
         Json(TraceCreditSettlementRunRequest {
             dry_run: false,
             policy_version: "trace-credit-policy-v1".to_string(),
