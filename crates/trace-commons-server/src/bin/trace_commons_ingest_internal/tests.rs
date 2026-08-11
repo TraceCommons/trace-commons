@@ -5374,10 +5374,22 @@ async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
 
     rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
 
+    // Medium, not Low, and deliberately so as of the consent-concordance
+    // change. `make_metadata_only_low_risk` declares
+    // `message_text_included = false`, then `set_metadata_only_user_message`
+    // puts prose in the envelope -- exactly the under-declaration the
+    // reconciliation corrects. Once the flag is raised to match the payload,
+    // the pre-existing floor `message_text_included || tool_payloads_included
+    // -> Medium` applies.
+    //
+    // The point of the test survives: no scan finding invented a risk here,
+    // and the envelope's own hashes, uuids and handles were not mistaken for
+    // secrets. What changed is that a false declaration can no longer buy a
+    // Low classification.
     assert_eq!(
         envelope.privacy.residual_pii_risk,
-        ResidualPiiRisk::Low,
-        "a clean metadata-only envelope must not be pushed above Low"
+        ResidualPiiRisk::Medium,
+        "content-bearing prose must not stay Low by under-declaring consent"
     );
 }
 
@@ -16062,6 +16074,12 @@ async fn bulk_export_limit_cap_is_applied_by_export_callers() {
     Arc::get_mut(&mut state)
         .expect("state is uniquely owned")
         .max_export_items_per_request = 1;
+    // See the note on the sibling export tests: consent concordance pushes
+    // these prose-bearing fixtures to Medium, which quarantines unless the
+    // deployment accepts Medium. This test is about the export cap.
+    Arc::get_mut(&mut state)
+        .expect("state is uniquely owned")
+        .accept_medium_risk_submissions = true;
 
     for index in 0..3 {
         let mut envelope = sample_envelope().await;
@@ -16269,6 +16287,16 @@ async fn export_access_grants_gate_replay_dataset_call_site() {
 async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let tenant =
         authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
 
@@ -19782,6 +19810,16 @@ async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_art
 async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::BenchmarkOnly];
@@ -22613,6 +22651,16 @@ fn legacy_benchmark_conversion_artifact_defaults_lifecycle_metadata() {
 async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut tenant_a_best = sample_envelope().await;
     make_metadata_only_low_risk(&mut tenant_a_best);
     tenant_a_best.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -22917,6 +22965,16 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
 async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23054,6 +23112,16 @@ async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credi
 async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23179,6 +23247,16 @@ async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
 async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -54268,6 +54346,16 @@ async fn ranking_label_sources_require_matching_authority_role() {
 async fn ranker_training_pairs_include_explicit_preference_labels_before_score_heuristics() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose in them, so consent concordance now corrects
+    // `message_text_included` upward and the pre-existing
+    // `message_text -> Medium` floor applies. Medium quarantines unless the
+    // deployment accepts it, which would drop these submissions out of the
+    // export under test. This test is about export scoping and dedup, not
+    // about the risk gate, so it adopts the accept-Medium policy the product
+    // runs with rather than asserting the consequence of not having it.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
