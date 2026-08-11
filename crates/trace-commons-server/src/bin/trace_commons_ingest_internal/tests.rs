@@ -634,6 +634,7 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
 /// (2) settle the unlinked principal under its own principal hash with no payout.
 #[tokio::test]
 async fn settlement_groups_account_principals_and_routes_designated_payout() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -782,6 +783,7 @@ async fn settlement_groups_account_principals_and_routes_designated_payout() {
 /// unchanged.
 #[tokio::test]
 async fn linked_contributor_sees_account_keyed_settled_credit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -904,6 +906,7 @@ async fn linked_contributor_sees_account_keyed_settled_credit() {
 /// is enqueued.
 #[tokio::test]
 async fn settlement_holds_account_payout_when_none_enrolled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -978,6 +981,7 @@ async fn settlement_holds_account_payout_when_none_enrolled() {
 /// but HOLDS its payout with `ambiguous_no_designation` and enqueues no outbox row.
 #[tokio::test]
 async fn settlement_holds_account_payout_when_ambiguous() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -1758,7 +1762,7 @@ fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
 }
 
 #[tokio::test]
-async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
+async fn account_ctx_refuses_a_device_bearer() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -1775,24 +1779,40 @@ async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
         false,
     );
 
-    // Mint creates-or-reuses the account linked to token-a's device principal.
+    // Minting a login link still works: that is an authority the device key
+    // has, and it is how a contributor starts the browser sign-in.
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links the principal to an account");
 
-    let ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+    // But the device claim itself must not resolve to an account context.
+    // It used to, which meant a device key reached every /v1/account/* route
+    // including withdrawal and account history. A device key is provisioned
+    // to upload; account authority comes from a browser session or the
+    // loopback native session, never from the upload credential.
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
         .await
-        .expect("bearer resolves to an account ctx");
-    assert_eq!(ctx.auth_method, AccountAuthMethod::DeviceBearer);
-    assert_eq!(ctx.tenant_id, "tenant-a");
-    let device_principal = principal_storage_ref("token-a");
-    assert_eq!(ctx.actor_ref, device_principal, "actor = device principal");
-    assert!(
-        ctx.principal_set.contains(&device_principal),
-        "principal set must contain the device principal"
-    );
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The same refusal, without a PostgreSQL backend, so it actually runs in CI.
+///
+/// The test above is pg-gated and skips silently when no database is
+/// configured -- which is exactly how it went on asserting the old behaviour
+/// unnoticed. This one needs no database: the dispatch refuses a device-shaped
+/// bearer before it ever reaches account storage.
+#[tokio::test]
+async fn account_ctx_refuses_a_device_bearer_without_a_database() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -4119,6 +4139,26 @@ fn test_state_with_submission_quota(
     state
 }
 
+/// Serialises the tests that drive a settlement run.
+///
+/// Settlement takes a process-global lock keyed by tenant, and these tests all
+/// use `tenant-a`, so under `cargo test`'s default parallelism they contend
+/// with each other and whichever loses gets
+/// `409 credit settlement already in progress for this tenant`. The failing
+/// set varied from run to run, which is what gave the race away.
+///
+/// This serialises the fixtures, not the property. That a second concurrent
+/// run for the same tenant is refused is still asserted by
+/// `credit_settlement_in_process_lock_rejects_concurrent_live_runs`, which
+/// holds its own tenant's lock and is unaffected by this guard.
+///
+/// The alternative -- a tenant per test -- was tried and abandoned: these
+/// tests share around twenty seeding and reading helpers that either derive
+/// the tenant from a token or assume `tenant-a` internally, so changing one
+/// test's tenant without changing its helpers breaks it differently, and
+/// changing the helpers breaks every other caller.
+static SETTLEMENT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -> Arc<AppState> {
     configure_unbounded_submit_limits_for_test(&tokens);
     let mut state = test_state(root);
@@ -4406,6 +4446,18 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -4557,6 +4609,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         credit_settlement_scheduler: None,
         process_evaluation_scheduler: None,
         revocation_propagation_scheduler: None,
+        community_snapshot_invalidation_scheduler: None,
         ranking_calibration_max_age: None,
         ranking_require_calibration_dataset_registry: false,
         ranking_require_active_calibration_dataset: false,
@@ -8814,6 +8867,7 @@ fn required_postgres_trace_rls_gate_checks_expected_runtime_role_hash() {
 
 #[tokio::test]
 async fn admin_config_status_route_returns_safe_projection() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -9828,6 +9882,7 @@ async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_submitter_readiness_without_endpoint_secrets() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -9894,6 +9949,7 @@ async fn admin_config_status_reports_near_credit_submitter_readiness_without_end
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_confirmer_readiness_without_endpoint_secrets() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -9956,6 +10012,7 @@ async fn admin_config_status_reports_near_credit_confirmer_readiness_without_end
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_outbox_scheduler_without_token_or_purpose() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -10713,6 +10770,7 @@ async fn admin_config_status_reports_process_evaluation_scheduler_without_secret
 
 #[tokio::test]
 async fn admin_config_status_reports_credit_cycle_scheduler_without_token_or_reason() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -10804,6 +10862,7 @@ async fn admin_config_status_reports_credit_cycle_scheduler_without_token_or_rea
 
 #[tokio::test]
 async fn admin_config_status_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -18697,6 +18756,7 @@ async fn export_job_scheduler_config_requires_export_worker_auth_at_startup() {
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_config_requires_utility_worker_auth_and_live_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
 
@@ -18796,6 +18856,7 @@ async fn near_credit_outbox_scheduler_config_requires_utility_worker_auth_and_li
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -18841,6 +18902,7 @@ async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_liv
 
 #[tokio::test]
 async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_live_contract() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
 
@@ -18933,6 +18995,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
 
 #[tokio::test]
 async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -19406,6 +19469,7 @@ async fn revocation_propagation_scheduler_config_requires_revocation_worker_auth
 
 #[tokio::test]
 async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -19483,6 +19547,7 @@ async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_nea
 
 #[tokio::test]
 async fn credit_cycle_scheduler_config_rejects_live_source_list_approval_mode() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -19555,6 +19620,7 @@ async fn credit_cycle_scheduler_config_rejects_live_source_list_approval_mode() 
 
 #[tokio::test]
 async fn credit_cycle_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -22395,6 +22461,7 @@ async fn operational_summary_reports_retention_scheduler_without_token_or_purpos
 
 #[tokio::test]
 async fn operational_summary_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     {
@@ -24808,6 +24875,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
 
 #[tokio::test]
 async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -24818,6 +24886,18 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
         tokens: Arc::new(tokens),
@@ -24914,6 +24994,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         credit_settlement_scheduler: None,
         process_evaluation_scheduler: None,
         revocation_propagation_scheduler: None,
+        community_snapshot_invalidation_scheduler: None,
         ranking_calibration_max_age: None,
         ranking_require_calibration_dataset_registry: false,
         ranking_require_active_calibration_dataset: false,
@@ -27868,6 +27949,7 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
 
 #[tokio::test]
 async fn revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -32963,6 +33045,7 @@ async fn admin_vector_entries_requires_configured_db() {
 
 #[tokio::test]
 async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_rows() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let settlement_batch_id = Uuid::new_v4();
@@ -34895,6 +34978,7 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
 
 #[tokio::test]
 async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_near_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -35059,6 +35143,7 @@ async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_nea
 
 #[tokio::test]
 async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_near_contract_id =
@@ -35164,6 +35249,7 @@ async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
 
 #[tokio::test]
 async fn credit_settlement_required_near_contract_blocks_live_without_config() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
@@ -35245,6 +35331,7 @@ async fn credit_settlement_required_near_contract_blocks_live_without_config() {
 
 #[tokio::test]
 async fn credit_settlement_rejects_unsafe_policy_version_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -35279,6 +35366,7 @@ async fn credit_settlement_rejects_unsafe_policy_version_before_side_effects() {
 
 #[tokio::test]
 async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
@@ -35415,6 +35503,7 @@ async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
 
 #[tokio::test]
 async fn credit_settlement_policy_allowlist_blocks_unapproved_issuer_approval_without_audit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
@@ -35476,6 +35565,7 @@ async fn credit_settlement_policy_allowlist_blocks_unapproved_issuer_approval_wi
 
 #[tokio::test]
 async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -35556,6 +35646,7 @@ async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
 
 #[tokio::test]
 async fn credit_settlement_approval_rejects_uppercase_hashes_without_audit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -35586,6 +35677,7 @@ async fn credit_settlement_approval_rejects_uppercase_hashes_without_audit() {
 
 #[tokio::test]
 async fn credit_settlement_approval_mirrors_typed_hash_only_audit_metadata() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -35655,6 +35747,7 @@ async fn credit_settlement_approval_mirrors_typed_hash_only_audit_metadata() {
 
 #[tokio::test]
 async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_writes() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -35745,6 +35838,7 @@ async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_
 
 #[tokio::test]
 async fn credit_settlement_can_require_central_issuer_approval_for_live_batches() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36087,6 +36181,7 @@ async fn credit_settlement_can_require_central_issuer_approval_for_live_batches(
 
 #[tokio::test]
 async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -36247,6 +36342,7 @@ async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_co
 
 #[tokio::test]
 async fn contributor_credit_summary_nets_revocation_reversal_against_settled_balance() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -36421,6 +36517,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
 
 #[tokio::test]
 async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -36489,6 +36586,7 @@ async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_ef
 
 #[tokio::test]
 async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
@@ -36588,6 +36686,7 @@ async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outb
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_account_cap() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36701,6 +36800,7 @@ async fn operational_summary_blocks_credit_settlement_without_account_cap() {
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_central_issuer_gate() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36925,6 +37025,7 @@ async fn operational_summary_blocks_incomplete_central_issuer_profile_before_cre
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37098,6 +37199,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_accounts() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37306,6 +37408,7 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37464,6 +37567,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth(
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37599,6 +37703,7 @@ async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
 
 #[tokio::test]
 async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37713,6 +37818,7 @@ async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -37804,6 +37910,7 @@ async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
@@ -37900,6 +38007,7 @@ async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_central_issuer_approval_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -38124,6 +38232,7 @@ async fn credit_settlement_drill_requires_central_issuer_approval_when_configure
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_near_adapters_by_default() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -38258,6 +38367,7 @@ async fn credit_settlement_drill_requires_near_adapters_by_default() {
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -38365,6 +38475,7 @@ async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
 
 #[tokio::test]
 async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -38587,6 +38698,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
 
 #[tokio::test]
 async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_scope() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -38792,6 +38904,7 @@ async fn utility_credit_worker_route_rejects_reviewer_tokens_before_source_check
 
 #[tokio::test]
 async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_live_settlement() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -38912,6 +39025,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
 
 #[tokio::test]
 async fn credit_settlement_worker_run_respects_source_event_limit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -39020,6 +39134,7 @@ async fn credit_settlement_worker_run_respects_source_event_limit() {
 
 #[tokio::test]
 async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -39174,6 +39289,7 @@ async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batc
 
 #[tokio::test]
 async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -39311,6 +39427,7 @@ async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch
 
 #[tokio::test]
 async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let tenant = test_reviewer_auth("tenant-a");
@@ -39379,6 +39496,7 @@ async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
 
 #[tokio::test]
 async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failure() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -39468,6 +39586,7 @@ async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failu
 
 #[tokio::test]
 async fn admin_credit_summary_counts_tenant_wide_settled_line_items() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut submissions = Vec::new();
@@ -41490,6 +41609,7 @@ async fn benchmark_registry_outbox_confirm_worker_keeps_oversized_failure_detail
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_confirmer = FakeNearCreditConfirmer::default();
@@ -41598,6 +41718,7 @@ async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_tick_submits_then_confirms_tenant_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41666,6 +41787,7 @@ async fn near_credit_outbox_scheduler_tick_submits_then_confirms_tenant_outbox()
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_tick_dry_run_leaves_outbox_unchanged() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41747,6 +41869,7 @@ async fn near_credit_outbox_scheduler_tick_dry_run_leaves_outbox_unchanged() {
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_rejects_mismatched_transaction_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
@@ -41792,6 +41915,7 @@ async fn near_credit_outbox_confirm_worker_rejects_mismatched_transaction_hash()
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_keeps_oversized_failure_detail_hash_only() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
@@ -41838,6 +41962,7 @@ async fn near_credit_outbox_confirm_worker_keeps_oversized_failure_detail_hash_o
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_confirmer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_confirmer = FakeNearCreditConfirmer::default();
@@ -41889,6 +42014,7 @@ async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_c
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_confirmed_transaction_hash_mismatch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -41964,6 +42090,7 @@ async fn near_credit_outbox_mark_status_rejects_confirmed_transaction_hash_misma
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_malformed_transaction_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -42000,6 +42127,7 @@ async fn near_credit_outbox_mark_status_rejects_malformed_transaction_hash() {
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_oversized_error_detail_before_mutation() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -42036,6 +42164,7 @@ async fn near_credit_outbox_mark_status_rejects_oversized_error_detail_before_mu
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_invalid_lifecycle_transitions() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let pending_outbox_id = Uuid::new_v4();
@@ -42101,6 +42230,7 @@ async fn near_credit_outbox_mark_status_rejects_invalid_lifecycle_transitions() 
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_requires_adapter_auth_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -42223,6 +42353,7 @@ async fn near_credit_outbox_mark_status_requires_adapter_auth_when_configured() 
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -42293,6 +42424,7 @@ async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_live_run() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let item = submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_1, 1_000_000);
@@ -42343,6 +42475,7 @@ async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_liv
 
 #[tokio::test]
 async fn near_credit_outbox_workers_require_adapter_auth_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -42433,6 +42566,7 @@ async fn near_credit_outbox_workers_require_adapter_auth_when_configured() {
 
 #[tokio::test]
 async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -42546,6 +42680,7 @@ async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live()
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitted() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -42710,6 +42845,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_relayer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -42785,6 +42921,7 @@ async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_re
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
@@ -42867,6 +43004,7 @@ async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live_run() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -42914,6 +43052,7 @@ async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live
 
 #[tokio::test]
 async fn credit_settlement_requires_promotable_calibration_for_ranking_utility() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -43169,6 +43308,7 @@ async fn credit_settlement_requires_promotable_calibration_for_ranking_utility()
 
 #[tokio::test]
 async fn ranking_utility_settlement_requires_active_model() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -43307,6 +43447,7 @@ async fn ranking_utility_settlement_requires_active_model() {
 
 #[tokio::test]
 async fn ranking_utility_settlement_requires_prediction_ref() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -45462,6 +45603,7 @@ async fn ranking_prediction_credit_run_cannot_override_calibration_label_actor_u
 
 #[tokio::test]
 async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, prediction) =
@@ -45654,6 +45796,7 @@ async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_en
 
 #[tokio::test]
 async fn ranking_credit_paths_block_cold_start_calibration_labelers_when_support_gate_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, prediction) =
@@ -45984,6 +46127,7 @@ async fn ranking_prediction_credit_worker_requires_active_positive_prediction() 
 
 #[tokio::test]
 async fn ranking_credit_paths_reject_stale_or_underdiverse_calibration_when_gates_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -47997,6 +48141,7 @@ async fn seed_pairwise_ranking_prediction_source(
 
 #[tokio::test]
 async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let issuer_approval_evidence_hash = sha256_prefixed("credit-cycle-issuer-approval");
@@ -48149,6 +48294,7 @@ async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
 
 #[tokio::test]
 async fn credit_cycle_worker_can_submit_and_confirm_near_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -48219,6 +48365,7 @@ async fn credit_cycle_worker_can_submit_and_confirm_near_outbox() {
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_issuer_approval_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -48283,6 +48430,7 @@ async fn credit_cycle_worker_requires_issuer_approval_before_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_central_issuer_profile_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -48347,6 +48495,7 @@ async fn credit_cycle_worker_requires_central_issuer_profile_before_side_effects
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -48412,6 +48561,7 @@ async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effe
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -48476,6 +48626,7 @@ async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_req
 
 #[tokio::test]
 async fn credit_cycle_scheduler_runs_next_eligible_model() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -48586,6 +48737,7 @@ async fn credit_cycle_scheduler_runs_next_eligible_model() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_only_reports_eligible_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) =
@@ -48648,6 +48800,7 @@ async fn credit_cycle_scheduler_preflight_only_reports_eligible_without_side_eff
 
 #[tokio::test]
 async fn credit_cycle_scheduler_tick_preflights_next_model_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -48709,6 +48862,7 @@ async fn credit_cycle_scheduler_tick_preflights_next_model_without_side_effects(
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -48780,6 +48934,7 @@ async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_prof
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_reports_rollout_smoke_not_ready_when_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
@@ -48860,6 +49015,7 @@ async fn credit_cycle_scheduler_preflight_reports_rollout_smoke_not_ready_when_r
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -48966,6 +49122,7 @@ async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_pairwise_labels_from_single_actor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
@@ -49102,6 +49259,7 @@ async fn credit_cycle_scheduler_preflight_blocks_pairwise_labels_from_single_act
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_cold_start_calibration_labelers() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -49170,6 +49328,7 @@ async fn credit_cycle_scheduler_preflight_blocks_cold_start_calibration_labelers
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_legacy_training_calibration_overlap() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -49242,6 +49401,7 @@ async fn credit_cycle_scheduler_preflight_blocks_legacy_training_calibration_ove
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_missing_calibration_dataset_registry() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -49310,6 +49470,7 @@ async fn credit_cycle_scheduler_preflight_blocks_missing_calibration_dataset_reg
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_min_label_floor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_label_count = 2;
@@ -49376,6 +49537,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_min_label_floor() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_confidence_floor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_confidence_threshold = 0.95;
@@ -49444,6 +49606,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_confidence_floor() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_error_ceiling() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_max_average_absolute_error_micros = 50_000;
@@ -49528,6 +49691,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_error_ceiling() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_live_skips_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -49601,6 +49765,7 @@ async fn credit_cycle_scheduler_live_skips_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_live_skips_source_list_approval_gate_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -49678,6 +49843,7 @@ async fn credit_cycle_scheduler_live_skips_source_list_approval_gate_before_clai
 
 #[tokio::test]
 async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_before_discovery() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -49730,6 +49896,7 @@ async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_befor
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_live_claim_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let Json(candidate) = ranking_model_version_handler(
@@ -49833,6 +50000,7 @@ async fn credit_cycle_scheduler_skips_live_claim_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_rejects_contributors_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -49880,6 +50048,7 @@ async fn credit_cycle_scheduler_rejects_contributors_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_rejects_invalid_limit_without_claiming_work() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -49925,6 +50094,7 @@ async fn credit_cycle_scheduler_rejects_invalid_limit_without_claiming_work() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_candidate_without_ranking_evidence_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let Json(candidate) = ranking_model_version_handler(
@@ -50009,6 +50179,7 @@ async fn credit_cycle_scheduler_skips_candidate_without_ranking_evidence_before_
 
 #[tokio::test]
 async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_candidate_with_prediction(
@@ -50099,6 +50270,7 @@ async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_cla
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_pairwise_policy_risk_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
@@ -50160,6 +50332,7 @@ async fn credit_cycle_scheduler_skips_pairwise_policy_risk_before_claiming() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -50212,6 +50385,7 @@ async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_oversized_reason_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -50267,6 +50441,7 @@ async fn credit_cycle_worker_rejects_oversized_reason_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_overlapping_live_cycle_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let active_cycle_id = Uuid::new_v4();
@@ -50358,6 +50533,7 @@ async fn credit_cycle_worker_rejects_overlapping_live_cycle_without_side_effects
 
 #[tokio::test]
 async fn credit_cycle_worker_marks_failed_when_later_step_fails() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -51248,6 +51424,7 @@ async fn ranking_model_promotion_rejects_nonpromotable_calibration() {
 
 #[tokio::test]
 async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -51322,6 +51499,7 @@ async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection
 
 #[tokio::test]
 async fn admin_credit_hold_release_unblocks_settlement() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -51484,6 +51662,7 @@ async fn admin_credit_hold_release_unblocks_settlement() {
 
 #[tokio::test]
 async fn admin_credit_hold_routes_are_tenant_scoped() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -51613,6 +51792,7 @@ async fn admin_credit_hold_routes_are_tenant_scoped() {
 
 #[tokio::test]
 async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_near_contract_id =
@@ -51741,6 +51921,7 @@ async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configu
 
 #[tokio::test]
 async fn credit_hold_mutations_require_authorized_central_issuer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -51751,6 +51932,18 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -52505,6 +52698,7 @@ async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db()
 
 #[tokio::test]
 async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -52936,6 +53130,7 @@ fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
 
 #[tokio::test]
 async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -53097,6 +53292,7 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
 
 #[tokio::test]
 async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and_near_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -53287,6 +53483,7 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
 
 #[tokio::test]
 async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -57205,6 +57402,7 @@ async fn active_ranking_model_risk_report_flags_required_calibration_dataset_reg
 
 #[tokio::test]
 async fn active_ranking_model_risk_report_flags_post_calibration_evidence_drift() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut calibration_envelope = sample_envelope().await;
@@ -58213,6 +58411,7 @@ async fn active_ranking_model_risk_report_flags_legacy_calibration_label_actor_u
 
 #[tokio::test]
 async fn ranking_utility_settlement_blocks_uncleared_active_model_risk() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) =
@@ -59883,6 +60082,7 @@ async fn operational_summary_blocks_required_worker_cache_invalidator_without_ad
 
 #[tokio::test]
 async fn admin_operational_summary_and_metrics_report_near_credit_outbox_readiness() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -64667,6 +64867,7 @@ async fn score_one_submission_skips_duplicate_ci_without_postgres() {
 /// the most direct verification available for a pure hash-only log line.
 #[tokio::test]
 async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postgres() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
     let (artifact_store, _object_store_name) =
@@ -69496,6 +69697,56 @@ async fn community_snapshot_recompute_requires_admin_token() {
         .expect("response");
     // token-a is a contributor token in the test fixture; admin is required.
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn community_snapshot_freshness_refuses_beyond_published_bound() {
+    let computed_at = Utc::now() - Duration::seconds(901);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), None);
+    assert_eq!(failure, Some("snapshot_exceeds_published_bound"));
+}
+
+#[test]
+fn community_snapshot_freshness_accepts_snapshot_within_bound() {
+    let computed_at = Utc::now() - Duration::seconds(60);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), None);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn community_snapshot_freshness_refuses_pre_invalidation_snapshot() {
+    let computed_at = Utc::now() - Duration::seconds(30);
+    let pending = Some(Utc::now() - Duration::seconds(10));
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), pending);
+    assert_eq!(failure, Some("snapshot_invalidated_by_withdrawal"));
+}
+
+#[test]
+fn community_snapshot_freshness_accepts_snapshot_after_invalidation() {
+    let pending = Some(Utc::now() - Duration::seconds(30));
+    let computed_at = Utc::now() - Duration::seconds(5);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), pending);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn community_snapshot_max_age_matches_published_bound() {
+    assert_eq!(COMMUNITY_SNAPSHOT_MAX_AGE, Duration::seconds(900));
+}
+
+#[test]
+fn community_snapshot_invalidation_scheduler_parses_when_community_enabled() {
+    let config = parse_community_snapshot_invalidation_scheduler_config(true)
+        .expect("scheduler config parses");
+    let config = config.expect("enabled community surface enables drain scheduler");
+    assert_eq!(config.interval.as_secs(), 900);
+}
+
+#[test]
+fn community_snapshot_invalidation_scheduler_absent_when_community_disabled() {
+    let config = parse_community_snapshot_invalidation_scheduler_config(false)
+        .expect("scheduler config parses");
+    assert!(config.is_none());
 }
 
 #[tokio::test]
@@ -75372,6 +75623,7 @@ async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
 
 #[tokio::test]
 async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     // Disabled mode == no submitter configured. The worker refuses (cannot advance)
     // and the pending row stays pending; credit is never marked submitted.
@@ -75409,6 +75661,7 @@ async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
 
 #[tokio::test]
 async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     // DryRun mode wires the in-process deterministic submitter + confirmer.
@@ -75496,6 +75749,7 @@ async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
 
 #[tokio::test]
 async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -75529,6 +75783,7 @@ async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
 
 #[tokio::test]
 async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
@@ -75570,6 +75825,7 @@ async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
 
 #[tokio::test]
 async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -75743,6 +75999,7 @@ impl TraceNearCreditSubmitter for BlockingCountingNearCreditSubmitter {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -75886,6 +76143,7 @@ async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submi
 /// external submitter fires EXACTLY ONCE total for the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -76018,6 +76276,7 @@ async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row()
 /// allow-list still writes unconditionally.
 #[tokio::test]
 async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -76097,6 +76356,7 @@ async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row()
 /// external submitter for it — the external submitter fires zero times here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -76235,6 +76495,7 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
 /// worker must REFUSE (503 missing-control) and mutate nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -77191,6 +77452,7 @@ async fn mint_login_link_account_for_subject(
 /// when neither is set. Run with `--test-threads=1`.
 #[tokio::test]
 async fn per_user_subjects_resolve_to_distinct_accounts() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -82001,6 +82263,7 @@ async fn a_stale_native_request_id_cannot_be_completed_twice() {
 
 #[tokio::test]
 async fn logging_out_a_native_token_revokes_its_session_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     // Unlike the device-bearer path (a documented no-op), a native token HAS a
     // session row, so logout must actually revoke it rather than leave a
     // signed-out app holding a live token.
@@ -82623,4 +82886,335 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuth
     async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
         todo!("stub")
     }
+}
+
+// --- #198 settlement batch-to-outbox atomicity ---
+
+/// Postgres advisory lock: a second acquire while the first is held returns None.
+#[tokio::test]
+async fn credit_settlement_advisory_lock_serializes_overlapping_acquires() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let first = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("first acquire")
+        .expect("first acquire succeeds");
+    let second = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("second acquire attempt");
+    assert!(
+        second.is_none(),
+        "overlapping settlement lock must not be granted"
+    );
+    first.release().await.expect("release first lock");
+    let third = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("third acquire")
+        .expect("lock is free after release");
+    third.release().await.expect("release third lock");
+}
+
+/// Two overlapping live settlement runs: the second must conflict rather than
+/// race the source-event conflict check (#198 concurrent-run requirement).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_settlement_in_process_lock_rejects_concurrent_live_runs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    // Hold the in-process lock the way a live settlement run would.
+    //
+    // tenant-lock, not tenant-a: this lock is process-global and keyed by
+    // tenant, and holding tenant-a's for the length of this test fails every
+    // other settlement test that happens to run in parallel with it. The
+    // contention under test is unchanged -- the handler below runs as
+    // tenant-lock and finds the lock already held.
+    let held = credit_settlement_in_process_lock("tenant-lock");
+    let _guard = held
+        .try_lock_owned()
+        .expect("test acquires the settlement lock");
+
+    let err = credit_settlement_handler(
+        State(state),
+        auth_headers("admin-token-lock"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "overlapping settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: None,
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect_err("overlapping live settlement must conflict");
+    assert_eq!(err.0, StatusCode::CONFLICT);
+}
+
+fn sample_finalized_settlement_with_outbox_ids(
+    outbox_ids: &[Uuid],
+) -> (
+    TraceCreditSettlementBatchRecord,
+    Vec<TraceNearCreditOutboxItem>,
+) {
+    let settlement_batch_id = Uuid::new_v4();
+    let mut line_items = Vec::new();
+    let mut outbox_items = Vec::new();
+    for (index, near_outbox_id) in outbox_ids.iter().copied().enumerate() {
+        let credit_account_ref = format!("principal-{}", index);
+        let credit_account_hash = sha256_prefixed(&credit_account_ref);
+        let item_source_list_hash = sha256_prefixed(&format!("settlement-item-sources-{index}"));
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: item_source_list_hash.clone(),
+            attestation_hash: sha256_prefixed(&format!("settlement-attestation-{index}")),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: sha256_prefixed(&format!("settlement-issuer-signature-{index}")),
+        };
+        line_items.push(StorageTraceCreditAccountSettlementLineItem {
+            credit_account_ref,
+            credit_account_hash: credit_account_hash.clone(),
+            settled_credit_delta_micros: 1_000_000,
+            source_credit_event_ids: vec![Uuid::new_v4()],
+            source_submission_ids: vec![Uuid::new_v4()],
+            source_list_hash: item_source_list_hash,
+            near_status: StorageTraceCreditSettlementNearStatus::Pending,
+            near_outbox_id: Some(near_outbox_id),
+            near_payout_hold_reason: None,
+        });
+        outbox_items.push(TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash,
+            near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                .expect("NEAR call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
+            created_at: Utc::now(),
+            submitted_at: None,
+            near_transaction_hash: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        });
+    }
+    let batch = TraceCreditSettlementBatchRecord {
+        settlement_batch_id,
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        status: StorageTraceCreditSettlementBatchStatus::Finalized,
+        reason_hash: "sha256:settlement-reason".to_string(),
+        issuer_approval_evidence_hash: None,
+        source_credit_event_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_credit_event_ids.iter().copied())
+            .collect(),
+        source_submission_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_submission_ids.iter().copied())
+            .collect(),
+        source_list_hash: "sha256:settlement-sources".to_string(),
+        settled_credit_points: outbox_ids.len() as f32,
+        settled_credit_micros: (outbox_ids.len() as i64) * 1_000_000,
+        line_items,
+        near_contract_id: Some("trace-credits.testnet".to_string()),
+        ranking_model_version: None,
+        ranking_target_use: None,
+        ranking_calibration_run_id: None,
+        ranking_calibration_report_hash: None,
+        ranking_calibration_joined_evidence_hash: None,
+        ranking_credit_events_excluded_count: 0,
+        ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        created_at: Utc::now(),
+    };
+    (batch, outbox_items)
+}
+
+/// DB-authoritative finalize commits batch + outbox in one transaction.
+#[tokio::test]
+async fn settlement_finalize_db_transaction_writes_batch_and_outbox_atomically() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("db-authoritative finalize");
+
+    let db_batches = backend
+        .list_trace_credit_settlement_batches("tenant-a")
+        .await
+        .expect("list batches");
+    assert_eq!(db_batches.len(), 1);
+    assert_eq!(db_batches[0].settlement_batch_id, batch.settlement_batch_id);
+
+    let db_outbox = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("list outbox");
+    assert_eq!(db_outbox.len(), 2);
+    let db_ids = db_outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(db_ids, outbox_ids.into_iter().collect::<BTreeSet<_>>());
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// File-primary finalize writes batch + outbox together and remains repairable.
+#[tokio::test]
+async fn settlement_finalize_writes_batch_and_outbox_together() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("finalize writes");
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1);
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 2);
+    assert_eq!(
+        outbox
+            .iter()
+            .map(|item| item.near_outbox_id)
+            .collect::<BTreeSet<_>>(),
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
+}
+
+/// Crash after the batch write and before any outbox row: repair must re-emit every
+/// expected row from the line-item `near_outbox_id` invariant (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_batch_only_crash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    // Simulate: batch durable, outbox loop never started.
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    assert!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .is_empty(),
+        "crash left zero outbox rows"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        std::slice::from_ref(&batch),
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 3, "repair re-emits every expected outbox row");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>(),
+        "repaired ids match the batch line-item invariant"
+    );
+    assert_eq!(outbox.len(), expected_items.len());
+
+    let repaired_again = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair re-run");
+    assert_eq!(repaired_again, 0, "repair is idempotent");
+}
+
+/// Crash after item k of n: repair must fill only the missing suffix (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_partial_outbox_crash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    // Survive the first two appends; crash before the third.
+    for item in &expected_items[..2] {
+        append_near_credit_outbox_item(temp.path(), "tenant-a", item).expect("partial outbox");
+    }
+    assert_eq!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .len(),
+        2,
+        "crash left a partial outbox"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 2, "repair fills only the missing suffix");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 4);
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
 }

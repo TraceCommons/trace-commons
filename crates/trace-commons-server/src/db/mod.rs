@@ -6,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::config::DatabaseConfig;
 use crate::error::DatabaseError;
-use crate::trace_corpus_storage::TraceCorpusStore;
+use crate::trace_corpus_storage::{
+    TraceCorpusStore, TraceCreditSettlementBatchWrite, TraceNearCreditOutboxItemWrite,
+};
 
 pub mod postgres;
 
@@ -106,6 +108,43 @@ impl Drop for NearCreditSubmitAdvisoryLock {
     }
 }
 
+/// Session-level Postgres advisory lock guarding a live credit-settlement
+/// finalize for a single tenant. Prevents two overlapping settlement runs from
+/// both passing the source-event conflict check and writing divergent batches
+/// (and partial outbox rows) for the same credits. Independent of the submit
+/// lock classid / namespace.
+///
+/// MUST be released via [`CreditSettlementAdvisoryLock::release`].
+pub struct CreditSettlementAdvisoryLock {
+    inner: Option<crate::db::postgres::CreditSettlementAdvisoryLockInner>,
+}
+
+impl CreditSettlementAdvisoryLock {
+    pub(crate) fn new(inner: crate::db::postgres::CreditSettlementAdvisoryLockInner) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    /// Release the advisory lock and return the connection to the pool. Idempotent.
+    pub async fn release(mut self) -> Result<(), DatabaseError> {
+        if let Some(inner) = self.inner.take() {
+            inner.release().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CreditSettlementAdvisoryLock {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            tracing::warn!(
+                "credit settlement advisory lock dropped without explicit release; \
+                 connection-scoped lock may linger until session reset"
+            );
+        }
+    }
+}
+
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
@@ -120,6 +159,34 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _tenant_id: &str,
     ) -> Result<Option<NearCreditSubmitAdvisoryLock>, DatabaseError> {
         Ok(None)
+    }
+
+    /// Try to acquire the per-tenant live credit-settlement advisory lock without
+    /// blocking. Returns `Ok(Some(guard))` if acquired (caller MUST `release()`),
+    /// or `Ok(None)` if another settlement run already holds it. Default returns
+    /// `Ok(None)` so callers without Postgres serialization refuse to race.
+    async fn try_acquire_credit_settlement_lock(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<CreditSettlementAdvisoryLock>, DatabaseError> {
+        Ok(None)
+    }
+
+    /// Atomically persist a finalized settlement batch together with every NEAR
+    /// outbox row it expects. Default falls back to sequential upserts (not
+    /// crash-atomic across statements); Postgres overrides this with one
+    /// tenant-scoped transaction so a process death cannot leave a finalized
+    /// batch without its payout work.
+    async fn upsert_credit_settlement_finalize(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+        outbox_items: Vec<TraceNearCreditOutboxItemWrite>,
+    ) -> Result<(), DatabaseError> {
+        self.upsert_trace_credit_settlement_batch(batch).await?;
+        for item in outbox_items {
+            self.upsert_trace_near_credit_outbox_item(item).await?;
+        }
+        Ok(())
     }
 
     async fn trace_corpus_rls_diagnostics(
@@ -150,15 +217,52 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Soft-delete by stamping `withdrawn_at = NOW()`. Idempotent. Returns
-    /// `Ok(false)` if no row exists for `(tenant_id, principal_ref)`.
+    /// Soft-delete by stamping `withdrawn_at = NOW()`, enqueue a coalesced
+    /// community-snapshot invalidation for `(window_label, metric)`, and
+    /// record an eviction receipt — all in one transaction.
+    ///
+    /// Idempotent: returns `Ok(None)` when no active profile row exists for
+    /// `(tenant_id, principal_ref)`. A successful withdrawal returns the
+    /// eviction receipt so callers can audit that the published surface was
+    /// asked to drop the contributor.
     async fn withdraw_contributor_profile(
         &self,
         _tenant_id: &str,
         _principal_ref: &str,
-    ) -> Result<bool, DatabaseError> {
+        _window_label: &str,
+        _metric: &str,
+    ) -> Result<Option<CommunityWithdrawalEvictionRow>, DatabaseError> {
         Err(DatabaseError::Pool(
             "withdraw_contributor_profile not implemented".to_string(),
+        ))
+    }
+
+    /// Latest undrained community-snapshot invalidation watermark, if any.
+    /// Public reads refuse snapshots whose `computed_at` is strictly before
+    /// this instant.
+    async fn pending_community_snapshot_invalidation(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "pending_community_snapshot_invalidation not implemented".to_string(),
+        ))
+    }
+
+    /// Clear a pending invalidation after a snapshot whose `computed_at` is
+    /// at or after the pending watermark has been written. Returns `true`
+    /// when a pending row was drained. Concurrent withdrawals that land
+    /// after `snapshot_computed_at` leave the pending flag set.
+    async fn drain_community_snapshot_invalidation(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+        _snapshot_id: uuid::Uuid,
+        _snapshot_computed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "drain_community_snapshot_invalidation not implemented".to_string(),
         ))
     }
 
@@ -1359,6 +1463,22 @@ pub struct ContributorProfileRow {
     pub public_since: chrono::DateTime<chrono::Utc>,
     pub last_updated_at: chrono::DateTime<chrono::Utc>,
     pub update_count: i32,
+}
+
+/// Eviction receipt written atomically with a community-profile
+/// withdrawal. Proves the published snapshot surface was asked to drop
+/// the contributor rather than relying on an assumed cache TTL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityWithdrawalEvictionRow {
+    pub eviction_id: uuid::Uuid,
+    pub tenant_id: String,
+    pub principal_ref: String,
+    pub display_handle: Option<String>,
+    pub handle_normalized: Option<String>,
+    pub withdrawn_at: chrono::DateTime<chrono::Utc>,
+    pub invalidation_requested_at: chrono::DateTime<chrono::Utc>,
+    pub window_label: String,
+    pub metric: String,
 }
 
 #[derive(Debug, Clone)]
