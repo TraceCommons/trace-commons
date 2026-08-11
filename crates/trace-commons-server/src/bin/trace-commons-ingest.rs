@@ -15284,6 +15284,10 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Proof that this confirmation came from a browser that actually rendered
+    /// the interstitial. See [`LOGIN_CEREMONY_COOKIE`].
+    #[serde(default)]
+    ceremony: Option<String>,
     /// Optional pending native-authorization request id (see
     /// [`LoginInterstitialQuery::native`]). When present and still live, a
     /// successful redeem ALSO mints the app's one-time authorization code and
@@ -15642,6 +15646,53 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
 /// vary status or body by cause (timing uniformity is Task 11).
+/// Cookie carrying the login-ceremony nonce.
+///
+/// `GET /account/login` mints a nonce, sets it here, and embeds the SAME value
+/// in the form it renders. `POST /account/login/confirm` requires both and
+/// requires them to match.
+///
+/// This is a possession proof, not a header check. Header-based origin
+/// signals (`Origin`, `Sec-Fetch-Site`) are absent on a plain HTTP client, and
+/// `confirm_is_same_origin` treats "neither signal present" as same-origin
+/// because a browser without fetch metadata must still work. That is the right
+/// call for compatibility and the wrong one for proving a browser was
+/// involved: anything that can reach the endpoint can satisfy it by sending
+/// nothing. A cookie set by the interstitial response cannot be produced by a
+/// caller that never fetched the interstitial.
+///
+/// `confirm_is_same_origin` is deliberately kept as well. This does not
+/// replace it; it covers what it cannot.
+const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+
+/// How long a rendered interstitial stays confirmable. Long enough for a human
+/// to read the page and click, short enough that a leaked nonce is not a
+/// standing credential.
+const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// A fresh, unguessable ceremony nonce.
+fn new_login_ceremony_nonce() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    // Same source as session secrets.
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Constant-time comparison, so a mismatched nonce cannot be recovered by
+/// timing the deny.
+fn ceremony_nonce_matches(cookie: &str, submitted: &str) -> bool {
+    if cookie.is_empty() || submitted.is_empty() || cookie.len() != submitted.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in cookie.bytes().zip(submitted.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
@@ -15752,6 +15803,10 @@ Confirm only if you started this.</p>"
     } else {
         "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
     };
+    // The ceremony nonce: embedded in the form AND set as a cookie on this
+    // response. Confirm requires both, and requires them to match, so a caller
+    // that never rendered this page cannot confirm.
+    let ceremony = new_login_ceremony_nonce();
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -15759,10 +15814,23 @@ Confirm only if you started this.</p>"
 <main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
 <input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
-<button type=\"submit\">Activate</button></form></main></body></html>"
+<input type=\"hidden\" name=\"ceremony\" value=\"{}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>",
+        html_escape_attribute(&ceremony)
     );
     let mut response = axum::response::Html(body).into_response();
+    let ceremony_cookie = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ceremony))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/account/login")
+        .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
+        .build()
+        .to_string();
     let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&ceremony_cookie) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -15806,10 +15874,34 @@ async fn confirm_login_inner(
 ) -> axum::response::Response {
     let code = body.0.code;
     let native_request_id = body.0.native;
+    let submitted_ceremony = body.0.ceremony;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
         return redeem_generic_deny();
+    }
+
+    // Browser-possession enforcement.
+    //
+    // The check above cannot establish that a browser was involved: it reads
+    // `Origin` / `Sec-Fetch-Site`, and a plain HTTP client simply omits both,
+    // which `confirm_is_same_origin` treats as same-origin so that browsers
+    // without fetch metadata keep working. Satisfying it therefore requires
+    // sending nothing.
+    //
+    // The ceremony nonce is different in kind: it is minted by
+    // `GET /account/login`, returned in a `Secure` `HttpOnly` `SameSite=Strict`
+    // cookie AND embedded in the form that page renders. Confirming requires
+    // both halves and requires them to match, so a caller that never fetched
+    // the interstitial in a browser cannot produce it -- possession, not a
+    // self-asserted header.
+    //
+    // Fails into the SAME uniform deny as every other branch, so it adds no
+    // new distinguishable outcome and the timing floor still applies.
+    let cookie_ceremony = cookie_value_from_headers(&headers, LOGIN_CEREMONY_COOKIE);
+    match (cookie_ceremony, submitted_ceremony.as_deref()) {
+        (Some(from_cookie), Some(from_form)) if ceremony_nonce_matches(from_cookie, from_form) => {}
+        _ => return redeem_generic_deny(),
     }
 
     // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
