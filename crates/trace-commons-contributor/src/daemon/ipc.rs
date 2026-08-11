@@ -2188,6 +2188,21 @@ mod tests {
             !id.contains("acme") && !id.contains("secret") && !id.contains('/'),
             "the id leaked a path component: {id}"
         );
+        // Only segments long enough that a coincidental match is implausible.
+        //
+        // The id is a prefix plus 16 hex characters, and a temp path on macOS
+        // contains short components that are themselves valid hex -- a real
+        // one is `/private/var/folders/d8/...`. Asserting the id does not
+        // contain "d8" fails about one run in seventeen purely because two
+        // hex characters agree, which is not a leak.
+        //
+        // A security test that cries wolf at that rate is worse than no test:
+        // it teaches everyone to re-run it, and a real leak is then waved
+        // through with the same shrug. Two separate agents hit this flake on
+        // 2026-08-10 while working on unrelated changes. Four characters puts
+        // a coincidental hit at roughly one in sixteen thousand while still
+        // catching any segment big enough to identify anybody.
+        const MIN_DISTINGUISHING_LEN: usize = 4;
         for segment in std::path::Path::new(&key)
             .parent()
             .unwrap()
@@ -2196,6 +2211,7 @@ mod tests {
                 std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
                 _ => None,
             })
+            .filter(|segment| segment.len() >= MIN_DISTINGUISHING_LEN)
         {
             assert!(
                 !id.contains(&segment),

@@ -159,6 +159,37 @@ final class DaemonClient {
         _ = try rawResult("dismiss", params: ["entry_id": entryID])
     }
 
+    // MARK: - Withdraw
+
+    /// Withdraws one already-submitted trace. Real network I/O, and the one
+    /// irreversible thing this app can ask the server to do.
+    ///
+    /// Returns the tier the server applied (`distribution_reach`), which is
+    /// the whole point of the call: withdrawal means different things
+    /// depending on how far a trace travelled, and a shell that reports a
+    /// generic "withdrawn" lets a contributor believe in an erasure they did
+    /// not get. See `WithdrawalReach`.
+    ///
+    /// **This always fails today**, with `unavailable` /
+    /// `account-session-required`, before any request leaves the machine.
+    /// Withdrawal is authenticated by an account session -- deliberately not
+    /// the device key that authenticates every other call here, so that
+    /// withdrawal survives losing the device that submitted the trace -- and
+    /// the daemon only ever holds a device key
+    /// (`crates/trace-commons-contributor/src/daemon/withdraw.rs`). That
+    /// label is distinct on purpose so a shell can say what is missing
+    /// instead of showing a bare failure; callers must route it separately
+    /// rather than letting it read as "we tried and something went wrong".
+    ///
+    /// There is no bulk wrapper here. The contract's `withdraw_bulk` reports
+    /// only `withdrawn`/`failed` counts and never a per-trace tier, and it
+    /// selects its targets from the local history cache's status, which can
+    /// be stale -- so it cannot support an honest confirmation. See
+    /// `docs/superpowers/plans/macos-withdrawal-ui-report.md`.
+    func withdraw(submissionID: String) throws -> WithdrawalOutcome {
+        try call("withdraw", params: ["submission_id": submissionID], as: WithdrawalOutcome.self)
+    }
+
     // MARK: - Pause
 
     struct PauseResult: Decodable {
