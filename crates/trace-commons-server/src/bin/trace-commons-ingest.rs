@@ -471,13 +471,13 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
 const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
     "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
-const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
-    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1134,6 +1134,10 @@ async fn main() -> anyhow::Result<()> {
         state.revocation_propagation_scheduler.as_ref(),
     )
     .await?;
+    validate_community_snapshot_invalidation_scheduler_config(
+        state.as_ref(),
+        state.community_snapshot_invalidation_scheduler.as_ref(),
+    )?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     // Say it out loud at boot. Publishing aggregates without a mechanism is
     // a deliberate choice, and an operator reading the log should not have to
@@ -1177,6 +1181,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_revocation_propagation_scheduler_task(
         &state,
         state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
     );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
@@ -1299,6 +1307,10 @@ struct AppState {
     credit_settlement_scheduler: Option<TraceCreditSettlementSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
+    /// When the community surface is enabled, drain coalesced withdrawal
+    /// invalidations by recomputing the published snapshot on this interval.
+    community_snapshot_invalidation_scheduler:
+        Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -1647,6 +1659,15 @@ struct TraceRevocationPropagationSchedulerConfig {
     limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process drain for community-snapshot invalidations enqueued by
+/// withdrawal. No worker token: the tick calls `recompute_community_snapshot`
+/// directly (the same function the admin handler uses), so contributor
+/// traffic never reaches a full rebuild.
+#[derive(Clone)]
+struct TraceCommunitySnapshotInvalidationSchedulerConfig {
+    interval: StdDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3347,6 +3368,9 @@ impl AppState {
             parse_trace_process_evaluation_scheduler_config_from_env()?;
         let revocation_propagation_scheduler =
             parse_trace_revocation_propagation_scheduler_config_from_env()?;
+        let community_leaderboard_enabled = env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED);
+        let community_snapshot_invalidation_scheduler =
+            parse_community_snapshot_invalidation_scheduler_config(community_leaderboard_enabled)?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -3538,7 +3562,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
-            community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_leaderboard_enabled,
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             community_analytics_publication_basis:
                 parse_community_analytics_publication_basis_from_env()?,
@@ -3611,6 +3635,7 @@ impl AppState {
             credit_settlement_scheduler,
             process_evaluation_scheduler,
             revocation_propagation_scheduler,
+            community_snapshot_invalidation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -6304,6 +6329,25 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
         limit,
         dry_run: env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN),
         purpose,
+    }))
+}
+
+/// When the community surface is enabled, schedule coalesced withdrawal
+/// invalidation drains on the published snapshot interval (default 900s).
+fn parse_community_snapshot_invalidation_scheduler_config(
+    community_leaderboard_enabled: bool,
+) -> anyhow::Result<Option<TraceCommunitySnapshotInvalidationSchedulerConfig>> {
+    if !community_leaderboard_enabled {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS,
+        900,
+        30,
+        86_400,
+    )?;
+    Ok(Some(TraceCommunitySnapshotInvalidationSchedulerConfig {
+        interval: StdDuration::from_secs(interval_seconds),
     }))
 }
 
@@ -9177,6 +9221,84 @@ fn spawn_trace_revocation_propagation_scheduler_task(
     });
 }
 
+fn validate_community_snapshot_invalidation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(_) = config else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        state.community_leaderboard_enabled,
+        "community snapshot invalidation scheduler requires {TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED}"
+    );
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "community snapshot invalidation scheduler requires the DB mirror"
+    );
+    Ok(())
+}
+
+fn spawn_community_snapshot_invalidation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        "Trace Commons community snapshot invalidation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_community_snapshot_invalidation_scheduler_tick(state.as_ref()).await {
+                Ok(drained) => {
+                    if drained {
+                        tracing::info!(
+                            "Trace Commons community snapshot invalidation drain completed"
+                        );
+                    }
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons community snapshot invalidation drain failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn run_community_snapshot_invalidation_scheduler_tick(
+    state: &AppState,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community snapshot invalidation drain requires the DB mirror",
+        )
+    })?;
+    let pending = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if pending.is_none() {
+        return Ok(false);
+    }
+    // Recompute is admin-authored in code but scheduler-triggered; contributors
+    // only enqueue the coalesced invalidation watermark.
+    let row = recompute_community_snapshot(state).await?;
+    Ok(row.snapshot_id != uuid::Uuid::nil())
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -10784,6 +10906,9 @@ struct TraceCommonsConfigStatusResponse {
     revocation_propagation_scheduler_interval_seconds: Option<u64>,
     revocation_propagation_scheduler_limit: Option<u32>,
     revocation_propagation_scheduler_dry_run: Option<bool>,
+    community_snapshot_invalidation_scheduler_configured: bool,
+    community_snapshot_invalidation_scheduler_interval_seconds: Option<u64>,
+    community_snapshot_max_age_seconds: u64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -11301,6 +11426,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .revocation_propagation_scheduler
             .as_ref()
             .map(|config| config.dry_run),
+        community_snapshot_invalidation_scheduler_configured: state
+            .community_snapshot_invalidation_scheduler
+            .is_some(),
+        community_snapshot_invalidation_scheduler_interval_seconds: state
+            .community_snapshot_invalidation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        community_snapshot_max_age_seconds: COMMUNITY_SNAPSHOT_MAX_AGE.num_seconds() as u64,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -12549,6 +12682,11 @@ const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
 /// all. It is a placeholder, not a mechanism identifier: snapshots
 /// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+/// Published withdrawal bound for community snapshots. Matches the
+/// design/docs ≤15-minute removal promise: serve refuses a snapshot
+/// older than this, converting a silent privacy failure into an
+/// availability failure when the drain queue is wedged.
+const COMMUNITY_SNAPSHOT_MAX_AGE: Duration = Duration::seconds(900);
 
 /// Minimum aggregate cell size enforced before any community aggregate
 /// is published. A cell of size one is the contributor.
@@ -12746,6 +12884,22 @@ fn community_snapshot_missing_controls(
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
     )
+}
+
+/// Freshness / invalidation refusal reasons for a published community
+/// snapshot. Label-only: safe for error bodies and audit rows.
+fn community_snapshot_freshness_failure(
+    computed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    pending_invalidation_at: Option<DateTime<Utc>>,
+) -> Option<&'static str> {
+    if now.signed_duration_since(computed_at) > COMMUNITY_SNAPSHOT_MAX_AGE {
+        return Some("snapshot_exceeds_published_bound");
+    }
+    if pending_invalidation_at.is_some_and(|pending| computed_at < pending) {
+        return Some("snapshot_invalidated_by_withdrawal");
+    }
+    None
 }
 
 /// Privacy provenance recorded on every snapshot, so a published
@@ -13005,9 +13159,23 @@ async fn recompute_community_snapshot(
         min_cell_count: state.analytics_min_cell_count as i32,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    db.insert_leaderboard_snapshot(write)
+    let row = db
+        .insert_leaderboard_snapshot(write)
         .await
-        .map_err(internal_error)
+        .map_err(internal_error)?;
+    // A successful recompute is the drain path for coalesced withdrawal
+    // invalidations. Concurrent withdrawals that requested after this
+    // snapshot's computed_at leave the pending watermark set.
+    let _ = db
+        .drain_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+            row.snapshot_id,
+            row.computed_at,
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(row)
 }
 
 /// Fetch the latest snapshot for the public read handlers and refuse to
@@ -13058,6 +13226,21 @@ async fn latest_publishable_community_snapshot(
                 "community snapshot is withheld by missing privacy controls: {}",
                 missing_controls.join(", ")
             ),
+        ));
+    }
+    let pending_invalidation = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if let Some(reason) =
+        community_snapshot_freshness_failure(snapshot.computed_at, Utc::now(), pending_invalidation)
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("community snapshot is withheld: {reason}"),
         ));
     }
     Ok(snapshot)
@@ -13249,27 +13432,32 @@ async fn delete_community_profile_handler(
     let db = community_profile_db(state.as_ref())?;
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     enforce_public_attribution_scope(&tenant)?;
-    let withdrew = db
-        .withdraw_contributor_profile(tenant.tenant_id(), &tenant.auth().principal_ref)
+    let eviction = db
+        .withdraw_contributor_profile(
+            tenant.tenant_id(),
+            &tenant.auth().principal_ref,
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
         .await
         .map_err(internal_error)?;
     db.append_contributor_profile_audit(
         tenant.tenant_id(),
         &tenant.auth().principal_ref,
         "withdraw",
-        None,
+        eviction
+            .as_ref()
+            .and_then(|row| row.handle_normalized.as_deref()),
         Some("public_attribution"),
     )
     .await
     .map_err(internal_error)?;
-    if withdrew {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        // Idempotent: nothing to withdraw means the caller's view is
-        // already "not public." 204 keeps the API simple and
-        // matches the spec's "withdrawal is idempotent" property.
-        Ok(StatusCode::NO_CONTENT)
-    }
+    // Idempotent: nothing to withdraw means the caller's view is
+    // already "not public." 204 keeps the API simple and
+    // matches the spec's "withdrawal is idempotent" property.
+    // A successful withdrawal enqueued a coalesced snapshot invalidation
+    // in the same DB transaction as withdrawn_at + the eviction receipt.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn credit_handler(
