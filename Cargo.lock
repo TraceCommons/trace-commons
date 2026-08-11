@@ -7148,6 +7148,18 @@ dependencies = [
  "trace-commons-server",
  "tracing",
  "uuid 1.23.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trace-commons-contributor-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "trace-commons-contributor",
 ]
 
 [[package]]

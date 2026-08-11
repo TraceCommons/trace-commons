@@ -258,6 +258,26 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Drop all but the `keep` most recent snapshots for a window/metric,
+    /// returning how many rows were removed.
+    ///
+    /// Only the newest snapshot is ever served, but older ones are the
+    /// record of what was published and under which privacy controls, so
+    /// this trims rather than truncates. It exists because recompute went
+    /// from an occasional manual action to a scheduled one: at a 60s
+    /// interval an unpruned table gains on the order of half a million
+    /// rows a year, each carrying a full JSON payload.
+    async fn prune_leaderboard_snapshots(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+        _keep: i64,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "prune_leaderboard_snapshots not implemented".to_string(),
+        ))
+    }
+
     /// Fetch the most recent snapshot matching `(window_label, metric)`.
     /// Returns `Ok(None)` if no snapshot has ever been computed.
     async fn latest_leaderboard_snapshot(
@@ -641,6 +661,29 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "update_webauthn_credential_after_login not implemented".to_string(),
+        ))
+    }
+
+    /// Issue a session for a native-app loopback sign-in whose one-time code and
+    /// PKCE verifier have ALREADY been checked. Mirrors
+    /// [`Database::issue_passkey_session`] except `client_kind = 'native'` and
+    /// `auth_credential_id` is NULL: no passkey or wallet key authenticated this
+    /// session, the human's browser login did.
+    ///
+    /// As with the passkey/NEAR paths there is NO `ensure_trace_tenant` here.
+    /// The tenant came from a login link that a human already redeemed in a
+    /// browser, so the account row provably exists; the insert is FK-bound to
+    /// `(tenant_id, account_id)` and a bogus pair simply fails rather than
+    /// writing anything. The raw session secret never reaches the database.
+    async fn issue_native_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session: NewSession<'_>,
+        _audit: RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "issue_native_session not implemented".to_string(),
         ))
     }
 

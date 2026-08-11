@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
@@ -17,9 +18,11 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    apply_granted_scopes, build_raw_contribution, build_redactor_with, canary_self_test_async,
-    envelope_has_residual_secret, envelope_size_ok, near_ai_settings_from_env, parse_scope_names,
-    parse_use_names, raw_contribution_size_ok, redact_to_envelope,
+    MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
+    build_preview_raw_contribution, build_raw_contribution, build_redactor_with,
+    canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
+    near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
+    raw_contribution_size_ok, redact_to_envelope,
 };
 use crate::identity::{
     DeviceIdentity, build_signed_claim_request, build_signed_claim_request_with_scopes,
@@ -31,6 +34,39 @@ use crate::source::{SessionRef, TraceSource};
 /// re-encountering a receipt with one of these statuses short-circuits the
 /// per-session flow instead of re-uploading.
 pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+
+/// A fail-closed precondition that aborts the whole submit pass rather than
+/// producing an outcome for one session.
+///
+/// `submit_one` returns `Ok(SubmitOutcome::…)` for everything that is a
+/// decision *about a session* and `Err` only for these -- a privacy-filter
+/// canary that did not catch its planted secret, a NEAR AI first-use notice
+/// that could not be recorded, a missing device identity. It carries a
+/// fixed label rather than free text so the daemon's health surface can
+/// name the condition without parsing an error string: before this existed,
+/// a canary failure propagated as an opaque `anyhow::Error`, the daemon
+/// logged a warning and continued, `LABEL_CANARY_FAILED` was never set by
+/// any production code path, and `expire` therefore ran the fourteen-day
+/// clock straight through a filter outage -- discarding pending traces as
+/// "expired-without-decision" when nobody had declined them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubmitPreconditionFailure(pub &'static str);
+
+/// The canary planted a known secret and the configured filter did not
+/// remove it. Nothing may be sent through that filter.
+pub const PRECONDITION_CANARY_FAILED: &str = "privacy-filter-canary-failed";
+/// The NEAR AI first-use notice could not be recorded as shown.
+pub const PRECONDITION_NEAR_AI_NOTICE_UNRECORDED: &str = "near-ai-notice-not-acknowledged";
+/// No usable device identity, so nothing can be signed.
+pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
+
+impl std::fmt::Display for SubmitPreconditionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SubmitPreconditionFailure {}
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
@@ -51,6 +87,11 @@ pub enum SubmitOutcome {
     },
     Refused {
         reason_label: String,
+        /// Opaque content hash identifying the local session without
+        /// exposing its path or trace contents.
+        session_ref: String,
+        size_bytes: Option<usize>,
+        limit_bytes: Option<usize>,
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
@@ -63,10 +104,52 @@ pub struct SubmitOptions {
     /// Drop model reasoning from every session in this run before envelope
     /// construction. Reasoning is included by default.
     pub no_reasoning: bool,
+    /// Suppress progress prose so stdout remains one machine-readable JSON
+    /// document. Outcome data is still returned to the command renderer.
+    pub machine_readable: bool,
+    /// This run has no persisted contributor config. It must remain offline,
+    /// use preview ids, and leave the contributor state directory untouched.
+    pub unenrolled_preview: bool,
     /// Re-upload corrected envelopes for sessions whose local receipt is
     /// `quarantined`. Keeps the same content-addressed `submission_id` and
     /// asks the server to supersede the stored record (#214).
     pub remediate_quarantined: bool,
+}
+
+fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: reason_label.to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: None,
+        limit_bytes: None,
+    }
+}
+
+fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
+    SubmitOutcome::Refused {
+        reason_label: "session-too-large".to_string(),
+        session_ref: session_ref.to_string(),
+        size_bytes: Some(size_bytes),
+        limit_bytes: Some(MAX_ENVELOPE_BYTES),
+    }
+}
+
+/// Whether a submit result must make the command exit non-zero. Only an
+/// expected size finding is non-fatal during dry-run. Every known privacy or
+/// pipeline refusal, and every future refusal label, fails closed.
+pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
+    outcomes.iter().any(|outcome| match outcome {
+        SubmitOutcome::Failed { .. } => true,
+        SubmitOutcome::Refused { reason_label, .. } => match reason_label.as_str() {
+            "session-too-large" => !dry_run,
+            "pii-filter-unavailable"
+            | "redaction-failed"
+            | "secret-leak-detected"
+            | "scopes-not-permitted" => true,
+            _ => true,
+        },
+        _ => false,
+    })
 }
 
 /// One entry in a `submit --manifest` file: an envelope id that reached the
@@ -115,47 +198,202 @@ pub async fn submit_sessions(
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
 ) -> Result<Vec<SubmitOutcome>> {
+    if opts.unenrolled_preview && !opts.dry_run {
+        anyhow::bail!("unenrolled preview requires dry-run");
+    }
+    let mut ctx = SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())?;
     let mut outcomes = Vec::with_capacity(sessions.len());
-    let effective_cfg = effective_config(cfg, opts);
+    for (source, session_ref) in sessions {
+        outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
+    }
+    Ok(outcomes)
+}
 
-    if effective_cfg.pii_filter.as_deref() == Some("near-ai")
-        && store
-            .ensure_near_ai_notice_shown()
-            .context("recording NEAR AI first-use notice")?
-    {
-        println!(
-            "notice: this will send redacted-but-unscrubbed message text to NEAR AI under your \
-             API key (one-time notice; see `--pii-filter near-ai` in the README for scope)."
-        );
+/// A long-lived submit pipeline: everything `submit_sessions` used to hoist
+/// across a batch -- device identity, issuer client, the minted claim, the
+/// privacy-filter canary, and the receipts index -- held so it can be reused
+/// across calls.
+///
+/// The CLI builds one per `submit` invocation and drops it. The daemon holds
+/// one for the life of the process and feeds it a session at a time, so a
+/// background upload takes byte-for-byte the same path as an interactive one
+/// rather than a parallel reimplementation of it.
+///
+/// `near_ai` is supplied by the caller rather than read from the environment,
+/// because a daemon started by a service manager inherits none of the user's
+/// shell environment.
+pub struct SubmitContext<'a> {
+    store: &'a ConfigStore,
+    cfg: &'a ContributorConfig,
+    opts: &'a SubmitOptions,
+    effective_cfg: ContributorConfig,
+    device: Option<DeviceIdentity>,
+    issuer: IssuerClient,
+    claim: Option<ClaimToken>,
+    canary_checked: bool,
+    near_ai_notice_recorded: bool,
+    near_ai: Option<NearAiSettings>,
+    receipts: Vec<Receipt>,
+    canary_runs: u32,
+    approved_envelope: Option<TraceContributionEnvelope>,
+}
+
+impl<'a> SubmitContext<'a> {
+    pub fn new(
+        store: &'a ConfigStore,
+        cfg: &'a ContributorConfig,
+        opts: &'a SubmitOptions,
+        near_ai: Option<NearAiSettings>,
+    ) -> Result<Self> {
+        let effective_cfg = effective_config(cfg, opts);
+        let device = if opts.unenrolled_preview {
+            None
+        } else if opts.dry_run {
+            DeviceIdentity::load(store).context("loading device identity")?
+        } else {
+            Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
+        };
+        let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+            .context("building issuer client")?;
+        // An unenrolled preview has no enrollment and therefore no submission
+        // history it can truthfully replay. Ignore stale receipts from torn
+        // local state and run the preview pipeline for every selected session.
+        let receipts = if opts.unenrolled_preview {
+            Vec::new()
+        } else {
+            store.load_receipts().context("loading receipts")?
+        };
+        Ok(Self {
+            store,
+            cfg,
+            opts,
+            effective_cfg,
+            device,
+            issuer,
+            claim: None,
+            canary_checked: false,
+            near_ai_notice_recorded: false,
+            near_ai,
+            receipts,
+            canary_runs: 0,
+            approved_envelope: None,
+        })
     }
 
-    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
+    /// Force the next `submit_one` to re-run the privacy-filter canary. A
+    /// long-lived daemon must re-check the filter periodically rather than
+    /// trusting a self-test from days ago.
+    pub fn invalidate_canary(&mut self) {
+        self.canary_checked = false;
+    }
 
-    let mut claim: Option<ClaimToken> = None;
-    let mut canary_checked = false;
+    /// Drop the cached claim, so the next upload mints a fresh one. Called
+    /// when enrollment or consent may have changed underneath a running
+    /// process.
+    pub fn invalidate_claim(&mut self) {
+        self.claim = None;
+    }
 
-    for (source, session_ref) in sessions {
-        let mut transcript = match source.load(&session_ref) {
+    /// How many times the privacy-filter canary has actually run. Used to
+    /// assert the canary is not re-run once per session.
+    pub fn canary_runs(&self) -> u32 {
+        self.canary_runs
+    }
+
+    /// Send *this* redacted envelope on the next `submit_loaded` instead of
+    /// building one.
+    ///
+    /// This is the artifact half of the daemon's consent guard. The re-hash
+    /// guard verifies the *input* -- the raw session bytes -- and cannot see
+    /// a redaction service that returned different spans, a privacy-filter
+    /// configuration that changed, or any other input to the envelope that
+    /// is not the session file.
+    ///
+    /// An earlier version of this took a *digest* and refused when the
+    /// rebuilt envelope did not match it. That is correct and unusable: the
+    /// pilot runs `pii_filter = "near-ai"`, an LLM-backed filter does not
+    /// return identical spans for identical text, and so every previewed
+    /// entry was refused, re-offered, previewed again, and refused again --
+    /// the primary consent path never completed. Handing the pipeline the
+    /// approved bytes removes the divergence instead of detecting it: what
+    /// the contributor saw is what goes out, by construction.
+    ///
+    /// `None` restores the ordinary build-from-transcript path, which is
+    /// what armed auto-upload (never previewed, nothing shown to hold the
+    /// send to) still uses.
+    ///
+    /// One-shot: consumed by the next `submit_loaded` so an approved
+    /// envelope cannot leak onto an unrelated later session.
+    pub fn use_approved_envelope(&mut self, envelope: Option<TraceContributionEnvelope>) {
+        self.approved_envelope = envelope;
+    }
+
+    /// The effective contributor config this pipeline stamps onto
+    /// envelopes -- `cfg` with any per-invocation option overrides applied.
+    /// The daemon fingerprints this, not the raw config, so the fingerprint
+    /// describes what actually determines the envelope.
+    pub fn effective_cfg(&self) -> &ContributorConfig {
+        &self.effective_cfg
+    }
+
+    /// The NEAR AI privacy-filter settings in force, if any.
+    pub fn near_ai(&self) -> Option<&NearAiSettings> {
+        self.near_ai.as_ref()
+    }
+
+    /// Redact and submit one session, loading it from `source` first.
+    ///
+    /// Independent of every other session: a refusal or failure here never
+    /// affects a later call. The single exception is a fail-closed
+    /// precondition (`SubmitPreconditionFailure`), which aborts the batch.
+    pub async fn submit_one(
+        &mut self,
+        source: &dyn TraceSource,
+        session_ref: &SessionRef,
+    ) -> Result<SubmitOutcome> {
+        let transcript = match source.load(session_ref) {
             Ok(t) => t,
             Err(_) => {
-                outcomes.push(SubmitOutcome::SkippedParseFailure {
+                return Ok(SubmitOutcome::SkippedParseFailure {
                     reason_label: "parse-failed".to_string(),
                 });
-                continue;
             }
         };
+        self.submit_loaded(transcript).await
+    }
+
+    /// Redact and submit a transcript the caller has already loaded.
+    ///
+    /// This is what closes the window between the daemon's re-hash guard
+    /// and the bytes that actually go out. The uploader loads and hashes the
+    /// session to check that its content still matches what the contributor
+    /// approved; `submit_one` then loaded the file a second, independent
+    /// time, and it was *that* read -- never hashed, never compared -- whose
+    /// bytes were sent. A session appended to in between passed the guard
+    /// and shipped content the guard had never seen, which is precisely the
+    /// consent property the guard exists to enforce. The uploader calls this
+    /// with the transcript it verified, so the verified bytes are the sent
+    /// bytes.
+    pub async fn submit_loaded(
+        &mut self,
+        mut transcript: crate::source::SessionTranscript,
+    ) -> Result<SubmitOutcome> {
+        let opts = self.opts;
+        // Taken up front, not at the point it is used below: several paths
+        // return before that point (already-submitted, an unavailable
+        // filter, an over-size refusal), and an approved envelope left
+        // behind would apply to whatever session came next.
+        let approved_envelope = self.approved_envelope.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
         }
 
-        let receipts = store.load_receipts().context("loading receipts")?;
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
         // first status it ever had.
-        let prior = receipts
+        let prior = self
+            .receipts
             .iter()
             .filter(|r| {
                 r.session_hash == transcript.session_hash
@@ -166,130 +404,172 @@ pub async fn submit_sessions(
             let remediating_quarantined =
                 opts.remediate_quarantined && prior.status == "quarantined";
             if !remediating_quarantined {
-                outcomes.push(SubmitOutcome::AlreadySubmitted {
+                return Ok(SubmitOutcome::AlreadySubmitted {
                     submission_id: prior.submission_id,
                     prior_status: prior.status.clone(),
                 });
-                continue;
             }
         }
 
-        let redactor = match build_redactor_with(
-            &effective_cfg,
-            transcript.cwd.as_deref(),
-            near_ai_settings_from_env(),
-        ) {
-            Ok(r) => r,
-            Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "pii-filter-unavailable".to_string(),
-                });
-                continue;
+        let redactor = if opts.unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            match build_redactor_with(
+                &self.effective_cfg,
+                transcript.cwd.as_deref(),
+                self.near_ai.clone(),
+            ) {
+                Ok(r) => r,
+                Err(_) => {
+                    return Ok(refused("pii-filter-unavailable", &transcript.session_hash));
+                }
             }
         };
 
-        if !canary_checked {
+        if !self.canary_checked {
             canary_self_test_async(&redactor)
                 .await
-                .context("privacy-filter-canary-failed")?;
-            canary_checked = true;
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
+            self.canary_checked = true;
+            self.canary_runs += 1;
         }
 
         let now = Utc::now();
-        let raw = build_raw_contribution(&transcript, &effective_cfg, now);
-        // Skip sessions that already exceed the envelope limit before the
-        // expensive redaction/privacy-filter pass; they would be refused for
-        // size after redaction anyway (envelope_size_ok below is the
-        // authoritative check).
-        if raw_contribution_size_ok(&raw).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
-            continue;
-        }
-        let mut envelope = match redact_to_envelope(&redactor, raw).await {
-            Ok(e) => e,
-            Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "redaction-failed".to_string(),
-                });
-                continue;
+        // The approved envelope, when there is one, is used *as it is*. No
+        // second redaction pass runs and nothing is compared: the bytes the
+        // contributor was shown are the bytes that go out. Everything
+        // downstream of here is unchanged and still applies to them -- the
+        // size ceiling, the residual-secret sweep, the granted scopes the
+        // issuer echoes back.
+        //
+        // The redactor above is still built and still canary-tested on this
+        // path. It is what the residual-secret sweep runs with, and a
+        // privacy filter that has gone bad must stop an upload whether or
+        // not this particular envelope was built through it.
+        let mut envelope = match approved_envelope {
+            Some(approved) => approved,
+            None => {
+                let raw = if opts.unenrolled_preview {
+                    build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
+                } else {
+                    build_raw_contribution(&transcript, &self.effective_cfg, now)
+                };
+                // Skip sessions that already exceed the envelope limit before
+                // the expensive redaction/privacy-filter pass; they would be
+                // refused for size after redaction anyway (envelope_size_ok
+                // below is the authoritative check).
+                if raw_contribution_size_ok(&raw).is_err() {
+                    let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                    return Ok(refused_for_size(&transcript.session_hash, size));
+                }
+                match redact_to_envelope(&redactor, raw).await {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return Ok(refused("redaction-failed", &transcript.session_hash));
+                    }
+                }
             }
         };
+
+        if !self.near_ai_notice_recorded
+            && self.effective_cfg.pii_filter.as_deref() == Some("near-ai")
+        {
+            self.store
+                .ensure_near_ai_notice_shown()
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED))?;
+            self.near_ai_notice_recorded = true;
+        }
 
         let size = match envelope_size_ok(&envelope) {
             Ok(s) => s,
             Err(_) => {
-                outcomes.push(SubmitOutcome::Refused {
-                    reason_label: "session-too-large".to_string(),
-                });
-                continue;
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                return Ok(refused_for_size(&transcript.session_hash, size));
             }
         };
 
         if opts.dry_run {
-            if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
-                outcomes.push(outcome);
-                continue;
+            if let Some(outcome) =
+                residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+            {
+                return Ok(outcome);
             }
-            println!(
-                "dry-run: submission_id={} bytes={size}",
-                envelope.submission_id
-            );
-            outcomes.push(SubmitOutcome::Submitted {
+            if !opts.machine_readable {
+                if opts.unenrolled_preview {
+                    println!(
+                        "unenrolled-preview dry-run: preview_id={} bytes={size} \
+                         deterministic-only",
+                        envelope.submission_id
+                    );
+                } else {
+                    println!(
+                        "dry-run: submission_id={} bytes={size}",
+                        envelope.submission_id
+                    );
+                }
+            }
+            return Ok(SubmitOutcome::Submitted {
                 submission_id: envelope.submission_id,
                 status: "dry-run".to_string(),
             });
-            continue;
         }
 
-        if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
-            match mint_claim(&issuer, cfg, &device, now).await {
-                Ok(token) => claim = Some(token),
+        if !self
+            .claim
+            .as_ref()
+            .map(|c| c.is_fresh(now))
+            .unwrap_or(false)
+        {
+            let device = self
+                .device
+                .as_ref()
+                .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
+            match mint_claim(&self.issuer, self.cfg, device, now).await {
+                Ok(token) => self.claim = Some(token),
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("consent scopes not permitted")
                         || msg.contains("allowed uses not permitted")
                     {
                         println!("hint: re-run login --scopes with a narrower selection");
-                        outcomes.push(SubmitOutcome::Refused {
-                            reason_label: "scopes-not-permitted".to_string(),
-                        });
-                    } else {
-                        outcomes.push(SubmitOutcome::Failed {
-                            reason_label: "claim-mint-failed".to_string(),
-                        });
+                        return Ok(refused("scopes-not-permitted", &transcript.session_hash));
                     }
-                    continue;
+                    return Ok(SubmitOutcome::Failed {
+                        reason_label: "claim-mint-failed".to_string(),
+                    });
                 }
             }
         }
 
-        let token = claim
+        let token = self
+            .claim
             .as_ref()
             .expect("a claim must be minted before applying granted scopes")
             .clone();
-        stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
+        stamp_granted_scopes(&mut envelope, &self.effective_cfg, &token);
 
-        if let Some(outcome) = residual_secret_refusal(&redactor, &envelope)? {
-            outcomes.push(outcome);
-            continue;
+        if let Some(outcome) =
+            residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
+        {
+            return Ok(outcome);
         }
 
         if envelope_size_ok(&envelope).is_err() {
-            outcomes.push(SubmitOutcome::Refused {
-                reason_label: "session-too-large".to_string(),
-            });
-            continue;
+            let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            return Ok(refused_for_size(&transcript.session_hash, size));
         }
 
+        let device = self
+            .device
+            .as_ref()
+            .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         match upload_with_retry(
-            cfg,
-            &issuer,
-            &device,
-            &mut claim,
+            self.cfg,
+            &self.issuer,
+            device,
+            &mut self.claim,
             &mut envelope,
-            &effective_cfg,
+            &self.effective_cfg,
         )
         .await
         {
@@ -301,19 +581,26 @@ pub async fn submit_sessions(
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
                 };
-                store.append_receipt(&r).context("appending receipt")?;
-                outcomes.push(SubmitOutcome::Submitted {
-                    submission_id: envelope.submission_id,
-                    status: receipt.status,
-                });
+                match self.store.append_receipt(&r) {
+                    Ok(()) => {
+                        self.receipts.push(r);
+                        Ok(SubmitOutcome::Submitted {
+                            submission_id: envelope.submission_id,
+                            status: receipt.status,
+                        })
+                    }
+                    Err(_) => Ok(SubmitOutcome::Failed {
+                        reason_label: "receipt-write-failed".to_string(),
+                    }),
+                }
             }
-            Err(reason_label) => {
-                outcomes.push(SubmitOutcome::Failed { reason_label });
+            Err(reason_label) if reason_label == "session-too-large" => {
+                let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                Ok(refused_for_size(&transcript.session_hash, size))
             }
+            Err(reason_label) => Ok(SubmitOutcome::Failed { reason_label }),
         }
     }
-
-    Ok(outcomes)
 }
 
 /// Read back submission status for every locally recorded receipt. Returns
@@ -357,6 +644,112 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommunityProfilePutRequest<'a> {
+    display_handle: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bio: Option<&'a str>,
+}
+
+/// The public profile as the server stores it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommunityProfile {
+    pub display_handle: String,
+    pub bio: Option<String>,
+    pub public_since: DateTime<Utc>,
+}
+
+/// Claim or update this contributor's public handle.
+///
+/// `login` can grant `public_attribution`, but until this existed nothing in
+/// this CLI could use it: claiming a handle meant the operator-facing
+/// `/profile` page and a workload token from the *other* enrollment path.
+/// Since the server derives the principal from the authenticated request
+/// rather than from anything in the body, a handle claimed through a
+/// different credential lands on a different principal and never appears
+/// beside this device's traces.
+pub async fn set_profile(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    display_handle: &str,
+    bio: Option<&str>,
+) -> Result<CommunityProfile> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status`: the issuer resolves it to this
+    // caller's full grant ceiling, so claiming a handle does not depend on
+    // whichever scopes were narrowed for the last submission.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile update")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let req = CommunityProfilePutRequest {
+        display_handle,
+        bio,
+    };
+    client
+        .call_json(Method::PUT, "/v1/community/profile", &[], Some(&req))
+        .await
+        .context("setting public profile")
+}
+
+/// Response of `POST /v1/account/login-links`. `url` is a ROOT-RELATIVE path
+/// carrying a single-use code; it is a secret for the few minutes it lives.
+/// `account_id` is returned by the server but not used here.
+#[derive(Debug, Clone, Deserialize)]
+struct MintLoginLinkResponse {
+    url: String,
+}
+
+/// Mint a single-use account login link for this device's principal.
+///
+/// Used by `crate::account_auth::sign_in` to open the human's browser at the
+/// EXISTING redeem flow. This is the same device-authenticated endpoint the
+/// account slice has always exposed, called with the same empty-scope claim as
+/// `status`: minting a login link is an authority the device key already has,
+/// and the loopback flow adds none.
+///
+/// Returns the root-relative path only. The caller joins it onto the
+/// configured ingest base URL; it is never logged.
+pub async fn mint_account_login_link(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for account sign-in")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let minted: MintLoginLinkResponse = client
+        .call_json(Method::POST, "/v1/account/login-links", &[], None::<&()>)
+        .await
+        .context("minting an account login link")?;
+    Ok(minted.url)
+}
+
+/// Withdraw this contributor's public attribution.
+///
+/// The row goes at the next snapshot. This is the action `/about/privacy`
+/// promises, so it belongs in the tool the contributor already has rather
+/// than only in a page they may never have been given access to.
+pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for profile withdrawal")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_raw::<()>(Method::DELETE, "/v1/community/profile", &[], None)
+        .await
+        .context("withdrawing public profile")?;
+    Ok(())
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores.
@@ -411,12 +804,11 @@ pub async fn fetch_score_attestation(
 fn residual_secret_refusal(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    session_ref: &str,
 ) -> Result<Option<SubmitOutcome>> {
     if envelope_has_residual_secret(redactor, envelope)? {
         tracing::warn!("refusing session: secret survived redaction");
-        return Ok(Some(SubmitOutcome::Refused {
-            reason_label: "secret-leak-detected".to_string(),
-        }));
+        return Ok(Some(refused("secret-leak-detected", session_ref)));
     }
     Ok(None)
 }
@@ -424,7 +816,9 @@ fn residual_secret_refusal(
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
 fn effective_config(cfg: &ContributorConfig, opts: &SubmitOptions) -> ContributorConfig {
     let mut c = cfg.clone();
-    if opts.pii_filter.is_some() {
+    if opts.unenrolled_preview {
+        c.pii_filter = None;
+    } else if opts.pii_filter.is_some() {
         c.pii_filter = opts.pii_filter.clone();
     }
     c
@@ -684,6 +1078,62 @@ mod tests {
         )]
     }
 
+    fn write_test_trajectory(path: &std::path::Path, content: &str) {
+        let body = serde_json::json!([
+            {"role": "meta", "source": "submit-test"},
+            {
+                "role": "user",
+                "content": content,
+                "timestamp": "2026-07-31T12:00:00Z"
+            }
+        ]);
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    fn trajectory_selection(
+        root: &std::path::Path,
+    ) -> Vec<(
+        Box<dyn crate::source::TraceSource>,
+        crate::source::SessionRef,
+    )> {
+        let mut refs = crate::source::trajectory::TrajectorySource::new(root.to_path_buf())
+            .discover()
+            .unwrap();
+        refs.sort_by(|a, b| a.path.cmp(&b.path));
+        refs.into_iter()
+            .map(|session_ref| {
+                (
+                    Box::new(crate::source::trajectory::TrajectorySource::new(
+                        root.to_path_buf(),
+                    )) as Box<dyn crate::source::TraceSource>,
+                    session_ref,
+                )
+            })
+            .collect()
+    }
+
+    async fn narrow_boundary_envelope(
+        trajectory_path: &std::path::Path,
+        content_len: usize,
+        cfg: &ContributorConfig,
+        narrow_token: &ClaimToken,
+    ) -> TraceContributionEnvelope {
+        write_test_trajectory(trajectory_path, &"x".repeat(content_len));
+        let source =
+            crate::source::trajectory::TrajectorySource::new(trajectory_path.to_path_buf());
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = build_raw_contribution(&transcript, cfg, now);
+        assert!(raw_contribution_size_ok(&raw).is_ok());
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        stamp_granted_scopes(&mut envelope, cfg, narrow_token);
+        envelope
+    }
+
     fn cfg_for(
         issuer: &str,
         ingest: &str,
@@ -702,6 +1152,174 @@ mod tests {
             pii_filter: None,
             allowed_hosts: None,
         }
+    }
+
+    async fn outcome_for_fixture(
+        cfg: &crate::config::ContributorConfig,
+        unenrolled_preview: bool,
+    ) -> trace_commons_protocol::trace_contribution::TraceContributionEnvelope {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
+        let source = crate::source::claude_code::ClaudeCodeSource::new(root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let transcript = source.load(&session_ref).unwrap();
+        let redactor = if unenrolled_preview {
+            build_deterministic_preview_redactor(transcript.cwd.as_deref())
+        } else {
+            build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = if unenrolled_preview {
+            build_preview_raw_contribution(&transcript, cfg, now)
+        } else {
+            build_raw_contribution(&transcript, cfg, now)
+        };
+        redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn unenrolled_and_enrolled_previews_have_full_outcome_parity() {
+        let preview_cfg = crate::commands::unenrolled_preview_config();
+        let enrolled_cfg = crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "https://issuer.example".into(),
+            ingest_url: "https://ingest.example".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: trace_commons_protocol::onboarding::derive_user_tenant_id(
+                "instance-1",
+                "alice",
+            ),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: "sha256:enrolled".into(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
+        assert_eq!(preview_cfg.tenant_id.len(), 71);
+
+        let preview = outcome_for_fixture(&preview_cfg, true).await;
+        let enrolled = outcome_for_fixture(&enrolled_cfg, false).await;
+
+        assert_eq!(
+            envelope_size(&preview).unwrap(),
+            envelope_size(&enrolled).unwrap(),
+            "canonical-width placeholder identity must preserve serialized size"
+        );
+        assert_eq!(
+            envelope_size_ok(&preview).is_ok(),
+            envelope_size_ok(&enrolled).is_ok(),
+            "placeholder identity must not change the size decision"
+        );
+        assert_eq!(
+            preview.consent, enrolled.consent,
+            "consent must agree without rewriting either fixture"
+        );
+        assert_eq!(
+            preview.privacy.redaction_pipeline_version,
+            enrolled.privacy.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.privacy.redaction_counts,
+            enrolled.privacy.redaction_counts
+        );
+        assert_eq!(
+            preview.privacy.privacy_filter_summary,
+            enrolled.privacy.privacy_filter_summary
+        );
+        assert_eq!(
+            preview.privacy.pii_labels_present,
+            enrolled.privacy.pii_labels_present
+        );
+        assert_eq!(
+            preview.privacy.residual_pii_risk,
+            enrolled.privacy.residual_pii_risk
+        );
+        assert_eq!(preview.privacy.warnings, enrolled.privacy.warnings);
+        // The redaction hash commits to each envelope's deliberately disjoint
+        // preview/submission id, so equality would erase the namespace fix.
+        for hash in [
+            &preview.privacy.redaction_hash,
+            &enrolled.privacy.redaction_hash,
+        ] {
+            assert!(hash.starts_with("sha256:"));
+            assert_eq!(hash.len(), 71);
+        }
+        assert_eq!(
+            preview.trace_card.consent_scope,
+            enrolled.trace_card.consent_scope
+        );
+        assert_eq!(
+            preview.trace_card.redaction_pipeline_version,
+            enrolled.trace_card.redaction_pipeline_version
+        );
+        assert_eq!(
+            preview.trace_card.source_channel,
+            enrolled.trace_card.source_channel
+        );
+        assert_eq!(
+            preview.trace_card.tool_categories,
+            enrolled.trace_card.tool_categories
+        );
+        assert_eq!(
+            preview.trace_card.allowed_uses,
+            enrolled.trace_card.allowed_uses
+        );
+        assert_eq!(
+            preview.trace_card.retention_policy,
+            enrolled.trace_card.retention_policy
+        );
+        assert!(Uuid::parse_str(&preview.trace_card.revocation_handle).is_ok());
+        assert!(Uuid::parse_str(&enrolled.trace_card.revocation_handle).is_ok());
+        let residual_scanner =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::deterministic_only(
+                Vec::new(),
+            );
+        assert_eq!(
+            envelope_has_residual_secret(&residual_scanner, &preview).unwrap(),
+            envelope_has_residual_secret(&residual_scanner, &enrolled).unwrap(),
+            "placeholder identity must not change the residual-secret result"
+        );
+        assert_eq!(preview.submission_id.get_version_num(), 8);
+        assert_eq!(enrolled.submission_id.get_version_num(), 5);
+        assert_ne!(preview.submission_id, enrolled.submission_id);
+    }
+
+    #[test]
+    fn only_size_refusal_is_non_fatal_in_dry_run() {
+        assert!(!outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            true
+        ));
+        assert!(outcomes_have_failure(
+            &[refused("session-too-large", "sha256:test")],
+            false
+        ));
+        for reason in [
+            "pii-filter-unavailable",
+            "redaction-failed",
+            "secret-leak-detected",
+            "scopes-not-permitted",
+            "future-refusal",
+        ] {
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], true),
+                "dry-run suppressed {reason}"
+            );
+            assert!(
+                outcomes_have_failure(&[refused(reason, "sha256:test")], false),
+                "real submit suppressed {reason}"
+            );
+        }
+        assert!(outcomes_have_failure(
+            &[SubmitOutcome::Failed {
+                reason_label: "transport".into(),
+            }],
+            true
+        ));
     }
 
     /// Drives the real submit path twice and inspects what actually reached
@@ -747,6 +1365,8 @@ mod tests {
                 dry_run: false,
                 pii_filter: None,
                 no_reasoning,
+                machine_readable: false,
+                unenrolled_preview: false,
                 remediate_quarantined: false,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -787,6 +1407,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_context_reuses_the_canary_across_sessions() {
+        // The canary is a per-batch precondition, not a per-session one. A
+        // daemon holding one context for weeks must not pay for -- or fail
+        // on -- a fresh self-test per trace.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+
+        let first = ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+        let second = ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+
+        assert!(
+            matches!(first, SubmitOutcome::Submitted { .. }),
+            "got {first:?}"
+        );
+        assert!(
+            matches!(second, SubmitOutcome::Submitted { .. }),
+            "got {second:?}"
+        );
+        assert_eq!(ctx.canary_runs(), 1, "canary must not re-run per session");
+    }
+
+    #[tokio::test]
+    async fn submit_loaded_sends_the_transcript_it_was_given_not_a_fresh_read() {
+        // The TOCTOU the daemon's re-hash guard could not close. The
+        // uploader loads and hashes the session to check it still matches
+        // what the contributor approved; `submit_one` then loaded the file
+        // a second, independent time, and it was *that* read -- never
+        // hashed, never compared -- whose bytes went out. A session
+        // appended to between the two reads passed the guard and shipped
+        // content the guard had never seen.
+        //
+        // Here the on-disk file is rewritten after the load, so the two
+        // reads would disagree. What arrives at ingest must be what was
+        // handed in.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        // A private copy of the fixture: this test rewrites the session
+        // file, and the checked-in fixture is shared by the whole module.
+        let session_root = dir.path().join("claude-root");
+        let project_dir = session_root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_path = project_dir.join("11111111-1111-1111-1111-111111111111.jsonl");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                "fixtures/claude-code/-Users-testuser-code-myproj/\
+                 11111111-1111-1111-1111-111111111111.jsonl",
+            ),
+            &session_path,
+        )
+        .unwrap();
+        let source = crate::source::claude_code::ClaudeCodeSource::new(session_root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let verified = source.load(&session_ref).unwrap();
+        let verified_hash = verified.session_hash.clone();
+
+        // Whatever is on disk now, it is not what was verified.
+        std::fs::write(
+            &session_ref.path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"APPENDED \
+             AFTER THE GUARD RAN\"},\"cwd\":\"/Users/testuser/code/myproj\",\
+             \"timestamp\":\"2026-08-08T23:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"uuid\":\"z9\"}\n",
+        )
+        .unwrap();
+        assert_ne!(
+            source.load(&session_ref).unwrap().session_hash,
+            verified_hash,
+            "the fixture must actually differ, or this test proves nothing"
+        );
+
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let outcome = ctx.submit_loaded(verified).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let sent = received.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let body = serde_json::to_string(&sent[0]).unwrap();
+        assert!(
+            !body.contains("APPENDED AFTER THE GUARD RAN"),
+            "the verified bytes must be the sent bytes: {body}"
+        );
+
+        // And the receipt records the hash that was actually verified, so a
+        // later dedup check is against the right content.
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].session_hash, verified_hash);
+    }
+
+    #[tokio::test]
+    async fn submit_context_reruns_the_canary_after_invalidation() {
+        // A long-lived daemon re-checks the privacy filter periodically.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+
+        ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+        ctx.invalidate_canary();
+        ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+
+        assert_eq!(ctx.canary_runs(), 2);
+    }
+
+    #[tokio::test]
     async fn submits_fixture_session_and_is_idempotent_on_rerun() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let issuer = spawn(stub_issuer()).await;
@@ -799,6 +1573,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -849,6 +1625,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -879,6 +1657,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: true,
         };
         let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
@@ -968,6 +1748,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1006,7 +1788,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "secret-leak-detected");
             }
             other => panic!("expected Refused(secret-leak-detected), got {other:?}"),
@@ -1032,6 +1814,8 @@ mod tests {
             dry_run: true,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1043,12 +1827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn near_ai_batch_creates_first_use_notice_marker() {
-        // No TRACE_NEAR_AI_PRIVACY_API_KEY is set in this process, so every
-        // session will be refused as pii-filter-unavailable -- but the
-        // once-per-batch first-use notice marker must still be created,
-        // since it is unconditional on effective_cfg.pii_filter and does
-        // not depend on the redactor actually building successfully.
+    async fn failed_filter_construction_does_not_write_notice_marker() {
         let issuer = spawn(stub_issuer()).await;
         let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1061,12 +1840,86 @@ mod tests {
             dry_run: true,
             pii_filter: Some("near-ai".to_string()),
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
-        submit_sessions(&store, &cfg, fixture_selection(), &opts)
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
             .unwrap();
-        assert!(store.dir().join("near-ai-notice-shown").exists());
+        assert!(matches!(
+            &outcomes[0],
+            SubmitOutcome::Refused { reason_label, .. }
+                if reason_label == "pii-filter-unavailable"
+        ));
+        assert!(!store.dir().join("near-ai-notice-shown").exists());
+    }
+
+    #[tokio::test]
+    async fn receipt_append_failure_preserves_prior_outcomes_and_finishes_batch() {
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
+        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let receipt_path = store.dir().join("receipts.jsonl");
+        let post_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let ingest = spawn(Router::new().route(
+            "/v1/traces",
+            post({
+                let post_calls = post_calls.clone();
+                let received = received.clone();
+                move |Json(body): Json<serde_json::Value>| {
+                    let post_calls = post_calls.clone();
+                    let received = received.clone();
+                    let receipt_path = receipt_path.clone();
+                    async move {
+                        received.lock().unwrap().push(body);
+                        let call = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if call == 1 {
+                            std::fs::remove_file(&receipt_path).unwrap();
+                            std::fs::create_dir(&receipt_path).unwrap();
+                        }
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                    }
+                }
+            }),
+        ))
+        .await;
+        let issuer = spawn(stub_issuer()).await;
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
+        assert!(matches!(
+            &outcomes[1],
+            SubmitOutcome::Failed { reason_label } if reason_label == "receipt-write-failed"
+        ));
+        assert_eq!(received.lock().unwrap().len(), 2);
     }
 
     /// Grants strictly less than requested: config asks for
@@ -1104,6 +1957,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1158,6 +2013,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1187,6 +2044,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1194,7 +2053,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1216,6 +2075,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1223,7 +2084,7 @@ mod tests {
             .await
             .unwrap();
         match &outcomes[0] {
-            SubmitOutcome::Refused { reason_label } => {
+            SubmitOutcome::Refused { reason_label, .. } => {
                 assert_eq!(reason_label, "scopes-not-permitted");
             }
             other => panic!("expected Refused(scopes-not-permitted), got {other:?}"),
@@ -1261,6 +2122,50 @@ mod tests {
                             "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
                         }))
                     }
+                }
+            }),
+        )
+    }
+
+    fn stub_issuer_widens_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
+        Router::new().route(
+            "/v1/trace-upload-claim",
+            post(move || {
+                let mint_calls = mint_calls.clone();
+                async move {
+                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let (consent_scopes, allowed_uses) = if n == 0 {
+                        (
+                            serde_json::json!(["debugging_evaluation"]),
+                            serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]),
+                        )
+                    } else {
+                        (
+                            serde_json::json!([
+                                "debugging_evaluation",
+                                "benchmark_only",
+                                "ranking_training",
+                                "model_training",
+                                "public_attribution"
+                            ]),
+                            serde_json::json!([
+                                "debugging",
+                                "evaluation",
+                                "benchmark_generation",
+                                "ranking_model_training",
+                                "model_training",
+                                "aggregate_analytics"
+                            ]),
+                        )
+                    };
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": consent_scopes,
+                        "allowed_uses": allowed_uses,
+                    }))
                 }
             }),
         )
@@ -1319,6 +2224,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1354,6 +2261,106 @@ mod tests {
                 .any(|u| u == &serde_json::json!("model_training")),
             "retried envelope must not retain model_training from the stale claim: {restamped}"
         );
+    }
+
+    #[tokio::test]
+    async fn post_remint_size_overflow_is_a_structured_refusal() {
+        use std::sync::atomic::AtomicUsize;
+
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        let trajectory_path = trajectory_dir.path().join("boundary.json");
+        let base_content_len = 1_496_000usize;
+        write_test_trajectory(&trajectory_path, &"x".repeat(base_content_len));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let post_calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_widens_on_remint(mint_calls.clone())).await;
+        let ingest = spawn(stub_ingest_401_then_200(
+            received.clone(),
+            post_calls.clone(),
+        ))
+        .await;
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
+        let narrow_token = ClaimToken {
+            access_token: "narrow".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec![
+                "debugging".to_string(),
+                "evaluation".to_string(),
+                "aggregate_analytics".to_string(),
+            ],
+        };
+        let wide_token = ClaimToken {
+            access_token: "wide".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            consent_scopes: crate::consent::VALID_SCOPES
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect(),
+            allowed_uses: crate::consent::scopes_to_allowed_uses(
+                &crate::consent::VALID_SCOPES
+                    .iter()
+                    .map(|scope| scope.to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        };
+
+        let initial =
+            narrow_boundary_envelope(&trajectory_path, base_content_len, &cfg, &narrow_token).await;
+        let target_size = MAX_ENVELOPE_BYTES - 64;
+        let initial_size = envelope_size(&initial).unwrap();
+        let calibrated_len = if initial_size <= target_size {
+            base_content_len + (target_size - initial_size)
+        } else {
+            base_content_len - (initial_size - target_size)
+        };
+        let narrow =
+            narrow_boundary_envelope(&trajectory_path, calibrated_len, &cfg, &narrow_token).await;
+        let narrow_size = envelope_size(&narrow).unwrap();
+        let mut wide = narrow.clone();
+        stamp_granted_scopes(&mut wide, &cfg, &wide_token);
+        let wide_size = envelope_size(&wide).unwrap();
+        assert_eq!(narrow_size, target_size);
+        assert!(wide_size > MAX_ENVELOPE_BYTES);
+
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let outcomes = submit_sessions(
+            &store,
+            &cfg,
+            trajectory_selection(trajectory_dir.path()),
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        match &outcomes[0] {
+            SubmitOutcome::Refused {
+                reason_label,
+                size_bytes,
+                limit_bytes,
+                ..
+            } => {
+                assert_eq!(reason_label, "session-too-large");
+                assert!(size_bytes.unwrap() > MAX_ENVELOPE_BYTES);
+                assert_eq!(*limit_bytes, Some(MAX_ENVELOPE_BYTES));
+            }
+            other => panic!("expected structured size refusal, got {other:?}"),
+        }
+        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(post_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Records every claim-request body it receives (as raw JSON) before
@@ -1440,6 +2447,99 @@ mod tests {
         );
     }
 
+    /// Records the method and body of every /v1/community/profile call.
+    fn stub_community_profile_ingest(seen: Arc<Mutex<Vec<(String, String)>>>) -> Router {
+        Router::new().route(
+            "/v1/community/profile",
+            axum::routing::put({
+                let seen = seen.clone();
+                move |body: String| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(("PUT".to_string(), body));
+                        Json(serde_json::json!({
+                            "display_handle": "stub_handle",
+                            "handle_normalized": "stub_handle",
+                            "bio": null,
+                            "public_since": chrono::Utc::now(),
+                            "last_updated_at": chrono::Utc::now(),
+                            "update_count": 0,
+                        }))
+                    }
+                }
+            })
+            .delete(move |body: String| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(("DELETE".to_string(), body));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn set_profile_mints_an_empty_scope_claim() {
+        // Same property `status` relies on: an empty request resolves to the
+        // caller's full grant ceiling, so claiming a handle does not depend
+        // on whichever scopes were narrowed for the last submission.
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let profile = set_profile(&store, &cfg, "stub_handle", None)
+            .await
+            .unwrap();
+        assert_eq!(profile.display_handle, "stub_handle");
+
+        let requests = claim_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["consent_scopes"], serde_json::json!([]));
+        assert_eq!(requests[0]["allowed_uses"], serde_json::json!([]));
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].0, "PUT");
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(body["display_handle"], "stub_handle");
+        // Omitting the key is NOT a way to preserve an existing bio: the
+        // server deserializes missing and null identically to None and then
+        // upserts `bio = excluded.bio`, so either form clears it. An earlier
+        // version of this test asserted the opposite. The protection against
+        // clearing a bio by accident lives in the command layer, which
+        // requires --bio or --no-bio; this only pins the wire shape.
+        assert!(
+            body.get("bio").is_none(),
+            "bio must be omitted from the body when not set: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_profile_sends_a_bodyless_delete() {
+        let claim_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
+        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        clear_profile(&store, &cfg).await.unwrap();
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls[0].0, "DELETE");
+        assert!(
+            calls[0].1.is_empty(),
+            "withdrawal must not send a JSON body: {:?}",
+            calls[0].1
+        );
+    }
+
     #[tokio::test]
     async fn upload_refuses_ingest_host_off_allowlist_before_any_request() {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -1457,6 +2557,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1486,9 +2588,7 @@ mod tests {
                 submission_id: u2,
                 prior_status: "quarantined".to_string(),
             },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
+            refused("secret-leak-detected", "sha256:test"),
             SubmitOutcome::Failed {
                 reason_label: "claim-mint-failed".to_string(),
             },
@@ -1522,6 +2622,8 @@ mod tests {
             dry_run: false,
             pii_filter: None,
             no_reasoning: false,
+            machine_readable: false,
+            unenrolled_preview: false,
             remediate_quarantined: false,
         };
 
@@ -1555,42 +2657,68 @@ mod tests {
 /// Every outcome is represented, including the ones `build_manifest` drops:
 /// a caller automating submission needs to know a session was refused and
 /// why, not merely that it is absent from the manifest.
-pub fn outcomes_to_json(outcomes: &[SubmitOutcome]) -> serde_json::Value {
+pub fn outcomes_to_json(
+    outcomes: &[SubmitOutcome],
+    unenrolled_preview: bool,
+    notices: &[&str],
+) -> serde_json::Value {
     let entries: Vec<serde_json::Value> = outcomes
         .iter()
-        .map(|o| match o {
-            SubmitOutcome::Submitted {
-                submission_id,
-                status,
-            } => serde_json::json!({
-                "outcome": "submitted",
-                "submission_id": submission_id,
-                "status": status,
-            }),
-            SubmitOutcome::AlreadySubmitted {
-                submission_id,
-                prior_status,
-            } => serde_json::json!({
-                "outcome": "already-submitted",
-                "submission_id": submission_id,
-                "status": prior_status,
-            }),
-            SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
-                "outcome": "skipped",
-                "reason": reason_label,
-            }),
-            SubmitOutcome::Refused { reason_label } => serde_json::json!({
-                "outcome": "refused",
-                "reason": reason_label,
-            }),
-            SubmitOutcome::Failed { reason_label } => serde_json::json!({
-                "outcome": "failed",
-                "reason": reason_label,
-            }),
+        .map(|o| {
+            let mut entry = match o {
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } if unenrolled_preview => serde_json::json!({
+                    "outcome": "previewed",
+                    "preview_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::Submitted {
+                    submission_id,
+                    status,
+                } => serde_json::json!({
+                    "outcome": "submitted",
+                    "submission_id": submission_id,
+                    "status": status,
+                }),
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id,
+                    prior_status,
+                } => serde_json::json!({
+                    "outcome": "already-submitted",
+                    "submission_id": submission_id,
+                    "status": prior_status,
+                }),
+                SubmitOutcome::SkippedParseFailure { reason_label } => serde_json::json!({
+                    "outcome": "skipped",
+                    "reason": reason_label,
+                }),
+                SubmitOutcome::Refused {
+                    reason_label,
+                    session_ref,
+                    size_bytes,
+                    limit_bytes,
+                } => serde_json::json!({
+                    "outcome": "refused",
+                    "reason": reason_label,
+                    "session_ref": session_ref,
+                    "size_bytes": size_bytes,
+                    "limit_bytes": limit_bytes,
+                }),
+                SubmitOutcome::Failed { reason_label } => serde_json::json!({
+                    "outcome": "failed",
+                    "reason": reason_label,
+                }),
+            };
+            entry["unenrolled_preview"] = serde_json::Value::Bool(unenrolled_preview);
+            entry
         })
         .collect();
     serde_json::json!({
         "schema_version": "trace_commons.submit_result.v1",
+        "unenrolled_preview": unenrolled_preview,
+        "notices": notices,
         "results": entries,
     })
 }
@@ -1602,25 +2730,27 @@ mod json_output_tests {
     #[test]
     fn every_outcome_kind_is_represented() {
         let id = Uuid::new_v4();
-        let out = outcomes_to_json(&[
-            SubmitOutcome::Submitted {
-                submission_id: id,
-                status: "accepted".to_string(),
-            },
-            SubmitOutcome::AlreadySubmitted {
-                submission_id: id,
-                prior_status: "quarantined".to_string(),
-            },
-            SubmitOutcome::Refused {
-                reason_label: "secret-leak-detected".to_string(),
-            },
-            SubmitOutcome::Failed {
-                reason_label: "claim-mint-failed".to_string(),
-            },
-            SubmitOutcome::SkippedParseFailure {
-                reason_label: "parse-failed".to_string(),
-            },
-        ]);
+        let out = outcomes_to_json(
+            &[
+                SubmitOutcome::Submitted {
+                    submission_id: id,
+                    status: "accepted".to_string(),
+                },
+                SubmitOutcome::AlreadySubmitted {
+                    submission_id: id,
+                    prior_status: "quarantined".to_string(),
+                },
+                refused("secret-leak-detected", "sha256:test"),
+                SubmitOutcome::Failed {
+                    reason_label: "claim-mint-failed".to_string(),
+                },
+                SubmitOutcome::SkippedParseFailure {
+                    reason_label: "parse-failed".to_string(),
+                },
+            ],
+            false,
+            &[],
+        );
 
         let results = out["results"].as_array().unwrap();
         // A caller automating submission must be able to see a refusal. The
@@ -1634,6 +2764,7 @@ mod json_output_tests {
         );
         assert_eq!(results[2]["outcome"], "refused");
         assert_eq!(results[2]["reason"], "secret-leak-detected");
+        assert_eq!(results[2]["session_ref"], "sha256:test");
         assert_eq!(results[3]["outcome"], "failed");
         assert_eq!(results[4]["outcome"], "skipped");
     }
@@ -1643,11 +2774,22 @@ mod json_output_tests {
         // Reason labels are fixed strings by construction. Pinning it here
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
-        let out = outcomes_to_json(&[SubmitOutcome::Refused {
-            reason_label: "session-too-large".to_string(),
-        }]);
+        let out = outcomes_to_json(
+            &[refused_for_size("sha256:test", 1_600_000)],
+            true,
+            &["preview notice"],
+        );
         let reason = out["results"][0]["reason"].as_str().unwrap();
         assert!(!reason.contains('/'), "a label must not look like a path");
         assert!(reason.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+        assert_eq!(out["unenrolled_preview"], true);
+        assert_eq!(out["results"][0]["unenrolled_preview"], true);
+        assert_eq!(out["notices"][0], "preview notice");
+        assert_eq!(out["results"][0]["session_ref"], "sha256:test");
+        assert_eq!(out["results"][0]["size_bytes"], 1_600_000);
+        assert_eq!(
+            out["results"][0]["limit_bytes"],
+            crate::envelope::MAX_ENVELOPE_BYTES
+        );
     }
 }
