@@ -48,7 +48,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
     // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
     // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     Some(backend)
 }
 
@@ -2767,6 +2767,23 @@ async fn insert_account_test_submission(
     tenant_id: &str,
     auth_principal_ref: &str,
 ) -> Uuid {
+    insert_account_test_submission_with_status(
+        backend,
+        tenant_id,
+        auth_principal_ref,
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await
+}
+
+/// Same as [`insert_account_test_submission`], with an explicit corpus status
+/// so withdrawal-tier tests can stage `submitted` / `quarantined` rows.
+async fn insert_account_test_submission_with_status(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    status: StorageTraceCorpusStatus,
+) -> Uuid {
     use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
     let submission_id = Uuid::new_v4();
     let mut redaction_counts = BTreeMap::new();
@@ -2784,7 +2801,7 @@ async fn insert_account_test_submission(
             consent_scopes: vec!["debugging_evaluation".to_string()],
             allowed_uses: vec!["debugging".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
-            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            status,
             privacy_risk: "low".to_string(),
             redaction_pipeline_version: "deterministic-v1".to_string(),
             redaction_counts,
@@ -3221,6 +3238,506 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+// ---------------------------------------------------------------------------
+// Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
+// ---------------------------------------------------------------------------
+
+/// Stage a stub trace object at the production object-key layout for
+/// `(tenant, status, submission)` so withdrawal has real bytes to delete.
+fn stage_trace_object_file(
+    state: &AppState,
+    tenant_id: &str,
+    status: TraceCorpusStatus,
+    submission_id: Uuid,
+) -> PathBuf {
+    let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, b"{\"stub\":true}").expect("write stub object");
+    path
+}
+
+/// Read every column of the withdrawal tombstone row as text, so a test can
+/// assert the row leaks no content, path, or contributor identity.
+async fn read_withdrawal_tombstone_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<(String, String)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let rows = tx
+        .query(
+            "SELECT tenant_id, submission_id::TEXT AS submission_id,
+                    withdrawn_at::TEXT AS withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read tombstone");
+    tx.commit().await.expect("commit");
+    let mut out = Vec::new();
+    for row in rows {
+        for column in row.columns() {
+            let value: Option<String> = row.get(column.name());
+            out.push((column.name().to_string(), value.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// Read one scalar text column from a tenant-scoped table on the raw pool.
+async fn read_scalar_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    sql: &str,
+    submission_id: Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let row = tx
+        .query_opt(sql, &[&tenant_id, &submission_id])
+        .await
+        .expect("scalar read");
+    tx.commit().await.expect("commit");
+    row.and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_quarantined_deletes_content_and_is_idempotent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let object_path = stage_trace_object_file(
+        state.as_ref(),
+        "tenant-a",
+        TraceCorpusStatus::Quarantined,
+        owned,
+    );
+    assert!(object_path.exists(), "content is staged before withdrawal");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(first) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+    assert_eq!(first.submission_id, owned);
+    assert_eq!(first.prior_status, "quarantined");
+    assert_eq!(first.distribution_reach, "not_distributed");
+    assert!(!first.already_distributed);
+    assert!(
+        first.credit_retained,
+        "withdrawal must not claw back credit"
+    );
+
+    // The content is genuinely gone.
+    assert!(
+        !object_path.exists(),
+        "withdrawal must delete the stored content"
+    );
+
+    // Twice is a success, and reports the SAME tier and timestamp.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(second) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(second.withdrawn_at, first.withdrawn_at);
+    assert_eq!(second.distribution_reach, first.distribution_reach);
+    assert_eq!(second.prior_status, first.prior_status);
+
+    // The tombstone is hash-only/label-only: no content, no path, no identity.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", owned).await;
+    assert!(!columns.is_empty(), "a tombstone row is retained");
+    for (name, value) in &columns {
+        assert!(
+            !value.contains(&device_principal),
+            "tombstone column {name} must not carry contributor identity"
+        );
+        assert!(
+            !value.contains('/'),
+            "tombstone column {name} must not carry an object path"
+        );
+        assert!(
+            !value.contains("stub"),
+            "tombstone column {name} must not carry trace content"
+        );
+    }
+    let names = columns
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("submission_id"));
+    assert!(names.contains("withdrawn_at"));
+    assert!(names.contains("prior_status"));
+    assert!(names.contains("distribution_reach"));
+    assert!(
+        !names.contains("auth_principal_ref") && !names.contains("object_key"),
+        "the tombstone must not have identity or path columns at all"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("another contributor's trace -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+
+    // 404 and NOT 403: existence must not be disclosed.
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_ne!(unowned_err.0, StatusCode::FORBIDDEN);
+    assert_eq!(unowned_err.1.0.error, missing_err.1.0.error);
+
+    // The unowned row is untouched: no tombstone was written for it.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", unowned).await;
+    assert!(
+        columns.is_empty(),
+        "a rejected withdrawal must not write a tombstone"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_reports_each_distribution_tier() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Tier 1: not yet in the commons. `received` deliberately exercises a
+    // status the local corpus-status projection DROPS, proving withdrawal is
+    // driven by the storage record rather than that projection.
+    let received = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Received,
+    )
+    .await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier1) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(received))
+        .await
+        .expect("received withdraws");
+    assert_eq!(tier1.prior_status, "received");
+    assert_eq!(tier1.distribution_reach, "not_distributed");
+    assert!(!tier1.already_distributed);
+
+    // Tier 2: accepted into the commons, never used downstream.
+    let accepted =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier2) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(accepted))
+        .await
+        .expect("accepted withdraws");
+    assert_eq!(tier2.prior_status, "accepted");
+    assert_eq!(tier2.distribution_reach, "commons_not_distributed");
+    assert!(!tier2.already_distributed);
+
+    // Tier 3: accepted AND already published in an export manifest.
+    let exported =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let exported_record = backend
+        .get_trace_submission("tenant-a", exported)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+    let manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: None,
+            audit_event_id: None,
+            source_submission_ids: vec![exported],
+            source_submission_ids_hash: "sha256:manifest".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("manifest writes");
+    backend
+        .upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            submission_id: exported,
+            trace_id: exported_record.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Accepted,
+            source_hash_at_export: "sha256:source".to_string(),
+        })
+        .await
+        .expect("manifest item writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier3) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(exported))
+        .await
+        .expect("exported trace withdraws");
+    assert_eq!(tier3.distribution_reach, "commons_distributed");
+    assert!(
+        tier3.already_distributed,
+        "the API must say copies were already distributed"
+    );
+
+    // Going forward the item is excluded from the export.
+    let invalidation_reason = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT source_invalidation_reason FROM trace_export_manifest_items
+         WHERE tenant_id = $1 AND submission_id = $2",
+        exported,
+    )
+    .await;
+    assert_eq!(invalidation_reason.as_deref(), Some("revoked"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let record = backend
+        .get_trace_submission("tenant-a", owned)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+
+    let derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            trace_id: record.trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::Summary,
+            worker_version: "test-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:input".to_string(),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            task_success: None,
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            duplicate_score: None,
+            novelty_score: None,
+            cluster_id: None,
+        })
+        .await
+        .expect("derived record writes");
+
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:summary".to_string(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some("embedding:cluster".to_string()),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("vector entry writes");
+
+    let decision_id = Uuid::new_v4();
+    backend
+        .insert_trace_gate_decision(
+            "tenant-a",
+            StorageTraceGateDecisionRow {
+                decision_id,
+                submission_id: owned,
+                gate_policy_version: "test-policy".to_string(),
+                gate_version_hash: "sha256:gate".to_string(),
+                perplexity_micros: 7_000_000,
+                tail_fraction_micros: 0,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:evidence".to_string(),
+                attestation_chain_hash: "sha256:attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(vector_entry_id),
+                credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                chunks_capped: None,
+            },
+        )
+        .await
+        .expect("gate decision writes");
+    backend
+        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .await
+        .expect("dedup assignment writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(_) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+
+    // The vector index no longer returns the withdrawn trace.
+    let vector_status = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT status FROM trace_vector_entries
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(vector_status.as_deref(), Some("invalidated"));
+
+    // The dedup cluster no longer contains the withdrawn trace.
+    let dedup_cluster = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_cluster_id::TEXT FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_cluster, None,
+        "the withdrawn trace must leave its dedup cluster"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -3595,9 +4112,18 @@ fn test_state_with_submission_quota(
 }
 
 fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -> Arc<AppState> {
+    configure_unbounded_submit_limits_for_test(&tokens);
     let mut state = test_state(root);
     Arc::make_mut(&mut state).tokens = Arc::new(tokens);
     state
+}
+
+fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAuth>) {
+    for auth in tokens.values() {
+        let key =
+            submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+    }
 }
 
 fn mutate_test_signed_token_verifier(
@@ -3928,6 +4454,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
+    configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
         tokens: Arc::new(tokens),
@@ -3956,6 +4483,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -4086,6 +4616,46 @@ fn auth_headers(token: &str) -> HeaderMap {
         HeaderValue::from_str(&value).expect("valid auth header"),
     );
     headers
+}
+
+const SUBMIT_RATE_LIMIT_TOKEN_A: &str = "submit-rate-limit-token-a";
+const SUBMIT_RATE_LIMIT_TOKEN_B: &str = "submit-rate-limit-token-b";
+
+fn submit_rate_limit_test_state(root: PathBuf) -> Arc<AppState> {
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_A,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_B,
+        TokenRole::Contributor,
+    );
+    let mut state = test_state(root);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    state
+}
+
+fn submit_rate_limit_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn reset_account_rate_limiter_for_db_test() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+}
+
+fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
+    submit_principal_rate_limit_key(
+        tenant_id,
+        TraceAuthMethod::StaticToken,
+        &principal_storage_ref(token),
+    )
 }
 
 fn append_legacy_calibration_dataset_manifest_conflict(
@@ -4680,6 +5250,10 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
+    envelope.schema_version = "invalid.test.schema".to_string();
+}
+
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
     for event in &mut envelope.events {
         if event.event_type
@@ -4853,6 +5427,450 @@ async fn server_rescrub_redacts_free_text_side_channels() {
 }
 
 #[tokio::test]
+async fn submit_rate_limit_is_per_authenticated_principal() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("invalid envelope reaches validation while under the rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal over the submission rate limit is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
+        Json(invalid),
+    )
+    .await
+    .expect_err("a different principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_handler_honors_explicit_test_override() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, 1, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("first request reaches validation under the configured test limit");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("second request exceeds the configured test limit");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let grant_db = Arc::new(DeviceGrantScopeTestDb::new());
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(grant_db as Arc<dyn Database>);
+    state_mut.require_tenant_access_grants = true;
+    let envelope = sample_envelope().await;
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, Json(error)) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grantless authenticated submission is forbidden under the rate limit");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error, "active tenant access grant required");
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await
+    .expect_err("grantless authenticated submission over the rate limit is denied early");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-collision-secret";
+    let state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let expires_at = (Utc::now() + Duration::minutes(5)).timestamp();
+    let token_a = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": expires_at
+        }),
+    );
+    let token_b = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a:b",
+            "role": "contributor",
+            "principal_ref": "c",
+            "exp": expires_at
+        }),
+    );
+    let principal_a = authenticate_ctx(state.as_ref(), &auth_headers(&token_a))
+        .expect("principal A authenticates");
+    let principal_b = authenticate_ctx(state.as_ref(), &auth_headers(&token_b))
+        .expect("principal B authenticates");
+    assert_eq!(
+        principal_a.principal_ref(),
+        principal_b.principal_ref(),
+        "the pre-existing signed-principal derivation collides for the review tuples"
+    );
+    let key_a = submit_principal_rate_limit_key(
+        principal_a.tenant_id(),
+        principal_a.safe_auth_method(),
+        principal_a.principal_ref(),
+    );
+    let key_b = submit_principal_rate_limit_key(
+        principal_b.tenant_id(),
+        principal_b.safe_auth_method(),
+        principal_b.principal_ref(),
+    );
+    assert_ne!(
+        key_a, key_b,
+        "tenant boundaries must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token_a),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("principal A reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&token_a),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal A exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(&token_b), Json(invalid))
+        .await
+        .expect_err("principal B retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-mixed-auth-secret";
+    let static_token = "signed:a:b:c";
+    let mut state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "a", static_token, TokenRole::Contributor);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let signed_token = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+        }),
+    );
+    let static_principal = authenticate_ctx(state.as_ref(), &auth_headers(static_token))
+        .expect("static principal authenticates");
+    let signed_principal = authenticate_ctx(state.as_ref(), &auth_headers(&signed_token))
+        .expect("signed principal authenticates");
+    assert_eq!(static_principal.tenant_id(), signed_principal.tenant_id());
+    assert_eq!(
+        static_principal.principal_ref(),
+        signed_principal.principal_ref(),
+        "the pre-existing principal derivation erases the authentication method"
+    );
+    let static_key = submit_principal_rate_limit_key(
+        static_principal.tenant_id(),
+        static_principal.safe_auth_method(),
+        static_principal.principal_ref(),
+    );
+    let signed_key = submit_principal_rate_limit_key(
+        signed_principal.tenant_id(),
+        signed_principal.safe_auth_method(),
+        signed_principal.principal_ref(),
+    );
+    assert_ne!(
+        static_key, signed_key,
+        "authentication methods must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&signed_token),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("signed principal reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&signed_token),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("signed principal exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(static_token), Json(invalid))
+        .await
+        .expect_err("static principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn db_backed_rate_limit_reset_waits_for_submit_test_lock() {
+    let lock = submit_rate_limit_test_lock().lock().await;
+    let mut reset = tokio::spawn(reset_account_rate_limiter_for_db_test());
+
+    tokio::time::timeout(StdDuration::from_millis(50), &mut reset)
+        .await
+        .expect_err("DB-backed reset must wait while a focused submit test owns the lock");
+
+    drop(lock);
+    tokio::time::timeout(StdDuration::from_secs(2), reset)
+        .await
+        .expect("DB-backed reset completes after the submit test releases the lock")
+        .expect("DB-backed reset task joins");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_caps_in_flight_requests() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key,
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let mut in_flight = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        let state = state.clone();
+        let envelope = invalid.clone();
+        in_flight.push(tokio::spawn(async move {
+            submit_trace_handler(
+                State(state),
+                auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+                Json(envelope),
+            )
+            .await
+        }));
+    }
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("in-flight submission reaches the test pause")
+            .expect("test pause sender remains open");
+    }
+
+    let (status, Json(error)) = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        ),
+    )
+    .await
+    .expect("request beyond the concurrency cap returns without entering the pause")
+    .expect_err("request beyond the concurrency cap is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(SUBMIT_PER_PRINCIPAL_CONCURRENCY as usize);
+    for task in in_flight {
+        let (status, _) = task
+            .await
+            .expect("in-flight submission task joins")
+            .expect_err("released invalid envelope reaches validation");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_releases_guard_when_request_completes() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, SUBMIT_PER_PRINCIPAL_LIMIT, 1);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key: key.clone(),
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let request = tokio::spawn(async move {
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        )
+        .await
+    });
+    tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+        .await
+        .expect("submission reaches the post-acquisition pause")
+        .expect("test pause sender remains open");
+
+    let handler_holds_only_slot = ACCOUNT_RATE_LIMITER.acquire(&key, 1).is_none();
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(1);
+    let (status, _) = request
+        .await
+        .expect("submission task joins")
+        .expect_err("released invalid envelope reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        handler_holds_only_slot,
+        "the in-flight handler must own the configured submission slot"
+    );
+    let _released_slot = ACCOUNT_RATE_LIMITER
+        .acquire(&key, 1)
+        .expect("completed request releases its submission slot");
+}
+
+#[tokio::test]
+async fn submit_authentication_precedes_rate_limit_accounting() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let principal_ref = principal_storage_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("unauthenticated submission is rejected");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        0
+    );
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("authenticated request reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        1
+    );
+}
+
+#[tokio::test]
+async fn submit_under_rate_limits_succeeds_end_to_end() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+
+    let Json(receipt) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission under both limits succeeds");
+
+    assert_eq!(receipt.status, "quarantined");
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .expect("submission record reads")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
@@ -4883,6 +5901,147 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
     );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+#[tokio::test]
+async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id() {
+    // #214: same content-addressed submission_id; owned quarantined rows are
+    // remediable. Fresh ids for the same session are deliberately not minted.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut first);
+    // Force Medium via consent flags so the first landing is quarantined.
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    let Json(first_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(first.clone()),
+    )
+    .await
+    .expect("first submission quarantines");
+    assert_eq!(first_receipt.status, "quarantined");
+    let prior = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let prior_received_at = prior.received_at;
+
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    // Keep the same submission_id — remediation supersedes in place.
+    assert_eq!(corrected.submission_id, first.submission_id);
+
+    let Json(remediated) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(corrected.clone()),
+    )
+    .await
+    .expect("owned quarantined remediation supersedes");
+    assert_eq!(remediated.status, "accepted");
+
+    let record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.privacy_risk, ResidualPiiRisk::Low);
+    assert_eq!(
+        record.received_at, prior_received_at,
+        "remediation must preserve the original receipt timestamp"
+    );
+    assert_eq!(record.auth_principal_ref, prior.auth_principal_ref);
+
+    // Without ownership, another principal still gets the conflict.
+    let blocked = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a-2"),
+        Json(corrected),
+    )
+    .await
+    .expect_err("other principal cannot remediate");
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+
+    // Accepted rows stay classic-idempotent: a further POST returns the
+    // stored receipt without rewriting.
+    let mut again = sample_envelope().await;
+    again.submission_id = first.submission_id;
+    make_metadata_only_low_risk(&mut again);
+    again.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
+        .await
+        .expect("accepted remains idempotent");
+    assert_eq!(idempotent.status, "accepted");
+    let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        final_record.privacy_risk,
+        ResidualPiiRisk::Low,
+        "idempotent retry must not rewrite an accepted record"
+    );
+}
+
+#[tokio::test]
+async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    // Path-bearing content → Medium → quarantined under default pilot config.
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("medium-risk submission quarantines");
+    assert_eq!(receipt.status, "quarantined");
+
+    // Flip the pilot override after the row is stuck, then operator-rescrub
+    // so the same stored envelope reclassifies under current rules.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let Json(result) = review_quarantine_rescrub_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest {
+            reason: Some("pilot backlog reclassify".into()),
+        }),
+    )
+    .await
+    .expect("operator rescrub succeeds");
+    assert_eq!(result.submission_id, envelope.submission_id);
+    assert_eq!(result.prior_status, "quarantined");
+    assert!(result.changed);
+    assert_eq!(result.status, "accepted");
+    assert_eq!(result.privacy_risk, "medium");
+
+    let updated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(updated.status, TraceCorpusStatus::Accepted);
+    assert_eq!(updated.privacy_risk, ResidualPiiRisk::Medium);
+
+    // Dry-run batch leaves the record untouched when already accepted... but
+    // accepted rows are skipped by the quarantined filter. Confirm contributor
+    // cannot call the reviewer route.
+    let denied = review_quarantine_rescrub_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest { reason: None }),
+    )
+    .await
+    .expect_err("contributor cannot operator-rescrub");
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -5907,6 +7066,48 @@ fn parses_analytics_min_cell_count() {
         error
             .to_string()
             .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+    );
+}
+
+#[test]
+fn community_snapshot_interval_defaults_to_admin_triggered_only() {
+    // Absent, empty and 0 all mean the same thing: no worker, recompute
+    // stays admin-triggered. That is what every deployment had before the
+    // worker existed, so it has to remain reachable without deleting the
+    // config line.
+    assert!(
+        parse_community_snapshot_interval("")
+            .expect("empty parses")
+            .is_none()
+            && parse_community_snapshot_interval("0")
+                .expect("zero parses")
+                .is_none()
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_a_pointlessly_tight_schedule() {
+    let error = parse_community_snapshot_interval("30")
+        .expect_err("below the floor should be rejected at boot, not at runtime");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
+    );
+    assert_eq!(
+        parse_community_snapshot_interval("900").expect("15 minutes parses"),
+        Some(StdDuration::from_secs(900))
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_nonsense() {
+    let error = parse_community_snapshot_interval("every 15 minutes")
+        .expect_err("a non-numeric interval is a config error");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
     );
 }
 
@@ -23557,6 +24758,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -67693,7 +68897,13 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
 #[test]
 fn community_publication_blocks_when_min_cell_count_is_unset() {
     // Absent config parses to 0, which disables suppression entirely.
-    let missing = community_publication_missing_controls(0, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -67701,19 +68911,358 @@ fn community_publication_blocks_when_min_cell_count_is_unset() {
 fn community_publication_blocks_when_min_cell_count_is_one() {
     // A threshold of 1 admits every opted-in row: the SQL HAVING
     // clause is satisfied by a cell of size one.
-    let missing = community_publication_missing_controls(1, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
 #[test]
+fn community_roster_publishes_without_an_approved_noise_mechanism() {
+    // The whole point of the split. Everyone on the roster holds
+    // public_attribution consent: their handle and counts being public
+    // is what they asked for, so a mechanism that exists to protect
+    // people who made no such choice is not the control that applies.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "roster should publish on consent + cohort shape alone, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_analytics_still_blocks_where_the_roster_publishes() {
+    // Same inputs, opposite answer. If these two ever agree, the split
+    // has collapsed and analytics are riding out on the roster's gate.
+    let inputs = (2usize, 2usize, false);
+    let roster = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    let analytics = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    assert!(roster.is_empty());
+    assert_eq!(analytics, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn roster_payload_strips_aggregates_a_pregate_snapshot_still_carries() {
+    // The bug this exists to prevent, found in production: recompute
+    // writes analytics: null when they are withheld, but a snapshot
+    // written before that gate existed already has them populated. The
+    // roster's weaker gate would then hand out aggregates computed under
+    // no approved mechanism.
+    let stored = serde_json::json!({
+        "leaderboard": [{"display_handle": "someone", "rank": 1}],
+        "analytics": {"total_submissions": 41, "total_accepted": 40},
+    });
+    let redacted = redact_withheld_analytics(stored, &[COMMUNITY_NOISE_MECHANISM_CONTROL]);
+
+    assert_eq!(redacted["analytics"], serde_json::Value::Null);
+    assert_eq!(
+        redacted["privacy"]["analytics_withheld_controls"],
+        serde_json::json!([COMMUNITY_NOISE_MECHANISM_CONTROL]),
+        "a reader must be able to tell withheld from no activity"
+    );
+    // The roster itself is untouched: those people consented.
+    assert_eq!(redacted["leaderboard"][0]["display_handle"], "someone");
+}
+
+#[test]
+fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
+    let stored = serde_json::json!({"analytics": {"total_submissions": 41}});
+    let kept = redact_withheld_analytics(stored, &[]);
+    assert_eq!(kept["analytics"]["total_submissions"], 41);
+}
+
+fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSummary {
+    trace_commons_server::db::CorpusAnalyticsSummary {
+        total_submissions: 43,
+        total_accepted: 40,
+        total_rejected: 3,
+        accept_rate: 0.93,
+        novelty_histogram: vec![(0, 0), (100_000, 1), (200_000, 2), (300_000, 37)],
+        gate_outcomes: vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2),
+            ("perplexity_failed".to_string(), 1),
+            ("both_failed".to_string(), 0),
+        ],
+    }
+}
+
+#[test]
+fn publication_basis_defaults_to_requiring_a_mechanism() {
+    // Publishing without a mechanism must be something an operator opts
+    // into, never something a deployment falls into by leaving a variable
+    // unset or empty.
+    assert_eq!(
+        parse_community_analytics_publication_basis("").expect("empty parses"),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("approved_noise_mechanism").unwrap(),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("suppression_only").unwrap(),
+        CommunityAnalyticsPublicationBasis::SuppressionOnly
+    );
+    assert!(
+        parse_community_analytics_publication_basis("none").is_err(),
+        "an unrecognised basis must fail at boot rather than pick one"
+    );
+}
+
+#[test]
+fn suppression_only_waives_the_mechanism_but_never_the_cell_floor() {
+    // Under this basis cell suppression stops being one control among
+    // several and becomes the only thing between a published aggregate and
+    // a small group, so the floor is required, not relaxed.
+    assert!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            2,
+            1,
+            false,
+        )
+        .is_empty(),
+        "suppression_only should publish at min-cell 2 with one tenant and no mechanism"
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            1,
+            9,
+            true,
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT],
+        "the cell floor is never waived under suppression_only"
+    );
+}
+
+fn snapshot_row_with_privacy(
+    privacy: serde_json::Value,
+) -> trace_commons_server::db::LeaderboardSnapshotRow {
+    trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({ "privacy": privacy }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    }
+}
+
+#[test]
+fn a_malformed_publication_basis_falls_back_to_strict() {
+    // The serve gate parses the stored basis permissively and falls back to
+    // the strict one. That is deliberate: an unreadable provenance field must
+    // never be the reason aggregates publish. Pinned because the failure mode
+    // is silent by construction - nothing errors, it just gets stricter.
+    for malformed in [
+        serde_json::json!("banana"),
+        serde_json::json!(null),
+        serde_json::json!(7),
+        serde_json::json!({"nested": true}),
+    ] {
+        let row = snapshot_row_with_privacy(
+            serde_json::json!({"tenant_cohort_size": 9, "publication_basis": malformed}),
+        );
+        assert_eq!(
+            community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+            vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+            "a basis of {malformed} must be read as strict, not as permission to publish"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_keeps_the_basis_it_was_published_under() {
+    // The serve gate reads the stored snapshot, never live config, so
+    // changing the operator setting cannot retroactively re-license an
+    // artifact in either direction.
+    let permissive = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 1,
+        "publication_basis": "suppression_only",
+    }));
+    assert!(
+        community_snapshot_missing_controls(&permissive, CommunitySurface::Analytics).is_empty(),
+        "a snapshot published under suppression_only stays servable when config turns strict"
+    );
+
+    let strict = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 9,
+        "publication_basis": "approved_noise_mechanism",
+    }));
+    assert_eq!(
+        community_snapshot_missing_controls(&strict, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "a snapshot published under the strict basis is not loosened by permissive config"
+    );
+}
+
+#[test]
+fn a_pregate_snapshot_is_not_read_as_suppression_only() {
+    // The basis is absent on snapshots written before it existed. Defaulting
+    // those to the strict basis keeps an old artifact from being served as
+    // though someone had chosen to publish it without a mechanism.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"privacy": {"tenant_cohort_size": 9}}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "an absent basis must fall back to requiring a mechanism"
+    );
+}
+
+#[test]
+fn community_analytics_cells_below_the_floor_are_suppressed() {
+    // The floor gated whether analytics could publish, but nothing applied
+    // it to what was published: compute_corpus_analytics_summary takes no
+    // min-cell argument, so a bucket holding one record went out at its
+    // true count.
+    let mut summary = analytics_summary_fixture();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 2);
+
+    assert_eq!(suppressed, 4, "0, 1, 1 and 0 valued cells should all go");
+    assert_eq!(summary.novelty_histogram, vec![(200_000, 2), (300_000, 37)]);
+    assert_eq!(
+        summary.gate_outcomes,
+        vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2)
+        ]
+    );
+    // Totals are the top-level sums and are deliberately left alone.
+    assert_eq!(summary.total_submissions, 43);
+}
+
+#[test]
+fn a_floor_of_one_leaves_the_histogram_shape_intact() {
+    // A floor of 1 suppresses nothing by definition, and must not strip the
+    // empty buckets that give the distribution its shape. Getting this wrong
+    // would silently reshape every chart on the analytics page.
+    let mut summary = analytics_summary_fixture();
+    let before = summary.novelty_histogram.clone();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 1);
+
+    assert_eq!(suppressed, 0);
+    assert_eq!(summary.novelty_histogram, before);
+    assert_eq!(summary.gate_outcomes.len(), 4);
+}
+
+#[test]
+fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
+    // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
+    // person on the roster individually asked to be listed, so neither the
+    // cohort size nor a cell of one tells us anything about consent.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        1,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "a consented single-tenant roster should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_roster_still_blocks_a_zero_min_cell() {
+    // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
+    // contributors with nothing accepted in the window.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Roster,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            0,
+            2,
+            false
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_analytics_keeps_both_cohort_floors() {
+    // Everything the roster stopped enforcing is still enforced here,
+    // because these aggregates cover people who never opted into anything.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            1,
+            2,
+            true
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            2,
+            1,
+            true
+        ),
+        vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
+    );
+}
+
+#[test]
 fn community_publication_blocks_on_unapproved_noise_mechanism() {
-    let missing = community_publication_missing_controls(4, 4, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        4,
+        false,
+    );
     assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
 }
 
 #[test]
 fn community_publication_blocks_single_tenant_cohort() {
-    let missing = community_publication_missing_controls(4, 1, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        1,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
 }
 
@@ -67722,7 +69271,13 @@ fn community_publication_reports_every_missing_control_at_once() {
     // The pilot's actual configuration: no min-cell value, one tenant,
     // placeholder seed. An operator should see all three, not just the
     // first, so a single fix does not look like it unblocked the path.
-    let missing = community_publication_missing_controls(0, 1, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        1,
+        false,
+    );
     assert_eq!(
         missing,
         vec![
@@ -67735,7 +69290,13 @@ fn community_publication_reports_every_missing_control_at_once() {
 
 #[test]
 fn community_publication_allows_a_fully_configured_cohort() {
-    let missing = community_publication_missing_controls(2, 2, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        true,
+    );
     assert!(
         missing.is_empty(),
         "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
@@ -67770,7 +69331,7 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
         min_cell_count: 0,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    let missing = community_snapshot_missing_controls(&row);
+    let missing = community_snapshot_missing_controls(&row, CommunitySurface::Analytics);
     assert_eq!(
         missing,
         vec![
@@ -67778,6 +69339,15 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
             COMMUNITY_NOISE_MECHANISM_CONTROL,
             TRACE_COMMONS_COMMUNITY_TENANT_IDS,
         ]
+    );
+    // And the roster surface refuses it too, which is the point: the split
+    // must not become a way for a snapshot predating the privacy block to
+    // reach the public read path. It reports one control rather than two
+    // now that cohort size is an analytics concern, but a pre-gate snapshot
+    // records min_cell_count 0 and so is still refused.
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Roster),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
 }
 
@@ -67800,7 +69370,7 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
     };
     assert_eq!(
-        community_snapshot_missing_controls(&row),
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
 }

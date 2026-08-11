@@ -73,7 +73,7 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Eight jobs gate every PR (see `.github/workflows/ci.yml`):
+Nine jobs gate every PR (see `.github/workflows/ci.yml`):
 
 - `cargo fmt --check` — runs `cargo fmt --all -- --check`. Run `cargo fmt --all`
   before committing.
@@ -92,6 +92,13 @@ Eight jobs gate every PR (see `.github/workflows/ci.yml`):
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path. Do not break it.
 - `operator-binaries smoke`.
+- `windows named-pipe ACL` — the only `windows-latest` job. Runs
+  `scripts/windows/verify-pipe-acl.ps1`, which creates a second,
+  non-administrator local account and requires it to be denied when opening
+  the contributor daemon's named pipe. That DACL is the sole access control
+  on the daemon IPC socket on Windows, and it is not observable from a
+  cross-compile, so this job is the only thing standing behind the claim
+  that it works. Do not weaken it to a smoke test.
 
 GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold

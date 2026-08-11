@@ -6,9 +6,11 @@
 pub mod commands;
 pub mod config;
 pub mod consent;
+pub mod daemon;
 pub mod envelope;
 pub mod identity;
 pub mod issuer_client;
 pub mod picker;
 pub mod source;
 pub mod submit;
+pub mod withdraw;
