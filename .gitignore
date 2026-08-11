@@ -15,5 +15,7 @@ crates/trace-commons-contributor-gtk/target/
 community/.wrangler/
 .superpowers/
 
+.review/
+
 # Operator exports can contain submission-level analysis data
 scripts/operator/*.csv
