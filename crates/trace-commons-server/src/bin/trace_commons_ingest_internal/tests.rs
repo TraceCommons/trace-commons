@@ -1762,7 +1762,7 @@ fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
 }
 
 #[tokio::test]
-async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
+async fn account_ctx_refuses_a_device_bearer() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -1779,24 +1779,40 @@ async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
         false,
     );
 
-    // Mint creates-or-reuses the account linked to token-a's device principal.
+    // Minting a login link still works: that is an authority the device key
+    // has, and it is how a contributor starts the browser sign-in.
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links the principal to an account");
 
-    let ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+    // But the device claim itself must not resolve to an account context.
+    // It used to, which meant a device key reached every /v1/account/* route
+    // including withdrawal and account history. A device key is provisioned
+    // to upload; account authority comes from a browser session or the
+    // loopback native session, never from the upload credential.
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
         .await
-        .expect("bearer resolves to an account ctx");
-    assert_eq!(ctx.auth_method, AccountAuthMethod::DeviceBearer);
-    assert_eq!(ctx.tenant_id, "tenant-a");
-    let device_principal = principal_storage_ref("token-a");
-    assert_eq!(ctx.actor_ref, device_principal, "actor = device principal");
-    assert!(
-        ctx.principal_set.contains(&device_principal),
-        "principal set must contain the device principal"
-    );
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The same refusal, without a PostgreSQL backend, so it actually runs in CI.
+///
+/// The test above is pg-gated and skips silently when no database is
+/// configured -- which is exactly how it went on asserting the old behaviour
+/// unnoticed. This one needs no database: the dispatch refuses a device-shaped
+/// bearer before it ever reaches account storage.
+#[tokio::test]
+async fn account_ctx_refuses_a_device_bearer_without_a_database() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

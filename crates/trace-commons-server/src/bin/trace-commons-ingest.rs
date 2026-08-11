@@ -13942,13 +13942,26 @@ async fn resolve_account_ctx_with_rotation(
         (Some(bearer), None) if is_native_token(bearer) => {
             resolve_account_ctx_native(state, bearer).await
         }
-        (Some(_), None) => resolve_account_ctx_bearer(state, headers)
-            .await
-            .map(|ctx| (ctx, None)),
+        // A device upload claim is NOT an account credential.
+        //
+        // This arm used to resolve one to a full `AccountCtx`, which meant a
+        // device key reached every `/v1/account/*` route -- withdrawal and
+        // account history included. A device key is provisioned to upload; a
+        // stolen one should not also be able to withdraw a contributor's
+        // traces or read their history, and the loopback native-session flow
+        // exists precisely so a native client never needs that authority.
+        //
+        // Nothing depends on the old behaviour: the contributor client
+        // authenticates these routes with a `tcn1_` native session, and no
+        // other caller in the tree sends a device bearer here.
+        (Some(_), None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session required: a device upload claim is not an account credential",
+        )),
         (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
         (None, None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
-            "account session cookie or device bearer token required",
+            "account session cookie or native session token required",
         )),
     }
 }
@@ -14019,42 +14032,6 @@ async fn resolve_account_ctx_native(
         },
         rotated,
     ))
-}
-
-/// Bearer path: device token → linked account → active-membership set.
-async fn resolve_account_ctx_bearer(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountCtx> {
-    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
-    let db = account_db(state)?;
-    let tenant_id = tenant.tenant_id().to_string();
-    let principal_ref = tenant.principal_ref().to_string();
-
-    let account_id = db
-        .resolve_account_for_principal(&tenant_id, &principal_ref)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
-    let account = AccountId::from_uuid(account_id);
-    let principal_set = db
-        .expand_account_principals(&tenant_id, account_id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(AccountCtx {
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::DeviceBearer,
-        tenant_id,
-        actor_ref: principal_ref,
-        // The bearer path is a device token, not a passkey assertion: there is no
-        // authenticating credential to flag as `this_device`.
-        auth_credential_id: None,
-        // A device bearer is NOT a strong authenticator for the authenticator-change
-        // gate: mark it weak so it is gated like a device-link cookie session.
-        client_kind: "device".to_string(),
-    })
 }
 
 /// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
