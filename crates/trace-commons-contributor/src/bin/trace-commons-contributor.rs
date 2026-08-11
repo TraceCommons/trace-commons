@@ -120,6 +120,11 @@ enum Command {
     Whoami,
     /// Delete local keystore, config, and receipts
     Logout,
+    /// Sign in to your account (needed to withdraw traces), or check/end that session
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Run and control the background upload daemon
     Daemon {
         #[command(subcommand)]
@@ -159,6 +164,24 @@ enum Command {
 /// Every mutating command here is delivered to the *running* daemon over
 /// its socket when one is running, so it takes effect immediately rather
 /// than being overwritten by the daemon's next pass. See `daemon::client`.
+/// Account session, as distinct from device enrollment. The device key
+/// uploads; the account withdraws. Keeping them separate is deliberate --
+/// a stolen device key must not be worth the ability to delete someone's
+/// contribution history.
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Sign in through your browser (opens it, or prints the URL)
+    Login {
+        /// Print the URL instead of opening a browser. The headless path.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Whether a live account session is stored, and when it expires
+    Status,
+    /// Revoke the account session and forget it locally
+    Logout,
+}
+
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Run the daemon in the foreground; a service manager backgrounds it
@@ -332,6 +355,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
+        Command::Account { action } => match action {
+            AccountAction::Login { no_browser } => {
+                commands::account_login(&store, no_browser, cli.json).await
+            }
+            AccountAction::Status => commands::account_status(&store, cli.json),
+            AccountAction::Logout => commands::account_logout(&store).await,
+        },
         Command::Daemon { action } => match action {
             DaemonAction::Run { dry_run } => {
                 trace_commons_contributor::daemon::run(store, dry_run).await
