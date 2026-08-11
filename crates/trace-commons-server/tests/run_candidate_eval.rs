@@ -132,6 +132,246 @@ impl FlakyScorer {
     }
 }
 
+/// Reproduces a selective failure pattern that improves the surviving-row
+/// AUC while remaining inside the evaluator's pooled failure budget.
+struct ClassCorrelatedFailureScorer;
+
+impl PerplexityScorer for ClassCorrelatedFailureScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        let aggregate_perplexity_micros = match plaintext {
+            b"H" => 3_000_000,
+            b"L" => 1_000_000,
+            b"X" => anyhow::bail!("ClassCorrelatedFailure"),
+            b"D" => 2_000_000,
+            _ => 2_000_000,
+        };
+        Ok(PerplexityResult {
+            aggregate_perplexity_micros,
+            tail_fraction_micros: 0,
+            tokens_scored: 1,
+        })
+    }
+}
+
+struct ParaphraseReproductionScorer {
+    fail_x: bool,
+}
+
+impl PerplexityScorer for ParaphraseReproductionScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        let aggregate_perplexity_micros = match plaintext {
+            b"H" => 3_000_000,
+            b"L" => 1_000_000,
+            b"D" | b"S" | b"O" => 2_000_000,
+            b"Z" => 0,
+            b"X" if self.fail_x => anyhow::bail!("SelectiveParaphraseFailure"),
+            b"X" => 0,
+            _ => 2_000_000,
+        };
+        Ok(PerplexityResult {
+            aggregate_perplexity_micros,
+            tail_fraction_micros: 0,
+            tokens_scored: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn class_correlated_failures_cannot_pass_baseline_dominance() {
+    let mut novel = vec!["H".to_string(); 10];
+    novel.extend(vec!["L".to_string(); 7]);
+    novel.extend(vec!["X".to_string(); 3]);
+    let corpus = LoadedCorpus {
+        novel,
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase: vec![
+            ParaphrasePair {
+                original: "P".to_string(),
+                paraphrase: "Q".to_string(),
+            };
+            20
+        ],
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 failures in 80 attempts remain inside the pooled budget");
+
+    assert!((result.discrimination_auc - (10.0 / 17.0)).abs() < 1e-12);
+    assert_eq!(result.dropped_novel_rows, Some(3));
+    assert_eq!(result.dropped_duplicate_rows, Some(0));
+    assert!(result.passed_determinism_gate);
+
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    assert_eq!(baselines.strongest_auc, 0.5);
+    assert!(baselines.clears(result.discrimination_auc));
+    assert!(
+        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none(),
+        "a truncated candidate must not qualify against a full-corpus baseline"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_correlated_failures_cannot_pass_baseline_dominance() {
+    let mut duplicate = vec!["D".to_string(); 17];
+    duplicate.extend(vec!["X".to_string(); 3]);
+    let corpus = LoadedCorpus {
+        novel: vec!["H".to_string(); 20],
+        duplicate,
+        paraphrase: vec![
+            ParaphrasePair {
+                original: "P".to_string(),
+                paraphrase: "Q".to_string(),
+            };
+            20
+        ],
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 failures in 80 attempts remain inside the pooled budget");
+
+    assert_eq!(result.dropped_novel_rows, Some(0));
+    assert_eq!(result.dropped_duplicate_rows, Some(3));
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    assert!(baselines.clears(result.discrimination_auc));
+    assert!(!bakeoff_report::is_v3_candidate_eligible(
+        &result, &baselines
+    ));
+    assert!(bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none());
+}
+
+#[tokio::test]
+async fn paraphrase_failures_clear_neither_persisted_v3_flag_nor_winner_gate() {
+    // The persisted flag is the candidate-local v3 eligibility predicate,
+    // including paraphrase support, and must agree with winner selection.
+    let mut paraphrase = vec![
+        ParaphrasePair {
+            original: "P".to_string(),
+            paraphrase: "Q".to_string(),
+        };
+        20
+    ];
+    for pair in paraphrase.iter_mut().take(3) {
+        pair.original = "X".to_string();
+    }
+    let corpus = LoadedCorpus {
+        novel: vec!["H".to_string(); 20],
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase,
+    };
+
+    let mut result = run_candidate_eval(
+        EvalScorers::perplexity_only(&ClassCorrelatedFailureScorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("3 paraphrase failures in 80 attempts remain inside the pooled budget");
+
+    assert_eq!(result.dropped_novel_rows, Some(0));
+    assert_eq!(result.dropped_duplicate_rows, Some(0));
+    assert_eq!(result.dropped_paraphrase_rows, Some(3));
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    result.passed_baseline_dominance =
+        bakeoff_report::is_v3_candidate_eligible(&result, &baselines);
+    assert!(
+        !result.passed_baseline_dominance,
+        "incomplete paraphrase support must clear the persisted v3 eligibility flag"
+    );
+    assert!(
+        bakeoff_report::pick_winner(std::slice::from_ref(&result), &baselines).is_none(),
+        "incomplete paraphrase support must not reach weighted scoring"
+    );
+}
+
+#[tokio::test]
+async fn selective_paraphrase_failures_cannot_improve_winner_selection() {
+    let mut novel = vec!["H".to_string(); 18];
+    novel.extend(vec!["L".to_string(); 2]);
+    let mut paraphrase = vec![
+        ParaphrasePair {
+            original: "S".to_string(),
+            paraphrase: "S".to_string(),
+        };
+        10
+    ];
+    paraphrase.extend(vec![
+        ParaphrasePair {
+            original: "O".to_string(),
+            paraphrase: "Z".to_string(),
+        };
+        6
+    ]);
+    paraphrase.extend(vec![
+        ParaphrasePair {
+            original: "O".to_string(),
+            paraphrase: "X".to_string(),
+        };
+        4
+    ]);
+    let corpus = LoadedCorpus {
+        novel,
+        duplicate: vec!["D".to_string(); 20],
+        paraphrase,
+    };
+
+    let honest_scorer = ParaphraseReproductionScorer { fail_x: false };
+    let selective_scorer = ParaphraseReproductionScorer { fail_x: true };
+    let mut honest = run_candidate_eval(
+        EvalScorers::perplexity_only(&honest_scorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("honest evaluation");
+    let mut selective = run_candidate_eval(
+        EvalScorers::perplexity_only(&selective_scorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("4 failures in 80 attempts equal the allowed 5 percent");
+    honest.id = "honest".to_string();
+    selective.id = "selective".to_string();
+    honest.throughput_tps = 100.0;
+    selective.throughput_tps = 100.0;
+
+    assert_eq!(honest.discrimination_auc, 0.9);
+    assert_eq!(selective.discrimination_auc, 0.9);
+    assert_eq!(honest.paraphrase_delta, 0.5);
+    assert_eq!(selective.paraphrase_delta, 0.0);
+    assert_eq!(selective.dropped_paraphrase_rows, Some(4));
+    let honest_score = bakeoff_report::weighted_score(&honest, 0.0);
+    let selective_score = bakeoff_report::weighted_score(&selective, 0.0);
+    assert!((honest_score - 0.69).abs() < 1e-12);
+    assert!((selective_score - 0.84).abs() < 1e-12);
+    assert!(honest_score < selective_score * (1.0 - bakeoff_report::TIE_TOLERANCE));
+
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
+    let results = [honest, selective];
+    let winner = bakeoff_report::pick_winner(&results, &baselines).expect("honest winner");
+    assert_eq!(winner.id, "honest");
+}
+
 impl PerplexityScorer for FlakyScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -166,6 +406,17 @@ async fn failure_above_5pct_aborts_candidate() {
         msg.contains("failure rate"),
         "error must mention failure rate, got: {msg}"
     );
+    let aborted = err
+        .downcast_ref::<run_candidate_eval::CandidateEvalAborted>()
+        .expect("abort error must preserve dropped-row counters");
+    assert_eq!(aborted.dropped_novel_rows, 2);
+    assert_eq!(aborted.dropped_duplicate_rows, 2);
+    assert_eq!(aborted.dropped_paraphrase_rows, 2);
+    let failed =
+        run_candidate_eval::failed_candidate_result(&candidate, "RunCandidateEvalFailed", &err);
+    assert_eq!(failed.dropped_novel_rows, Some(2));
+    assert_eq!(failed.dropped_duplicate_rows, Some(2));
+    assert_eq!(failed.dropped_paraphrase_rows, Some(2));
 }
 
 #[tokio::test]
@@ -218,6 +469,10 @@ async fn token_rarity_only_populates_metrics_block_and_zeroes_legacy_auc() {
     assert!((result.discrimination_auc - 0.5).abs() < 1e-12);
     assert_eq!(result.paraphrase_delta, 0.0);
     assert_eq!(result.tail_fraction_range, 0.0);
+    assert_eq!(
+        result.dropped_paraphrase_rows, None,
+        "a skipped paraphrase slice must remain not evidenced"
+    );
 
     // The new metrics block exists, the perplexity sub-field is absent, and
     // the rarity sub-field carries the K we asked for.
@@ -235,6 +490,39 @@ async fn token_rarity_only_populates_metrics_block_and_zeroes_legacy_auc() {
     assert_eq!(rarity_block.duplicate_scores.len(), corpus.duplicate.len());
     assert!(rarity_block.discrimination_auc.is_finite());
     assert!((0.0..=1.0).contains(&rarity_block.discrimination_auc));
+}
+
+#[tokio::test]
+async fn rarity_only_paraphrase_support_cannot_be_promoted_into_v3_eligibility() {
+    let rarity = MockTokenRarityScorer::new();
+    let corpus = synth_corpus();
+    let mut result = run_candidate_eval(
+        EvalScorers {
+            perplexity: None,
+            token_rarity: Some(&rarity),
+            token_rarity_k: 10,
+        },
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("rarity-only eval must succeed");
+
+    // Simulate the planned promotion of rarity AUC into the decision column.
+    // Missing paraphrase evidence must remain independently disqualifying.
+    result.discrimination_auc = 0.9;
+    let baselines = bakeoff_report::BaselineResults {
+        measures: Vec::new(),
+        strongest_name: None,
+        strongest_auc: 0.5,
+        required_discrimination_auc: 0.55,
+    };
+    assert_eq!(result.dropped_paraphrase_rows, None);
+    assert!(!bakeoff_report::is_v3_candidate_eligible(
+        &result, &baselines
+    ));
 }
 
 #[tokio::test]

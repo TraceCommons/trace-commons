@@ -11,6 +11,7 @@ anyhow = "1"
 sha2 = "0.10"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+trace-commons-gate-api = { path = "../trace-commons-gate-api" }
 
 # Optional inference stack — enabled by the `local-gpu-models` feature.
 # Pulled in only when the gate-service binary is built for a GPU host with

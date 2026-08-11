@@ -24,17 +24,20 @@ pub mod vector_index;
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 pub mod vector_index_usearch;
 
-pub use embedder::{Embedder, MockEmbedder};
-pub use orchestrator::{
-    EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, OrchestrationDecision,
-    PerplexityOnlyOutcome,
+// Contracts now live in `trace-commons-gate-api`; re-exported here so existing
+// `trace_commons_gate_enclave::{Embedder, PerplexityScorer, ...}` paths keep
+// resolving. Implementations below remain local to this crate.
+pub use trace_commons_gate_api::{
+    ChunkPerplexity, Embedder, EnclaveGateOrchestratorConfig, InsertedChunkEntry,
+    MOCK_EMBEDDING_DIM, NearestNeighbor, OrchestrationDecision, PerplexityOnlyOutcome,
+    PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer, VectorIndex,
 };
-pub use perplexity::{
-    MockPerplexityScorer, MockTokenRarityScorer, PerplexityResult, PerplexityScorer,
-    TokenRarityResult, TokenRarityScorer,
-};
+
+pub use embedder::MockEmbedder;
+pub use orchestrator::EnclaveGateOrchestrator;
+pub use perplexity::{MockPerplexityScorer, MockTokenRarityScorer};
 #[cfg(feature = "near-ai-scorer")]
 pub use perplexity_near_ai::{NearAiPerplexityScorer, NearAiScorerConfig};
-pub use vector_index::{MockVectorIndex, NearestNeighbor, VectorIndex};
+pub use vector_index::MockVectorIndex;
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 pub use vector_index_usearch::UsearchVectorIndex;

@@ -104,12 +104,16 @@ Authoritative contracts to read before changing anything substantive:
   contract
 - [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md) — phased
   open work and "Production Gap Queue"
+- [`docs/contributor-daemon-ipc-v1_1.md`](docs/contributor-daemon-ipc-v1_1.md) —
+  IPC contract between the contributor background daemon and the native
+  menu-bar and window applications
 
 ## Repository Layout
 
 ```
 crates/
 ├── trace-commons-protocol/      DTOs + redaction helpers shared with the client.
+├── trace-commons-gate-api/      Public gate contracts plus the reference scorer.
 ├── trace-commons-gate-enclave/  Scoring orchestrator (perplexity, embedder, vector index).
 │                                Two real perplexity backends: mistralrs (local CUDA,
 │                                feature `local-gpu-models`) and NEAR AI Cloud HTTP

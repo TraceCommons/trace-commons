@@ -1,4 +1,9 @@
 /target/
+# The GTK shell is its own cargo workspace (excluded from the root one so the
+# root builds on macOS), so its build output is NOT covered by the anchored
+# /target/ above. Without this, a `git add -A` in that worktree stages a few
+# hundred build artifacts.
+crates/trace-commons-contributor-gtk/target/
 /.env
 /.env.*
 !/.env.example
@@ -9,3 +14,6 @@
 # Local Cloudflare/Wrangler state
 community/.wrangler/
 .superpowers/
+
+# Operator exports can contain submission-level analysis data
+scripts/operator/*.csv
