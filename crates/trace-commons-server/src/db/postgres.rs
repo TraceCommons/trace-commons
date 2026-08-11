@@ -115,6 +115,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_audit_events",
     "trace_credit_ledger",
     "trace_tombstones",
+    "trace_withdrawals",
     "trace_vector_entries",
     "trace_export_manifests",
     "trace_export_manifest_items",
@@ -1274,6 +1275,51 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V43 (not V42: that number is held by the unmerged
+        // db-authoritative-invites branch) adds the contributor-withdrawal
+        // tombstone and the trace_submissions.withdrawn_at column.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&43_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V43__trace_withdrawal.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&43_i32, &"trace_withdrawal"],
+                )
+                .await?;
+        }
+        // V44 widens the trace_sessions.client_kind CHECK to admit 'native',
+        // the client_kind of a loopback native-app session token.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&44_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V44__native_session_client_kind.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&44_i32, &"native_session_client_kind"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -1739,6 +1785,35 @@ impl Database for PgBackend {
             min_cell_count: row.get("min_cell_count"),
             noise_seed_hash: row.get("noise_seed_hash"),
         })
+    }
+
+    async fn prune_leaderboard_snapshots(
+        &self,
+        window_label: &str,
+        metric: &str,
+        keep: i64,
+    ) -> Result<u64, DatabaseError> {
+        // Ordered by computed_at with snapshot_id as the tiebreak so the
+        // set kept is deterministic when two snapshots share a timestamp.
+        let client = self.trace_pool().get().await?;
+        let removed = client
+            .execute(
+                "DELETE FROM trace_leaderboard_snapshots
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND snapshot_id NOT IN (
+                        SELECT snapshot_id
+                          FROM trace_leaderboard_snapshots
+                         WHERE window_label = $1
+                           AND metric = $2
+                         ORDER BY computed_at DESC, snapshot_id DESC
+                         LIMIT $3
+                    )",
+                &[&window_label, &metric, &keep],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(removed)
     }
 
     async fn latest_leaderboard_snapshot(
@@ -2885,6 +2960,58 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn issue_native_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: no ensure_trace_tenant, for the same reason as
+        // issue_passkey_session. The tenant here came from a login link a human
+        // just redeemed in a browser; the session insert is FK-bound to
+        // (tenant_id, account_id), so a bogus pair fails the insert rather than
+        // writing a tenant row.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // auth_credential_id is left NULL: a native session is authenticated by
+        // the browser login that approved it, not by a passkey or wallet key.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), now(), $5
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
@@ -4312,6 +4439,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -4327,6 +4455,7 @@ mod tests {
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
+            include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

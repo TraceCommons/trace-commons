@@ -93,10 +93,23 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
         let cwd = peek_cwd(&path);
+        // Derive the label from the cwd we just peeked, the same way
+        // `load_session` does further down. Leaving this `None` meant every
+        // Codex row in the picker rendered as `-`, so a contributor choosing
+        // what to submit could not tell one session from another - while the
+        // submitted envelope carried the correct project all along, because
+        // load_session computes it. `--project` filtering was unaffected too,
+        // since that matches on `cwd`. Only the thing a human reads was wrong.
+        let project = cwd
+            .as_deref()
+            .map(Path::new)
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
         sessions.push(SessionRef {
             source: SOURCE_CODEX,
             path,
-            project: None,
+            project,
             cwd,
             started_at,
             size_bytes: metadata.len(),
@@ -410,6 +423,29 @@ mod tests {
         let found = src.discover().unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].source, "codex");
+    }
+
+    #[test]
+    fn discovery_labels_the_project_not_just_load() {
+        // Discovery is what fills the picker a contributor chooses from. It
+        // used to hardcode `project: None`, so every Codex row rendered as
+        // `-` and one session was indistinguishable from another - even
+        // though `load()` derived the same value correctly from the same cwd,
+        // which is why submitted envelopes were right and only the list was
+        // wrong. Assert both agree.
+        let src = CodexSource::new(fixture_root());
+        let found = src.discover().unwrap();
+        assert_eq!(
+            found[0].project.as_deref(),
+            Some("otherproj"),
+            "discovery must label the project, not leave it for load()"
+        );
+        let loaded = src.load(&found[0]).unwrap();
+        assert_eq!(
+            found[0].project.as_deref(),
+            loaded.project.as_deref(),
+            "discovery and load must agree on the project label"
+        );
     }
 
     #[test]

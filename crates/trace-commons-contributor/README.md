@@ -116,15 +116,18 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
   post-redaction envelope: 1003 cue-gated tokens, 243 `sk-` keys, and 154 PEM
   private keys found and removed on the most recent run.
 
-  **Known gap: opaque bearer tokens.** Production covers `Bearer ` values only
-  through the cue-gated entropy pass, which a realistic opaque token evades in
-  four ways — a UUID-shaped token is allowlisted, lowercase hex of 32+ chars is
-  treated as a content hash, a token under 16 characters misses the minimum
-  length, and a low-entropy static credential falls under the 3.2 bits/char
-  floor. The audit reports surviving bearer values as advisories so the gap
-  stays visible, but they are not redacted today. If a session pasted a bearer
-  token of one of those shapes, assume it is still present and do not submit
-  that session until this is closed.
+  **Known gap: opaque bearer tokens (narrowed by #193).** Production covers
+  `Bearer ` values through the cue-gated entropy pass. After #193 the pass
+  redacts cued short opaque tokens (8–15 chars) and cued lowercase-hex ≥32
+  (HMAC/AES-shaped material that the old content-hash allowlist spared).
+  Two deliberate survivals remain: UUID-shaped tokens stay allowlisted even
+  when cued (~105k structural IDs vs ~20 real secrets in the prototype
+  scan), and zero-separator glue (`BearerSECRET` with no space) is accepted
+  as unfixable without splitting inside arbitrary identifiers. Low-entropy
+  static credentials still fall under the 3.2 bits/char floor. The audit
+  reports surviving bearer values as advisories so the residual stays
+  visible. If a session pasted a bearer token of a surviving shape, assume
+  it is still present and do not submit that session until reviewed.
 - An optional second pass, `--pii-filter near-ai`, sends the
   already-locally-redacted **message text only** (`content`/
   `human_correction` fields — not structured tool payloads) through a NEAR AI
@@ -204,7 +207,7 @@ the redactor and mapper produce from message content.
 |---|---|
 | `login [--grant <b64>] [--allowed-hosts <csv>]` | Without `--grant`, prints this device's key id to hand to an instance operator. With `--grant`, redeems an enrollment grant and saves local config. |
 | `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear only when `--trajectory` names a file or directory. |
-| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
+| `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |
 | `logout` | Deletes local config, device key, and receipts, plus orphaned temp files. |

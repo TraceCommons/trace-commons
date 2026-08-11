@@ -2559,6 +2559,22 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
+    pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
+        let mut known_path_prefixes: Vec<String> = known_path_prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        known_path_prefixes.dedup();
+
+        Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes,
+            privacy_filter: None,
+            privacy_filter_backend: PrivacyFilterBackendTag::None,
+        }
+    }
+
     /// A redactor with no attached privacy-filter adapter and no known path
     /// prefixes, for detection-only work that never touches
     /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
@@ -6729,6 +6745,513 @@ mod tests {
             envelope.privacy.residual_pii_risk,
             ResidualPiiRisk::Medium,
             "content-bearing prose must not stay Low after concordance"
+        );
+    }
+
+    fn deterministic_only_constructor_ignores_inherited_backend() {
+        use super::DeterministicTraceRedactor;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes process-environment mutation across
+        // every env-touching test in this crate.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
+        let has_filter = redactor.attached_privacy_filter().is_some();
+        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(!has_filter);
+        assert!(!redacted.contains("/Users/preview/private"));
+    }
+
+    fn contextual_entropy_applies_cued_secret_shape_decisions() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Row 1 — Accept, documented. No separator means no boundary without
+        // splitting inside arbitrary identifiers; FP cost is too high.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("secret={hex40}"),
+            format!("api_key: {hex64}"),
+            format!("api_key={hex64}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Sub-threshold entropy — still not opaque enough, even when cued.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
+    }
+
+    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // Uncued content hashes / shas must still survive (row 4 narrows the
+        // allowlist to the *cued* case only; uncued path never reached it).
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("commit {sha40}"),
+            format!("digest {sha64}"),
+            format!("blob {sha64} verified"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_eq!(out, text, "uncued hash was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // UUID stays allowlisted even when cued (row 3).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
+        }
+
+        // Prefixed structural IDs stay allowlisted even when cued.
+        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
+
+        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
+        // rate on `api_key: deadbeef`-style short hex dominates recall here.
+        for sha in ["deadbee", "deadbeef"] {
+            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
+            assert!(
+                out.contains(sha),
+                "short git sha was redacted (FP budget): {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Low-entropy short values after a cue must survive (row 2 lowers
+        // length, not the entropy floor).
+        for text in [
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            "secret: none1234",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Sub-floor length even with a cue and high opacity — still too short.
+        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
+        assert_eq!(out, "api_key=Zx9Qk2L");
+
+        // Uncued short opaque tokens must survive (candidate class is wider
+        // now, but the cue gate is the FP control).
+        let short = "Q7vM2xP9sL4nR8k";
+        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
+        assert!(
+            out.contains(short),
+            "uncued short opaque was redacted: {out}"
+        );
+        assert!(!rep.blocked_secret_detected);
+    }
+
+    fn successfully_redacted_secret_is_medium_not_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([
+                ("secret".to_string(), 1),
+                ("secret:openai_api_key".to_string(), 1),
+            ]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must be Medium, not terminal High"
+        );
+    }
+
+    fn unredactable_key_finding_still_forces_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            key_finding_detected: true,
+            ..Default::default()
+        };
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::High,
+            "unredactable key findings must stay High"
+        );
+    }
+
+    fn residual_secret_hit_still_forces_high() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let residual_findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings,
+        };
+
+        assert_eq!(
+            resolve_post_scrub_risk(
+                ResidualPiiRisk::Medium,
+                ResidualPiiRisk::Medium,
+                &assessment
+            ),
+            ResidualPiiRisk::High,
+            "a post-scrub residual secret hit must force High"
+        );
+    }
+
+    fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
+        use super::*;
+
+        let findings = RedactionReport {
+            counts: BTreeMap::from([("secret".to_string(), 1)]),
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings,
+            residual_findings: RedactionReport::default(),
+        };
+
+        assert!(
+            assessment.can_downgrade(),
+            "clean residual + complete coverage must allow downgrade"
+        );
+        assert_eq!(
+            resolve_post_scrub_risk(ResidualPiiRisk::High, ResidualPiiRisk::Medium, &assessment),
+            ResidualPiiRisk::Medium,
+            "successful scrub must not pin High when residual scan is clean"
+        );
+    }
+
+    fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
+        use super::*;
+
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: risk,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some("ordinary work".to_string()),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            // replayable: false is the realistic case for a recorded session,
+            // and it is what makes the medium band unreachable under the old
+            // formula: 0.20 of the weight is gone before anything is measured.
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    fn privacy_gate_and_risk_score_are_the_same_signal() {
+        use super::*;
+        // The reason the subtractive term was redundant: these are
+        // complementary functions of one enum. If they ever stop being
+        // complementary, the argument for applying only the gate needs
+        // revisiting, so pin it.
+        for risk in [
+            ResidualPiiRisk::Low,
+            ResidualPiiRisk::Medium,
+            ResidualPiiRisk::High,
+        ] {
+            assert!(
+                (privacy_gate(risk) + privacy_risk_score(risk) - 1.0).abs() < f32::EPSILON,
+                "gate and risk score must remain complementary for {risk:?}"
+            );
+        }
+    }
+
+    fn medium_risk_work_can_earn_credit() {
+        use super::*;
+        // Every medium-risk submission in the pilot corpus scored exactly
+        // zero - ten of ten - because risk was penalised twice: a 0.5 gate
+        // and a flat -0.30. Accepting medium-risk work while guaranteeing it
+        // earns nothing made the accept flag and the scorer disagree.
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "medium-risk work that is accepted must be able to earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    fn dropping_the_double_penalty_leaves_low_risk_untouched() {
+        use super::*;
+        // The change is confined to the medium band, and this is why rather
+        // than a pinned number: the term that was removed evaluated to
+        // `0.60 * privacy_risk_score(Low)`, and that factor is zero. So the
+        // 331 low-risk submissions already in the corpus keep their scores
+        // by construction, not by coincidence of the current weights.
+        assert_eq!(
+            privacy_risk_score(ResidualPiiRisk::Low),
+            0.0,
+            "the removed subtraction was already inert for low risk"
+        );
+        let scored = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        assert!(
+            scored.credit_points_estimate > 0.0,
+            "low-risk work must still earn credit, got {}",
+            scored.credit_points_estimate
+        );
+    }
+
+    fn risk_bands_stay_ordered_and_high_earns_nothing() {
+        use super::*;
+        let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
+        let medium = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Medium));
+        let high = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::High));
+
+        assert!(
+            low.credit_points_estimate > medium.credit_points_estimate,
+            "low must still out-earn medium: {} vs {}",
+            low.credit_points_estimate,
+            medium.credit_points_estimate
+        );
+        assert_eq!(
+            high.credit_points_estimate, 0.0,
+            "high risk earns nothing regardless of quality"
+        );
+        // The blast-radius claim is about both outputs, not just credit.
+        // For high risk the gate is 0.0, so the quality terms contribute
+        // nothing and `raw` was negative before this change and is
+        // non-positive after; either way it clamps to 0. Asserting the score
+        // too keeps "only the medium band moves" honest.
+        // `submission_score` is the name this value carries once it reaches an
+        // envelope; on the scorecard itself the field is `online_score`
+        // (`let submission_score = scorecard.online_score` in
+        // `estimate_initial_credit`). The test was written against the
+        // downstream name, so it never compiled.
+        assert_eq!(
+            high.online_score, 0.0,
+            "high-risk submission score must clamp to zero either side of this change"
+        );
+    }
+
+    fn rescrub_of_successfully_redacted_secret_lands_medium() {
+        use super::*;
+
+        let now = Utc::now();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: vec![TraceContributionEvent {
+                event_id: Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::UserMessage,
+                timestamp: now,
+                redacted_content: Some(format!("export OPENAI_API_KEY={secret}")),
+                structured_payload: Value::Null,
+                tool_name: None,
+                tool_category: None,
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: None,
+                failure_modes: Vec::new(),
+                side_effect: SideEffectLevel::None,
+            }],
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        };
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        let content = env.events[0]
+            .redacted_content
+            .as_deref()
+            .expect("content present");
+        assert!(
+            !content.contains(secret),
+            "secret must be removed from stored content: {content}"
+        );
+        assert!(
+            env.privacy.redaction_counts.contains_key("secret")
+                || env
+                    .privacy
+                    .redaction_counts
+                    .keys()
+                    .any(|k| k.starts_with("secret:")),
+            "redaction telemetry must record the secret finding: {:?}",
+            env.privacy.redaction_counts
+        );
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "successful secret scrub must land Medium (quarantine-with-override), not High"
         );
     }
 }

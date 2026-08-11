@@ -1,0 +1,86 @@
+# Publish contributor-CLI binaries so joining the pilot does not require a
+# Rust toolchain. The client is the one piece a contributor has to run on
+# their own machine, and "build from source" is the largest single piece of
+# friction between an invite and a first submission.
+#
+# Tag-driven: push a tag like `contributor-v0.1.0`.
+name: release-contributor
+
+on:
+  push:
+    tags:
+      - "contributor-v*"
+  # Buildable on demand without cutting a tag, so the matrix can be proven
+  # before it is trusted with a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p trace-commons-contributor --target ${{ matrix.target }}
+
+      # The checksum is published beside the binary so a contributor can
+      # verify what they downloaded. It is not a signature and does not
+      # establish provenance on its own - see the release notes.
+      - name: Package
+        run: |
+          set -euo pipefail
+          BIN=target/${{ matrix.target }}/release/trace-commons-contributor
+          OUT=trace-commons-contributor-${{ matrix.target }}
+          mkdir -p dist
+          cp "$BIN" "dist/$OUT"
+          ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Contributor CLI binaries.
+
+          Verify your download against the published \`.sha256\` beside it.
+
+          These binaries are **not code-signed or notarized**. macOS Gatekeeper
+          will quarantine them; clearing that requires an explicit user action.
+          Signing needs an Apple Developer identity and is not set up yet.
+
+          Nothing leaves your machine until you run \`submit\`. Run
+          \`submit --dry-run\` first to see exactly what would be sent." \
+            dist/*/*
