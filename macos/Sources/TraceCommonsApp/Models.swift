@@ -174,6 +174,54 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
     }
 }
 
+// MARK: - Withdrawal
+
+/// Which of the three withdrawal tiers the server applied.
+///
+/// The wire names are the SERVER's, pinned in
+/// `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
+/// (`TRACE_WITHDRAWAL_REACH_*`) and mirrored by `DistributionReach` in
+/// `crates/trace-commons-contributor/src/withdraw.rs`. The two sides were
+/// once written in parallel and did NOT agree -- the Rust client expected
+/// `in_commons`/`distributed` while the server sends
+/// `commons_not_distributed`/`commons_distributed` -- so the exact strings
+/// below matter more than they look. `docs/contributor-daemon-ipc-v1_1.md`
+/// still documents the old, wrong pair; the Rust is authoritative.
+///
+/// Deliberately decoded leniently (see `WithdrawalOutcome`): an unrecognized
+/// label must leave this `nil` so the UI says it cannot tell which tier
+/// applied, rather than throwing away a withdrawal that really happened.
+enum WithdrawalReach: String, Decodable {
+    /// Never entered the commons. Nothing was distributed.
+    case notDistributed = "not_distributed"
+    /// In the commons, never published in an export or benchmark.
+    case commonsNotDistributed = "commons_not_distributed"
+    /// In the commons AND already published. Copies cannot be recalled.
+    case commonsDistributed = "commons_distributed"
+}
+
+/// The `withdraw` result: `withdrawn: true` plus the tier that applied.
+struct WithdrawalOutcome: Decodable, Equatable {
+    let withdrawn: Bool
+    /// `nil` when the daemon sent a label this build does not know. The
+    /// withdrawal still happened; what cannot be stated is how far the trace
+    /// had travelled, and the UI says so rather than guessing the gentler
+    /// answer.
+    let distributionReach: WithdrawalReach?
+
+    enum CodingKeys: String, CodingKey {
+        case withdrawn
+        case distributionReach = "distribution_reach"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        withdrawn = try container.decodeIfPresent(Bool.self, forKey: .withdrawn) ?? true
+        let label = try container.decodeIfPresent(String.self, forKey: .distributionReach)
+        distributionReach = label.flatMap(WithdrawalReach.init(rawValue:))
+    }
+}
+
 struct HistoryCounts: Decodable, Equatable {
     let submitted: Int
     let accepted: Int

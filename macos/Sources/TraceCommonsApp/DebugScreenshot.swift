@@ -79,6 +79,11 @@ enum DebugScreenshot {
                 size: CGSize(width: 660, height: 420)
             )
             render(
+                WithdrawalConfirmationCapture().environmentObject(model),
+                to: directory + "/macos-shell-withdrawal.png",
+                size: CGSize(width: 860, height: 620)
+            )
+            render(
                 OnboardingPrivacyScanContent(),
                 to: directory + "/macos-shell-onboarding-privacy-scan.png",
                 size: CGSize(width: 660, height: 560)
