@@ -627,6 +627,29 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Issue a session for a native-app loopback sign-in whose one-time code and
+    /// PKCE verifier have ALREADY been checked. Mirrors
+    /// [`Database::issue_passkey_session`] except `client_kind = 'native'` and
+    /// `auth_credential_id` is NULL: no passkey or wallet key authenticated this
+    /// session, the human's browser login did.
+    ///
+    /// As with the passkey/NEAR paths there is NO `ensure_trace_tenant` here.
+    /// The tenant came from a login link that a human already redeemed in a
+    /// browser, so the account row provably exists; the insert is FK-bound to
+    /// `(tenant_id, account_id)` and a bogus pair simply fails rather than
+    /// writing anything. The raw session secret never reaches the database.
+    async fn issue_native_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session: NewSession<'_>,
+        _audit: RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "issue_native_session not implemented".to_string(),
+        ))
+    }
+
     /// Issue a browser session for a passkey login that has ALREADY been verified
     /// (Task 6). Inserts a `trace_sessions` row (hash-only `token_hash`,
     /// `client_kind = 'passkey'`, `auth_credential_id` = the base64url credential

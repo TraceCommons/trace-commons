@@ -33,6 +33,13 @@ pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
 /// auto-upload, bulk-approving). This is user-facing visibility, not a
 /// security control -- see `daemon::audit`.
 pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
+/// The account session token from the loopback browser sign-in
+/// (`crate::account_auth`). A SECRET, written at 0600 inside the 0700 state
+/// directory exactly like the device key, and swept by `wipe()` -- a logout
+/// that left an account token behind would hand the next person to enroll on
+/// this machine the ability to read and withdraw the previous contributor's
+/// traces.
+pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -292,6 +299,7 @@ impl ConfigStore {
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
+            ACCOUNT_SESSION_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -310,6 +318,7 @@ impl ConfigStore {
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
+            ACCOUNT_SESSION_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -508,6 +517,7 @@ mod tests {
             DAEMON_QUEUE_FILE,
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
+            ACCOUNT_SESSION_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();

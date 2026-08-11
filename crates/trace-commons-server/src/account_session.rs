@@ -84,6 +84,13 @@ pub enum AccountAuthMethod {
     SessionCookie,
     /// Device bearer token resolved to its linked account.
     DeviceBearer,
+    /// Native-app bearer token (`tcn1_...`) minted by the loopback sign-in
+    /// flow and backed by a real `trace_sessions` row (`client_kind =
+    /// 'native'`). It is a SESSION, not a device credential: it expires, it
+    /// rotates on use, and `revoke-all` kills it. It is deliberately WEAK for
+    /// the strong-authenticator gate — a native token can read and withdraw,
+    /// never change authenticators or redirect payouts.
+    NativeToken,
 }
 
 /// Resolved account context guarding the `/v1/account/*` read surface.
