@@ -34,6 +34,12 @@ use trace_commons_protocol::trace_contribution::{
     rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
     retention_policy_for_trace, run_privacy_filter_canary,
 };
+use trace_commons_server::account_native_auth::{
+    IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
+    NATIVE_SESSION_CLIENT_KIND, NATIVE_SESSION_TTL_HOURS, PendingNativeAuth,
+    challenge_for_verifier, challenge_is_wellformed, is_native_token, native_token_parts,
+    native_token_value, secret_eq, validate_loopback_redirect_uri, verifier_is_wellformed,
+};
 use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
     generate_login_code, generate_session_secret, hash_secret,
@@ -166,6 +172,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
 use trace_commons_server::trace_gate_service::{
@@ -467,6 +474,10 @@ const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
+    "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1124,6 +1135,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
+    spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
@@ -1196,6 +1220,11 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    /// How often to recompute the community snapshot in-process. `None`
+    /// leaves recompute admin-triggered only, which is the behaviour
+    /// every deployment had before this existed.
+    community_snapshot_interval: Option<StdDuration>,
+    community_analytics_publication_basis: CommunityAnalyticsPublicationBasis,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -1313,6 +1342,17 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Loopback native-app sign-in: pending authorization requests, keyed by
+    /// `request_id`, holding only the PKCE challenge and the validated loopback
+    /// redirect. Single-use and TTL-bounded, same in-process store and same
+    /// single-instance limitation as `account_ceremony_store`. Deliberately
+    /// carries no account/tenant: starting a flow is unauthenticated and confers
+    /// nothing.
+    account_native_requests: Arc<CeremonyStore<PendingNativeAuth>>,
+    /// Loopback native-app sign-in: issued one-time authorization codes, keyed
+    /// by the raw code's sha256. Single-use and TTL-bounded; the first
+    /// successful `take` removes the entry, so a replayed code finds nothing.
+    account_native_codes: Arc<CeremonyStore<IssuedNativeCode>>,
     /// Slice 3a login-with-NEAR: the NEAR sign-in config, present only when
     /// `NearConfig` is fully configured. `None` makes the NEAR sign-in surface
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
@@ -3459,6 +3499,8 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
+        let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
         // Score attestations: `from_env` fails startup on a partial
         // configuration (a signing key with no matching public key/kid is an
@@ -3497,6 +3539,9 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
+            community_analytics_publication_basis:
+                parse_community_analytics_publication_basis_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -3588,6 +3633,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_native_requests,
+            account_native_codes,
             account_near_config,
             attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -6680,6 +6727,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/traces/{submission_id}/content",
             get(account_trace_content_handler),
         )
+        .route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post(account_trace_withdraw_handler),
+        )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
             "/v1/account/sessions/revoke-all",
@@ -6814,6 +6865,18 @@ fn app(state: Arc<AppState>) -> Router {
         //  - The redeem + passkey-login flows are the credential themselves (the
         //    single-use code / the WebAuthn assertion).
         .route("/v1/account/login-links", post(mint_login_link_handler))
+        // Loopback native-app sign-in. BOTH endpoints are unauthenticated by
+        // necessity, and neither confers anything on its own:
+        //  - `native/authorize` only parks a PKCE challenge and a validated
+        //    loopback redirect. No account, no tenant, no credential.
+        //  - `native/token` cannot require a session: it CREATES one. Its
+        //    credentials are the one-time code (minted only by a human
+        //    completing the browser redeem) plus the PKCE verifier.
+        .route(
+            "/v1/account/native/authorize",
+            post(native_authorize_start_handler),
+        )
+        .route("/v1/account/native/token", post(native_token_handler))
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -8372,6 +8435,169 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
 ) {
     if let Ok(mut verifier) = verifier.write() {
         verifier.managed_eddsa_keyset_last_refresh_failed_at = Some(Utc::now());
+    }
+}
+
+/// Minimum recompute interval. Each recompute is a full pass over the
+/// window for every tenant in the cohort, and the snapshot it produces is
+/// only read once per page load, so anything tighter costs database work
+/// nobody sees.
+const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
+
+/// Snapshots kept per window/metric. Only the newest is ever served; the
+/// rest are the record of what was published and under which controls, so
+/// this trims to a short history rather than to one. At the documented
+/// 900s interval that is a bit over a day.
+const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
+
+fn parse_community_analytics_publication_basis_from_env()
+-> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS) {
+        Ok(configured) => parse_community_analytics_publication_basis(&configured),
+        // Absent means the stricter basis. Publishing without a mechanism is
+        // a decision an operator has to make explicitly; it is never what a
+        // deployment falls into by not setting something.
+        Err(_) => Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism),
+    }
+}
+
+fn parse_community_analytics_publication_basis(
+    configured: &str,
+) -> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match configured.trim() {
+        "" | "approved_noise_mechanism" => {
+            Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism)
+        }
+        "suppression_only" => Ok(CommunityAnalyticsPublicationBasis::SuppressionOnly),
+        other => anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS} must be \
+             `approved_noise_mechanism` or `suppression_only`, got `{other}`"
+        ),
+    }
+}
+
+fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
+        Ok(configured) => parse_community_snapshot_interval(&configured),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_community_snapshot_interval(configured: &str) -> anyhow::Result<Option<StdDuration>> {
+    let trimmed = configured.trim();
+    // Empty and 0 both mean "admin-triggered only", so an operator can
+    // disable the worker without deleting the line.
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let seconds: u64 = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be a whole number of seconds"
+        )
+    })?;
+    if seconds < COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be at least {COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS} seconds"
+        );
+    }
+    Ok(Some(StdDuration::from_secs(seconds)))
+}
+
+/// Keep the published snapshot current without an operator POSTing to the
+/// admin route. Before this existed, a contributor who earned a row had no
+/// way for it to appear: the snapshot only moved when someone remembered
+/// to trigger it by hand.
+fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
+    if !state.community_leaderboard_enabled {
+        return;
+    }
+    let Some(interval) = state.community_snapshot_interval else {
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Each tick runs in its own task so a panic surfaces as a
+            // JoinError here rather than killing this loop. Without that,
+            // one panic leaves the process healthy and the snapshot
+            // silently frozen - the exact failure this worker exists to
+            // prevent, in the form least likely to be noticed.
+            let tick = tokio::spawn(community_snapshot_tick(state.clone(), interval));
+            if let Err(join_error) = tick.await {
+                tracing::error!(
+                    panicked = join_error.is_panic(),
+                    "community snapshot recompute tick did not complete; worker continuing"
+                );
+            }
+        }
+    });
+}
+
+/// One scheduled recompute, including the checks that make running this on
+/// a timer safe rather than merely automatic.
+async fn community_snapshot_tick(state: Arc<AppState>, interval: StdDuration) {
+    // Skip if something already produced a snapshot inside this interval:
+    // the admin route, or another process. This is a cheap coordination,
+    // not a mutual exclusion - two writers can still race inside the same
+    // instant. See the deployment note on the interval env var: the worker
+    // assumes a single writer, and a multi-replica deployment wanting
+    // stronger guarantees needs an elected scheduler or a distributed lock.
+    if let Some(db) = state.db_mirror.as_ref() {
+        if let Ok(Some(existing)) = db
+            .latest_leaderboard_snapshot(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+            )
+            .await
+        {
+            let age = Utc::now().signed_duration_since(existing.computed_at);
+            if age < chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::zero()) {
+                tracing::debug!("community snapshot already fresh; skipping scheduled recompute");
+                return;
+            }
+        }
+    }
+
+    let row = match recompute_community_snapshot(state.as_ref()).await {
+        Ok(row) => row,
+        // A 409 here is the publication gate refusing, which is a steady
+        // state rather than a fault: a deployment with controls
+        // unsatisfied would otherwise log an error every interval forever.
+        Err((status, _)) if status == StatusCode::CONFLICT => {
+            tracing::debug!(
+                "community snapshot recompute skipped: publication controls unsatisfied"
+            );
+            return;
+        }
+        Err((status, _)) => {
+            tracing::warn!(status = %status, "community snapshot recompute failed");
+            return;
+        }
+    };
+    tracing::info!(
+        snapshot_id = %row.snapshot_id,
+        "community snapshot recomputed on schedule"
+    );
+
+    // Retention runs after a successful write, so a failure here never
+    // costs the snapshot that was just published.
+    if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .prune_leaderboard_snapshots(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+                COMMUNITY_SNAPSHOT_RETAINED,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned superseded community snapshots"),
+            Err(error) => tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "pruning superseded community snapshots failed"
+            ),
+        }
     }
 }
 
@@ -12307,7 +12533,12 @@ struct CommunitySnapshotContents {
     privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
-    analytics: CommunityCorpusAnalytics,
+    /// `None` when the analytics gate was unsatisfied at recompute time.
+    /// The aggregates are then never computed at all, rather than
+    /// computed and withheld, so nothing un-noised is written to the
+    /// snapshot table. `privacy.analytics_withheld_controls` says why.
+    #[serde(default)]
+    analytics: Option<CommunityCorpusAnalytics>,
 }
 
 const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
@@ -12323,15 +12554,92 @@ const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
 /// is published. A cell of size one is the contributor.
 const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
 
+/// Roster floor. A leaderboard row is not an aggregate that might happen
+/// to identify someone — it is a named person who asked to be named, and
+/// suppressing a contributor for having contributed once hides a
+/// participant rather than protecting a bystander. All this floor does is
+/// keep the SQL honest: below 1, a contributor with nothing accepted in
+/// the window would still take a row.
+///
+/// Note that despite its name, `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT`
+/// is only ever applied to the leaderboard query's HAVING clause.
+/// `compute_corpus_analytics_summary` takes no min-cell argument at all,
+/// so the corpus aggregates have never been cell-suppressed. The
+/// [`COMMUNITY_MIN_CELL_COUNT_FLOOR`] check below therefore gates
+/// analytics publication without suppressing anything inside it — a real
+/// gap, but one that only matters once a noise mechanism exists, since
+/// nothing publishes until then.
+const COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR: usize = 1;
+
 /// Minimum number of distinct tenants in the community cohort before
-/// publication. A single-tenant cohort republishes one tenant's corpus
-/// under a "community" label, which the leaderboard design forbids.
+/// corpus aggregates are published. A single-tenant cohort republishes
+/// one tenant's corpus under a "community" label.
+///
+/// Analytics only. The roster carries no such implication: it is a list
+/// of people who individually chose to appear, and how many tenants they
+/// span changes nothing about who consented to what. The claim of breadth
+/// lives in the aggregates, so the control belongs there.
 const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 
 /// Label-only missing-control name for an unapproved noise mechanism.
 /// Not an env var: no configuration value can approve a mechanism that
 /// has not been implemented.
 const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// What a published set of corpus aggregates rests on.
+///
+/// This exists so the answer is recorded rather than inferred. Previously
+/// the only way to publish analytics was to satisfy a noise-mechanism
+/// control, so anything published implied a mechanism had been approved.
+/// An operator who wants to publish without one should have to say so, and
+/// the snapshot should carry which basis was used, rather than a reader of
+/// the code or the artifact assuming noise was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommunityAnalyticsPublicationBasis {
+    /// Aggregates publish only under an approved, calibrated mechanism.
+    /// The default, and the only basis that supports a privacy claim
+    /// stronger than cell suppression.
+    ApprovedNoiseMechanism,
+    /// Aggregates publish under cell suppression alone: cells below the
+    /// min-cell floor are dropped, and nothing else is done to them. This
+    /// is a real protection and it is not differential privacy. Totals are
+    /// not suppressed, so at small corpus sizes they can still describe a
+    /// handful of contributors closely. Anything user-facing that describes
+    /// this deployment must say which basis is in force.
+    SuppressionOnly,
+}
+
+impl CommunityAnalyticsPublicationBasis {
+    fn strict() -> Self {
+        Self::ApprovedNoiseMechanism
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovedNoiseMechanism => "approved_noise_mechanism",
+            Self::SuppressionOnly => "suppression_only",
+        }
+    }
+}
+
+/// The two community surfaces, which carry different disclosure risks
+/// and therefore different controls.
+///
+/// The split is not cosmetic. Everyone on the roster holds
+/// `public_attribution` consent: their handle and their counts being
+/// public is the thing they asked for, and perturbing those figures
+/// protects nobody while making the published number wrong. The
+/// analytics aggregates span every contributor, including those who
+/// never opted in, so they are an inference surface over people who
+/// made no such choice and need a mechanism before they can leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommunitySurface {
+    /// Leaderboard rows and contributor profiles.
+    Roster,
+    /// Corpus aggregates.
+    Analytics,
+}
 
 /// Noise-seed prefixes belonging to mechanisms approved for community
 /// publication.
@@ -12364,19 +12672,33 @@ fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
 /// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
 /// derive it with [`community_noise_mechanism_approved`].
 fn community_publication_missing_controls(
+    surface: CommunitySurface,
+    basis: CommunityAnalyticsPublicationBasis,
     min_cell_count: usize,
     tenant_cohort_size: usize,
     noise_mechanism_approved: bool,
 ) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+    let min_cell_floor = match surface {
+        CommunitySurface::Roster => COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR,
+        CommunitySurface::Analytics => COMMUNITY_MIN_CELL_COUNT_FLOOR,
+    };
+    // The min-cell floor is never waived for analytics. Under
+    // `SuppressionOnly` it stops being one control among several and becomes
+    // the only thing standing between a published aggregate and a small
+    // group, so it is required more strictly there, not less.
+    if min_cell_count < min_cell_floor {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if !noise_mechanism_approved {
-        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
-    }
-    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
-        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    if surface == CommunitySurface::Analytics
+        && basis == CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    {
+        if !noise_mechanism_approved {
+            missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+        }
+        if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+            missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+        }
     }
     missing
 }
@@ -12384,8 +12706,13 @@ fn community_publication_missing_controls(
 /// Recompute-path preconditions, evaluated against live config. The
 /// seed is the one recompute would stamp on the snapshot it is about to
 /// write.
-fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+fn community_publication_missing_controls_for_state(
+    state: &AppState,
+    surface: CommunitySurface,
+) -> Vec<&'static str> {
     community_publication_missing_controls(
+        surface,
+        state.community_analytics_publication_basis,
         state.analytics_min_cell_count,
         state.community_tenant_ids.len(),
         community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
@@ -12398,6 +12725,7 @@ fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'s
 /// rather than grandfathered in.
 fn community_snapshot_missing_controls(
     row: &trace_commons_server::db::LeaderboardSnapshotRow,
+    surface: CommunitySurface,
 ) -> Vec<&'static str> {
     let cohort_size = row
         .contents
@@ -12405,7 +12733,15 @@ fn community_snapshot_missing_controls(
         .and_then(|privacy| privacy.get("tenant_cohort_size"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
+    let basis = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("publication_basis"))
+        .and_then(|basis| serde_json::from_value(basis.clone()).ok())
+        .unwrap_or_else(CommunityAnalyticsPublicationBasis::strict);
     community_publication_missing_controls(
+        surface,
+        basis,
         usize::try_from(row.min_cell_count).unwrap_or(0),
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
@@ -12430,6 +12766,19 @@ struct CommunitySnapshotPrivacy {
     /// Per-contributor sensitivity the noise was calibrated to. `None`
     /// for the same reason.
     sensitivity: Option<f64>,
+    /// Empty when the aggregates were computed. Otherwise the
+    /// label-only control names that withheld them, in the same
+    /// convention as the serve path: no tenant ids, handles or counts,
+    /// so it is safe in a public body. A reader can tell "withheld"
+    /// from "no activity" from "bug", which a bare null cannot.
+    #[serde(default)]
+    analytics_withheld_controls: Vec<String>,
+    /// What the aggregates in this snapshot rest on. Absent on snapshots
+    /// written before the basis was explicit; those default to the strict
+    /// basis, so an old artifact is never read as having been published
+    /// under suppression alone.
+    #[serde(default = "CommunityAnalyticsPublicationBasis::strict")]
+    publication_basis: CommunityAnalyticsPublicationBasis,
 }
 
 impl CommunitySnapshotPrivacy {
@@ -12443,8 +12792,49 @@ impl CommunitySnapshotPrivacy {
             tenant_cohort_size: 0,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: Vec::new(),
+            publication_basis: CommunityAnalyticsPublicationBasis::strict(),
         }
     }
+}
+
+/// Drop disaggregated analytics cells below the configured minimum size.
+///
+/// A histogram bucket or gate outcome holding one or two records is a
+/// description of those records, and the whole point of a k-anonymity floor
+/// is that such a cell must not be published. `COMMUNITY_MIN_CELL_COUNT_FLOOR`
+/// already gates *whether* analytics publish; this applies the same number to
+/// *what* they contain, which nothing did before.
+///
+/// Suppression drops the cell rather than zeroing it, matching
+/// [`suppress_small_analytics_cells`] on the broad-release path. Dropping
+/// zero-count cells too is deliberate and is the stronger choice: an absent
+/// bucket is then indistinguishable between "no records" and "fewer records
+/// than the floor", where keeping the zeros would have told a reader which.
+///
+/// The totals are deliberately not suppressed: they are the top-level sums
+/// over everything, and blanking them would leave a page that says nothing
+/// while still claiming to be analytics. If a corpus is small enough that its
+/// totals are identifying, the control that should stop publication is the
+/// tenant-cohort floor, not this. Returns the number of cells removed.
+fn suppress_small_community_analytics_cells(
+    summary: &mut trace_commons_server::db::CorpusAnalyticsSummary,
+    min_cell_count: usize,
+) -> usize {
+    let floor = min_cell_count as i64;
+    if floor <= 1 {
+        // A floor of 0 or 1 suppresses nothing by definition: a cell of one
+        // already meets it. Leave the data alone rather than pretending to
+        // filter, and in particular do not strip the empty buckets that give
+        // the histogram its shape.
+        return 0;
+    }
+    let before = summary.novelty_histogram.len() + summary.gate_outcomes.len();
+    summary
+        .novelty_histogram
+        .retain(|(_, count)| *count >= floor);
+    summary.gate_outcomes.retain(|(_, count)| *count >= floor);
+    before.saturating_sub(summary.novelty_histogram.len() + summary.gate_outcomes.len())
 }
 
 /// Compute a fresh snapshot from current DB state and persist it.
@@ -12462,7 +12852,15 @@ async fn recompute_community_snapshot(
     // Fail closed before touching contributor data: a snapshot that
     // cannot be published is not worth computing, and computing it
     // anyway leaves un-noised aggregates sitting in the snapshot table.
-    let missing_controls = community_publication_missing_controls_for_state(state);
+    //
+    // That second clause is why the analytics gate is evaluated
+    // separately below rather than folded in here. When it fails we do
+    // not compute the aggregates at all, so there is nothing un-noised
+    // to sit anywhere — a stronger position than computing them and
+    // withholding at serve time. The roster has no such problem: it is
+    // published under consent, so failing its gate is still fatal here.
+    let missing_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Roster);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -12481,13 +12879,36 @@ async fn recompute_community_snapshot(
         )
         .await
         .map_err(internal_error)?;
-    let analytics = db
-        .compute_corpus_analytics_summary(
-            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
-            state.community_tenant_ids.as_ref(),
-        )
-        .await
-        .map_err(internal_error)?;
+    let analytics_withheld_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Analytics);
+    let analytics = if analytics_withheld_controls.is_empty() {
+        let mut summary = db
+            .compute_corpus_analytics_summary(
+                COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+                state.community_tenant_ids.as_ref(),
+            )
+            .await
+            .map_err(internal_error)?;
+        // The min-cell floor gates whether analytics may publish at all, but
+        // until now nothing applied it to what was published: the aggregation
+        // SQL takes no min-cell argument, so every bucket and gate outcome
+        // went out at its true count however small. Suppress here, where the
+        // configured floor is known.
+        let suppressed =
+            suppress_small_community_analytics_cells(&mut summary, state.analytics_min_cell_count);
+        if suppressed > 0 {
+            tracing::info!(
+                suppressed,
+                "suppressed community analytics cells below the min-cell floor"
+            );
+        }
+        Some(summary)
+    } else {
+        // Deliberately not computed. See the comment on the roster gate
+        // above: an aggregate that cannot be published is an aggregate
+        // that should never exist at rest.
+        None
+    };
 
     // Rank by novelty_credit (rolling 7d).
     let mut sorted = inputs;
@@ -12547,10 +12968,15 @@ async fn recompute_community_snapshot(
             tenant_cohort_size: state.community_tenant_ids.len() as i32,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: analytics_withheld_controls
+                .iter()
+                .map(|control| (*control).to_string())
+                .collect(),
+            publication_basis: state.community_analytics_publication_basis,
         },
         leaderboard,
         contributors,
-        analytics: CommunityCorpusAnalytics {
+        analytics: analytics.map(|analytics| CommunityCorpusAnalytics {
             window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
             total_submissions: analytics.total_submissions,
             total_accepted: analytics.total_accepted,
@@ -12565,7 +12991,7 @@ async fn recompute_community_snapshot(
                 })
                 .collect(),
             gate_outcomes: analytics.gate_outcomes.into_iter().collect(),
-        },
+        }),
     };
     let contents_json = serde_json::to_value(&contents).map_err(internal_error)?;
     let contents_canonical = serde_json::to_string(&contents).map_err(internal_error)?;
@@ -12591,8 +13017,13 @@ async fn recompute_community_snapshot(
 /// into one and forgotten on another, and so snapshots already sitting
 /// in the table from before the gate existed stop being served the
 /// moment this ships - without requiring a data migration.
+///
+/// `surface` selects which controls apply. A caller has to name the
+/// surface it is serving, so adding a route cannot silently inherit the
+/// weaker gate.
 async fn latest_publishable_community_snapshot(
     state: &AppState,
+    surface: CommunitySurface,
 ) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
     if !state.community_leaderboard_enabled {
         return Err(api_error(
@@ -12619,7 +13050,7 @@ async fn latest_publishable_community_snapshot(
                 "no community snapshot has been computed yet",
             )
         })?;
-    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    let missing_controls = community_snapshot_missing_controls(&snapshot, surface);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12658,15 +13089,67 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
-    Ok(Json(snapshot.contents))
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
+
+    // Recompute writes `analytics: null` when the analytics gate is
+    // unsatisfied, so a snapshot produced by current code already omits
+    // them. A snapshot written before that gate existed does not: it
+    // carries aggregates computed under no approved mechanism, and this
+    // handler would hand them out through the roster's weaker gate.
+    //
+    // So the gate is re-evaluated against the stored snapshot here rather
+    // than trusted from when it was written. Withheld aggregates are
+    // replaced with null and the reason recorded, matching what recompute
+    // would have produced, so a reader can still tell "withheld" from
+    // "no activity".
+    let withheld = community_snapshot_missing_controls(&snapshot, CommunitySurface::Analytics);
+    Ok(Json(redact_withheld_analytics(
+        snapshot.contents,
+        &withheld,
+    )))
+}
+
+/// Replace withheld aggregates with null and record why, matching what
+/// recompute would have written. Separate from the handler so the
+/// redaction is testable without standing up a database.
+fn redact_withheld_analytics(
+    mut contents: serde_json::Value,
+    withheld: &[&'static str],
+) -> serde_json::Value {
+    if withheld.is_empty() {
+        return contents;
+    }
+    let Some(object) = contents.as_object_mut() else {
+        return contents;
+    };
+    object.insert("analytics".to_string(), serde_json::Value::Null);
+    let reasons = serde_json::Value::Array(
+        withheld
+            .iter()
+            .map(|control| serde_json::Value::String((*control).to_string()))
+            .collect(),
+    );
+    match object.get_mut("privacy").and_then(|p| p.as_object_mut()) {
+        Some(privacy) => {
+            privacy.insert("analytics_withheld_controls".to_string(), reasons);
+        }
+        None => {
+            object.insert(
+                "privacy".to_string(),
+                serde_json::json!({ "analytics_withheld_controls": reasons }),
+            );
+        }
+    }
+    contents
 }
 
 async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12679,11 +13162,23 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Analytics).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    // The gate above passes against current config, but this snapshot may
+    // predate that config: it was computed while analytics were withheld,
+    // so the aggregates were never calculated. Refuse rather than serve an
+    // empty body, and name the fix, since a recompute is all it takes.
+    let analytics = parsed.analytics.ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "latest community snapshot was computed without analytics; \
+             recompute to publish them",
+        )
+    })?;
     Ok(Json(
-        serde_json::to_value(&parsed.analytics).map_err(internal_error)?,
+        serde_json::to_value(&analytics).map_err(internal_error)?,
     ))
 }
 
@@ -13154,17 +13649,40 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_cookie_value) =
+    let (ctx, rotated_secret_value) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
             Err(err) => return err.into_response(),
         };
 
+    // A native token rotates exactly like a cookie session, but a native client
+    // has no cookie jar. Hand the new token back in a response header — the
+    // bearer analogue of `Set-Cookie`, on the same channel, to the same
+    // already-authenticated caller — and return early so no `Set-Cookie` is
+    // ever emitted for a native client.
+    let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    if native_rotation {
+        request.extensions_mut().insert(ctx);
+        let mut response = next.run(request).await;
+        if let Some(token) = rotated_secret_value {
+            if let Ok(value) = HeaderValue::from_str(&token) {
+                response
+                    .headers_mut()
+                    .insert(ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, value);
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+            }
+        }
+        return response;
+    }
+
     request.extensions_mut().insert(ctx);
     let mut response = next.run(request).await;
 
-    if let Some(cookie_value) = rotated_cookie_value {
+    if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -13216,27 +13734,102 @@ async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
 ) -> ApiResult<(AccountCtx, Option<String>)> {
-    let has_bearer = headers
+    let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim_start().starts_with("Bearer "))
-        .unwrap_or(false);
+        .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+        .map(str::trim);
     let cookie = cookie_value_from_headers(headers, ACCOUNT_SESSION_COOKIE);
 
-    match (has_bearer, cookie) {
-        (true, Some(_)) => Err(api_error(
+    match (bearer, cookie) {
+        (Some(_), Some(_)) => Err(api_error(
             StatusCode::BAD_REQUEST,
             "ambiguous credentials: present both a session cookie and a bearer token",
         )),
-        (true, None) => resolve_account_ctx_bearer(state, headers)
+        // A `tcn1_`-prefixed bearer is a NATIVE ACCOUNT SESSION, not a device
+        // upload claim. The prefix is the whole dispatch: a device claim never
+        // carries it, so the two credential kinds cannot be confused in either
+        // direction, and a native token is never fed to the device authenticator.
+        (Some(bearer), None) if is_native_token(bearer) => {
+            resolve_account_ctx_native(state, bearer).await
+        }
+        (Some(_), None) => resolve_account_ctx_bearer(state, headers)
             .await
             .map(|ctx| (ctx, None)),
-        (false, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
-        (false, None) => Err(api_error(
+        (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
+        (None, None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
             "account session cookie or device bearer token required",
         )),
     }
+}
+
+/// Native-token path: the SAME session validation as the cookie path, reached
+/// through an `Authorization: Bearer tcn1_...` header instead of a cookie.
+///
+/// Everything that governs a browser session governs this one, because it IS a
+/// browser-session row: expiry, the idle cap, revocation (`revoke-all` sets
+/// `revoked_at`, and `validate_session` refuses a revoked row), and
+/// rotation-on-use. The only differences are the transport and the resulting
+/// `auth_method`.
+///
+/// The session's own `client_kind` is NOT propagated into `AccountCtx`: a native
+/// token is pinned WEAK (`'native'`) for the strong-authenticator gate no matter
+/// what browser session approved it, so it can read and withdraw but can never
+/// change authenticators or redirect a payout.
+async fn resolve_account_ctx_native(
+    state: &AppState,
+    bearer: &str,
+) -> ApiResult<(AccountCtx, Option<String>)> {
+    let invalid = || {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired account session",
+        )
+    };
+
+    let (tenant_id, token_hash) = native_token_parts(bearer).ok_or_else(invalid)?;
+
+    let db = account_db(state)?;
+    let session = db
+        .validate_session(&tenant_id, &token_hash)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(invalid)?;
+    // A session row that is not a native session must NOT be reachable through
+    // this transport: that would mean a browser cookie's secret had been
+    // presented as a bearer, which is exactly the "make the browser session
+    // reachable by a native client" property this design forbids.
+    if session.client_kind != NATIVE_SESSION_CLIENT_KIND {
+        return Err(invalid());
+    }
+    let account_id = session.account_id;
+    let account = AccountId::from_uuid(account_id);
+    let principal_set = db
+        .expand_account_principals(&tenant_id, account_id)
+        .await
+        .map_err(internal_error)?;
+
+    // Rotation-on-use fires for native sessions exactly as for cookies. The
+    // middleware hands the new secret back in a response header (the bearer
+    // analogue of `Set-Cookie`) so the client can swap before the short
+    // prev-token grace lapses.
+    let rotated = session
+        .rotated_secret
+        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+
+    Ok((
+        AccountCtx {
+            account_id: account,
+            principal_set,
+            auth_method: AccountAuthMethod::NativeToken,
+            tenant_id,
+            actor_ref: account_actor_ref(&account),
+            auth_credential_id: None,
+            client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+        },
+        rotated,
+    ))
 }
 
 /// Bearer path: device token → linked account → active-membership set.
@@ -13740,6 +14333,335 @@ async fn account_trace_content_handler(
     Ok(response)
 }
 
+/// Label recorded on the withdrawal tombstone and returned to the client:
+/// the trace was never in the commons.
+const TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED: &str = "not_distributed";
+/// In the commons, but never published in an export or benchmark.
+const TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED: &str = "commons_not_distributed";
+/// In the commons AND already published. Copies cannot be recalled.
+const TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED: &str = "commons_distributed";
+
+/// Revocation reason recorded for a contributor-initiated withdrawal. Distinct
+/// from `contributor_revocation` so the audit trail separates "I revoked this
+/// submission" from "I withdrew my trace from the commons".
+const TRACE_WITHDRAWAL_REASON: &str = "contributor_withdrawal";
+
+/// Response body for `POST /v1/account/traces/{submission_id}/withdraw`.
+///
+/// The tier is reported explicitly so the client can tell the contributor the
+/// truth rather than a generic success. Nothing here is derived from the
+/// request body; every field comes from auth-derived tenant state.
+#[derive(Debug, Serialize)]
+struct AccountTraceWithdrawalResponse {
+    submission_id: Uuid,
+    withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status held immediately before withdrawal.
+    prior_status: String,
+    /// One of `not_distributed`, `commons_not_distributed`,
+    /// `commons_distributed`.
+    distribution_reach: String,
+    /// True only for `commons_distributed`. When true the content is deleted
+    /// and the trace is excluded going forward, but copies already distributed
+    /// cannot be recalled — and the API says so rather than implying otherwise.
+    already_distributed: bool,
+    /// Always true. Withdrawal is not a punishment: credit already awarded
+    /// stays awarded.
+    credit_retained: bool,
+}
+
+impl AccountTraceWithdrawalResponse {
+    fn from_record(record: StorageTraceWithdrawalRecord) -> Self {
+        let already_distributed =
+            record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
+        Self {
+            submission_id: record.submission_id,
+            withdrawn_at: record.withdrawn_at,
+            prior_status: record.prior_status,
+            distribution_reach: record.distribution_reach,
+            already_distributed,
+            credit_retained: true,
+        }
+    }
+}
+
+/// Wire label for a storage corpus status. Used for the tombstone's
+/// `prior_status`; deliberately independent of the local `TraceCorpusStatus`
+/// projection, which DROPS `received` and would make those traces
+/// un-withdrawable.
+fn storage_corpus_status_label(status: StorageTraceCorpusStatus) -> &'static str {
+    match status {
+        StorageTraceCorpusStatus::Received => "received",
+        StorageTraceCorpusStatus::Accepted => "accepted",
+        StorageTraceCorpusStatus::Quarantined => "quarantined",
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => "awaiting_pii_backstop",
+        StorageTraceCorpusStatus::Rejected => "rejected",
+        StorageTraceCorpusStatus::Revoked => "revoked",
+        StorageTraceCorpusStatus::Expired => "expired",
+        StorageTraceCorpusStatus::Purged => "purged",
+    }
+}
+
+/// Map a stored object-ref artifact kind onto the artifact-store kind carried
+/// on a receipt. Deletion keys on the object key, but the receipt is typed and
+/// the mapping is written out rather than guessed at the call site.
+fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> TraceArtifactKind {
+    match kind {
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+        | StorageTraceObjectArtifactKind::RescrubbedEnvelope => {
+            TraceArtifactKind::ContributionEnvelope
+        }
+        StorageTraceObjectArtifactKind::BenchmarkArtifact => TraceArtifactKind::BenchmarkConversion,
+        StorageTraceObjectArtifactKind::ExportArtifact => TraceArtifactKind::ReplayDatasetExport,
+        StorageTraceObjectArtifactKind::ReviewSnapshot
+        | StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::Other,
+    }
+}
+
+/// Delete every trace object this submission owns: the stored envelope and the
+/// encrypted artifact.
+///
+/// Three sources are swept, because no single one is complete:
+///
+/// 1. the file-side submission record, which is the ONLY place the encrypted
+///    artifact receipt survives (the DB projection drops it);
+/// 2. the `trace_object_refs` rows, so a submission with no file-side record
+///    still gets its encrypted artifact deleted;
+/// 3. every status-derived envelope path, because the object key encodes the
+///    corpus status and a transition may have left bytes at an earlier path.
+///
+/// Errors propagate: withdrawal must not report success while content survives.
+async fn delete_withdrawn_trace_objects(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
+        delete_trace_objects_for_record(state, &record)?;
+    }
+
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    for object_ref in db.list_trace_object_refs(tenant_id, submission_id).await? {
+        if object_ref.deleted_at.is_some() {
+            continue;
+        }
+        if object_ref.object_store == TRACE_COMMONS_FILE_OBJECT_STORE {
+            remove_file_if_exists(&state.root.join(&object_ref.object_key))?;
+        } else if let Some(store) = state.artifact_store.as_ref()
+            && object_ref.object_store == store.object_store_name()
+        {
+            let receipt = EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_ref.clone(),
+                artifact_kind: trace_artifact_kind_from_storage(object_ref.artifact_kind),
+                object_key: object_ref.object_key.clone(),
+                ciphertext_sha256: object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&object_ref.content_sha256)
+                    .to_string(),
+                encrypted_at: Utc::now(),
+            };
+            store.delete_artifact(&tenant_ref, &receipt)?;
+        }
+        db.mark_trace_object_ref_deleted(
+            tenant_id,
+            submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await?;
+    }
+
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
+    }
+    Ok(())
+}
+
+/// Evict a withdrawn trace from every derived surface that would otherwise
+/// keep its content alive in derived form: the vector index (both the DB rows
+/// and the gate service's in-memory ANN index), the dedup clusters, and future
+/// export / benchmark membership.
+async fn evict_withdrawn_trace_from_derived_surfaces(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let vector_entry_ids = db
+        .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
+    // Canonical tenant_storage_ref: it must match the form the gate worker
+    // used at insertion time, or a sharded index routes the delete to the
+    // wrong shard and the embedding survives.
+    let gate_tenant = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    for vector_entry_id in vector_entry_ids {
+        state
+            .gate_service
+            .invalidate_vector_entry(&gate_tenant, vector_entry_id)
+            .context("VectorInvalidationFailed")?;
+    }
+
+    db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
+        .await?;
+
+    db.invalidate_trace_submission_artifacts(
+        tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Revoked,
+    )
+    .await?;
+    db.invalidate_trace_export_manifests_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_export_manifest_items_for_submission(
+        tenant_id,
+        submission_id,
+        StorageTraceExportManifestItemInvalidationReason::Revoked,
+    )
+    .await?;
+    Ok(())
+}
+
+/// `POST /v1/account/traces/{submission_id}/withdraw` — contributor-initiated
+/// withdrawal, authenticated by the ACCOUNT SESSION (the same auth that guards
+/// the content read-back), not the device key: withdrawal is an account-level
+/// act and must survive losing a device.
+///
+/// Contract:
+///
+/// * Tenant-scoped through the auth-derived `AccountCtx`; ownership is checked
+///   against the account's active principal set BEFORE anything is touched.
+///   Not-found and not-owned collapse to the byte-identical `404` the detail
+///   and content handlers use — another tenant's submission id must not be
+///   distinguishable from one that never existed.
+/// * Idempotent. The tombstone is first-writer-wins, so withdrawing twice
+///   returns the same tier and the same `withdrawn_at`. Deletion and eviction
+///   are re-run on every call, so a partial failure converges on retry rather
+///   than leaving content behind under a tombstone that says it is gone.
+/// * Credit is NOT clawed back.
+/// * Fail-closed: any deletion or eviction failure is a generic label-only
+///   `500`. The withdrawal is not reported as complete while content or a
+///   derived copy may survive.
+async fn account_trace_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    // Ownership BEFORE any state change. The storage record is used directly
+    // rather than the local corpus-status projection, which drops `received`
+    // and would leave those traces permanently un-withdrawable.
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        _ => return Err(not_found()),
+    };
+
+    let withdrawal_failed = |error: &anyhow::Error| {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            %submission_id,
+            "Trace Commons trace withdrawal failed; failing closed"
+        );
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+    };
+
+    // Tier. An existing tombstone is authoritative: the reach recorded at the
+    // first withdrawal is the honest answer, and recomputing it against
+    // mutated export state could silently downgrade it.
+    let existing = db
+        .get_trace_withdrawal(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (prior_status, distribution_reach) = match existing.as_ref() {
+        Some(existing) => (
+            existing.prior_status.clone(),
+            existing.distribution_reach.clone(),
+        ),
+        None => {
+            let reach = if record.status != StorageTraceCorpusStatus::Accepted {
+                TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED
+            } else {
+                let memberships = db
+                    .count_trace_export_memberships(&ctx.tenant_id, submission_id)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+                if memberships > 0 {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED
+                } else {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED
+                }
+            };
+            (
+                storage_corpus_status_label(record.status).to_string(),
+                reach.to_string(),
+            )
+        }
+    };
+
+    // Tombstone + status FIRST, bytes second: a crash between the two leaves a
+    // tombstone whose retry deletes the content, never content with no record
+    // that it was withdrawn.
+    let tombstone = db
+        .record_trace_withdrawal(
+            &ctx.tenant_id,
+            submission_id,
+            Utc::now(),
+            &prior_status,
+            &distribution_reach,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+
+    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+
+    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
+    // account-actor ref, never contributor identity.
+    let audit_tenant = account_audit_tenant(&ctx);
+    let audit_event =
+        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
+    if let Err(error) = append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &audit_tenant,
+        audit_event,
+        StorageTraceAuditAction::Revoke,
+        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+    )
+    .await
+    {
+        // The content is already gone and the tombstone is durable; a failed
+        // audit append must not resurrect either. Log hash-only and continue.
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(&error),
+            %submission_id,
+            "Trace Commons withdrawal audit append failed"
+        );
+    }
+
+    Ok(Json(AccountTraceWithdrawalResponse::from_record(tombstone)))
+}
+
 /// Mint a single-use login link for the authenticated device's principal.
 ///
 /// Creates-or-reuses the durable account for the device principal, then issues
@@ -13812,6 +14734,325 @@ async fn mint_login_link_handler(
     }))
 }
 
+// --- Loopback native-app sign-in -------------------------------------------
+//
+// See `trace_commons_server::account_native_auth` for the threat model. The
+// shape here is deliberately the standard authorization-code + PKCE dance,
+// grafted onto the EXISTING login-link redeem rather than built beside it:
+//
+//   1. app  -> POST /v1/account/native/authorize  (PKCE challenge + loopback
+//              redirect; unauthenticated, confers nothing)
+//   2. app  -> POST /v1/account/login-links       (existing device-authenticated
+//              mint, unchanged)
+//   3. human-> GET  /account/login?code=..&native=<request_id>
+//              POST /account/login/confirm        (existing redeem, unchanged
+//              except that it now also honours `native`)
+//   4. server 303s the BROWSER to http://127.0.0.1:<port>/...?code=<one-time>
+//   5. app  -> POST /v1/account/native/token      (code + PKCE verifier)
+//              -> short-lived `tcn1_` bearer backed by a trace_sessions row
+//
+// What the device key gains: nothing. Step 2 is an authority it already has,
+// and the session it can ultimately reach is the same account its bearer token
+// already resolves to through `resolve_account_ctx_bearer`. See the report in
+// docs/superpowers/plans/account-loopback-auth-report.md.
+
+/// Response header carrying a rotated native session token. The bearer
+/// analogue of `Set-Cookie`, emitted by `account_auth_middleware` on the one
+/// response where rotation fired, to the already-authenticated caller that
+/// presented the old token.
+const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
+
+/// Query/form field naming the pending native authorization request that the
+/// browser redeem should complete. Optional everywhere: a plain browser login
+/// never carries it.
+const NATIVE_REQUEST_FIELD: &str = "native";
+
+/// Per-IP cap on `POST /v1/account/native/authorize` per window. Starting a
+/// flow is cheap and confers nothing, but it does consume store space.
+const NATIVE_AUTHORIZE_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native authorize-starts per window.
+const NATIVE_AUTHORIZE_GLOBAL_LIMIT: u32 = 600;
+/// Per-IP cap on `POST /v1/account/native/token` per window.
+const NATIVE_TOKEN_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native token exchanges per window.
+const NATIVE_TOKEN_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`code_hash` ceiling on exchange attempts per window. A code is
+/// single-use, so more than a couple of attempts against one code is a replay
+/// or a guess; this caps it independently of the source IP.
+const NATIVE_TOKEN_PER_CODE_LIMIT: u32 = 5;
+
+/// Request body for `POST /v1/account/native/authorize`.
+#[derive(Debug, Deserialize)]
+struct NativeAuthorizeStartRequest {
+    /// `base64url(sha256(code_verifier))`, unpadded.
+    code_challenge: String,
+    /// Must be `S256`. `plain` is refused: with `plain` the challenge IS the
+    /// verifier, so anyone who sees the start request can complete the flow.
+    code_challenge_method: String,
+    /// Must be exactly `http://127.0.0.1:{port}/trace-commons/native-auth/callback`.
+    redirect_uri: String,
+}
+
+/// Response for `POST /v1/account/native/authorize`. `request_id` is a
+/// 160-bit CSPRNG value; it is a flow handle, not a credential (holding it
+/// without the verifier gets you nothing).
+#[derive(Debug, Serialize)]
+struct NativeAuthorizeStartResponse {
+    request_id: String,
+    expires_in_secs: u64,
+}
+
+/// Request body for `POST /v1/account/native/token`.
+#[derive(Debug, Deserialize)]
+struct NativeTokenRequest {
+    request_id: String,
+    /// The one-time code delivered to the loopback listener.
+    code: String,
+    /// The PKCE verifier whose sha256 was registered at authorize-start.
+    code_verifier: String,
+}
+
+/// Response for `POST /v1/account/native/token`.
+///
+/// `access_token` is a SECRET. It is returned exactly once, is never persisted
+/// server-side in raw form (only `sha256` of its secret part reaches the
+/// database), and appears in no log line, error string, or audit row.
+#[derive(Debug, Serialize)]
+struct NativeTokenResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_in_secs: i64,
+    account_id: String,
+}
+
+/// The single uniform deny for the whole native flow.
+///
+/// Every failure mode — malformed body, bad redirect, unknown or expired or
+/// replayed code, wrong `request_id`, wrong verifier, rate limit, DB error —
+/// returns this identical response, so nothing about which of them occurred is
+/// observable. It carries no detail an attacker could use and no secret.
+fn native_generic_deny() -> axum::response::Response {
+    let mut response = (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "native sign-in could not be completed" })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `POST /v1/account/native/authorize` — park a PKCE challenge and a loopback
+/// redirect, and hand back the `request_id` that names them.
+///
+/// UNAUTHENTICATED, and safe to be: nothing is created but an entry in a
+/// short-TTL in-process map, bound to no account and no tenant. An attacker who
+/// floods this endpoint gets rate-limited and learns nothing.
+async fn native_authorize_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeAuthorizeStartRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-authorize-ip:{client_ip}"),
+        NATIVE_AUTHORIZE_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    if body.code_challenge_method != NATIVE_CODE_CHALLENGE_METHOD {
+        return native_generic_deny();
+    }
+    if !challenge_is_wellformed(&body.code_challenge) {
+        return native_generic_deny();
+    }
+    let Some(redirect) = validate_loopback_redirect_uri(&body.redirect_uri) else {
+        return native_generic_deny();
+    };
+
+    let request_id = generate_login_code();
+    state.account_native_requests.put(
+        request_id.clone(),
+        PendingNativeAuth {
+            code_challenge: body.code_challenge.clone(),
+            redirect,
+        },
+    );
+
+    let mut response = Json(NativeAuthorizeStartResponse {
+        request_id,
+        expires_in_secs: NATIVE_AUTH_REQUEST_TTL.as_secs(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Complete the native half of a browser redeem: mint the one-time code and
+/// return the absolute loopback `Location` the browser should be sent to.
+///
+/// Returns `None` when there is no live pending request under `request_id` (it
+/// expired, it was already completed, or it never existed). The caller then
+/// falls through to the ordinary post-login redirect: the human's browser login
+/// genuinely succeeded, so denying it would be wrong, and the native app simply
+/// times out waiting on its listener and reports a failed sign-in.
+fn issue_native_authorization_code(
+    state: &AppState,
+    request_id: &str,
+    tenant_id: &str,
+    account_id: uuid::Uuid,
+) -> Option<String> {
+    let pending = state.account_native_requests.take(request_id)?;
+    let code = generate_login_code();
+    // Keyed by the code's HASH so the store never holds the raw code.
+    state.account_native_codes.put(
+        hash_secret(&code),
+        IssuedNativeCode {
+            request_id: request_id.to_string(),
+            code_challenge: pending.code_challenge,
+            tenant_id: tenant_id.to_string(),
+            account_id,
+        },
+    );
+    // `code` and `request_id` are both unpadded base64url, so neither needs
+    // percent-encoding, and the redirect itself was validated to be an exact
+    // loopback URI with no query of its own.
+    Some(format!(
+        "{}?code={code}&request_id={request_id}",
+        pending.redirect.as_str()
+    ))
+}
+
+/// `POST /v1/account/native/token` — exchange a one-time code plus its PKCE
+/// verifier for a short-lived native session token.
+///
+/// UNAUTHENTICATED by necessity: this endpoint CREATES the session, so it
+/// cannot require one. Its credentials are the code (which only a human
+/// completing the browser redeem can cause to exist) and the verifier (which
+/// only the app that started the flow holds).
+async fn native_token_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    // Same fixed-latency floor as the login redeem, for the same reason: erase
+    // the found-vs-not-found (and rate-limited-vs-not) timing oracle across
+    // every branch below.
+    let start = std::time::Instant::now();
+    let response = native_token_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+async fn native_token_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-ip:{client_ip}"),
+        NATIVE_TOKEN_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    // Reject a malformed verifier before it is hashed, so nothing outside RFC
+    // 7636's shape can ever participate in the binding.
+    if !verifier_is_wellformed(&body.code_verifier) {
+        return native_generic_deny();
+    }
+
+    let code_hash = hash_secret(&body.code);
+    // Per-code ceiling, IP-independent: caps replay/guessing against one
+    // specific code even from rotating sources. The key is a sha256, so the
+    // limiter holds no cleartext secret.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-code:{code_hash}"),
+        NATIVE_TOKEN_PER_CODE_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+
+    // SINGLE USE: `take` removes the entry, so a replay of this exact code
+    // finds nothing here regardless of whether the first attempt succeeded.
+    let Some(issued) = state.account_native_codes.take(&code_hash) else {
+        return native_generic_deny();
+    };
+    // The code must be presented against the flow it was minted for.
+    if !secret_eq(&issued.request_id, &body.request_id) {
+        return native_generic_deny();
+    }
+    // PKCE: the verifier must hash to the challenge registered BEFORE the
+    // browser step. This is the check that makes an intercepted code useless.
+    if !secret_eq(
+        &issued.code_challenge,
+        &challenge_for_verifier(&body.code_verifier),
+    ) {
+        return native_generic_deny();
+    }
+
+    let Ok(db) = account_db(state.as_ref()) else {
+        return native_generic_deny();
+    };
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS);
+    if db
+        .issue_native_session(
+            &issued.tenant_id,
+            issued.account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at,
+            },
+            trace_commons_server::db::RedeemAudit {
+                action: "account_native_session_issue".to_string(),
+                outcome: "success".to_string(),
+                metadata: serde_json::json!({ "client_kind": NATIVE_SESSION_CLIENT_KIND }),
+            },
+        )
+        .await
+        .is_err()
+    {
+        return native_generic_deny();
+    }
+
+    // The raw token is built here and returned once. It is never logged and
+    // never audited; only `token_hash` above reached the database.
+    let mut response = Json(NativeTokenResponse {
+        access_token: native_token_value(&issued.tenant_id, &secret),
+        token_type: "Bearer",
+        expires_in_secs: NATIVE_SESSION_TTL_HOURS * 3600,
+        account_id: issued.account_id.to_string(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// Body extractor for the confirm POST. Accepts both a browser form post
 /// (`application/x-www-form-urlencoded`, the default) and a JSON body. On ANY
 /// extraction failure it rejects with the uniform redeem deny so a malformed
@@ -13864,6 +15105,12 @@ const ACCOUNT_VIEW_PATH: &str = "/account";
 #[derive(Debug, Deserialize)]
 struct LoginInterstitialQuery {
     code: String,
+    /// Optional pending native-authorization request id. Present only when a
+    /// native application opened this link; carried through to the confirm POST
+    /// so one human action both signs the browser in and releases the app's
+    /// one-time code. A plain browser login never sets it.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 /// Body for `POST /account/login/confirm`. Accepts either a form post (browser
@@ -13871,6 +15118,12 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Optional pending native-authorization request id (see
+    /// [`LoginInterstitialQuery::native`]). When present and still live, a
+    /// successful redeem ALSO mints the app's one-time authorization code and
+    /// redirects to the registered loopback URI instead of the account view.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 // --- Task 11: account-surface hardening (rate limit, timing floor) ----------
@@ -14273,6 +15526,17 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
     true
 }
 
+/// Escape a client-supplied string for use inside a double-quoted HTML
+/// attribute. Shared by every hidden field the interstitial renders so no field
+/// can be added later that forgets to escape.
+fn html_escape_attribute(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 /// `GET /account/login?code=...` — minimal "Activate" interstitial.
 ///
 /// Renders a self-contained HTML page with a form that POSTs the code to
@@ -14300,21 +15564,35 @@ async fn login_interstitial_handler(
     }
     // Minimal, self-contained HTML; the code rides in a hidden field. HTML-escape
     // it so a crafted code cannot break out of the attribute context.
-    let escaped_code = query
-        .code
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;");
+    let escaped_code = html_escape_attribute(&query.code);
+    // A native request id rides in a second hidden field, escaped identically.
+    // It is echoed back to the client that supplied it and is not otherwise
+    // trusted: the confirm handler looks it up in the pending-request store and
+    // ignores it when there is no live entry.
+    let native_field = match query.native.as_deref() {
+        Some(native) => format!(
+            "<input type=\"hidden\" name=\"{NATIVE_REQUEST_FIELD}\" value=\"{}\">",
+            html_escape_attribute(native)
+        ),
+        None => String::new(),
+    };
+    // When a native app opened this link, say so plainly: the human is being
+    // asked to grant an application on this computer access to their account,
+    // which is a different question from "sign this browser in".
+    let heading = if query.native.is_some() {
+        "<h1>Sign in an application</h1>\
+<p>An application on this computer asked to sign in to your account. \
+Confirm only if you started this.</p>"
+    } else {
+        "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
+    };
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Activate account</title></head><body>\
-<main><h1>Activate your account</h1>\
-<p>Confirm to sign in on this browser.</p>\
+<main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
-<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">\
+<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
 <button type=\"submit\">Activate</button></form></main></body></html>"
     );
     let mut response = axum::response::Html(body).into_response();
@@ -14361,6 +15639,7 @@ async fn confirm_login_inner(
     body: ConfirmLoginForm,
 ) -> axum::response::Response {
     let code = body.0.code;
+    let native_request_id = body.0.native;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
@@ -14435,6 +15714,16 @@ async fn confirm_login_inner(
     };
     let _ = redeemed.session_id; // server-assigned; not surfaced to the client.
 
+    // If a native app opened this link, this ONE human action also releases the
+    // app's one-time authorization code, delivered by redirecting the browser to
+    // the loopback URI the app registered (and the server validated) at
+    // authorize-start. A missing or stale `native` id is not an error: the
+    // browser login itself succeeded, so we fall through to the ordinary
+    // account-view redirect and the app times out on its listener.
+    let native_location = native_request_id.as_deref().and_then(|request_id| {
+        issue_native_authorization_code(state.as_ref(), request_id, &tenant, redeemed.account_id)
+    });
+
     // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
     // Max-Age matching the 7d TTL. The VALUE encodes the tenant alongside the
     // secret as `{b64url(tenant_id)}.{secret}` so that browser session
@@ -14463,10 +15752,18 @@ async fn confirm_login_inner(
     // secret never leaks via cache or Referer.
     let mut response = StatusCode::SEE_OTHER.into_response();
     let resp_headers = response.headers_mut();
-    resp_headers.insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
-    );
+    // Either the code-free account view, or the app's exact loopback URI when a
+    // native flow was completed. Both are server-built: the loopback URI came
+    // from `validate_loopback_redirect_uri`, so this is not an open redirect —
+    // the only reachable off-view destination is 127.0.0.1 on one fixed path.
+    let location = match native_location.as_deref() {
+        Some(loopback) => match HeaderValue::from_str(loopback) {
+            Ok(value) => value,
+            Err(_) => return redeem_generic_deny(),
+        },
+        None => HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    };
+    resp_headers.insert(axum::http::header::LOCATION, location);
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
@@ -14515,6 +15812,24 @@ async fn account_logout_handler(
                 .await
                 .map_err(internal_error)?
         }
+        // Native token: there IS a session row behind this bearer, so logout
+        // must actually revoke it (a documented no-op here would leave a signed
+        // -out app holding a live token for the rest of its 12h TTL). Re-derive
+        // the hash from the presented bearer with the same shared parser the
+        // resolver used, and revoke exactly that row.
+        AccountAuthMethod::NativeToken => {
+            let bearer = headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+                .map(str::trim)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            let (_token_tenant, token_hash) = native_token_parts(bearer)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            db.revoke_current_session(&ctx.tenant_id, &token_hash)
+                .await
+                .map_err(internal_error)?
+        }
         // Bearer path: no browser session row to revoke. Documented 200 no-op.
         AccountAuthMethod::DeviceBearer => 0,
     };
@@ -14530,6 +15845,7 @@ async fn account_logout_handler(
             "auth_method": match ctx.auth_method {
                 AccountAuthMethod::SessionCookie => "session_cookie",
                 AccountAuthMethod::DeviceBearer => "device_bearer",
+                AccountAuthMethod::NativeToken => "native_token",
             },
             "revoked": revoked,
         }),

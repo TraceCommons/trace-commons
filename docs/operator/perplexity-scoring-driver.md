@@ -32,7 +32,7 @@ CREATE ROLE trace_gate_driver NOLOGIN NOBYPASSRLS;
 -- table, trace_gate_evaluation_attempts
 ```
 
-`V42__trace_gate_driver_column_grants.sql` then narrows those grants to the
+`V45__trace_gate_driver_column_grants.sql` then narrows those grants to the
 exact columns the driver's queries select, join on, filter by, or order by —
 the same convention `V38__trace_pii_backstop.sql` established for
 `trace_pii_backstop_driver`. Cross-tenant enumeration stays deliberate

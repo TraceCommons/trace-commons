@@ -5541,9 +5541,7 @@ async fn gate_driver_column_grants_exclude_object_keys_and_wide_columns() {
                 .expect("commit column-grant cleanup transaction");
         }
         Err(e) => {
-            eprintln!(
-                "skipping live SET ROLE column-grant assertion: cannot SET ROLE ({e})"
-            );
+            eprintln!("skipping live SET ROLE column-grant assertion: cannot SET ROLE ({e})");
         }
     }
 }

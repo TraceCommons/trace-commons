@@ -1586,7 +1586,10 @@ async fn confirm_login_issues_single_use_session_cookie() {
     let response = confirm_login_handler(
         State(state.clone()),
         same_origin.clone(),
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+        }),
     )
     .await
     .into_response();
@@ -1630,7 +1633,10 @@ async fn confirm_login_issues_single_use_session_cookie() {
     let reused = confirm_login_handler(
         State(state.clone()),
         same_origin.clone(),
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+        }),
     )
     .await
     .into_response();
@@ -1645,6 +1651,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
         same_origin,
         ConfirmLoginForm(ConfirmLoginBody {
             code: "totally-bogus-code".to_string(),
+            native: None,
         }),
     )
     .await
@@ -1676,6 +1683,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
         cross_site,
         ConfirmLoginForm(ConfirmLoginBody {
             code: "another-code".to_string(),
+            native: None,
         }),
     )
     .await
@@ -1710,7 +1718,7 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     let response = confirm_login_handler(
         State(state.clone()),
         same_origin,
-        ConfirmLoginForm(ConfirmLoginBody { code }),
+        ConfirmLoginForm(ConfirmLoginBody { code, native: None }),
     )
     .await
     .into_response();
@@ -2767,6 +2775,23 @@ async fn insert_account_test_submission(
     tenant_id: &str,
     auth_principal_ref: &str,
 ) -> Uuid {
+    insert_account_test_submission_with_status(
+        backend,
+        tenant_id,
+        auth_principal_ref,
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await
+}
+
+/// Same as [`insert_account_test_submission`], with an explicit corpus status
+/// so withdrawal-tier tests can stage `submitted` / `quarantined` rows.
+async fn insert_account_test_submission_with_status(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    status: StorageTraceCorpusStatus,
+) -> Uuid {
     use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
     let submission_id = Uuid::new_v4();
     let mut redaction_counts = BTreeMap::new();
@@ -2784,7 +2809,7 @@ async fn insert_account_test_submission(
             consent_scopes: vec!["debugging_evaluation".to_string()],
             allowed_uses: vec!["debugging".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
-            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            status,
             privacy_risk: "low".to_string(),
             redaction_pipeline_version: "deterministic-v1".to_string(),
             redaction_counts,
@@ -3217,6 +3242,506 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     // The generic message carries no path, object key, or exception detail.
     assert!(!err.1.0.error.contains('/'));
     assert!(!err.1.0.error.to_lowercase().contains("tenant"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ---------------------------------------------------------------------------
+// Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
+// ---------------------------------------------------------------------------
+
+/// Stage a stub trace object at the production object-key layout for
+/// `(tenant, status, submission)` so withdrawal has real bytes to delete.
+fn stage_trace_object_file(
+    state: &AppState,
+    tenant_id: &str,
+    status: TraceCorpusStatus,
+    submission_id: Uuid,
+) -> PathBuf {
+    let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, b"{\"stub\":true}").expect("write stub object");
+    path
+}
+
+/// Read every column of the withdrawal tombstone row as text, so a test can
+/// assert the row leaks no content, path, or contributor identity.
+async fn read_withdrawal_tombstone_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<(String, String)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let rows = tx
+        .query(
+            "SELECT tenant_id, submission_id::TEXT AS submission_id,
+                    withdrawn_at::TEXT AS withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read tombstone");
+    tx.commit().await.expect("commit");
+    let mut out = Vec::new();
+    for row in rows {
+        for column in row.columns() {
+            let value: Option<String> = row.get(column.name());
+            out.push((column.name().to_string(), value.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// Read one scalar text column from a tenant-scoped table on the raw pool.
+async fn read_scalar_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    sql: &str,
+    submission_id: Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let row = tx
+        .query_opt(sql, &[&tenant_id, &submission_id])
+        .await
+        .expect("scalar read");
+    tx.commit().await.expect("commit");
+    row.and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_quarantined_deletes_content_and_is_idempotent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let object_path = stage_trace_object_file(
+        state.as_ref(),
+        "tenant-a",
+        TraceCorpusStatus::Quarantined,
+        owned,
+    );
+    assert!(object_path.exists(), "content is staged before withdrawal");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(first) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+    assert_eq!(first.submission_id, owned);
+    assert_eq!(first.prior_status, "quarantined");
+    assert_eq!(first.distribution_reach, "not_distributed");
+    assert!(!first.already_distributed);
+    assert!(
+        first.credit_retained,
+        "withdrawal must not claw back credit"
+    );
+
+    // The content is genuinely gone.
+    assert!(
+        !object_path.exists(),
+        "withdrawal must delete the stored content"
+    );
+
+    // Twice is a success, and reports the SAME tier and timestamp.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(second) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(second.withdrawn_at, first.withdrawn_at);
+    assert_eq!(second.distribution_reach, first.distribution_reach);
+    assert_eq!(second.prior_status, first.prior_status);
+
+    // The tombstone is hash-only/label-only: no content, no path, no identity.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", owned).await;
+    assert!(!columns.is_empty(), "a tombstone row is retained");
+    for (name, value) in &columns {
+        assert!(
+            !value.contains(&device_principal),
+            "tombstone column {name} must not carry contributor identity"
+        );
+        assert!(
+            !value.contains('/'),
+            "tombstone column {name} must not carry an object path"
+        );
+        assert!(
+            !value.contains("stub"),
+            "tombstone column {name} must not carry trace content"
+        );
+    }
+    let names = columns
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("submission_id"));
+    assert!(names.contains("withdrawn_at"));
+    assert!(names.contains("prior_status"));
+    assert!(names.contains("distribution_reach"));
+    assert!(
+        !names.contains("auth_principal_ref") && !names.contains("object_key"),
+        "the tombstone must not have identity or path columns at all"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("another contributor's trace -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+
+    // 404 and NOT 403: existence must not be disclosed.
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_ne!(unowned_err.0, StatusCode::FORBIDDEN);
+    assert_eq!(unowned_err.1.0.error, missing_err.1.0.error);
+
+    // The unowned row is untouched: no tombstone was written for it.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", unowned).await;
+    assert!(
+        columns.is_empty(),
+        "a rejected withdrawal must not write a tombstone"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_reports_each_distribution_tier() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Tier 1: not yet in the commons. `received` deliberately exercises a
+    // status the local corpus-status projection DROPS, proving withdrawal is
+    // driven by the storage record rather than that projection.
+    let received = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Received,
+    )
+    .await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier1) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(received))
+        .await
+        .expect("received withdraws");
+    assert_eq!(tier1.prior_status, "received");
+    assert_eq!(tier1.distribution_reach, "not_distributed");
+    assert!(!tier1.already_distributed);
+
+    // Tier 2: accepted into the commons, never used downstream.
+    let accepted =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier2) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(accepted))
+        .await
+        .expect("accepted withdraws");
+    assert_eq!(tier2.prior_status, "accepted");
+    assert_eq!(tier2.distribution_reach, "commons_not_distributed");
+    assert!(!tier2.already_distributed);
+
+    // Tier 3: accepted AND already published in an export manifest.
+    let exported =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let exported_record = backend
+        .get_trace_submission("tenant-a", exported)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+    let manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: None,
+            audit_event_id: None,
+            source_submission_ids: vec![exported],
+            source_submission_ids_hash: "sha256:manifest".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("manifest writes");
+    backend
+        .upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            submission_id: exported,
+            trace_id: exported_record.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Accepted,
+            source_hash_at_export: "sha256:source".to_string(),
+        })
+        .await
+        .expect("manifest item writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier3) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(exported))
+        .await
+        .expect("exported trace withdraws");
+    assert_eq!(tier3.distribution_reach, "commons_distributed");
+    assert!(
+        tier3.already_distributed,
+        "the API must say copies were already distributed"
+    );
+
+    // Going forward the item is excluded from the export.
+    let invalidation_reason = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT source_invalidation_reason FROM trace_export_manifest_items
+         WHERE tenant_id = $1 AND submission_id = $2",
+        exported,
+    )
+    .await;
+    assert_eq!(invalidation_reason.as_deref(), Some("revoked"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let record = backend
+        .get_trace_submission("tenant-a", owned)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+
+    let derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            trace_id: record.trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::Summary,
+            worker_version: "test-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:input".to_string(),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            task_success: None,
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            duplicate_score: None,
+            novelty_score: None,
+            cluster_id: None,
+        })
+        .await
+        .expect("derived record writes");
+
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:summary".to_string(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some("embedding:cluster".to_string()),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("vector entry writes");
+
+    let decision_id = Uuid::new_v4();
+    backend
+        .insert_trace_gate_decision(
+            "tenant-a",
+            StorageTraceGateDecisionRow {
+                decision_id,
+                submission_id: owned,
+                gate_policy_version: "test-policy".to_string(),
+                gate_version_hash: "sha256:gate".to_string(),
+                perplexity_micros: 7_000_000,
+                tail_fraction_micros: 0,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:evidence".to_string(),
+                attestation_chain_hash: "sha256:attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(vector_entry_id),
+                credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                chunks_capped: None,
+            },
+        )
+        .await
+        .expect("gate decision writes");
+    backend
+        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .await
+        .expect("dedup assignment writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(_) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+
+    // The vector index no longer returns the withdrawn trace.
+    let vector_status = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT status FROM trace_vector_entries
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(vector_status.as_deref(), Some("invalidated"));
+
+    // The dedup cluster no longer contains the withdrawn trace.
+    let dedup_cluster = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_cluster_id::TEXT FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_cluster, None,
+        "the withdrawn trace must leave its dedup cluster"
+    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -3966,6 +4491,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -4051,6 +4579,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
+        account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -6546,6 +7076,48 @@ fn parses_analytics_min_cell_count() {
         error
             .to_string()
             .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+    );
+}
+
+#[test]
+fn community_snapshot_interval_defaults_to_admin_triggered_only() {
+    // Absent, empty and 0 all mean the same thing: no worker, recompute
+    // stays admin-triggered. That is what every deployment had before the
+    // worker existed, so it has to remain reachable without deleting the
+    // config line.
+    assert!(
+        parse_community_snapshot_interval("")
+            .expect("empty parses")
+            .is_none()
+            && parse_community_snapshot_interval("0")
+                .expect("zero parses")
+                .is_none()
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_a_pointlessly_tight_schedule() {
+    let error = parse_community_snapshot_interval("30")
+        .expect_err("below the floor should be rejected at boot, not at runtime");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
+    );
+    assert_eq!(
+        parse_community_snapshot_interval("900").expect("15 minutes parses"),
+        Some(StdDuration::from_secs(900))
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_nonsense() {
+    let error = parse_community_snapshot_interval("every 15 minutes")
+        .expect_err("a non-numeric interval is a config error");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
     );
 }
 
@@ -24196,6 +24768,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -24283,6 +24858,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
+        account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -68332,7 +68909,13 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
 #[test]
 fn community_publication_blocks_when_min_cell_count_is_unset() {
     // Absent config parses to 0, which disables suppression entirely.
-    let missing = community_publication_missing_controls(0, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -68340,19 +68923,358 @@ fn community_publication_blocks_when_min_cell_count_is_unset() {
 fn community_publication_blocks_when_min_cell_count_is_one() {
     // A threshold of 1 admits every opted-in row: the SQL HAVING
     // clause is satisfied by a cell of size one.
-    let missing = community_publication_missing_controls(1, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
 #[test]
+fn community_roster_publishes_without_an_approved_noise_mechanism() {
+    // The whole point of the split. Everyone on the roster holds
+    // public_attribution consent: their handle and counts being public
+    // is what they asked for, so a mechanism that exists to protect
+    // people who made no such choice is not the control that applies.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "roster should publish on consent + cohort shape alone, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_analytics_still_blocks_where_the_roster_publishes() {
+    // Same inputs, opposite answer. If these two ever agree, the split
+    // has collapsed and analytics are riding out on the roster's gate.
+    let inputs = (2usize, 2usize, false);
+    let roster = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    let analytics = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    assert!(roster.is_empty());
+    assert_eq!(analytics, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn roster_payload_strips_aggregates_a_pregate_snapshot_still_carries() {
+    // The bug this exists to prevent, found in production: recompute
+    // writes analytics: null when they are withheld, but a snapshot
+    // written before that gate existed already has them populated. The
+    // roster's weaker gate would then hand out aggregates computed under
+    // no approved mechanism.
+    let stored = serde_json::json!({
+        "leaderboard": [{"display_handle": "someone", "rank": 1}],
+        "analytics": {"total_submissions": 41, "total_accepted": 40},
+    });
+    let redacted = redact_withheld_analytics(stored, &[COMMUNITY_NOISE_MECHANISM_CONTROL]);
+
+    assert_eq!(redacted["analytics"], serde_json::Value::Null);
+    assert_eq!(
+        redacted["privacy"]["analytics_withheld_controls"],
+        serde_json::json!([COMMUNITY_NOISE_MECHANISM_CONTROL]),
+        "a reader must be able to tell withheld from no activity"
+    );
+    // The roster itself is untouched: those people consented.
+    assert_eq!(redacted["leaderboard"][0]["display_handle"], "someone");
+}
+
+#[test]
+fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
+    let stored = serde_json::json!({"analytics": {"total_submissions": 41}});
+    let kept = redact_withheld_analytics(stored, &[]);
+    assert_eq!(kept["analytics"]["total_submissions"], 41);
+}
+
+fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSummary {
+    trace_commons_server::db::CorpusAnalyticsSummary {
+        total_submissions: 43,
+        total_accepted: 40,
+        total_rejected: 3,
+        accept_rate: 0.93,
+        novelty_histogram: vec![(0, 0), (100_000, 1), (200_000, 2), (300_000, 37)],
+        gate_outcomes: vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2),
+            ("perplexity_failed".to_string(), 1),
+            ("both_failed".to_string(), 0),
+        ],
+    }
+}
+
+#[test]
+fn publication_basis_defaults_to_requiring_a_mechanism() {
+    // Publishing without a mechanism must be something an operator opts
+    // into, never something a deployment falls into by leaving a variable
+    // unset or empty.
+    assert_eq!(
+        parse_community_analytics_publication_basis("").expect("empty parses"),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("approved_noise_mechanism").unwrap(),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("suppression_only").unwrap(),
+        CommunityAnalyticsPublicationBasis::SuppressionOnly
+    );
+    assert!(
+        parse_community_analytics_publication_basis("none").is_err(),
+        "an unrecognised basis must fail at boot rather than pick one"
+    );
+}
+
+#[test]
+fn suppression_only_waives_the_mechanism_but_never_the_cell_floor() {
+    // Under this basis cell suppression stops being one control among
+    // several and becomes the only thing between a published aggregate and
+    // a small group, so the floor is required, not relaxed.
+    assert!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            2,
+            1,
+            false,
+        )
+        .is_empty(),
+        "suppression_only should publish at min-cell 2 with one tenant and no mechanism"
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            1,
+            9,
+            true,
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT],
+        "the cell floor is never waived under suppression_only"
+    );
+}
+
+fn snapshot_row_with_privacy(
+    privacy: serde_json::Value,
+) -> trace_commons_server::db::LeaderboardSnapshotRow {
+    trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({ "privacy": privacy }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    }
+}
+
+#[test]
+fn a_malformed_publication_basis_falls_back_to_strict() {
+    // The serve gate parses the stored basis permissively and falls back to
+    // the strict one. That is deliberate: an unreadable provenance field must
+    // never be the reason aggregates publish. Pinned because the failure mode
+    // is silent by construction - nothing errors, it just gets stricter.
+    for malformed in [
+        serde_json::json!("banana"),
+        serde_json::json!(null),
+        serde_json::json!(7),
+        serde_json::json!({"nested": true}),
+    ] {
+        let row = snapshot_row_with_privacy(
+            serde_json::json!({"tenant_cohort_size": 9, "publication_basis": malformed}),
+        );
+        assert_eq!(
+            community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+            vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+            "a basis of {malformed} must be read as strict, not as permission to publish"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_keeps_the_basis_it_was_published_under() {
+    // The serve gate reads the stored snapshot, never live config, so
+    // changing the operator setting cannot retroactively re-license an
+    // artifact in either direction.
+    let permissive = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 1,
+        "publication_basis": "suppression_only",
+    }));
+    assert!(
+        community_snapshot_missing_controls(&permissive, CommunitySurface::Analytics).is_empty(),
+        "a snapshot published under suppression_only stays servable when config turns strict"
+    );
+
+    let strict = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 9,
+        "publication_basis": "approved_noise_mechanism",
+    }));
+    assert_eq!(
+        community_snapshot_missing_controls(&strict, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "a snapshot published under the strict basis is not loosened by permissive config"
+    );
+}
+
+#[test]
+fn a_pregate_snapshot_is_not_read_as_suppression_only() {
+    // The basis is absent on snapshots written before it existed. Defaulting
+    // those to the strict basis keeps an old artifact from being served as
+    // though someone had chosen to publish it without a mechanism.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"privacy": {"tenant_cohort_size": 9}}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "an absent basis must fall back to requiring a mechanism"
+    );
+}
+
+#[test]
+fn community_analytics_cells_below_the_floor_are_suppressed() {
+    // The floor gated whether analytics could publish, but nothing applied
+    // it to what was published: compute_corpus_analytics_summary takes no
+    // min-cell argument, so a bucket holding one record went out at its
+    // true count.
+    let mut summary = analytics_summary_fixture();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 2);
+
+    assert_eq!(suppressed, 4, "0, 1, 1 and 0 valued cells should all go");
+    assert_eq!(summary.novelty_histogram, vec![(200_000, 2), (300_000, 37)]);
+    assert_eq!(
+        summary.gate_outcomes,
+        vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2)
+        ]
+    );
+    // Totals are the top-level sums and are deliberately left alone.
+    assert_eq!(summary.total_submissions, 43);
+}
+
+#[test]
+fn a_floor_of_one_leaves_the_histogram_shape_intact() {
+    // A floor of 1 suppresses nothing by definition, and must not strip the
+    // empty buckets that give the distribution its shape. Getting this wrong
+    // would silently reshape every chart on the analytics page.
+    let mut summary = analytics_summary_fixture();
+    let before = summary.novelty_histogram.clone();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 1);
+
+    assert_eq!(suppressed, 0);
+    assert_eq!(summary.novelty_histogram, before);
+    assert_eq!(summary.gate_outcomes.len(), 4);
+}
+
+#[test]
+fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
+    // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
+    // person on the roster individually asked to be listed, so neither the
+    // cohort size nor a cell of one tells us anything about consent.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        1,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "a consented single-tenant roster should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_roster_still_blocks_a_zero_min_cell() {
+    // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
+    // contributors with nothing accepted in the window.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Roster,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            0,
+            2,
+            false
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_analytics_keeps_both_cohort_floors() {
+    // Everything the roster stopped enforcing is still enforced here,
+    // because these aggregates cover people who never opted into anything.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            1,
+            2,
+            true
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            2,
+            1,
+            true
+        ),
+        vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
+    );
+}
+
+#[test]
 fn community_publication_blocks_on_unapproved_noise_mechanism() {
-    let missing = community_publication_missing_controls(4, 4, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        4,
+        false,
+    );
     assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
 }
 
 #[test]
 fn community_publication_blocks_single_tenant_cohort() {
-    let missing = community_publication_missing_controls(4, 1, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        1,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
 }
 
@@ -68361,7 +69283,13 @@ fn community_publication_reports_every_missing_control_at_once() {
     // The pilot's actual configuration: no min-cell value, one tenant,
     // placeholder seed. An operator should see all three, not just the
     // first, so a single fix does not look like it unblocked the path.
-    let missing = community_publication_missing_controls(0, 1, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        1,
+        false,
+    );
     assert_eq!(
         missing,
         vec![
@@ -68374,7 +69302,13 @@ fn community_publication_reports_every_missing_control_at_once() {
 
 #[test]
 fn community_publication_allows_a_fully_configured_cohort() {
-    let missing = community_publication_missing_controls(2, 2, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        true,
+    );
     assert!(
         missing.is_empty(),
         "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
@@ -68409,7 +69343,7 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
         min_cell_count: 0,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    let missing = community_snapshot_missing_controls(&row);
+    let missing = community_snapshot_missing_controls(&row, CommunitySurface::Analytics);
     assert_eq!(
         missing,
         vec![
@@ -68417,6 +69351,15 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
             COMMUNITY_NOISE_MECHANISM_CONTROL,
             TRACE_COMMONS_COMMUNITY_TENANT_IDS,
         ]
+    );
+    // And the roster surface refuses it too, which is the point: the split
+    // must not become a way for a snapshot predating the privacy block to
+    // reach the public read path. It reports one control rather than two
+    // now that cohort size is an analytics concern, but a pre-gate snapshot
+    // records min_cell_count 0 and so is still refused.
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Roster),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
 }
 
@@ -68439,7 +69382,7 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
     };
     assert_eq!(
-        community_snapshot_missing_controls(&row),
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
 }
@@ -68702,6 +69645,7 @@ async fn confirm_deny_respects_timing_floor() {
         cross_site,
         ConfirmLoginForm(ConfirmLoginBody {
             code: "bogus".to_string(),
+            native: None,
         }),
     )
     .await
@@ -68743,7 +69687,10 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
         let resp = confirm_login_handler(
             State(state.clone()),
             same_origin.clone(),
-            ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+            ConfirmLoginForm(ConfirmLoginBody {
+                code: code.clone(),
+                native: None,
+            }),
         )
         .await
         .into_response();
@@ -68752,7 +69699,10 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
     let exhausted = confirm_login_handler(
         State(state.clone()),
         same_origin,
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+        }),
     )
     .await
     .into_response();
@@ -80392,4 +81342,1197 @@ fn dedup_vector_index_builder_returns_a_trait_object() {
     use trace_commons_gate_enclave::VectorIndex;
 
     let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
+}
+
+// --- Loopback native-app sign-in -------------------------------------------
+//
+// These tests are the attack list from the design, not the happy path alone:
+// an intercepted code without the verifier, a replayed code, a mismatched
+// request handle, a browser cookie secret presented as a bearer, an expired
+// token, and `revoke-all`. They run WITHOUT PostgreSQL — the account suite's
+// pg-gated tests silently skip when no database is configured, and the checks
+// below are exactly the ones that must never be skipped.
+//
+// Redirect matching is unit-tested exhaustively in
+// `trace_commons_server::account_native_auth`, against every non-loopback
+// spelling; the handler-level test here pins that the endpoint actually calls
+// that validator.
+
+#[derive(Clone)]
+struct NativeTestSession {
+    tenant_id: String,
+    account_id: Uuid,
+    token_hash: String,
+    client_kind: String,
+    expires_at: DateTime<Utc>,
+    revoked: bool,
+}
+
+/// In-memory `Database` covering only the handful of calls the native sign-in
+/// flow makes. Everything else keeps the trait's fail-closed default.
+#[derive(Default)]
+struct NativeAuthTestDb {
+    sessions: std::sync::Mutex<Vec<NativeTestSession>>,
+}
+
+impl NativeAuthTestDb {
+    fn session_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Insert a session row directly, so a test can pin an ALREADY-expired or
+    /// non-native session without waiting or reaching for a second code path.
+    fn insert_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        token_hash: &str,
+        client_kind: &str,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.sessions.lock().unwrap().push(NativeTestSession {
+            tenant_id: tenant_id.to_string(),
+            account_id,
+            token_hash: token_hash.to_string(),
+            client_kind: client_kind.to_string(),
+            expires_at,
+            revoked: false,
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for NativeAuthTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn get_device_key(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<trace_commons_server::db::DeviceKeyRecord>, DatabaseError> {
+        Ok(None)
+    }
+
+    async fn issue_native_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: trace_commons_server::db::NewSession<'_>,
+        _audit: trace_commons_server::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        self.insert_session(
+            tenant_id,
+            account_id,
+            session.token_hash,
+            session.client_kind,
+            session.expires_at,
+        );
+        Ok(())
+    }
+
+    async fn validate_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<Option<trace_commons_server::db::ValidatedSession>, DatabaseError> {
+        let now = Utc::now();
+        let sessions = self.sessions.lock().unwrap();
+        Ok(sessions
+            .iter()
+            .find(|s| {
+                s.tenant_id == tenant_id
+                    && s.token_hash == token_hash
+                    && !s.revoked
+                    && s.expires_at > now
+            })
+            .map(|s| trace_commons_server::db::ValidatedSession {
+                account_id: s.account_id,
+                auth_credential_id: None,
+                client_kind: s.client_kind.clone(),
+                rotated_secret: None,
+            }))
+    }
+
+    async fn expand_account_principals(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+    ) -> Result<AccountPrincipalSet, DatabaseError> {
+        Ok(AccountPrincipalSet::from_iter_for_test_only([
+            "principal_sha256:native-test".to_string(),
+        ]))
+    }
+
+    async fn revoke_all_account_sessions(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut revoked = 0;
+        for s in sessions.iter_mut() {
+            if s.tenant_id == tenant_id && s.account_id == account_id && !s.revoked {
+                s.revoked = true;
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn revoke_current_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut revoked = 0;
+        for s in sessions.iter_mut() {
+            if s.tenant_id == tenant_id && s.token_hash == token_hash && !s.revoked {
+                s.revoked = true;
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn append_account_audit(
+        &self,
+        _tenant_id: &str,
+        _action: &str,
+        _actor_ref: &str,
+        _outcome: &str,
+        _metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+}
+
+fn native_test_state(db: Arc<NativeAuthTestDb>) -> (tempfile::TempDir, Arc<AppState>) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = db;
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    (temp, state)
+}
+
+/// A well-formed verifier/challenge pair, distinct per call so the per-code
+/// rate limiter in one test cannot affect another.
+fn native_test_pkce() -> (String, String) {
+    let verifier = format!("{}{}", "verifier-", Uuid::new_v4().simple()).repeat(2);
+    let verifier = format!("{verifier}{}", "x".repeat(64))
+        .chars()
+        .take(64)
+        .collect::<String>();
+    let challenge = challenge_for_verifier(&verifier);
+    (verifier, challenge)
+}
+
+fn native_loopback_redirect() -> String {
+    "http://127.0.0.1:49152/trace-commons/native-auth/callback".to_string()
+}
+
+async fn native_start(
+    state: &Arc<AppState>,
+    challenge: &str,
+    redirect: &str,
+) -> (StatusCode, Option<String>) {
+    let body = serde_json::json!({
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "redirect_uri": redirect,
+    });
+    let response = native_authorize_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(
+            serde_json::from_value(body).expect("valid start body"),
+        )),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::OK {
+        return (status, None);
+    }
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("start body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("start json");
+    let request_id = parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .expect("request_id")
+        .to_string();
+    (status, Some(request_id))
+}
+
+async fn native_exchange(
+    state: &Arc<AppState>,
+    request_id: &str,
+    code: &str,
+    verifier: &str,
+) -> (StatusCode, Option<String>) {
+    let body = serde_json::json!({
+        "request_id": request_id,
+        "code": code,
+        "code_verifier": verifier,
+    });
+    let response = native_token_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(
+            serde_json::from_value(body).expect("valid token body"),
+        )),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::OK {
+        return (status, None);
+    }
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("token body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("token json");
+    let token = parsed
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .expect("access_token")
+        .to_string();
+    (status, Some(token))
+}
+
+/// Drive the flow to the point where a one-time code exists, WITHOUT needing a
+/// database for the browser half: `issue_native_authorization_code` is exactly
+/// what the confirm handler calls once a human has redeemed a login link.
+async fn native_flow_to_code(
+    state: &Arc<AppState>,
+    challenge: &str,
+    account_id: Uuid,
+) -> (String, String) {
+    let (status, request_id) = native_start(state, challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK, "authorize start succeeds");
+    let request_id = request_id.expect("request id");
+    let location =
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", account_id)
+            .expect("a live pending request yields a loopback redirect");
+    assert!(
+        location.starts_with("http://127.0.0.1:49152/trace-commons/native-auth/callback?code="),
+        "code is delivered only to the registered loopback URI: {location}"
+    );
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("code in the loopback redirect")
+        .to_string();
+    (request_id, code)
+}
+
+#[tokio::test]
+async fn native_authorize_refuses_a_redirect_that_is_not_loopback() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (_verifier, challenge) = native_test_pkce();
+    for redirect in [
+        "http://localhost:49152/trace-commons/native-auth/callback",
+        "https://evil.example.com/trace-commons/native-auth/callback",
+        "http://127.0.0.1:49152/somewhere-else",
+    ] {
+        let (status, request_id) = native_start(&state, &challenge, redirect).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "must refuse {redirect}");
+        assert!(request_id.is_none());
+    }
+}
+
+#[tokio::test]
+async fn native_authorize_refuses_plain_pkce() {
+    // `plain` would make the challenge equal the verifier, so anyone who saw the
+    // start request could finish the flow. Only S256 is accepted.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (verifier, _challenge) = native_test_pkce();
+    let body = serde_json::json!({
+        "code_challenge": verifier,
+        "code_challenge_method": "plain",
+        "redirect_uri": native_loopback_redirect(),
+    });
+    let response = native_authorize_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(serde_json::from_value(body).expect("body"))),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_intercepted_code_without_the_verifier_is_useless() {
+    // THE central property. Another local process races the loopback listener
+    // and gets the code. It does not have the verifier, so the exchange fails
+    // and no session is ever created.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (_verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (attacker_verifier, _) = native_test_pkce();
+    let (status, token) = native_exchange(&state, &request_id, &code, &attacker_verifier).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "wrong verifier is refused");
+    assert!(token.is_none());
+    assert_eq!(
+        db.session_count(),
+        0,
+        "no session may exist after a failed exchange"
+    );
+}
+
+#[tokio::test]
+async fn a_replayed_code_fails() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    assert_eq!(status, StatusCode::OK, "the honest exchange succeeds");
+    assert!(token.expect("token").starts_with("tcn1_"));
+    assert_eq!(db.session_count(), 1);
+
+    // Same code, same verifier, second time.
+    let (status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a replayed code is refused"
+    );
+    assert!(token.is_none());
+    assert_eq!(
+        db.session_count(),
+        1,
+        "a replay must not mint a second session"
+    );
+}
+
+#[tokio::test]
+async fn a_code_presented_against_another_request_fails() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (_request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (_other_verifier, other_challenge) = native_test_pkce();
+    let (status, other_request_id) =
+        native_start(&state, &other_challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, token) = native_exchange(
+        &state,
+        &other_request_id.expect("second request id"),
+        &code,
+        &verifier,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code is bound to its own request"
+    );
+    assert!(token.is_none());
+    assert_eq!(db.session_count(), 0);
+}
+
+#[tokio::test]
+async fn a_native_token_authenticates_the_account_surface_as_a_weak_session() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("the native token resolves");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "actor must be the reserved-prefix account actor, never a device ref"
+    );
+    assert!(
+        !ctx.is_strong_session(),
+        "a native token must stay WEAK: read and withdraw, never change authenticators"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_kills_a_native_token() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    assert!(resolve_account_ctx(state.as_ref(), &headers).await.is_ok());
+
+    let revoked = db
+        .revoke_all_account_sessions("tenant-a", account_id)
+        .await
+        .expect("revoke-all");
+    assert_eq!(revoked, 1, "the native session is an ordinary session row");
+
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a revoked native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_expired_native_token_is_denied() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let account_id = Uuid::new_v4();
+    let secret = "expired-native-secret";
+    db.insert_session(
+        "tenant-a",
+        account_id,
+        &hash_secret(secret),
+        "native",
+        Utc::now() - Duration::minutes(1),
+    );
+    let token = native_token_value("tenant-a", secret);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("an expired native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_browser_session_secret_is_not_usable_as_a_native_bearer() {
+    // The cookie's HttpOnly/SameSite=Strict shape exists so a native process
+    // cannot reach the browser session. Even if a `'web'` session's secret were
+    // somehow obtained and re-encoded as a `tcn1_` bearer, the client_kind guard
+    // refuses it.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let account_id = Uuid::new_v4();
+    let secret = "a-browser-session-secret";
+    db.insert_session(
+        "tenant-a",
+        account_id,
+        &hash_secret(secret),
+        "web",
+        Utc::now() + Duration::days(7),
+    );
+    let token = native_token_value("tenant-a", secret);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a web session must not be reachable as a native bearer");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_stale_native_request_id_cannot_be_completed_twice() {
+    // The pending request is single-use: a second confirm carrying the same
+    // `native` id (a replayed browser POST, or a second tab) mints no second
+    // code.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (_verifier, challenge) = native_test_pkce();
+    let (status, request_id) = native_start(&state, &challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK);
+    let request_id = request_id.expect("request id");
+    assert!(
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", Uuid::new_v4())
+            .is_some()
+    );
+    assert!(
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", Uuid::new_v4())
+            .is_none(),
+        "a pending native request is consumed by the first completion"
+    );
+}
+
+#[tokio::test]
+async fn logging_out_a_native_token_revokes_its_session_row() {
+    // Unlike the device-bearer path (a documented no-op), a native token HAS a
+    // session row, so logout must actually revoke it rather than leave a
+    // signed-out app holding a live token.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let ctx = account_ctx_ext(&state, &headers).await;
+    account_logout_handler(State(state.clone()), ctx, headers.clone())
+        .await
+        .expect("logout succeeds");
+
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a logged-out native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+// The corpus-storage half of `Database` is unreachable from the native
+// sign-in flow: it touches only sessions, account principals, and the
+// account audit. Stubbed the same way every other focused test double in
+// this file stubs it.
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        _: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCorpusStatus,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        _: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        _: &str,
+        _: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
 }
