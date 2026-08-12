@@ -34,10 +34,12 @@ Work through these in order before setting `TRACE_COMMONS_PII_BACKSTOP_ENABLED=1
    [`login-resolver-role.md`](login-resolver-role.md) and
    [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md) for the
    full writeup. It ships `NOLOGIN NOBYPASSRLS`; migration V38 grants it
-   `SELECT` on `trace_submissions`, `trace_object_refs`, and
+   column-scoped `SELECT` on `trace_submissions`, `trace_object_refs`, and
    `trace_pii_backstop`, each gated by a role-scoped permissive
    `trace_pii_backstop_driver_cross_tenant_read` policy — never a
-   `BYPASSRLS` grant. Recommended: a dedicated LOGIN role granted membership
+   `BYPASSRLS` grant. (`trace_gate_driver` follows the same column-scoped
+   convention after V42; see [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md).)
+   Recommended: a dedicated LOGIN role granted membership
    in the base role:
 
    ```sql
