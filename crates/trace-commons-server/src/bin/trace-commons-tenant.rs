@@ -989,7 +989,7 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
             "provide exactly one principal mode: --token-env, both signed-claim flags, or both device-key flags"
         );
     }
-    let (mode, principal_ref) = if let Some(token_env) = token_env {
+    let (mode, principal_ref, legacy_principal_ref) = if let Some(token_env) = token_env {
         let token = std::env::var(&token_env).map_err(|_| {
             anyhow::anyhow!(
                 "{} is not set; refusing to derive a principal_ref from a missing token",
@@ -999,7 +999,11 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         if token.trim().is_empty() {
             anyhow::bail!("{token_env} is empty; refusing to derive a principal_ref");
         }
-        ("static_token", principal_storage_ref(&token))
+        (
+            "static_token",
+            static_token_principal_ref(&token),
+            Some(legacy_static_token_principal_ref(&token)),
+        )
     } else if has_signed {
         let tenant_id = signed_tenant_id.ok_or_else(|| {
             anyhow::anyhow!("--signed-tenant-id is required with --signed-actor-ref")
@@ -1010,6 +1014,7 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         (
             "signed_claim",
             signed_claim_principal_ref(&tenant_id, &actor_ref),
+            Some(legacy_signed_claim_principal_ref(&tenant_id, &actor_ref)),
         )
     } else {
         let tenant_id = device_tenant_id.ok_or_else(|| {
@@ -1021,6 +1026,7 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         (
             "device_key",
             device_key_principal_ref(&tenant_id, &device_key_id),
+            None,
         )
     };
 
@@ -1028,6 +1034,7 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         let value = serde_json::json!({
             "mode": mode,
             "principal_ref": principal_ref,
+            "legacy_principal_ref": legacy_principal_ref,
         });
         oc_format::emit_json(
             &mut stdout(),
@@ -1045,9 +1052,36 @@ fn principal_storage_ref(value: &str) -> String {
     format!("principal_{}", sha256_prefixed(value))
 }
 
+fn method_bound_principal_material(method: &str, identity_material: &str) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        method.len(),
+        method,
+        identity_material.len(),
+        identity_material
+    )
+}
+
+fn method_bound_principal_ref(method: &str, identity_material: &str) -> String {
+    principal_storage_ref(&method_bound_principal_material(method, identity_material))
+}
+
 fn signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
     let composed = format!("signed:{}:{}", tenant_id.trim(), actor_ref.trim());
+    method_bound_principal_ref("signed_claim", &composed)
+}
+
+fn legacy_signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    let composed = format!("signed:{}:{}", tenant_id.trim(), actor_ref.trim());
     principal_storage_ref(&composed)
+}
+
+fn static_token_principal_ref(token: &str) -> String {
+    method_bound_principal_ref("static_token", token)
+}
+
+fn legacy_static_token_principal_ref(token: &str) -> String {
+    principal_storage_ref(token)
 }
 
 fn device_key_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
@@ -1529,8 +1563,9 @@ mod tests {
         };
         tenant_principal_ref(&args, true).expect("derive works");
         // Re-derive directly to confirm format.
-        let p = principal_storage_ref("secret-token-abc");
+        let p = static_token_principal_ref("secret-token-abc");
         assert!(p.starts_with("principal_sha256:"));
+        assert_ne!(p, legacy_static_token_principal_ref("secret-token-abc"));
     }
 
     #[test]
@@ -1551,7 +1586,24 @@ mod tests {
     fn tenant_principal_ref_signed_claim_mode_matches_issuer_hash_input() {
         assert_eq!(
             signed_claim_principal_ref("tenant-1", "actor-xyz"),
+            method_bound_principal_ref("signed_claim", "signed:tenant-1:actor-xyz")
+        );
+        assert_eq!(
+            legacy_signed_claim_principal_ref("tenant-1", "actor-xyz"),
             principal_storage_ref("signed:tenant-1:actor-xyz")
+        );
+    }
+
+    #[test]
+    fn tenant_principal_ref_static_and_signed_methods_do_not_collide() {
+        let colliding = "signed:a:b:c";
+        assert_ne!(
+            static_token_principal_ref(colliding),
+            signed_claim_principal_ref("a", "b:c")
+        );
+        assert_eq!(
+            legacy_static_token_principal_ref(colliding),
+            legacy_signed_claim_principal_ref("a", "b:c")
         );
     }
 

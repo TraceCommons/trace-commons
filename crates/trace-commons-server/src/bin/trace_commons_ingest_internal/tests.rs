@@ -499,9 +499,9 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
     let (p2_submission, p2_event) = seed_submission_with_credit(&state, "token-a-2").await;
     let (p3_submission, p3_event) = seed_submission_with_credit(&state, "token-a-3").await;
 
-    let p1_principal = principal_storage_ref("token-a");
-    let p2_principal = principal_storage_ref("token-a-2");
-    let p3_principal = principal_storage_ref("token-a-3");
+    let p1_principal = static_token_principal_ref("token-a");
+    let p2_principal = static_token_principal_ref("token-a-2");
+    let p3_principal = static_token_principal_ref("token-a-3");
 
     // Mint account A linked to P1, then add P2 as a second ACTIVE link to A. P3 is
     // left UNLINKED. Mirrors Task 2's seeding shape.
@@ -658,9 +658,9 @@ async fn settlement_groups_account_principals_and_routes_designated_payout() {
     let (_, p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
     let (_, p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
 
-    let p1_principal = principal_storage_ref("token-a");
-    let p2_principal = principal_storage_ref("token-a-2");
-    let p3_principal = principal_storage_ref("token-a-3");
+    let p1_principal = static_token_principal_ref("token-a");
+    let p2_principal = static_token_principal_ref("token-a-2");
+    let p3_principal = static_token_principal_ref("token-a-3");
 
     // Account A links P1 + P2; P3 stays unlinked.
     let account_a = backend
@@ -807,8 +807,8 @@ async fn linked_contributor_sees_account_keyed_settled_credit() {
     let (_, _p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
     let (_, _p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
     let (_, _p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
-    let p1_principal = principal_storage_ref("token-a");
-    let p2_principal = principal_storage_ref("token-a-2");
+    let p1_principal = static_token_principal_ref("token-a");
+    let p2_principal = static_token_principal_ref("token-a-2");
 
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
@@ -927,7 +927,7 @@ async fn settlement_holds_account_payout_when_none_enrolled() {
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
 
     let (_, p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -1002,7 +1002,7 @@ async fn settlement_holds_account_payout_when_ambiguous() {
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
 
     let (_, _) = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -1860,7 +1860,7 @@ async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
     // Active membership expansion still carries the device principal.
     assert!(
         ctx.principal_set
-            .contains(&principal_storage_ref("token-a"))
+            .contains(&static_token_principal_ref("token-a"))
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -2877,7 +2877,7 @@ async fn account_traces_list_returns_only_owned_submissions() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links the principal to an account");
-    let device_principal = principal_storage_ref("token-a");
+    let device_principal = static_token_principal_ref("token-a");
 
     // One owned submission (device principal) and one foreign principal under the
     // same tenant that the account does NOT own.
@@ -2935,7 +2935,7 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint");
-    let device_principal = principal_storage_ref("token-a");
+    let device_principal = static_token_principal_ref("token-a");
 
     let mut inserted = Vec::new();
     for _ in 0..3 {
@@ -3013,7 +3013,7 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint");
-    let device_principal = principal_storage_ref("token-a");
+    let device_principal = static_token_principal_ref("token-a");
 
     let owned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
@@ -3147,7 +3147,7 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint");
-    let device_principal = principal_storage_ref("token-a");
+    let device_principal = static_token_principal_ref("token-a");
 
     let owned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
@@ -3253,7 +3253,7 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint");
-    let device_principal = principal_storage_ref("token-a");
+    let device_principal = static_token_principal_ref("token-a");
 
     // Owned submission, but NO envelope is staged on disk and no artifact store
     // is configured -> the file-fallback read fails. The handler must fail
@@ -3883,7 +3883,7 @@ fn append_ranking_backfill_fixture(
             training_dataset_hash: sha256_prefixed("ranking-training-backfill"),
             calibration_dataset_hash: sha256_prefixed("ranking-calibration-backfill"),
             model_artifact_hash: sha256_prefixed("ranking-model-artifact-backfill"),
-            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            actor_principal_ref: static_token_principal_ref("admin-token-a"),
             created_at: now,
         },
     )
@@ -3907,7 +3907,7 @@ fn append_ranking_backfill_fixture(
             privacy_risk_score: Some(0.01),
             quality_score: Some(0.89),
             coverage_tags: vec!["tool:terminal".to_string()],
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -3933,7 +3933,7 @@ fn append_ranking_backfill_fixture(
             novelty_bonus_micros: 0,
             settlement_score_micros: 1_200_000,
             explanation_codes: vec!["backfill_probe".to_string()],
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -3954,7 +3954,7 @@ fn append_ranking_backfill_fixture(
             utility_delta_micros: 1_250_000,
             evidence_hash: sha256_prefixed("ranking-label-evidence-backfill"),
             external_ref_hash: "sha256:ranking-label-external-ref-backfill".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -3976,7 +3976,7 @@ fn append_ranking_backfill_fixture(
             preference_strength_micros: 850_000,
             evidence_hash: sha256_prefixed("ranking-preference-evidence-backfill"),
             external_ref_hash: "sha256:ranking-preference-external-ref-backfill".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -4012,7 +4012,7 @@ fn append_ranking_backfill_fixture(
             promotable: true,
             reason_codes: Vec::new(),
             report_hash: "sha256:ranking-calibration-report-backfill".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -4040,7 +4040,7 @@ fn append_ranking_backfill_fixture(
             pending_after_count: 0,
             result_refs: vec![format!("ranking_calibration:{calibration_run_id}")],
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
             completed_at: Some(now),
             last_error_hash: None,
@@ -4865,7 +4865,7 @@ fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
     submit_principal_rate_limit_key(
         tenant_id,
         TraceAuthMethod::StaticToken,
-        &principal_storage_ref(token),
+        &static_token_principal_ref(token),
     )
 }
 
@@ -4907,7 +4907,8 @@ fn test_reviewer_auth(tenant_id: &str) -> TenantAuth {
     TenantAuth {
         tenant_id: tenant_id.to_string(),
         role: TokenRole::Reviewer,
-        principal_ref: principal_storage_ref("review-token"),
+        principal_ref: static_token_principal_ref("review-token"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -5087,7 +5088,8 @@ fn require_competition_operator_admits_admin_and_competition_worker_denies_other
     let build_auth = |role: TokenRole| TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role,
-        principal_ref: principal_storage_ref("competition-read-worker-token-a"),
+        principal_ref: static_token_principal_ref("competition-read-worker-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -5215,7 +5217,7 @@ fn benchmark_candidate_structural_gate_requires_canonical_summary_hash() {
     let mut candidate = TraceBenchmarkCandidate {
         submission_id: Uuid::from_u128(1),
         trace_id: Uuid::from_u128(2),
-        auth_principal_ref: principal_storage_ref("token-a"),
+        auth_principal_ref: static_token_principal_ref("token-a"),
         derived_id: Uuid::from_u128(3),
         canonical_summary_hash: sha256_prefixed("benchmark-summary"),
         canonical_summary: "benchmark summary".to_string(),
@@ -5461,6 +5463,26 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+/// Give a metadata-only envelope a distinguishing feature that is NOT message
+/// text, so two otherwise-identical Low-risk fixtures stay distinct without
+/// either of them acquiring content that would classify them Medium.
+///
+/// A tool name is metadata about which tool ran, not a payload, so this keeps
+/// the envelope genuinely Low and its false/false consent declaration honest.
+fn set_metadata_only_tool_name(envelope: &mut TraceContributionEnvelope, name: &str) {
+    for event in &mut envelope.events {
+        if event.event_type
+            == trace_commons_protocol::trace_contribution::TraceContributionEventType::ToolCall
+        {
+            event.tool_name = Some(name.to_string());
+            return;
+        }
+    }
+    if let Some(event) = envelope.events.first_mut() {
+        event.tool_name = Some(name.to_string());
+    }
+}
+
 fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
     envelope.schema_version = "invalid.test.schema".to_string();
 }
@@ -5575,10 +5597,22 @@ async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
 
     rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
 
+    // Medium, not Low, and deliberately so as of the consent-concordance
+    // change. `make_metadata_only_low_risk` declares
+    // `message_text_included = false`, then `set_metadata_only_user_message`
+    // puts prose in the envelope -- exactly the under-declaration the
+    // reconciliation corrects. Once the flag is raised to match the payload,
+    // the pre-existing floor `message_text_included || tool_payloads_included
+    // -> Medium` applies.
+    //
+    // The point of the test survives: no scan finding invented a risk here,
+    // and the envelope's own hashes, uuids and handles were not mistaken for
+    // secrets. What changed is that a false declaration can no longer buy a
+    // Low classification.
     assert_eq!(
         envelope.privacy.residual_pii_risk,
-        ResidualPiiRisk::Low,
-        "a clean metadata-only envelope must not be pushed above Low"
+        ResidualPiiRisk::Medium,
+        "content-bearing prose must not stay Low by under-declaring consent"
     );
 }
 
@@ -5847,10 +5881,15 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
     let signed_principal = authenticate_ctx(state.as_ref(), &auth_headers(&signed_token))
         .expect("signed principal authenticates");
     assert_eq!(static_principal.tenant_id(), signed_principal.tenant_id());
-    assert_eq!(
+    assert_ne!(
         static_principal.principal_ref(),
         signed_principal.principal_ref(),
-        "the pre-existing principal derivation erases the authentication method"
+        "method-bound principal derivation keeps authentication methods in separate namespaces"
+    );
+    assert_eq!(
+        static_principal.auth().legacy_principal_ref,
+        signed_principal.auth().legacy_principal_ref,
+        "pre-#209 legacy hashes still collide for the adversarial token shape"
     );
     let static_key = submit_principal_rate_limit_key(
         static_principal.tenant_id(),
@@ -5892,6 +5931,63 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
         .await
         .expect_err("static principal retains an independent bucket");
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn method_bound_principal_refs_separate_static_and_signed_namespaces() {
+    let colliding = "signed:a:b:c";
+    let (static_ref, static_legacy) = static_token_principal_refs(colliding);
+    let (signed_ref, signed_legacy) = signed_claim_principal_refs("a", "b:c");
+    assert_ne!(static_ref, signed_ref);
+    assert_eq!(static_legacy, signed_legacy);
+    assert_ne!(static_ref, static_legacy);
+    assert_ne!(signed_ref, signed_legacy);
+}
+
+#[test]
+fn ownership_predicates_do_not_cross_colliding_auth_methods() {
+    let colliding = "signed:a:b:c";
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "a", colliding, TokenRole::Contributor);
+    let static_auth = tokens.get(colliding).expect("static auth").clone();
+    let (signed_ref, signed_legacy) = signed_claim_principal_refs("a", "b:c");
+    let signed_auth = TenantAuth {
+        tenant_id: "a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: signed_ref.clone(),
+        legacy_principal_ref: Some(signed_legacy),
+        expires_at: None,
+        auth_method: TraceAuthMethod::SignedClaim,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    let signed_record = submission_record_with_principal(&signed_ref);
+    assert!(principal_owns_submission(&signed_auth, &signed_record));
+    assert!(!principal_owns_submission(&static_auth, &signed_record));
+    assert!(principal_can_self_revoke_submission(
+        &signed_auth,
+        &signed_record
+    ));
+    assert!(!principal_can_self_revoke_submission(
+        &static_auth,
+        &signed_record
+    ));
+
+    let static_record = submission_record_with_principal(&static_auth.principal_ref);
+    assert!(principal_owns_submission(&static_auth, &static_record));
+    assert!(!principal_owns_submission(&signed_auth, &static_record));
+
+    // Dual-read keeps same-credential continuity for pre-#209 rows.
+    let legacy = static_auth.legacy_principal_ref.clone().expect("legacy");
+    let legacy_record = submission_record_with_principal(&legacy);
+    assert!(principal_owns_submission(&static_auth, &legacy_record));
+    // Residual for historical colliding hashes only: both methods still match the
+    // shared pre-#209 row. New submissions never write that hash.
+    assert!(principal_owns_submission(&signed_auth, &legacy_record));
 }
 
 #[tokio::test]
@@ -6026,7 +6122,7 @@ async fn submit_authentication_precedes_rate_limit_accounting() {
     reset_account_rate_limiter_for_test();
     let temp = tempfile::tempdir().expect("temp dir");
     let state = submit_rate_limit_test_state(temp.path().to_path_buf());
-    let principal_ref = principal_storage_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let principal_ref = static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
     let mut invalid = sample_envelope().await;
     invalidate_envelope_schema(&mut invalid);
 
@@ -7022,13 +7118,13 @@ async fn contributor_credit_read_rejects_mismatched_file_ledger_tenant() {
             tenant_storage_ref: tenant_storage_ref("tenant-b"),
             submission_id,
             trace_id,
-            auth_principal_ref: principal_storage_ref("token-a"),
+            auth_principal_ref: static_token_principal_ref("token-a"),
             event_type: TraceCreditLedgerEventType::TrainingUtility,
             credit_points_delta: 1.0,
             reason: Some("mismatched file tenant should fail closed".to_string()),
             external_ref: Some("utility:tenant-mismatch".to_string()),
             actor_role: TokenRole::UtilityWorker,
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
         },
         "corrupt trace credit ledger",
@@ -7066,7 +7162,7 @@ async fn audit_read_rejects_mismatched_file_event_tenant() {
             created_at: Utc::now(),
             status: Some(TraceCorpusStatus::Accepted),
             actor_role: Some(TokenRole::Reviewer),
-            actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+            actor_principal_ref: Some(static_token_principal_ref("review-token-a")),
             reason: Some("mismatched file tenant should fail closed".to_string()),
             export_count: None,
             export_id: None,
@@ -7104,7 +7200,7 @@ async fn audit_events_handler_uses_bounded_file_audit_reads() {
         created_at: Utc::now() - Duration::minutes(1),
         status: None,
         actor_role: Some(TokenRole::Reviewer),
-        actor_principal_ref: Some(principal_storage_ref("review-token-b")),
+        actor_principal_ref: Some(static_token_principal_ref("review-token-b")),
         reason: Some("older non-returned corrupt audit row".to_string()),
         export_count: None,
         export_id: None,
@@ -7120,7 +7216,7 @@ async fn audit_events_handler_uses_bounded_file_audit_reads() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Reviewer),
-        actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("review-token-a")),
         reason: Some("latest bounded audit row".to_string()),
         export_count: None,
         export_id: None,
@@ -7430,7 +7526,7 @@ fn parses_expiring_tenant_tokens_with_rfc3339_colons() {
     assert_eq!(contributor.role, TokenRole::Contributor);
     assert_eq!(
         contributor.principal_ref,
-        principal_storage_ref("dev-token-a")
+        static_token_principal_ref("dev-token-a")
     );
     assert_eq!(
         contributor.expires_at,
@@ -7748,8 +7844,8 @@ fn parses_credit_settlement_allowed_policy_versions() {
 
 #[test]
 fn central_issuer_principal_refs_parse_hash_only_allowlist() {
-    let admin_ref = principal_storage_ref("admin-token-a");
-    let utility_ref = principal_storage_ref("utility-worker-token-a");
+    let admin_ref = static_token_principal_ref("admin-token-a");
+    let utility_ref = static_token_principal_ref("utility-worker-token-a");
     let parsed = parse_credit_settlement_central_issuer_principal_refs(&format!(
         "{admin_ref}, {utility_ref}, {admin_ref}"
     ))
@@ -8301,7 +8397,8 @@ fn remote_object_delete_request_hashes_sensitive_refs_for_adapter_boundary() {
     let tenant = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::RevocationWorker,
-        principal_ref: principal_storage_ref("revocation-worker-token-a"),
+        principal_ref: static_token_principal_ref("revocation-worker-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -10202,13 +10299,13 @@ async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
     for (tenant_id, principal_ref, canonical_summary_hash, score) in [
         (
             "tenant-a",
-            principal_storage_ref("token-a"),
+            static_token_principal_ref("token-a"),
             "sha256:tenant-a-summary",
             Some(0.81),
         ),
         (
             "tenant-b",
-            principal_storage_ref("token-b"),
+            static_token_principal_ref("token-b"),
             "sha256:tenant-b-summary",
             Some(0.42),
         ),
@@ -13846,7 +13943,7 @@ fn storage_audit_projection_preserves_benchmark_conversion_kind() {
         audit_event_id: Uuid::new_v4(),
         tenant_id: "tenant-a".to_string(),
         audit_sequence: 1,
-        actor_principal_ref: principal_storage_ref("review-token-a"),
+        actor_principal_ref: static_token_principal_ref("review-token-a"),
         actor_role: "reviewer".to_string(),
         action: StorageTraceAuditAction::BenchmarkConvert,
         reason: Some("purpose=registry_evaluator_contract".to_string()),
@@ -13891,7 +13988,7 @@ fn audit_backfill_preserves_benchmark_lifecycle_update_projection() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::BenchmarkWorker),
-        actor_principal_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("benchmark-worker-token-a")),
         reason: Some("registry_status=published;evaluation_status=passed".to_string()),
         export_count: Some(3),
         export_id: Some(conversion_id),
@@ -13954,7 +14051,7 @@ fn audit_backfill_derives_hash_only_maintenance_metadata_from_reason() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "purpose_hash={purpose_hash};dry_run=false;export_provenance_invalidated=2;records_marked_revoked=1"
         )),
@@ -14028,7 +14125,7 @@ fn audit_mirror_normalization_rejects_noncanonical_maintenance_purpose_hash() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(
             "purpose_hash=raw-frontier-lab-purpose;dry_run=false;records_marked_revoked=1"
                 .to_string(),
@@ -14069,7 +14166,7 @@ fn audit_mirror_normalization_rejects_raw_maintenance_purpose() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "purpose={raw_purpose};dry_run=false;records_marked_revoked=1"
         )),
@@ -14109,7 +14206,8 @@ fn db_audit_projection_preserves_rollout_smoke_evidence_kind() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14161,7 +14259,8 @@ fn rollout_smoke_audit_projection_rejects_noncanonical_hashes() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14219,7 +14318,8 @@ fn db_audit_projection_preserves_credit_settlement_issuer_approval_kind() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14325,7 +14425,8 @@ fn db_audit_projection_preserves_credit_hold_kind_and_hash_only_metadata() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14427,7 +14528,8 @@ fn audit_mirror_normalization_derives_credit_hold_metadata_from_reason() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14525,7 +14627,7 @@ fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_re
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::UtilityWorker),
-        actor_principal_ref: Some(principal_storage_ref("utility-worker-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("utility-worker-token-a")),
         reason: Some(trace_near_credit_outbox_status_audit_reason(&item)),
         export_count: None,
         export_id: None,
@@ -14624,7 +14726,7 @@ fn db_audit_projection_preserves_near_credit_outbox_status_hash_only_metadata() 
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::UtilityWorker),
-        actor_principal_ref: Some(principal_storage_ref("utility-worker-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("utility-worker-token-a")),
         reason: Some(trace_near_credit_outbox_status_audit_reason(&item)),
         export_count: None,
         export_id: None,
@@ -14733,7 +14835,7 @@ fn audit_mirror_normalization_derives_benchmark_registry_outbox_status_metadata_
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::BenchmarkWorker),
-        actor_principal_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("benchmark-worker-token-a")),
         reason: Some(trace_benchmark_registry_outbox_status_audit_reason(&item)),
         export_count: None,
         export_id: None,
@@ -14847,7 +14949,7 @@ fn db_audit_projection_preserves_benchmark_registry_outbox_status_hash_only_meta
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(trace_benchmark_registry_outbox_status_audit_reason(&item)),
         export_count: None,
         export_id: None,
@@ -14914,7 +15016,8 @@ fn issuer_approval_audit_projection_rejects_noncanonical_hashes() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -16563,6 +16666,12 @@ async fn bulk_export_limit_cap_is_applied_by_export_callers() {
     Arc::get_mut(&mut state)
         .expect("state is uniquely owned")
         .max_export_items_per_request = 1;
+    // See the note on the sibling export tests: consent concordance pushes
+    // these prose-bearing fixtures to Medium, which quarantines unless the
+    // deployment accepts Medium. This test is about the export cap.
+    Arc::get_mut(&mut state)
+        .expect("state is uniquely owned")
+        .accept_medium_risk_submissions = true;
 
     for index in 0..3 {
         let mut envelope = sample_envelope().await;
@@ -16770,6 +16879,15 @@ async fn export_access_grants_gate_replay_dataset_call_site() {
 async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let tenant =
         authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
 
@@ -16818,7 +16936,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_benchmark".to_string()),
             consent_scope: Some("benchmark-only".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             external_ref: None,
         },
         expired_benchmark_grant,
@@ -16846,7 +16964,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_ranker_candidates".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("ranking-training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         },
         wrong_tenant_ranker_grant,
         now,
@@ -16873,7 +16991,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_ranker_pairs".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("model-training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         },
         valid_pair_grant,
         now,
@@ -17054,7 +17172,7 @@ async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_rea
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("review-token-a"),
+                caller_principal_ref: static_token_principal_ref("review-token-a"),
                 requested_dataset_kind: "replay_dataset".to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(10),
@@ -17073,7 +17191,7 @@ async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_rea
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("review-token-a"),
+                caller_principal_ref: static_token_principal_ref("review-token-a"),
                 requested_dataset_kind: "replay_dataset".to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(10),
@@ -17101,7 +17219,7 @@ async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_rea
             tenant_id: "tenant-b".to_string(),
             export_job_id: tenant_b_job_id,
             grant_id: tenant_b_grant_id,
-            caller_principal_ref: principal_storage_ref("review-token-b"),
+            caller_principal_ref: static_token_principal_ref("review-token-b"),
             requested_dataset_kind: "replay_dataset".to_string(),
             purpose: "cross_tenant_queued_replay".to_string(),
             max_item_cap: Some(10),
@@ -17120,7 +17238,7 @@ async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_rea
             tenant_id: "tenant-b".to_string(),
             export_job_id: tenant_b_job_id,
             grant_id: tenant_b_grant_id,
-            caller_principal_ref: principal_storage_ref("review-token-b"),
+            caller_principal_ref: static_token_principal_ref("review-token-b"),
             requested_dataset_kind: "replay_dataset".to_string(),
             purpose: "cross_tenant_queued_replay".to_string(),
             max_item_cap: Some(10),
@@ -17216,7 +17334,7 @@ async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_rea
             .metadata
             .get("claimed_by_principal_ref")
             .map(String::as_str),
-        Some(principal_storage_ref("export-worker-token-a").as_str())
+        Some(static_token_principal_ref("export-worker-token-a").as_str())
     );
 
     let jobs = backend
@@ -17288,7 +17406,7 @@ async fn export_worker_claims_and_runs_queued_replay_job_from_safe_metadata() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "queued replay execution".to_string(),
             max_item_cap: Some(5),
@@ -17310,7 +17428,7 @@ async fn export_worker_claims_and_runs_queued_replay_job_from_safe_metadata() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "queued replay execution".to_string(),
             max_item_cap: Some(5),
@@ -17377,7 +17495,7 @@ async fn export_worker_claims_and_runs_queued_replay_job_from_safe_metadata() {
             .metadata
             .get("claimed_by_principal_ref")
             .map(String::as_str),
-        Some(principal_storage_ref("export-worker-token-a").as_str())
+        Some(static_token_principal_ref("export-worker-token-a").as_str())
     );
     assert!(completed.metadata.contains_key("external_ref_hash"));
     assert!(
@@ -17416,7 +17534,7 @@ async fn export_worker_claim_and_run_fails_claimed_replay_job_with_bad_metadata(
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "bad queued replay execution".to_string(),
             max_item_cap: Some(5),
@@ -17432,7 +17550,7 @@ async fn export_worker_claim_and_run_fails_claimed_replay_job_with_bad_metadata(
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "bad queued replay execution".to_string(),
             max_item_cap: Some(5),
@@ -17538,7 +17656,7 @@ async fn export_worker_claims_and_runs_queued_benchmark_job_from_safe_metadata()
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "queued benchmark execution".to_string(),
             max_item_cap: Some(5),
@@ -17554,7 +17672,7 @@ async fn export_worker_claims_and_runs_queued_benchmark_job_from_safe_metadata()
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "queued benchmark execution".to_string(),
             max_item_cap: Some(5),
@@ -17657,8 +17775,9 @@ async fn central_issuer_allowlist_blocks_credit_bearing_export_job_claims_before
         false,
         false,
     );
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     let now = Utc::now();
     let benchmark_job_id = Uuid::new_v4();
     let ranker_job_id = Uuid::new_v4();
@@ -17682,7 +17801,7 @@ async fn central_issuer_allowlist_blocks_credit_bearing_export_job_claims_before
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -17698,7 +17817,7 @@ async fn central_issuer_allowlist_blocks_credit_bearing_export_job_claims_before
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -17852,7 +17971,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -17868,7 +17987,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -18053,7 +18172,7 @@ async fn export_worker_run_queued_jobs_makes_bounded_progress_after_job_failure(
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -18069,7 +18188,7 @@ async fn export_worker_run_queued_jobs_makes_bounded_progress_after_job_failure(
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: dataset_kind.storage_name().to_string(),
                 purpose: purpose.to_string(),
                 max_item_cap: Some(5),
@@ -18231,7 +18350,7 @@ async fn admin_can_retry_failed_export_job_for_scheduler_execution() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "retryable queued replay".to_string(),
             max_item_cap: Some(5),
@@ -18275,7 +18394,7 @@ async fn admin_can_retry_failed_export_job_for_scheduler_execution() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: requested_dataset_kind.to_string(),
             purpose: "retryable queued replay".to_string(),
             max_item_cap: Some(5),
@@ -18414,7 +18533,7 @@ async fn admin_retry_refuses_failed_export_job_without_replayable_metadata() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                 .storage_name()
                 .to_string(),
@@ -18432,7 +18551,7 @@ async fn admin_retry_refuses_failed_export_job_without_replayable_metadata() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+            caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
             requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                 .storage_name()
                 .to_string(),
@@ -18714,7 +18833,7 @@ async fn export_worker_retry_failed_jobs_applies_backoff_and_retry_limits() {
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                     .storage_name()
                     .to_string(),
@@ -18747,7 +18866,7 @@ async fn export_worker_retry_failed_jobs_applies_backoff_and_retry_limits() {
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                     .storage_name()
                     .to_string(),
@@ -18977,7 +19096,7 @@ async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() 
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                     .storage_name()
                     .to_string(),
@@ -18995,7 +19114,7 @@ async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() 
                 tenant_id: "tenant-a".to_string(),
                 export_job_id,
                 grant_id,
-                caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                caller_principal_ref: static_token_principal_ref("export-worker-token-a"),
                 requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
                     .storage_name()
                     .to_string(),
@@ -19273,8 +19392,9 @@ async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_liv
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     Arc::make_mut(&mut state).near_credit_submitter =
         Some(Arc::new(FakeNearCreditSubmitter::default()));
     Arc::make_mut(&mut state).near_credit_confirmer =
@@ -19412,8 +19532,9 @@ async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let live_error = validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
@@ -19586,8 +19707,9 @@ async fn benchmark_registry_scheduler_config_requires_benchmark_worker_auth_and_
         Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
     Arc::make_mut(&mut state).benchmark_registry_confirmer =
         Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let central_issuer_error = validate_trace_benchmark_registry_scheduler_config(
         state.as_ref(),
@@ -20037,8 +20159,9 @@ async fn credit_cycle_scheduler_requires_authorized_central_issuer_for_live() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let live_error = validate_trace_credit_cycle_scheduler_config(
         state.as_ref(),
@@ -20290,6 +20413,15 @@ async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_art
 async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::BenchmarkOnly];
@@ -23122,6 +23254,13 @@ fn legacy_benchmark_conversion_artifact_defaults_lifecycle_metadata() {
 async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // `tenant_a_quarantined` is deliberately left content-bearing so it
+    // quarantines and is excluded from the export -- that exclusion is the
+    // point of this test. Accepting Medium submissions wholesale would admit
+    // it and silently destroy the assertion, so the fixtures stay genuinely
+    // Low instead: `make_metadata_only_low_risk` strips content and declares
+    // false/false, and nothing puts prose back. The two exported traces are
+    // distinguished by `submission_score`, which is what the ranker orders on.
     let mut tenant_a_best = sample_envelope().await;
     make_metadata_only_low_risk(&mut tenant_a_best);
     tenant_a_best.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23134,15 +23273,7 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
     tenant_a_lower.trace_card.consent_scope = ConsentScope::RankingTraining;
     tenant_a_lower.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     tenant_a_lower.value.submission_score = 0.25;
-    for event in &mut tenant_a_lower.events {
-        if event.event_type
-            == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
-        {
-            event.redacted_content =
-                Some("Please inspect the lower-ranked ranker trace".to_string());
-            break;
-        }
-    }
+    set_metadata_only_tool_name(&mut tenant_a_lower, "lower_ranked_probe");
     let tenant_a_lower_id = tenant_a_lower.submission_id;
     let mut tenant_a_quarantined = sample_envelope().await;
     tenant_a_quarantined.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23426,6 +23557,15 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
 async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23563,6 +23703,15 @@ async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credi
 async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23688,6 +23837,15 @@ async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
 async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -26136,7 +26294,8 @@ async fn revocation_propagation_audit_reason_hashes_worker_purpose() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::RevocationWorker,
-        principal_ref: principal_storage_ref("revocation-worker-token-a"),
+        principal_ref: static_token_principal_ref("revocation-worker-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -26480,7 +26639,8 @@ fn revocation_worker_tenant_auth(tenant_id: &str) -> TenantAuth {
     TenantAuth {
         tenant_id: tenant_id.to_string(),
         role: TokenRole::RevocationWorker,
-        principal_ref: principal_storage_ref(&format!("revocation-worker-token-{tenant_id}")),
+        principal_ref: static_token_principal_ref(&format!("revocation-worker-token-{tenant_id}")),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -28006,7 +28166,8 @@ async fn worker_queue_invalidation_calls_configured_cache_invalidator_hash_only(
     let tenant = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::RevocationWorker,
-        principal_ref: principal_storage_ref("revocation-worker-token-a"),
+        principal_ref: static_token_principal_ref("revocation-worker-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -28081,7 +28242,8 @@ async fn worker_queue_invalidation_fails_closed_when_required_invalidator_missin
     let tenant = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::RevocationWorker,
-        principal_ref: principal_storage_ref("revocation-worker-token-a"),
+        principal_ref: static_token_principal_ref("revocation-worker-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -31328,7 +31490,7 @@ async fn maintenance_reconciliation_reports_submitted_audit_metadata_drift() {
         created_at: Utc::now(),
         status: Some(TraceCorpusStatus::Accepted),
         actor_role: Some(TokenRole::Contributor),
-        actor_principal_ref: Some(principal_storage_ref("token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("token-a")),
         reason: Some("auth_method=static_token".to_string()),
         export_count: None,
         export_id: None,
@@ -31418,7 +31580,7 @@ async fn maintenance_reconciliation_samples_audit_reader_projection_drift() {
         false,
     );
     let mut auth = test_reviewer_auth("tenant-a");
-    auth.principal_ref = principal_storage_ref("review-token-a");
+    auth.principal_ref = static_token_principal_ref("review-token-a");
     let file_event = append_audit_event(
         temp.path(),
         "tenant-a",
@@ -32100,7 +32262,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             training_dataset_hash: sha256_prefixed("ranking-training-reconcile"),
             calibration_dataset_hash: sha256_prefixed("ranking-calibration-reconcile"),
             model_artifact_hash: sha256_prefixed("ranking-model-artifact-reconcile"),
-            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            actor_principal_ref: static_token_principal_ref("admin-token-a"),
             created_at: now,
         },
     )
@@ -32117,7 +32279,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
         label_source_count: 2,
         label_actor_count: 2,
         status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         created_at: now,
     };
     let mut calibration_dataset_rewrite = calibration_dataset.clone();
@@ -32155,7 +32317,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             privacy_risk_score: Some(0.01),
             quality_score: Some(0.89),
             coverage_tags: vec!["tool:terminal".to_string()],
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -32181,7 +32343,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             novelty_bonus_micros: 0,
             settlement_score_micros: 1_200_000,
             explanation_codes: vec!["reconciliation_probe".to_string()],
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -32202,7 +32364,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             utility_delta_micros: 1_250_000,
             evidence_hash: sha256_prefixed("ranking-label-evidence-reconcile"),
             external_ref_hash: "sha256:ranking-label-external-ref-reconcile".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -32224,7 +32386,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             preference_strength_micros: 850_000,
             evidence_hash: sha256_prefixed("ranking-preference-evidence-reconcile"),
             external_ref_hash: "sha256:ranking-preference-external-ref-reconcile".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -32260,7 +32422,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             promotable: true,
             reason_codes: Vec::new(),
             report_hash: "sha256:ranking-calibration-report-reconcile".to_string(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
         },
     )
@@ -32288,7 +32450,7 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
             pending_after_count: 0,
             result_refs: vec![format!("ranking_calibration:{calibration_run_id}")],
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: now,
             completed_at: Some(now),
             last_error_hash: None,
@@ -33433,7 +33595,7 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             evidence_hash: sha256_prefixed("utility-attestation-evidence"),
             external_ref_hash: "sha256:utility-attestation-ref".to_string(),
             source_submission_ids: vec![Uuid::new_v4()],
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
         },
     )
@@ -33445,11 +33607,11 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             hold_id: Uuid::new_v4(),
             tenant_id: "tenant-a".to_string(),
             tenant_storage_ref: tenant_storage_ref("tenant-a"),
-            credit_account_ref: principal_storage_ref("token-a"),
-            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            credit_account_ref: static_token_principal_ref("token-a"),
+            credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
             reason: StorageTraceCreditHoldReason::AttestationDispute,
             reason_hash: "sha256:credit-hold-reason".to_string(),
-            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            actor_principal_ref: static_token_principal_ref("admin-token-a"),
             created_at: Utc::now(),
             released_at: None,
         },
@@ -33472,8 +33634,8 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             settled_credit_points: 1.0,
             settled_credit_micros: 1_000_000,
             line_items: vec![StorageTraceCreditAccountSettlementLineItem {
-                credit_account_ref: principal_storage_ref("token-a"),
-                credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+                credit_account_ref: static_token_principal_ref("token-a"),
+                credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
                 settled_credit_delta_micros: 1_000_000,
                 source_credit_event_ids: vec![Uuid::new_v4()],
                 source_submission_ids: vec![Uuid::new_v4()],
@@ -33490,14 +33652,14 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
             ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            actor_principal_ref: static_token_principal_ref("admin-token-a"),
             created_at: Utc::now(),
         },
     )
     .expect("settlement file writes");
     let receipt = NearCreditReceipt {
         settlement_batch_id,
-        credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+        credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
         policy_version: "trace-credit-policy-v1".to_string(),
         source_list_hash: sha256_prefixed("settlement-item-sources"),
         attestation_hash: sha256_prefixed("settlement-attestation"),
@@ -33590,7 +33752,7 @@ async fn maintenance_backfill_dry_run_counts_benchmark_registry_outbox_rows() {
             registry_ref: "benchmark-registry:trace-benchmark-dry-run".to_string(),
             artifact_payload_hash: "sha256:benchmark-artifact-dry-run".to_string(),
             source_submission_ids_hash: "sha256:benchmark-sources-dry-run".to_string(),
-            evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+            evaluator_ref: Some(static_token_principal_ref("benchmark-worker-token-a")),
             evaluation_score: Some(0.88),
             status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
             created_at: Utc::now(),
@@ -33760,7 +33922,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
     let near_outbox_id = Uuid::new_v4();
     let receipt = NearCreditReceipt {
         settlement_batch_id,
-        credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+        credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
         policy_version: "trace-credit-policy-v1".to_string(),
         source_list_hash: sha256_prefixed("settlement-item-sources"),
         attestation_hash: sha256_prefixed("settlement-attestation"),
@@ -33781,7 +33943,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         settled_credit_points: 1.0,
         settled_credit_micros: 1_000_000,
         line_items: vec![StorageTraceCreditAccountSettlementLineItem {
-            credit_account_ref: principal_storage_ref("token-a"),
+            credit_account_ref: static_token_principal_ref("token-a"),
             credit_account_hash: receipt.credit_account_hash.clone(),
             settled_credit_delta_micros: 1_000_000,
             source_credit_event_ids: vec![Uuid::new_v4()],
@@ -33799,7 +33961,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         ranking_calibration_joined_evidence_hash: None,
         ranking_credit_events_excluded_count: 0,
         ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         created_at: Utc::now(),
     };
     append_credit_settlement_batch(temp.path(), "tenant-a", &batch)
@@ -33910,7 +34072,7 @@ async fn maintenance_backfill_updates_existing_benchmark_registry_outbox_status_
         registry_ref: "benchmark-registry:trace-benchmark-backfill".to_string(),
         artifact_payload_hash: "sha256:benchmark-artifact-backfill".to_string(),
         source_submission_ids_hash: "sha256:benchmark-sources-backfill".to_string(),
-        evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+        evaluator_ref: Some(static_token_principal_ref("benchmark-worker-token-a")),
         evaluation_score: Some(0.91),
         status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
         created_at: Utc::now(),
@@ -34315,7 +34477,7 @@ fn audit_backfill_preserves_tenant_access_grant_update_metadata() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "action=revoked;grant_id={grant_id};role=reviewer;status=revoked;allowed_consent_scope_count=2;allowed_use_count=1;grant_projection_hash={projection_hash}"
         )),
@@ -34352,7 +34514,7 @@ fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
             created_at: Utc::now(),
             status: None,
             actor_role: Some(TokenRole::Admin),
-            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
             reason: Some(
                 "policy_version=trace-policy-v1;allowed_consent_scope_count=2;allowed_use_count=3;policy_projection_hash=sha256:not-canonical"
                     .to_string(),
@@ -34376,7 +34538,7 @@ fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "action=revoked;grant_id={grant_id};role=reviewer;status=revoked;allowed_consent_scope_count=2;allowed_use_count=1;grant_projection_hash=sha256:not-canonical"
         )),
@@ -34398,7 +34560,7 @@ fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Reviewer),
-        actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("review-token-a")),
         reason: Some("surface=review_decision;purpose_hash=sha256:not-canonical".to_string()),
         export_count: None,
         export_id: None,
@@ -34418,7 +34580,7 @@ fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "export_job_id={};status=failed;reason_hash=sha256:not-canonical",
             Uuid::from_u128(0x101)
@@ -34441,7 +34603,7 @@ fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "ranking_worker_run_id={};run_kind=prediction_credit;status=failed;reason_hash=sha256:not-canonical",
             Uuid::from_u128(0x202)
@@ -34462,7 +34624,8 @@ fn audit_backfill_preserves_calibration_dataset_quarantine_metadata() {
     let auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -34482,7 +34645,7 @@ fn audit_backfill_preserves_calibration_dataset_quarantine_metadata() {
         label_source_count: 3,
         label_actor_count: 3,
         status: StorageTraceRankingCalibrationDatasetStatus::Archived,
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         created_at: Utc::now(),
     };
     let conflict_key =
@@ -34524,7 +34687,7 @@ fn audit_backfill_rejects_noncanonical_calibration_dataset_quarantine_hash_metad
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Admin),
-        actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("admin-token-a")),
         reason: Some(format!(
             "calibration_dataset_hash={};target_use=ranking_model_training;policy_version=trace-credit-policy-v1;archived_source_manifest_hash={};conflict_key_hash={};reason_hash=sha256:not-canonical",
             sha256_prefixed("quarantine-holdout"),
@@ -34560,7 +34723,7 @@ fn audit_chain_verifier_reports_mismatched_file_event_tenant() {
         created_at: Utc::now(),
         status: None,
         actor_role: Some(TokenRole::Reviewer),
-        actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+        actor_principal_ref: Some(static_token_principal_ref("review-token-a")),
         reason: Some("mismatched audit tenant".to_string()),
         export_count: Some(1),
         export_id: None,
@@ -36122,8 +36285,9 @@ async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let source_list_hash = sha256_prefixed("central issuer principal source list");
     let approval_hash = sha256_prefixed("central issuer principal approval");
@@ -36777,7 +36941,7 @@ async fn contributor_credit_summary_nets_revocation_reversal_against_settled_bal
             tenant_storage_ref: tenant_storage_ref("tenant-a"),
             submission_id,
             trace_id: event.trace_id,
-            auth_principal_ref: principal_storage_ref("token-a"),
+            auth_principal_ref: static_token_principal_ref("token-a"),
             event_type: TraceCreditLedgerEventType::BenchmarkConversion,
             credit_points_delta: -2.5,
             reason: Some(format!(
@@ -36789,7 +36953,7 @@ async fn contributor_credit_summary_nets_revocation_reversal_against_settled_bal
                 event.event_id
             )),
             actor_role: TokenRole::RevocationWorker,
-            actor_principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("revocation-worker-token-a"),
             created_at: Utc::now(),
         },
     )
@@ -36851,7 +37015,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
             tenant_storage_ref: tenant_storage_ref("tenant-a"),
             submission_id,
             trace_id: event.trace_id,
-            auth_principal_ref: principal_storage_ref("token-a"),
+            auth_principal_ref: static_token_principal_ref("token-a"),
             event_type: TraceCreditLedgerEventType::BenchmarkConversion,
             credit_points_delta: -2.5,
             reason: Some(format!(
@@ -36863,7 +37027,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
                 event.event_id
             )),
             actor_role: TokenRole::RevocationWorker,
-            actor_principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("revocation-worker-token-a"),
             created_at: Utc::now(),
         },
     )
@@ -39195,7 +39359,7 @@ async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_sc
     assert_eq!(batches.len(), 1);
     assert_eq!(
         batches[0].actor_principal_ref,
-        principal_storage_ref("utility-worker-token-a")
+        static_token_principal_ref("utility-worker-token-a")
     );
     assert!(
         read_all_credit_settlement_batches(temp.path(), "tenant-b")
@@ -39365,7 +39529,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     assert_eq!(batches.len(), 1);
     assert_eq!(
         batches[0].actor_principal_ref,
-        principal_storage_ref("utility-worker-token-a")
+        static_token_principal_ref("utility-worker-token-a")
     );
     let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
     assert_eq!(outbox.len(), 1);
@@ -39822,8 +39986,8 @@ async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
         settled_credit_points: 1.0,
         settled_credit_micros: 1_000_000,
         line_items: vec![StorageTraceCreditAccountSettlementLineItem {
-            credit_account_ref: principal_storage_ref("token-a"),
-            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            credit_account_ref: static_token_principal_ref("token-a"),
+            credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
             settled_credit_delta_micros: 1_000_000,
             source_credit_event_ids: vec![source_credit_event_id],
             source_submission_ids: vec![submission_id],
@@ -40409,7 +40573,7 @@ fn pending_benchmark_registry_outbox_item(
         registry_ref: "benchmark-registry:worker-submit".to_string(),
         artifact_payload_hash: "sha256:benchmark-registry-worker-artifact".to_string(),
         source_submission_ids_hash: "sha256:benchmark-registry-worker-sources".to_string(),
-        evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+        evaluator_ref: Some(static_token_principal_ref("benchmark-worker-token-a")),
         evaluation_score: Some(0.97),
         status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
         created_at: Utc::now(),
@@ -40551,8 +40715,9 @@ async fn benchmark_registry_outbox_mark_status_is_tenant_scoped() {
 async fn benchmark_registry_outbox_mark_status_requires_authorized_central_issuer() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let benchmark_outbox_id = Uuid::new_v4();
     let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
@@ -41156,8 +41321,9 @@ async fn benchmark_registry_outbox_workers_require_authorized_central_issuer_for
     let confirmer_calls = fake_confirmer.calls.clone();
     Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
     Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let pending_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
     let submitted_item = submitted_benchmark_registry_outbox_item(
@@ -42728,8 +42894,9 @@ async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let pending_outbox_id = Uuid::new_v4();
     let mut pending_item =
@@ -42947,8 +43114,9 @@ async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live()
     let confirmer_calls = fake_confirmer.calls.clone();
     Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
     Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let mut pending_item =
         submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_1, 1_000_000);
@@ -43228,7 +43396,7 @@ async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_re
     let near_outbox_id = Uuid::new_v4();
     let receipt = NearCreditReceipt {
         settlement_batch_id,
-        credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+        credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
         policy_version: "trace-credit-policy-v1".to_string(),
         source_list_hash: sha256_prefixed("settlement-worker-tampered-sources"),
         attestation_hash: sha256_prefixed("settlement-worker-tampered-attestation"),
@@ -43304,7 +43472,7 @@ async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
     let near_outbox_id = Uuid::new_v4();
     let receipt = NearCreditReceipt {
         settlement_batch_id,
-        credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+        credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
         policy_version: "trace-credit-policy-v1".to_string(),
         source_list_hash: sha256_prefixed("settlement-worker-retry-sources"),
         attestation_hash: sha256_prefixed("settlement-worker-retry-attestation"),
@@ -45341,7 +45509,7 @@ async fn admin_can_recover_stale_ranking_worker_run_as_failed() {
     assert_eq!(recovery_audit.tenant_id, "tenant-a");
     assert_eq!(recovery_audit.submission_id, Uuid::nil());
     assert_eq!(recovery_audit.actor_role, Some(TokenRole::Admin));
-    let expected_admin_principal_ref = principal_storage_ref("admin-token-a");
+    let expected_admin_principal_ref = static_token_principal_ref("admin-token-a");
     assert_eq!(
         recovery_audit.actor_principal_ref.as_deref(),
         Some(expected_admin_principal_ref.as_str())
@@ -48870,8 +49038,9 @@ async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effe
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     let (candidate, _) =
         seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-principal-v1")
             .await;
@@ -49418,7 +49587,7 @@ async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
             pending_after_count: 0,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: None,
             last_error_hash: None,
@@ -50221,8 +50390,9 @@ async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_befor
 
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let response = app(state.clone())
         .oneshot(
@@ -52323,8 +52493,9 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
         TokenRole::Admin,
     );
     let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
@@ -53376,12 +53547,12 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         ranking_calibration_joined_evidence_hash: None,
         ranking_credit_events_excluded_count: 0,
         ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         created_at: Utc::now(),
     };
     let line_item = StorageTraceCreditAccountSettlementLineItem {
-        credit_account_ref: principal_storage_ref("token-a"),
-        credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+        credit_account_ref: static_token_principal_ref("token-a"),
+        credit_account_hash: sha256_prefixed(&static_token_principal_ref("token-a")),
         settled_credit_delta_micros: 3_000_000,
         source_credit_event_ids: vec![credit_event_id, other_credit_event_id],
         source_submission_ids: batch.source_submission_ids.clone(),
@@ -53395,12 +53566,12 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         tenant_id: "tenant-a".to_string(),
         submission_id,
         trace_id: Uuid::new_v4(),
-        credit_account_ref: principal_storage_ref("token-a"),
+        credit_account_ref: static_token_principal_ref("token-a"),
         event_type: StorageTraceCreditEventType::TrainingUtility,
         points_delta: "1.2500".to_string(),
         reason: "frontier training utility".to_string(),
         external_ref: Some("frontier:revoked-credit".to_string()),
-        actor_principal_ref: principal_storage_ref("review-token-a"),
+        actor_principal_ref: static_token_principal_ref("review-token-a"),
         actor_role: "reviewer".to_string(),
         settlement_state: StorageTraceCreditSettlementState::Final,
         occurred_at: Utc::now(),
@@ -54840,6 +55011,9 @@ async fn ranking_label_sources_require_matching_authority_role() {
 async fn ranker_training_pairs_include_explicit_preference_labels_before_score_heuristics() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // Both fixtures stay genuinely Low: content is stripped and the false/false
+    // consent declaration is honest, so consent concordance has nothing to
+    // correct upward and the default risk policy applies.
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -54853,15 +55027,11 @@ async fn ranker_training_pairs_include_explicit_preference_labels_before_score_h
     rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
     rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     rejected.value.submission_score = 0.95;
-    for event in &mut rejected.events {
-        if event.event_type
-            == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
-        {
-            event.redacted_content =
-                Some("This explicit preference rejection is a distinct trace".to_string());
-            break;
-        }
-    }
+    // Distinguished by metadata rather than prose: the trace only needs to be
+    // a distinct trace, and giving it message text would classify it Medium
+    // while its sibling stayed Low, so no single risk filter could return the
+    // pair.
+    set_metadata_only_tool_name(&mut rejected, "explicit_preference_rejection");
     let rejected_submission_id = rejected.submission_id;
 
     let _ = submit_trace_handler(
@@ -59062,7 +59232,7 @@ async fn operational_summary_blocks_stale_running_ranking_worker_runs() {
             pending_after_count: 0,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now() - Duration::hours(2),
             completed_at: None,
             last_error_hash: None,
@@ -59123,7 +59293,7 @@ async fn operational_summary_blocks_failed_ranking_worker_runs() {
             pending_after_count: 0,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: Some(sha256_prefixed("worker failed before settlement")),
@@ -59389,7 +59559,7 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
-            caller_principal_ref: principal_storage_ref("review-token-a"),
+            caller_principal_ref: static_token_principal_ref("review-token-a"),
             requested_dataset_kind: "replay_dataset".to_string(),
             purpose: "stale_replay_export".to_string(),
             max_item_cap: Some(10),
@@ -59410,7 +59580,7 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             tenant_id: "tenant-b".to_string(),
             export_job_id,
             grant_id: Uuid::new_v4(),
-            caller_principal_ref: principal_storage_ref("review-token-b"),
+            caller_principal_ref: static_token_principal_ref("review-token-b"),
             requested_dataset_kind: "replay_dataset".to_string(),
             purpose: "same_id_tenant_b_stale_replay_export".to_string(),
             max_item_cap: Some(10),
@@ -59445,7 +59615,7 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             tenant_id: "tenant-a".to_string(),
             export_job_id: fresh_export_job_id,
             grant_id: Uuid::new_v4(),
-            caller_principal_ref: principal_storage_ref("review-token-a"),
+            caller_principal_ref: static_token_principal_ref("review-token-a"),
             requested_dataset_kind: "replay_dataset".to_string(),
             purpose: "fresh_replay_export".to_string(),
             max_item_cap: Some(10),
@@ -59618,7 +59788,7 @@ async fn operational_summary_reports_ranking_worker_skip_totals() {
                 ("calibration_stale".to_string(), 1),
                 ("current_evidence_not_promotable".to_string(), 1),
             ]),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: None,
@@ -59648,7 +59818,7 @@ async fn operational_summary_reports_ranking_worker_skip_totals() {
             pending_after_count: 2,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::from([("evaluation_use_not_allowed".to_string(), 1)]),
-            actor_principal_ref: principal_storage_ref("process-eval-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("process-eval-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: None,
@@ -59789,7 +59959,7 @@ async fn operational_summary_warns_on_actionable_ranking_worker_skips() {
                 ("calibration_stale".to_string(), 2),
                 ("target_not_allowed".to_string(), 1),
             ]),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: None,
@@ -59854,7 +60024,7 @@ async fn operational_summary_audit_reason_records_safe_gate_counts() {
             pending_after_count: 1,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::from([("calibration_stale".to_string(), 3)]),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: None,
@@ -60218,7 +60388,7 @@ async fn admin_operational_metrics_route_exports_revocation_propagation_worker_s
                 created_at: Utc::now(),
                 status: None,
                 actor_role: Some(TokenRole::RevocationWorker),
-                actor_principal_ref: Some(principal_storage_ref("revocation-worker-token-a")),
+                actor_principal_ref: Some(static_token_principal_ref("revocation-worker-token-a")),
                 reason: Some(
                     "purpose=disabled_remote_probe;dry_run=false;checked=3;completed=1;failed=0;skipped=2;pending=0"
                         .to_string(),
@@ -60655,7 +60825,7 @@ fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
         status: TraceRolloutSmokeEvidenceStatus::Passed,
         evidence_hash: sha256_prefixed("newer audit reads passed"),
         evidence_ref_hash: None,
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         recorded_at: Utc::now(),
     };
     let older_failed = TraceRolloutSmokeEvidenceResponse {
@@ -60666,7 +60836,7 @@ fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
         status: TraceRolloutSmokeEvidenceStatus::Failed,
         evidence_hash: sha256_prefixed("older audit reads failed"),
         evidence_ref_hash: None,
-        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
         recorded_at: newer_passed.recorded_at - Duration::minutes(10),
     };
     let out_of_order_evidence = vec![newer_passed.clone(), older_failed];
@@ -60706,7 +60876,7 @@ fn rollout_smoke_summary_blocks_stale_passed_evidence() {
             status: TraceRolloutSmokeEvidenceStatus::Passed,
             evidence_hash: sha256_prefixed(&format!("{check_name} stale rehearsal")),
             evidence_ref_hash: None,
-            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            actor_principal_ref: static_token_principal_ref("admin-token-a"),
             recorded_at: generated_at - Duration::hours(25),
         })
         .collect::<Vec<_>>();
@@ -61293,7 +61463,7 @@ async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
             pending_after_count: 0,
             result_refs: Vec::new(),
             reason_counts: BTreeMap::new(),
-            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),
             last_error_hash: Some(sha256_prefixed("metrics route worker failed")),
@@ -61881,13 +62051,13 @@ async fn ranking_credit_readiness_report_blocks_on_calibration_dataset_manifest_
         tenant_storage_ref: tenant_storage_ref("tenant-a"),
         submission_id: Uuid::new_v4(),
         trace_id: Uuid::new_v4(),
-        auth_principal_ref: principal_storage_ref("token-a"),
+        auth_principal_ref: static_token_principal_ref("token-a"),
         event_type: TraceCreditLedgerEventType::RankingUtility,
         credit_points_delta: 1.0,
         reason: Some("pending ranking utility credit should be held".to_string()),
         external_ref: None,
         actor_role: TokenRole::UtilityWorker,
-        actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+        actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
         created_at: Utc::now(),
     };
     append_credit_event(temp.path(), "tenant-a", &credit_event).expect("credit event writes");
@@ -62225,8 +62395,9 @@ async fn contributor_cannot_append_delayed_credit_event() {
 async fn central_issuer_allowlist_blocks_positive_credit_issuance() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
     envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -62422,8 +62593,9 @@ async fn central_issuer_allowlist_blocks_positive_credit_issuance() {
 async fn central_issuer_allowlist_blocks_credit_bearing_process_evaluation_before_mutation() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
     let submission_id = envelope.submission_id;
@@ -62484,8 +62656,9 @@ async fn central_issuer_allowlist_blocks_credit_bearing_process_evaluation_befor
 async fn central_issuer_allowlist_blocks_credit_bearing_exports_before_artifacts() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
 
     let benchmark_error = benchmark_worker_convert_handler(
         State(state.clone()),
@@ -62547,8 +62720,9 @@ async fn central_issuer_allowlist_blocks_credit_bearing_exports_before_artifacts
 fn central_issuer_allowlist_classifies_credit_bearing_export_job_claims() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
-        Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+    Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs = Arc::new(
+        BTreeSet::from([static_token_principal_ref("admin-token-a")]),
+    );
     let tenant = authenticate(state.as_ref(), &auth_headers("export-worker-token-a"))
         .expect("export worker auth");
 
@@ -62720,7 +62894,7 @@ async fn accepts_signed_tenant_token_and_attributes_to_claim_tenant() {
     assert_eq!(record.tenant_id, "tenant-b");
     assert_eq!(
         record.auth_principal_ref,
-        principal_storage_ref("signed:tenant-b:actor-123")
+        signed_claim_principal_refs("tenant-b", "actor-123").0
     );
     let audit_events = read_all_audit_events(temp.path(), "tenant-b").expect("audit reads");
     assert!(audit_events.iter().any(|event| {
@@ -62761,7 +62935,7 @@ async fn accepts_eddsa_signed_tenant_token_and_attributes_to_claim_tenant() {
     assert_eq!(record.tenant_id, "tenant-b");
     assert_eq!(
         record.auth_principal_ref,
-        principal_storage_ref("signed:tenant-b:actor-eddsa")
+        signed_claim_principal_refs("tenant-b", "actor-eddsa").0
     );
 }
 
@@ -63063,7 +63237,7 @@ async fn accepts_eddsa_signed_claim_when_eddsa_required() {
     assert_eq!(record.tenant_id, "tenant-b");
     assert_eq!(
         record.auth_principal_ref,
-        principal_storage_ref("signed:tenant-b:actor-required-eddsa")
+        signed_claim_principal_refs("tenant-b", "actor-required-eddsa").0
     );
 }
 
@@ -63089,7 +63263,7 @@ async fn accepts_managed_eddsa_signed_claim_when_managed_eddsa_required() {
     assert_eq!(record.tenant_id, "tenant-a");
     assert_eq!(
         record.auth_principal_ref,
-        principal_storage_ref("signed:tenant-a:actor-required-managed-eddsa")
+        signed_claim_principal_refs("tenant-a", "actor-required-managed-eddsa").0
     );
 }
 
@@ -63112,7 +63286,7 @@ async fn preserves_managed_eddsa_signed_claim_identity_for_grant_binding() {
     assert_eq!(auth.auth_method, TraceAuthMethod::SignedClaim);
     assert_eq!(
         auth.principal_ref,
-        principal_storage_ref("signed:tenant-a:actor-binding-subject")
+        signed_claim_principal_refs("tenant-a", "actor-binding-subject").0
     );
     assert_eq!(
         auth.signed_claim_issuer.as_deref(),
@@ -64289,6 +64463,7 @@ fn synthetic_admin_auth(
         tenant_id: "tenant-privileged-abac".to_string(),
         role: TokenRole::Admin,
         principal_ref: "principal-privileged-abac".to_string(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::SignedClaim,
         signed_claim_issuer: None,
@@ -70197,6 +70372,7 @@ fn account_and_tenant_surfaces_take_distinct_types() {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Contributor,
         principal_ref: "principal_a".to_string(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -70597,8 +70773,8 @@ async fn isolation_a_two_accounts_one_tenant_cannot_cross_read() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a-2"))
         .await
         .expect("mint links account B");
-    let principal_a = principal_storage_ref("token-a");
-    let principal_b = principal_storage_ref("token-a-2");
+    let principal_a = static_token_principal_ref("token-a");
+    let principal_b = static_token_principal_ref("token-a-2");
 
     let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
     let b_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_b).await;
@@ -70655,7 +70831,7 @@ async fn isolation_b_legacy_principal_never_returned_on_account_surface() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links account A");
-    let principal_a = principal_storage_ref("token-a");
+    let principal_a = static_token_principal_ref("token-a");
 
     let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
     // A legacy-wildcard-owned submission under the same tenant.
@@ -70695,7 +70871,7 @@ async fn isolation_c_reviewer_token_confined_to_own_account() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("review-token-a"))
         .await
         .expect("mint links the reviewer's account");
-    let reviewer_principal = principal_storage_ref("review-token-a");
+    let reviewer_principal = static_token_principal_ref("review-token-a");
 
     let reviewer_owned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", &reviewer_principal).await;
@@ -70745,7 +70921,7 @@ async fn isolation_d_unlinked_principal_excluded_active_principal_visible() {
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links the active principal");
-    let active_principal = principal_storage_ref("token-a");
+    let active_principal = static_token_principal_ref("token-a");
 
     // Resolve the account_id for token-a's principal so we can attach an UNLINKED
     // sibling principal to the SAME account.
@@ -70843,7 +71019,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
         ctx.actor_ref.starts_with("account-actor:"),
         "cookie path actor ref must be the account-actor literal"
     );
-    let active_principal = principal_storage_ref("token-a");
+    let active_principal = static_token_principal_ref("token-a");
 
     let active_owned =
         insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
@@ -72276,7 +72452,7 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
 
@@ -72663,7 +72839,7 @@ async fn passkey_login_round_trip_mints_passkey_session() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut authenticator, credential_id) =
@@ -72751,7 +72927,7 @@ async fn passkey_login_rejects_stale_counter_assertion() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut authenticator, credential_id) =
@@ -72829,7 +73005,7 @@ async fn passkey_login_binds_only_to_owning_account() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut authenticator, credential_id) =
@@ -73036,7 +73212,7 @@ async fn passkey_login_denials_are_byte_identical() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut enrolled, enrolled_cred) = enroll_passkey_for_token(&state, &session_cookie).await;
@@ -73147,7 +73323,7 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut auth1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
@@ -73292,7 +73468,7 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     let account_id = account_id_for_principal(
         backend.as_ref(),
         "tenant-a",
-        &principal_storage_ref("token-a"),
+        &static_token_principal_ref("token-a"),
     )
     .await;
     let (mut a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
@@ -74674,8 +74850,12 @@ async fn gate_allows_any_authenticator_from_strong_session() {
     let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id =
-        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a"),
+    )
+    .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
@@ -74724,8 +74904,12 @@ async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id =
-        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a"),
+    )
+    .await;
     // Enroll the only passkey (carve-out) -> 1 strong.
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
@@ -75025,8 +75209,12 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
 
     // Account A: weak redeem cookie, then enroll a passkey and log in -> STRONG.
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_a =
-        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let account_a = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a"),
+    )
+    .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
     let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
@@ -75103,7 +75291,7 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
         merge_principal_account(
             backend.as_ref(),
             tenant,
-            &principal_storage_ref("token-a-2")
+            &static_token_principal_ref("token-a-2")
         )
         .await,
         Some(account_a),
@@ -75183,7 +75371,7 @@ async fn merge_confirm_is_blocked_from_weak_session() {
         merge_principal_account(
             backend.as_ref(),
             tenant,
-            &principal_storage_ref("token-a-2")
+            &static_token_principal_ref("token-a-2")
         )
         .await,
         Some(account_b),
@@ -75209,8 +75397,12 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
 
     // Caller account A, strong session (so confirm reaches execute_merge, not the gate).
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_a =
-        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let account_a = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a"),
+    )
+    .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
     let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
@@ -75247,7 +75439,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     let account_c = account_id_for_principal(
         backend.as_ref(),
         tenant,
-        &principal_storage_ref("token-a-3"),
+        &static_token_principal_ref("token-a-3"),
     )
     .await;
     let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
@@ -76137,7 +76329,7 @@ async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
     // Finalize a settlement for an account with NO enrolled payout -> HELD line item,
     // no outbox row.
     let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -76191,7 +76383,8 @@ async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
     let admin_auth = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -76320,7 +76513,7 @@ async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submi
     // Designate a payout for the account BEFORE settlement so the finalize enqueues
     // exactly one `pending` outbox row routed to the payout target.
     let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -76462,7 +76655,7 @@ async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row()
         }));
 
     let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -76578,7 +76771,8 @@ async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row()
     let tenant = TenantAuth {
         tenant_id: "tenant-a".to_string(),
         role: TokenRole::Admin,
-        principal_ref: principal_storage_ref("admin-token-a"),
+        principal_ref: static_token_principal_ref("admin-token-a"),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -76670,7 +76864,7 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
 
     // Settlement enqueues exactly one `pending` outbox row in BOTH stores.
     let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -76812,7 +77006,7 @@ async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes
     // Seed one pending outbox row (with require=true so the mirror write lands), then
     // flip the worker into the unsafe best-effort mode for the submit attempt.
     let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
-    let p1_principal = principal_storage_ref("token-a");
+    let p1_principal = static_token_principal_ref("token-a");
     let account_a = backend
         .create_or_reuse_account("tenant-a", &p1_principal)
         .await
@@ -81773,8 +81967,8 @@ async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_c
     let temp = tempfile::tempdir().expect("temp dir");
     let db = Arc::new(PerplexityDriverTestDb::new());
 
-    let principal_a = principal_storage_ref("token-a");
-    let principal_a2 = principal_storage_ref("token-a-2");
+    let principal_a = static_token_principal_ref("token-a");
+    let principal_a2 = static_token_principal_ref("token-a-2");
 
     let id1 = Uuid::new_v4();
     let mut row1 = rescore_test_decision_row(id1);

@@ -1669,7 +1669,7 @@ impl TraceUploadClaimIssuerState {
                 .or(workload.sub.as_deref()),
             "workload subject is required",
         )?;
-        let grant_principal_ref = principal_storage_ref(&format!("signed:{tenant_id}:{actor}"));
+        let grant_principal_ref = signed_claim_auth_principal_ref(&tenant_id, &actor);
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
@@ -2503,10 +2503,30 @@ impl TraceUploadClaimIssuerState {
             .tenant_access_grant_db
             .as_ref()
             .ok_or_else(IssuerError::internal)?;
-        let grants = db
-            .list_active_trace_tenant_access_grants_for_principal(tenant_id, principal_ref, now)
-            .await
-            .map_err(|_| IssuerError::internal())?;
+        // Dual-read canonical method-bound refs and pre-#209 signed hashes so
+        // grants provisioned under either shape still authorize.
+        let mut principal_refs = vec![principal_ref.to_string()];
+        let legacy_signed = legacy_signed_claim_principal_ref(tenant_id, actor);
+        if legacy_signed != principal_ref {
+            principal_refs.push(legacy_signed);
+        }
+        let mut grants = Vec::new();
+        for candidate in &principal_refs {
+            let matched = db
+                .list_active_trace_tenant_access_grants_for_principal(tenant_id, candidate, now)
+                .await
+                .map_err(|_| IssuerError::internal())?;
+            for grant in matched {
+                if grants
+                    .iter()
+                    .all(|existing: &TraceTenantAccessGrantRecord| {
+                        existing.grant_id != grant.grant_id
+                    })
+                {
+                    grants.push(grant);
+                }
+            }
+        }
         authorize_upload_claim_from_tenant_grants(
             &grants,
             &self.issuer,
@@ -2999,6 +3019,35 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 fn principal_storage_ref(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     format!("principal_sha256:{}", hex::encode(digest))
+}
+
+fn method_bound_principal_material(method: &str, identity_material: &str) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        method.len(),
+        method,
+        identity_material.len(),
+        identity_material
+    )
+}
+
+fn method_bound_principal_ref(method: &str, identity_material: &str) -> String {
+    principal_storage_ref(&method_bound_principal_material(method, identity_material))
+}
+
+fn signed_claim_identity_material(tenant_id: &str, actor_ref: &str) -> String {
+    format!("signed:{tenant_id}:{actor_ref}")
+}
+
+fn signed_claim_auth_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    method_bound_principal_ref(
+        "signed_claim",
+        &signed_claim_identity_material(tenant_id, actor_ref),
+    )
+}
+
+fn legacy_signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    principal_storage_ref(&signed_claim_identity_material(tenant_id, actor_ref))
 }
 
 /// Maximum accepted byte length for a client-supplied subject.
@@ -3908,8 +3957,16 @@ mod tests {
     #[test]
     fn tenant_grant_principal_ref_matches_ingest_signed_actor_shape() {
         assert_eq!(
-            principal_storage_ref("signed:tenant-a:actor-123"),
-            "principal_sha256:5cd45d57c4270245a9eae65dc4140e2bbaa5b18e84371fdf9a3abb2feb8c26cc"
+            signed_claim_auth_principal_ref("tenant-a", "actor-123"),
+            method_bound_principal_ref("signed_claim", "signed:tenant-a:actor-123")
+        );
+        assert_eq!(
+            legacy_signed_claim_principal_ref("tenant-a", "actor-123"),
+            principal_storage_ref("signed:tenant-a:actor-123")
+        );
+        assert_ne!(
+            signed_claim_auth_principal_ref("tenant-a", "actor-123"),
+            legacy_signed_claim_principal_ref("tenant-a", "actor-123")
         );
     }
 
