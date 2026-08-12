@@ -10,10 +10,11 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::collections::BTreeMap;
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate,
+    ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
 };
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
@@ -137,6 +138,74 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
 /// Whether a submit result must make the command exit non-zero. Only an
 /// expected size finding is non-fatal during dry-run. Every known privacy or
 /// pipeline refusal, and every future refusal label, fails closed.
+/// Why an envelope carries the residual risk it does, in labels only.
+///
+/// The risk VALUE is never recomputed here -- it is read from
+/// `envelope.privacy.residual_pii_risk`, which the protocol crate already
+/// derived. Only the explanation is assembled, from the envelope's own counts,
+/// labels and consent flags. A second implementation of the risk rule in this
+/// crate would eventually disagree with the first, and an explanation that
+/// contradicts the number it explains is worse than no explanation.
+///
+/// Labels and counts only. This runs over other people's private traces, so
+/// no matched text, no path, no content ever reaches the output.
+fn residual_risk_explanation(
+    message_text_included: bool,
+    tool_payloads_included: bool,
+    redaction_counts: &BTreeMap<String, u32>,
+    pii_labels_present: &[String],
+) -> String {
+    let mut causes: Vec<String> = Vec::new();
+
+    let mut consent_flags: Vec<&str> = Vec::new();
+    if message_text_included {
+        consent_flags.push("message_text_included");
+    }
+    if tool_payloads_included {
+        consent_flags.push("tool_payloads_included");
+    }
+    if !consent_flags.is_empty() {
+        causes.push(format!("consent flags: {}", consent_flags.join(", ")));
+    }
+
+    if !redaction_counts.is_empty() {
+        let mut parts: Vec<String> = redaction_counts
+            .iter()
+            .map(|(label, count)| format!("{count} {label}"))
+            .collect();
+        parts.sort();
+        causes.push(format!("redaction found: {}", parts.join(", ")));
+    }
+
+    if !pii_labels_present.is_empty() {
+        let mut labels = pii_labels_present.to_vec();
+        labels.sort();
+        causes.push(format!("pii labels: {}", labels.join(", ")));
+    }
+
+    if causes.is_empty() {
+        "nothing in this envelope raised the floor".to_string()
+    } else {
+        causes.join("; ")
+    }
+}
+
+/// What a given tier means for storage on the server.
+///
+/// Phrased conditionally on purpose: the client cannot see the operator's
+/// configuration, so it says what the tier means rather than promising an
+/// outcome it cannot know.
+fn residual_risk_storage_note(risk: ResidualPiiRisk) -> &'static str {
+    match risk {
+        ResidualPiiRisk::Low => "Low is accepted.",
+        ResidualPiiRisk::Medium => {
+            "Medium accepts only if the operator enabled \
+             TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS; otherwise quarantines."
+        }
+        ResidualPiiRisk::High => "High quarantines for review.",
+    }
+}
+
 pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
     outcomes.iter().any(|outcome| match outcome {
         SubmitOutcome::Failed { .. } => true,
@@ -502,9 +571,26 @@ impl<'a> SubmitContext<'a> {
                         envelope.submission_id
                     );
                 } else {
+                    // Unchanged first line: anything parsing it keeps working.
                     println!(
                         "dry-run: submission_id={} bytes={size}",
                         envelope.submission_id
+                    );
+                    let risk = envelope.privacy.residual_pii_risk;
+                    println!("dry-run: risk={risk:?}");
+                    println!(
+                        "dry-run: why={}",
+                        residual_risk_explanation(
+                            envelope.consent.message_text_included,
+                            envelope.consent.tool_payloads_included,
+                            &envelope.privacy.redaction_counts,
+                            &envelope.privacy.pii_labels_present,
+                        )
+                    );
+                    println!("dry-run: storage={}", residual_risk_storage_note(risk));
+                    println!(
+                        "dry-run: the server re-scrubs and can RAISE this risk but never \
+                         silently lower it; this client-side risk is a floor, not a promise."
                     );
                 }
             }
@@ -1286,6 +1372,42 @@ mod tests {
         assert_eq!(preview.submission_id.get_version_num(), 8);
         assert_eq!(enrolled.submission_id.get_version_num(), 5);
         assert_ne!(preview.submission_id, enrolled.submission_id);
+    }
+
+    #[test]
+    fn the_explanation_names_causes_in_labels_only() {
+        // The point of the dry-run explanation is that a contributor can see
+        // WHY a trace will quarantine. The point of this test is that seeing
+        // why never costs them the content: this runs over other people's
+        // private traces, so counts and labels only.
+        let counts = BTreeMap::from([("secret:aws_access_key".to_string(), 2u32)]);
+        let labels = vec!["email".to_string()];
+
+        let why = residual_risk_explanation(true, false, &counts, &labels);
+
+        assert!(why.contains("message_text_included"));
+        assert!(why.contains("2 secret:aws_access_key"));
+        assert!(why.contains("email"));
+        // The matched text itself must never appear.
+        assert!(!why.contains("AKIA"), "no matched secret may appear: {why}");
+        assert!(!why.contains('/'), "no path may appear: {why}");
+    }
+
+    #[test]
+    fn a_clean_envelope_says_so_rather_than_listing_nothing() {
+        let why = residual_risk_explanation(false, false, &BTreeMap::new(), &[]);
+        assert_eq!(why, "nothing in this envelope raised the floor");
+    }
+
+    #[test]
+    fn the_storage_note_is_conditional_for_medium() {
+        // The client cannot see the operator's configuration, so Medium must
+        // describe the tier rather than promise an outcome.
+        let note = residual_risk_storage_note(ResidualPiiRisk::Medium);
+        assert!(note.contains("only if the operator enabled"));
+        assert!(note.contains("TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS"));
+        assert!(residual_risk_storage_note(ResidualPiiRisk::Low).contains("accepted"));
+        assert!(residual_risk_storage_note(ResidualPiiRisk::High).contains("quarantines"));
     }
 
     #[test]

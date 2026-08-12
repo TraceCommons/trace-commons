@@ -57,7 +57,8 @@ use trace_commons_server::account_passkey::{
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{
-    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
+    TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -12395,6 +12396,20 @@ async fn revoke_submission(
             "revocation",
         )?;
     }
+    // Fail closed before anything is mutated. Revocation must leave the trace
+    // body unreachable, so a record that carries an encrypted artifact receipt
+    // can only be revoked on a deployment that can reach the store holding that
+    // ciphertext. Refusing here is preferable to tombstoning the record and
+    // silently leaving the payload in a store this process cannot delete from.
+    if let Some(record) = record.as_ref()
+        && record.artifact_receipt.is_some()
+        && state.artifact_store.is_none()
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation refused: missing control trace_artifact_store_unconfigured",
+        ));
+    }
     let revocation_reason =
         trace_revocation_reason_for_request(tenant.auth(), owner_self_revocation, reason)?;
     let mut derived = tenant
@@ -12414,9 +12429,17 @@ async fn revoke_submission(
             .map(|record| record.canonical_summary_hash.clone()),
     };
 
+    // Revocation flips status only. `credit_points_final` is deliberately left
+    // as-is: withdrawing a trace is a contributor's right, not an offence, and
+    // zeroing the awarded figure made the receipt read like a penalty. Nothing
+    // selects for settlement by this value -- `run_credit_settlement` gates on
+    // `status == Accepted` plus `!record.is_terminal()`, and the tenant credit
+    // summary only sums `credit_points_final` for Accepted records -- so the
+    // field is a display value here, not a control. Credit that has already
+    // settled is likewise left alone: revocation removes the trace from the
+    // commons and deletes its content, it does not reach back onto the chain.
     let mirrored_record = record.take().map(|mut record| {
         record.status = TraceCorpusStatus::Revoked;
-        record.credit_points_final = Some(0.0);
         record
     });
     let revoked_derived = derived.take().map(|mut derived| {
@@ -12529,6 +12552,18 @@ async fn revoke_submission(
         }
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Revoked means the content is gone, not merely relabelled. This runs last,
+    // after every hash-only tombstone, mirror, and invalidation has been written
+    // from the still-readable record -- `redaction_hash_for_record` reads the
+    // stored envelope, so deleting earlier would strip the tombstone of the very
+    // hashes it exists to carry. Errors propagate: a store that refuses deletion
+    // (a disabled remote object store returns an error) fails the request rather
+    // than leaving the payload behind under a revoked label. Deleting an object
+    // that is already gone is a no-op, so re-revoking is idempotent.
+    if let Some(record) = mirrored_record.as_ref() {
+        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -13941,13 +13976,26 @@ async fn resolve_account_ctx_with_rotation(
         (Some(bearer), None) if is_native_token(bearer) => {
             resolve_account_ctx_native(state, bearer).await
         }
-        (Some(_), None) => resolve_account_ctx_bearer(state, headers)
-            .await
-            .map(|ctx| (ctx, None)),
+        // A device upload claim is NOT an account credential.
+        //
+        // This arm used to resolve one to a full `AccountCtx`, which meant a
+        // device key reached every `/v1/account/*` route -- withdrawal and
+        // account history included. A device key is provisioned to upload; a
+        // stolen one should not also be able to withdraw a contributor's
+        // traces or read their history, and the loopback native-session flow
+        // exists precisely so a native client never needs that authority.
+        //
+        // Nothing depends on the old behaviour: the contributor client
+        // authenticates these routes with a `tcn1_` native session, and no
+        // other caller in the tree sends a device bearer here.
+        (Some(_), None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session required: a device upload claim is not an account credential",
+        )),
         (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
         (None, None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
-            "account session cookie or device bearer token required",
+            "account session cookie or native session token required",
         )),
     }
 }
@@ -14018,42 +14066,6 @@ async fn resolve_account_ctx_native(
         },
         rotated,
     ))
-}
-
-/// Bearer path: device token → linked account → active-membership set.
-async fn resolve_account_ctx_bearer(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountCtx> {
-    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
-    let db = account_db(state)?;
-    let tenant_id = tenant.tenant_id().to_string();
-    let principal_ref = tenant.principal_ref().to_string();
-
-    let account_id = db
-        .resolve_account_for_principal(&tenant_id, &principal_ref)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
-    let account = AccountId::from_uuid(account_id);
-    let principal_set = db
-        .expand_account_principals(&tenant_id, account_id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(AccountCtx {
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::DeviceBearer,
-        tenant_id,
-        actor_ref: principal_ref,
-        // The bearer path is a device token, not a passkey assertion: there is no
-        // authenticating credential to flag as `this_device`.
-        auth_credential_id: None,
-        // A device bearer is NOT a strong authenticator for the authenticator-change
-        // gate: mark it weak so it is gated like a device-link cookie session.
-        client_kind: "device".to_string(),
-    })
 }
 
 /// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
@@ -15306,6 +15318,10 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Proof that this confirmation came from a browser that actually rendered
+    /// the interstitial. See [`LOGIN_CEREMONY_COOKIE`].
+    #[serde(default)]
+    ceremony: Option<String>,
     /// Optional pending native-authorization request id (see
     /// [`LoginInterstitialQuery::native`]). When present and still live, a
     /// successful redeem ALSO mints the app's one-time authorization code and
@@ -15664,6 +15680,53 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
 /// vary status or body by cause (timing uniformity is Task 11).
+/// Cookie carrying the login-ceremony nonce.
+///
+/// `GET /account/login` mints a nonce, sets it here, and embeds the SAME value
+/// in the form it renders. `POST /account/login/confirm` requires both and
+/// requires them to match.
+///
+/// This is a possession proof, not a header check. Header-based origin
+/// signals (`Origin`, `Sec-Fetch-Site`) are absent on a plain HTTP client, and
+/// `confirm_is_same_origin` treats "neither signal present" as same-origin
+/// because a browser without fetch metadata must still work. That is the right
+/// call for compatibility and the wrong one for proving a browser was
+/// involved: anything that can reach the endpoint can satisfy it by sending
+/// nothing. A cookie set by the interstitial response cannot be produced by a
+/// caller that never fetched the interstitial.
+///
+/// `confirm_is_same_origin` is deliberately kept as well. This does not
+/// replace it; it covers what it cannot.
+const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+
+/// How long a rendered interstitial stays confirmable. Long enough for a human
+/// to read the page and click, short enough that a leaked nonce is not a
+/// standing credential.
+const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// A fresh, unguessable ceremony nonce.
+fn new_login_ceremony_nonce() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    // Same source as session secrets.
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Constant-time comparison, so a mismatched nonce cannot be recovered by
+/// timing the deny.
+fn ceremony_nonce_matches(cookie: &str, submitted: &str) -> bool {
+    if cookie.is_empty() || submitted.is_empty() || cookie.len() != submitted.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in cookie.bytes().zip(submitted.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
@@ -15774,6 +15837,10 @@ Confirm only if you started this.</p>"
     } else {
         "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
     };
+    // The ceremony nonce: embedded in the form AND set as a cookie on this
+    // response. Confirm requires both, and requires them to match, so a caller
+    // that never rendered this page cannot confirm.
+    let ceremony = new_login_ceremony_nonce();
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -15781,10 +15848,23 @@ Confirm only if you started this.</p>"
 <main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
 <input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
-<button type=\"submit\">Activate</button></form></main></body></html>"
+<input type=\"hidden\" name=\"ceremony\" value=\"{}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>",
+        html_escape_attribute(&ceremony)
     );
     let mut response = axum::response::Html(body).into_response();
+    let ceremony_cookie = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ceremony))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/account/login")
+        .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
+        .build()
+        .to_string();
     let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&ceremony_cookie) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -15828,10 +15908,34 @@ async fn confirm_login_inner(
 ) -> axum::response::Response {
     let code = body.0.code;
     let native_request_id = body.0.native;
+    let submitted_ceremony = body.0.ceremony;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
         return redeem_generic_deny();
+    }
+
+    // Browser-possession enforcement.
+    //
+    // The check above cannot establish that a browser was involved: it reads
+    // `Origin` / `Sec-Fetch-Site`, and a plain HTTP client simply omits both,
+    // which `confirm_is_same_origin` treats as same-origin so that browsers
+    // without fetch metadata keep working. Satisfying it therefore requires
+    // sending nothing.
+    //
+    // The ceremony nonce is different in kind: it is minted by
+    // `GET /account/login`, returned in a `Secure` `HttpOnly` `SameSite=Strict`
+    // cookie AND embedded in the form that page renders. Confirming requires
+    // both halves and requires them to match, so a caller that never fetched
+    // the interstitial in a browser cannot produce it -- possession, not a
+    // self-asserted header.
+    //
+    // Fails into the SAME uniform deny as every other branch, so it adds no
+    // new distinguishable outcome and the timing floor still applies.
+    let cookie_ceremony = cookie_value_from_headers(&headers, LOGIN_CEREMONY_COOKIE);
+    match (cookie_ceremony, submitted_ceremony.as_deref()) {
+        (Some(from_cookie), Some(from_form)) if ceremony_nonce_matches(from_cookie, from_form) => {}
+        _ => return redeem_generic_deny(),
     }
 
     // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
@@ -23285,6 +23389,35 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    // Live settlement serializes per tenant so two overlapping runs cannot both
+    // pass the source-event conflict check and finalize divergent batches (or
+    // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
+    let settlement_locks = if body.dry_run {
+        None
+    } else {
+        Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
+    };
+    let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
+    if let Some(locks) = settlement_locks {
+        // Settlement may already be durable; never convert a successful finalize into
+        // a caller-visible failure because advisory unlock hiccuped.
+        if let Err(error) = locks.release().await {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                tenant_id = %tenant.tenant_id,
+                "failed to release credit settlement run locks after settlement"
+            );
+        }
+    }
+    result
+}
+
+async fn run_credit_settlement_unlocked(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
     require_credit_settlement_policy_version_allowed_for_live(
@@ -23706,14 +23839,9 @@ async fn run_credit_settlement(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
+        append_credit_settlement_finalize_with_db_mirror(state, tenant, &batch, &near_outbox_items)
             .await
             .map_err(internal_error)?;
-        for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
-                .await
-                .map_err(internal_error)?;
-        }
     }
 
     Ok(TraceCreditSettlementRunResponse {
@@ -27211,6 +27339,14 @@ async fn append_utility_attestation_with_db_mirror(
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
 
+/// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
+/// which writes the batch and its NEAR outbox rows in one transaction. This
+/// batch-only variant is retained because it is the narrowest way to exercise
+/// `ensure_credit_settlement_batch_has_no_finalized_source_conflict` on its own;
+/// see the finalized-source-conflict test in the sibling test module. Without
+/// the allow, `-D warnings` fails the non-test build, since the only remaining
+/// caller is `#[cfg(test)]`.
+#[allow(dead_code)]
 async fn append_credit_settlement_batch_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -27239,6 +27375,237 @@ async fn append_credit_settlement_batch_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+/// Persist a finalized settlement batch and every NEAR outbox row it expects as
+/// one durability unit.
+///
+/// Design (#198):
+/// - When a DB mirror is required, batch + outbox rows commit in one Postgres
+///   transaction (`Database::upsert_credit_settlement_finalize`), then the file
+///   journal is updated. A process death cannot finalize the ledger without its
+///   payout work.
+/// - Across stores / process death after the batch is durable, each line item's
+///   `near_outbox_id` is the repair invariant: `repair_missing_near_credit_outbox_items_for_finalized_batches`
+///   re-emits any missing row. Finalize invokes that repair immediately if a
+///   post-batch outbox write fails, so the same request converges when the
+///   failure is transient.
+async fn append_credit_settlement_finalize_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    outbox_items: &[TraceNearCreditOutboxItem],
+) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
+    let outbox_writes = outbox_items
+        .iter()
+        .map(near_credit_outbox_item_to_storage_write)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if state.require_db_mirror_writes {
+        let Some(db) = state.db_mirror.as_ref() else {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for credit settlement finalize"
+            );
+        };
+        db.upsert_credit_settlement_finalize(
+            credit_settlement_batch_to_storage_write(batch)?,
+            outbox_writes,
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: credit settlement finalize")?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        let mut file_outbox_error: Option<anyhow::Error> = None;
+        for item in outbox_items {
+            if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            {
+                file_outbox_error = Some(error);
+                break;
+            }
+        }
+        if file_outbox_error.is_some() {
+            // DB already has the full set. Repair the file journal from the
+            // expected ids without going through the admin reader (which may be
+            // DB-authoritative and would otherwise skip already-mirrored rows).
+            let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                .into_iter()
+                .map(|item| item.near_outbox_id)
+                .collect::<BTreeSet<_>>();
+            let mut repaired = 0usize;
+            for item in outbox_items {
+                if present.contains(&item.near_outbox_id) {
+                    continue;
+                }
+                append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item).with_context(
+                    || {
+                        format!(
+                            "failed to repair file NEAR outbox item {} after DB-authoritative finalize",
+                            item.near_outbox_id
+                        )
+                    },
+                )?;
+                repaired += 1;
+            }
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired_outbox_count = repaired,
+                    settlement_batch_id = %batch.settlement_batch_id,
+                    tenant_id = %tenant.tenant_id,
+                    "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
+                );
+            }
+            if let Some(error) = file_outbox_error {
+                let expected = outbox_items.len();
+                let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                    .iter()
+                    .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                    .count();
+                if present < expected {
+                    return Err(error.context(format!(
+                        "settlement finalize left incomplete file NEAR outbox ({present}/{expected} present after repair)"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // File-primary path: batch is the commit marker (carries expected outbox
+    // ids). Append outbox rows next; on any failure, repair from the durable
+    // batch before propagating so callers do not observe a silent half-write.
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    let mut outbox_error: Option<anyhow::Error> = None;
+    for item in outbox_items {
+        if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item) {
+            outbox_error = Some(error);
+            break;
+        }
+    }
+    if outbox_error.is_some() {
+        let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state,
+            tenant,
+            std::slice::from_ref(batch),
+        )
+        .await
+        .context("settlement outbox repair after partial finalize failed")?;
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_outbox_count = repaired,
+                settlement_batch_id = %batch.settlement_batch_id,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items after partial settlement finalize"
+            );
+        }
+        if let Some(error) = outbox_error {
+            // Prefer reporting the original failure; repair ran best-effort so the
+            // next settlement / outbox tick can still converge if repair itself
+            // could not complete every row in this request.
+            let expected = outbox_items.len();
+            let existing = read_near_credit_outbox_items_for_admin(state, tenant)
+                .await
+                .unwrap_or_default();
+            let present = existing
+                .iter()
+                .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                .count();
+            if present < expected {
+                return Err(error.context(format!(
+                    "settlement finalize left incomplete NEAR outbox ({present}/{expected} present after repair)"
+                )));
+            }
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let mirror_result = db
+            .upsert_credit_settlement_finalize(
+                credit_settlement_batch_to_storage_write(batch)?,
+                outbox_writes,
+            )
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement finalize mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+    }
+    Ok(())
+}
+
+struct CreditSettlementRunLocks {
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
+    advisory: Option<CreditSettlementAdvisoryLock>,
+}
+
+impl CreditSettlementRunLocks {
+    async fn release(self) -> anyhow::Result<()> {
+        if let Some(advisory) = self.advisory {
+            advisory
+                .release()
+                .await
+                .context("failed to release credit settlement advisory lock")?;
+        }
+        Ok(())
+    }
+}
+
+fn credit_settlement_in_process_lock(tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(tenant_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn acquire_credit_settlement_run_locks(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<CreditSettlementRunLocks> {
+    let in_process = credit_settlement_in_process_lock(tenant_id);
+    let _in_process = match in_process.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "credit settlement already in progress for this tenant",
+            ));
+        }
+    };
+
+    let advisory = if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .try_acquire_credit_settlement_lock(tenant_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "credit settlement already in progress for this tenant",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(CreditSettlementRunLocks {
+        _in_process,
+        advisory,
+    })
 }
 
 async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
@@ -38331,6 +38698,29 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     config: &TraceNearCreditOutboxSchedulerConfig,
 ) -> ApiResult<TraceNearCreditOutboxSchedulerTickSummary> {
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    // Before draining, repair any finalized settlement whose expected outbox rows
+    // are missing (crash between batch commit and outbox append). Settlement runs
+    // already repair on entry; the outbox scheduler is the continuous path that
+    // must converge even when nobody re-triggers settlement (#198).
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &batches,
+    )
+    .await
+    .map_err(internal_error)?;
+    if repaired > 0 {
+        tracing::warn!(
+            repaired_outbox_count = repaired,
+            tenant_id = %tenant.tenant_id,
+            "repaired missing NEAR credit outbox items before outbox scheduler drain"
+        );
+    }
     let Json(submit) = near_credit_outbox_submit_worker_handler(
         State(state.clone()),
         headers.clone(),
@@ -41007,8 +41397,15 @@ async fn run_revocation_effects_drill(
                 })
         })
         .count();
-    let delayed_credit_reversal_ready = credit_reversal_item_count > 0
-        && credit_reversal_done_count == credit_reversal_item_count
+    // Revocation no longer claws back settled credit, so the expected item
+    // count for a canary revocation is zero and zero is the ready state: the
+    // check now proves the contributor was NOT charged for withdrawing. It is
+    // not vacuous -- any `ReverseCreditSettlement` item that does exist (an
+    // operator reversal of fraudulent or mistakenly settled credit, or an item
+    // enqueued before this policy change) must still be fully drained, with its
+    // reversal credit event and NEAR reverse receipt present, before the check
+    // reads ready.
+    let delayed_credit_reversal_ready = credit_reversal_done_count == credit_reversal_item_count
         && reversed_credit_event_count >= credit_reversal_item_count
         && near_reversal_outbox_count >= near_reversal_outbox_expected_count;
 
@@ -53979,14 +54376,15 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
-    let credit_reversal_items_enqueued = enqueue_credit_settlement_reversal_items_for_revocation(
-        db.as_ref(),
-        &tenant.tenant_id,
-        submission_id,
-        revocation_reason,
-    )
-    .await
-    .context("failed to enqueue credit settlement reversal propagation items")?;
+    // Revocation does NOT claw back credit that has already settled. Credit
+    // earned and settled stays earned: a contributor who is uneasy about a
+    // trace must be able to pull it back without being financially penalised,
+    // or the trace stays in the commons out of fear. Revocation removes the
+    // trace from the corpus and deletes its content -- it does not reach back
+    // onto the chain. The `ReverseCreditSettlement` propagation action and its
+    // worker remain, so an operator can still reverse a fraudulent or
+    // mistakenly settled credit and so any item enqueued before this change
+    // still drains; nothing on the revocation path enqueues one.
     let object_delete_items_enqueued = enqueue_object_payload_delete_items_for_revocation(
         db.as_ref(),
         &tenant.tenant_id,
@@ -54036,7 +54434,6 @@ async fn mirror_revocation_to_db(
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
-            || credit_reversal_items_enqueued > 0
             || object_delete_items_enqueued > 0
             || worker_queue_items_enqueued > 0
             || vector_entry_items_enqueued > 0)
@@ -54048,12 +54445,6 @@ async fn mirror_revocation_to_db(
             export_manifests_invalidated,
             export_manifest_items_invalidated,
         );
-        if credit_reversal_items_enqueued > 0 {
-            action_counts.insert(
-                "credit_reversal_items_enqueued".to_string(),
-                credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
-            );
-        }
         if object_delete_items_enqueued > 0 {
             action_counts.insert(
                 "object_delete_items_enqueued".to_string(),
@@ -54323,92 +54714,6 @@ async fn enqueue_object_payload_delete_items_for_revocation(
         })
         .await
         .context("failed to upsert object payload delete propagation item")?;
-        enqueued += 1;
-    }
-    Ok(enqueued)
-}
-
-async fn enqueue_credit_settlement_reversal_items_for_revocation(
-    db: &dyn Database,
-    tenant_id: &str,
-    submission_id: Uuid,
-    revocation_reason: &str,
-) -> anyhow::Result<usize> {
-    let existing_idempotency_keys = db
-        .list_trace_revocation_propagation_items(tenant_id, submission_id)
-        .await
-        .context("failed to read existing revocation propagation items")?
-        .into_iter()
-        .map(|item| item.idempotency_key)
-        .collect::<BTreeSet<_>>();
-    let settled_event_ids = db
-        .list_trace_credit_settlement_batches(tenant_id)
-        .await
-        .context("failed to read credit settlement batches for revocation propagation")?
-        .into_iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids)
-        .collect::<BTreeSet<_>>();
-    if settled_event_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut enqueued = 0usize;
-    for event in db
-        .list_trace_credit_events(tenant_id)
-        .await
-        .context("failed to read credit events for revocation propagation")?
-        .into_iter()
-        .filter(|event| event.submission_id == submission_id)
-        .filter(|event| event.settlement_state == StorageTraceCreditSettlementState::Final)
-        .filter(|event| settled_event_ids.contains(&event.credit_event_id))
-    {
-        let Ok(points_delta) = event.points_delta.parse::<f32>() else {
-            continue;
-        };
-        if !points_delta.is_finite() || points_delta <= 0.0 {
-            continue;
-        }
-        let idempotency_key = sha256_prefixed(&format!(
-            "trace_revocation_credit_settlement_reversal:v1:{tenant_id}:{submission_id}:{}",
-            event.credit_event_id
-        ));
-        if existing_idempotency_keys.contains(&idempotency_key) {
-            continue;
-        }
-        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
-            tenant_id: tenant_id.to_string(),
-            propagation_item_id: deterministic_trace_uuid_for_external_ref(
-                "revocation-credit-settlement-reversal",
-                tenant_id,
-                submission_id,
-                &event.credit_event_id.to_string(),
-            ),
-            source_submission_id: submission_id,
-            target: StorageTraceRevocationPropagationTarget::CreditSettlement {
-                credit_event_id: event.credit_event_id,
-                credit_account_ref: event.credit_account_ref,
-                settlement_state_at_selection: event.settlement_state,
-            },
-            action: StorageTraceRevocationPropagationAction::ReverseCreditSettlement,
-            status: StorageTraceRevocationPropagationItemStatus::Pending,
-            idempotency_key,
-            reason: format!(
-                "revoked trace settled credit reversal;reason_hash={}",
-                sha256_prefixed(revocation_reason)
-            ),
-            attempt_count: 0,
-            last_error: None,
-            next_attempt_at: None,
-            completed_at: None,
-            evidence_hash: None,
-            metadata: BTreeMap::from([(
-                "source".to_string(),
-                "mirror_revocation_to_db".to_string(),
-            )]),
-        })
-        .await
-        .context("failed to upsert credit settlement reversal propagation item")?;
         enqueued += 1;
     }
     Ok(enqueued)
@@ -60850,8 +61155,10 @@ async fn run_maintenance(
                 .or_insert_with(|| TRACE_DEFAULT_REVOCATION_REASON.to_string())
                 .clone();
             if !request.dry_run {
+                // Same decision as `revoke_submission`: reconciling a record
+                // against an existing tombstone marks it revoked and leaves the
+                // awarded credit figure untouched.
                 record.status = TraceCorpusStatus::Revoked;
-                record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
                 mirror_revocation_to_db(
                     state,

@@ -52,6 +52,11 @@ fn session_rotation_grace_secs() -> i64 {
 /// audit-chain append, so the two can never alias.
 const NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID: i32 = 0x7472_6163u32 as i32; // "trac"
 
+/// Fixed advisory-lock namespace for live credit-settlement finalize. Distinct from
+/// the submit classid so a submit pass and a settlement pass never contend on the
+/// same key — they serialize different money-path races.
+const CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID: i32 = 0x7365_7474u32 as i32; // "sett"
+
 /// Owns the pooled connection that holds a session-level advisory lock for the
 /// duration of a NEAR settlement submit pass. Released explicitly via
 /// [`NearCreditSubmitAdvisoryLockInner::release`]; see the public
@@ -77,6 +82,25 @@ impl NearCreditSubmitAdvisoryLockInner {
     }
 }
 
+/// Owns the pooled connection holding the live credit-settlement advisory lock.
+pub struct CreditSettlementAdvisoryLockInner {
+    client: deadpool_postgres::Object,
+    objid: i32,
+}
+
+impl CreditSettlementAdvisoryLockInner {
+    pub(crate) async fn release(self) -> Result<(), DatabaseError> {
+        self.client
+            .execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &self.objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
 pub struct PgBackend {
     pool: Pool,
     /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
@@ -88,9 +112,9 @@ pub struct PgBackend {
     /// Narrow, SEPARATE pool for the cross-tenant gate-driver enumeration
     /// query. Built only when `gate_driver_url` is configured; its DB user is
     /// the operator-provisioned `trace_gate_driver` role (NOLOGIN base,
-    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
-    /// V36). `None` keeps the gate driver's enumeration path fail-closed.
-    /// NEVER aliased to `pool`.
+    /// NOBYPASSRLS, V36 USING(true) cross-tenant policies, V42 column-scoped
+    /// SELECT grants mirroring `trace_pii_backstop_driver`). `None` keeps the
+    /// gate driver's enumeration path fail-closed. NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
     /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
     /// enumeration query (server-side NEAR AI PII backstop). Built only when
@@ -704,6 +728,45 @@ impl Database for PgBackend {
         Ok(Some(crate::db::NearCreditSubmitAdvisoryLock::new(
             NearCreditSubmitAdvisoryLockInner { client, objid },
         )))
+    }
+
+    async fn try_acquire_credit_settlement_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::db::CreditSettlementAdvisoryLock>, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let objid: i32 = client
+            .query_one("SELECT hashtext('credit-settlement:' || $1)", &[&tenant_id])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        let acquired: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if !acquired {
+            return Ok(None);
+        }
+        Ok(Some(crate::db::CreditSettlementAdvisoryLock::new(
+            CreditSettlementAdvisoryLockInner { client, objid },
+        )))
+    }
+
+    async fn upsert_credit_settlement_finalize(
+        &self,
+        batch: crate::trace_corpus_storage::TraceCreditSettlementBatchWrite,
+        outbox_items: Vec<crate::trace_corpus_storage::TraceNearCreditOutboxItemWrite>,
+    ) -> Result<(), DatabaseError> {
+        self.upsert_credit_settlement_finalize_tx(batch, &outbox_items)
+            .await
     }
 
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
@@ -1608,6 +1671,29 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&44_i32, &"native_session_client_kind"],
+                )
+                .await?;
+        }
+        // V45 retrofits V36's table-wide SELECT grants to the V38
+        // column-scoped convention. Safe to apply after V36+; the USING(true)
+        // policies stay.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&45_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V45__trace_gate_driver_column_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&45_i32, &"trace_gate_driver_column_grants"],
                 )
                 .await?;
         }
@@ -4299,8 +4385,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's submissions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's submissions.
         let rows = client
             .query(
                 // DISTINCT: a submission can carry more than one active
@@ -4410,8 +4497,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's decisions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's decisions.
         //
         // DISTINCT + `received_at` in the projection mirrors the sibling
         // `list_submissions_needing_gate_decision` query: `received_at` is a

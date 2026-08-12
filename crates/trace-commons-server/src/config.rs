@@ -60,9 +60,9 @@ pub struct DatabaseConfig {
     /// pool used by the perplexity scoring driver's ungated-submissions
     /// enumeration. Its DB user MUST be an operator-provisioned LOGIN role
     /// that inherits the `trace_gate_driver` role (NOLOGIN base, NOBYPASSRLS,
-    /// permissive cross-tenant SELECT policies only — see migration V36).
-    /// Optional at the type level; the gate driver is fail-closed without it.
-    /// Never reuse the runtime `url` here.
+    /// V36 USING(true) cross-tenant policies, V42 column-scoped SELECT grants —
+    /// see migrations V36/V42). Optional at the type level; the gate driver is
+    /// fail-closed without it. Never reuse the runtime `url` here.
     pub gate_driver_url: Option<SecretString>,
     /// Separate connection string for the narrow, cross-tenant PII-backstop
     /// driver pool used by the server-side NEAR AI PII backstop driver's

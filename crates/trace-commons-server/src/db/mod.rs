@@ -6,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::config::DatabaseConfig;
 use crate::error::DatabaseError;
-use crate::trace_corpus_storage::TraceCorpusStore;
+use crate::trace_corpus_storage::{
+    TraceCorpusStore, TraceCreditSettlementBatchWrite, TraceNearCreditOutboxItemWrite,
+};
 use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
@@ -140,6 +142,43 @@ impl Drop for NearCreditSubmitAdvisoryLock {
     }
 }
 
+/// Session-level Postgres advisory lock guarding a live credit-settlement
+/// finalize for a single tenant. Prevents two overlapping settlement runs from
+/// both passing the source-event conflict check and writing divergent batches
+/// (and partial outbox rows) for the same credits. Independent of the submit
+/// lock classid / namespace.
+///
+/// MUST be released via [`CreditSettlementAdvisoryLock::release`].
+pub struct CreditSettlementAdvisoryLock {
+    inner: Option<crate::db::postgres::CreditSettlementAdvisoryLockInner>,
+}
+
+impl CreditSettlementAdvisoryLock {
+    pub(crate) fn new(inner: crate::db::postgres::CreditSettlementAdvisoryLockInner) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    /// Release the advisory lock and return the connection to the pool. Idempotent.
+    pub async fn release(mut self) -> Result<(), DatabaseError> {
+        if let Some(inner) = self.inner.take() {
+            inner.release().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CreditSettlementAdvisoryLock {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            tracing::warn!(
+                "credit settlement advisory lock dropped without explicit release; \
+                 connection-scoped lock may linger until session reset"
+            );
+        }
+    }
+}
+
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
@@ -154,6 +193,34 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _tenant_id: &str,
     ) -> Result<Option<NearCreditSubmitAdvisoryLock>, DatabaseError> {
         Ok(None)
+    }
+
+    /// Try to acquire the per-tenant live credit-settlement advisory lock without
+    /// blocking. Returns `Ok(Some(guard))` if acquired (caller MUST `release()`),
+    /// or `Ok(None)` if another settlement run already holds it. Default returns
+    /// `Ok(None)` so callers without Postgres serialization refuse to race.
+    async fn try_acquire_credit_settlement_lock(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<CreditSettlementAdvisoryLock>, DatabaseError> {
+        Ok(None)
+    }
+
+    /// Atomically persist a finalized settlement batch together with every NEAR
+    /// outbox row it expects. Default falls back to sequential upserts (not
+    /// crash-atomic across statements); Postgres overrides this with one
+    /// tenant-scoped transaction so a process death cannot leave a finalized
+    /// batch without its payout work.
+    async fn upsert_credit_settlement_finalize(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+        outbox_items: Vec<TraceNearCreditOutboxItemWrite>,
+    ) -> Result<(), DatabaseError> {
+        self.upsert_trace_credit_settlement_batch(batch).await?;
+        for item in outbox_items {
+            self.upsert_trace_near_credit_outbox_item(item).await?;
+        }
+        Ok(())
     }
 
     async fn trace_corpus_rls_diagnostics(
@@ -1029,6 +1096,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// decision, across ALL tenants. Runs on the narrow, cross-tenant
     /// `trace_gate_driver` pool (never the tenant-scoped runtime pool) — the
     /// permissive `USING (true)` SELECT policies installed by migration V36
+    /// authorize cross-tenant row visibility, and V42 narrows that grant to
+    /// the columns the driver's queries actually use (mirroring V38).
     /// authorize the read.
     ///
     /// A submission qualifies when: it has a `submitted_envelope` object ref

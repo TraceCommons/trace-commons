@@ -159,8 +159,10 @@ are not recorded.
 
 ## `CreditSettlementReversalFailed`
 
-**Symptom:** Revocation events queue up; credit reversals never make
-it to the NEAR outbox.
+**Symptom:** An operator-raised credit-settlement reversal never makes
+it to the NEAR outbox. Note revocation itself never raises one -- credit
+already settled stays earned when a contributor withdraws a trace -- so a
+reversal item present here is an operator correction, not a withdrawal.
 **Signature:** `CreditSettlementReversalFailed`;
 `revocation_propagation_terminal_failed_credit_settlements` increments.
 **Root cause:**
