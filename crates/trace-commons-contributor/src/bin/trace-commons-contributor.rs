@@ -120,6 +120,16 @@ enum Command {
     Whoami,
     /// Delete local keystore, config, and receipts
     Logout,
+    /// Sign in to your account (needed to withdraw traces), or check/end that session
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
+    /// Run and control the background upload daemon
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
     /// Operator/dogfood tool: mint an enrollment grant with an instance private key
     MintGrant {
         #[arg(long)]
@@ -138,6 +148,108 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         ttl_seconds: i64,
     },
+}
+
+/// The daemon control surface.
+///
+/// Deliberately full parity with what the native menu-bar and window
+/// applications can do, so the daemon stays completely usable over SSH and
+/// on a machine with no desktop session. Parity runs in both directions:
+/// there is no terminal-only operation here. Arming a project for automatic
+/// upload and approving everything at once were once refused over the
+/// socket; that gate was removed (it restricted nothing an attacker with
+/// same-user code execution already had -- see the `daemon::ipc` module
+/// doc), and a local audit log replaced it. `daemon audit` reads it.
+///
+/// Every mutating command here is delivered to the *running* daemon over
+/// its socket when one is running, so it takes effect immediately rather
+/// than being overwritten by the daemon's next pass. See `daemon::client`.
+/// Account session, as distinct from device enrollment. The device key
+/// uploads; the account withdraws. Keeping them separate is deliberate --
+/// a stolen device key must not be worth the ability to delete someone's
+/// contribution history.
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Sign in through your browser (opens it, or prints the URL)
+    Login {
+        /// Print the URL instead of opening a browser. The headless path.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Whether a live account session is stored, and when it expires
+    Status,
+    /// Revoke the account session and forget it locally
+    Logout,
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Run the daemon in the foreground; a service manager backgrounds it
+    Run {
+        /// Watch and queue as normal, but upload nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show what the daemon is doing and whether anything is wrong
+    Status,
+    /// List sessions waiting for a decision
+    Pending,
+    /// Show what would be sent for one queued session
+    Preview { entry_id: String },
+    /// Approve one queued session, or all of them
+    Approve {
+        entry_id: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Decline one queued session
+    Dismiss { entry_id: String },
+    /// Withdraw a submitted trace: content deleted, tier-dependent on how
+    /// far it had already gone. See
+    /// docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md.
+    Withdraw {
+        submission_id: Option<String>,
+        /// Withdraw every trace currently held for privacy review, not one
+        #[arg(long = "all-quarantined", conflicts_with = "submission_id")]
+        all_quarantined: bool,
+    },
+    /// Stop queueing and uploading until resumed
+    Pause,
+    /// Resume after a pause
+    Resume,
+    /// List projects and their upload modes
+    Projects,
+    /// Set a project's upload mode
+    Project {
+        /// The project's working directory
+        path: PathBuf,
+        /// auto | notify | ignore
+        #[arg(long)]
+        mode: String,
+    },
+    /// Show contribution history and the credit rollup
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Ask the daemon to refresh from the server before showing
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Read the local audit log: autonomy armed, queue bulk-approved,
+    /// consent scopes changed, NEAR AI notice acknowledged
+    Audit {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show or change daemon settings
+    Settings {
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+    },
+    /// Install the systemd user unit (Linux)
+    Install,
+    /// Remove the systemd user unit (Linux)
+    Uninstall,
 }
 
 #[tokio::main]
@@ -243,6 +355,51 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Whoami => commands::whoami(&store, cli.json),
         Command::Logout => commands::logout(&store),
+        Command::Account { action } => match action {
+            AccountAction::Login { no_browser } => {
+                commands::account_login(&store, no_browser, cli.json).await
+            }
+            AccountAction::Status => commands::account_status(&store, cli.json),
+            AccountAction::Logout => commands::account_logout(&store).await,
+        },
+        Command::Daemon { action } => match action {
+            DaemonAction::Run { dry_run } => {
+                trace_commons_contributor::daemon::run(store, dry_run).await
+            }
+            DaemonAction::Status => commands::daemon_status(&store, cli.json),
+            DaemonAction::Pending => commands::daemon_pending(&store, cli.json),
+            DaemonAction::Preview { entry_id } => {
+                commands::daemon_preview(&store, &entry_id, cli.json)
+            }
+            DaemonAction::Approve { entry_id, all } => {
+                commands::daemon_approve(&store, entry_id.as_deref(), all, cli.json)
+            }
+            DaemonAction::Dismiss { entry_id } => {
+                commands::daemon_dismiss(&store, &entry_id, cli.json)
+            }
+            DaemonAction::Withdraw {
+                submission_id,
+                all_quarantined,
+            } => commands::daemon_withdraw(
+                &store,
+                submission_id.as_deref(),
+                all_quarantined,
+                cli.json,
+            ),
+            DaemonAction::Pause => commands::daemon_pause(&store, true, cli.json),
+            DaemonAction::Resume => commands::daemon_pause(&store, false, cli.json),
+            DaemonAction::Projects => commands::daemon_projects(&store, cli.json),
+            DaemonAction::Project { path, mode } => {
+                commands::daemon_set_project(&store, &path, &mode, cli.json)
+            }
+            DaemonAction::History { limit, refresh } => {
+                commands::daemon_history(&store, limit, refresh, cli.json).await
+            }
+            DaemonAction::Audit { limit } => commands::daemon_audit(&store, limit, cli.json),
+            DaemonAction::Settings { set } => commands::daemon_settings(&store, &set, cli.json),
+            DaemonAction::Install => commands::daemon_install(&store),
+            DaemonAction::Uninstall => commands::daemon_uninstall(),
+        },
         Command::MintGrant {
             instance_key_pem,
             instance_id,

@@ -18,7 +18,7 @@ use trace_commons_protocol::trace_contribution::{
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
-    MAX_ENVELOPE_BYTES, apply_granted_scopes, build_deterministic_preview_redactor,
+    MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
     build_preview_raw_contribution, build_raw_contribution, build_redactor_with,
     canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
     near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
@@ -34,6 +34,39 @@ use crate::source::{SessionRef, TraceSource};
 /// re-encountering a receipt with one of these statuses short-circuits the
 /// per-session flow instead of re-uploading.
 pub(crate) const ALREADY_SUBMITTED_STATUSES: [&str; 3] = ["submitted", "accepted", "quarantined"];
+
+/// A fail-closed precondition that aborts the whole submit pass rather than
+/// producing an outcome for one session.
+///
+/// `submit_one` returns `Ok(SubmitOutcome::…)` for everything that is a
+/// decision *about a session* and `Err` only for these -- a privacy-filter
+/// canary that did not catch its planted secret, a NEAR AI first-use notice
+/// that could not be recorded, a missing device identity. It carries a
+/// fixed label rather than free text so the daemon's health surface can
+/// name the condition without parsing an error string: before this existed,
+/// a canary failure propagated as an opaque `anyhow::Error`, the daemon
+/// logged a warning and continued, `LABEL_CANARY_FAILED` was never set by
+/// any production code path, and `expire` therefore ran the fourteen-day
+/// clock straight through a filter outage -- discarding pending traces as
+/// "expired-without-decision" when nobody had declined them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubmitPreconditionFailure(pub &'static str);
+
+/// The canary planted a known secret and the configured filter did not
+/// remove it. Nothing may be sent through that filter.
+pub const PRECONDITION_CANARY_FAILED: &str = "privacy-filter-canary-failed";
+/// The NEAR AI first-use notice could not be recorded as shown.
+pub const PRECONDITION_NEAR_AI_NOTICE_UNRECORDED: &str = "near-ai-notice-not-acknowledged";
+/// No usable device identity, so nothing can be signed.
+pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
+
+impl std::fmt::Display for SubmitPreconditionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SubmitPreconditionFailure {}
 
 #[derive(Debug)]
 pub enum SubmitOutcome {
@@ -168,40 +201,189 @@ pub async fn submit_sessions(
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
     }
+    let mut ctx = SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())?;
     let mut outcomes = Vec::with_capacity(sessions.len());
-    let effective_cfg = effective_config(cfg, opts);
-    let device = if opts.unenrolled_preview {
-        None
-    } else if opts.dry_run {
-        DeviceIdentity::load(store).context("loading device identity")?
-    } else {
-        Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
-    };
-    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
-        .context("building issuer client")?;
-
-    let mut claim: Option<ClaimToken> = None;
-    let mut canary_checked = false;
-    let mut near_ai_notice_recorded = false;
-    // An unenrolled preview has no enrollment and therefore no submission
-    // history it can truthfully replay. Ignore stale receipts from torn local
-    // state and run the preview pipeline for every selected session.
-    let mut receipts = if opts.unenrolled_preview {
-        Vec::new()
-    } else {
-        store.load_receipts().context("loading receipts")?
-    };
-
     for (source, session_ref) in sessions {
-        let mut transcript = match source.load(&session_ref) {
+        outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
+    }
+    Ok(outcomes)
+}
+
+/// A long-lived submit pipeline: everything `submit_sessions` used to hoist
+/// across a batch -- device identity, issuer client, the minted claim, the
+/// privacy-filter canary, and the receipts index -- held so it can be reused
+/// across calls.
+///
+/// The CLI builds one per `submit` invocation and drops it. The daemon holds
+/// one for the life of the process and feeds it a session at a time, so a
+/// background upload takes byte-for-byte the same path as an interactive one
+/// rather than a parallel reimplementation of it.
+///
+/// `near_ai` is supplied by the caller rather than read from the environment,
+/// because a daemon started by a service manager inherits none of the user's
+/// shell environment.
+pub struct SubmitContext<'a> {
+    store: &'a ConfigStore,
+    cfg: &'a ContributorConfig,
+    opts: &'a SubmitOptions,
+    effective_cfg: ContributorConfig,
+    device: Option<DeviceIdentity>,
+    issuer: IssuerClient,
+    claim: Option<ClaimToken>,
+    canary_checked: bool,
+    near_ai_notice_recorded: bool,
+    near_ai: Option<NearAiSettings>,
+    receipts: Vec<Receipt>,
+    canary_runs: u32,
+    approved_envelope: Option<TraceContributionEnvelope>,
+}
+
+impl<'a> SubmitContext<'a> {
+    pub fn new(
+        store: &'a ConfigStore,
+        cfg: &'a ContributorConfig,
+        opts: &'a SubmitOptions,
+        near_ai: Option<NearAiSettings>,
+    ) -> Result<Self> {
+        let effective_cfg = effective_config(cfg, opts);
+        let device = if opts.unenrolled_preview {
+            None
+        } else if opts.dry_run {
+            DeviceIdentity::load(store).context("loading device identity")?
+        } else {
+            Some(DeviceIdentity::load_or_generate(store).context("loading device identity")?)
+        };
+        let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+            .context("building issuer client")?;
+        // An unenrolled preview has no enrollment and therefore no submission
+        // history it can truthfully replay. Ignore stale receipts from torn
+        // local state and run the preview pipeline for every selected session.
+        let receipts = if opts.unenrolled_preview {
+            Vec::new()
+        } else {
+            store.load_receipts().context("loading receipts")?
+        };
+        Ok(Self {
+            store,
+            cfg,
+            opts,
+            effective_cfg,
+            device,
+            issuer,
+            claim: None,
+            canary_checked: false,
+            near_ai_notice_recorded: false,
+            near_ai,
+            receipts,
+            canary_runs: 0,
+            approved_envelope: None,
+        })
+    }
+
+    /// Force the next `submit_one` to re-run the privacy-filter canary. A
+    /// long-lived daemon must re-check the filter periodically rather than
+    /// trusting a self-test from days ago.
+    pub fn invalidate_canary(&mut self) {
+        self.canary_checked = false;
+    }
+
+    /// Drop the cached claim, so the next upload mints a fresh one. Called
+    /// when enrollment or consent may have changed underneath a running
+    /// process.
+    pub fn invalidate_claim(&mut self) {
+        self.claim = None;
+    }
+
+    /// How many times the privacy-filter canary has actually run. Used to
+    /// assert the canary is not re-run once per session.
+    pub fn canary_runs(&self) -> u32 {
+        self.canary_runs
+    }
+
+    /// Send *this* redacted envelope on the next `submit_loaded` instead of
+    /// building one.
+    ///
+    /// This is the artifact half of the daemon's consent guard. The re-hash
+    /// guard verifies the *input* -- the raw session bytes -- and cannot see
+    /// a redaction service that returned different spans, a privacy-filter
+    /// configuration that changed, or any other input to the envelope that
+    /// is not the session file.
+    ///
+    /// An earlier version of this took a *digest* and refused when the
+    /// rebuilt envelope did not match it. That is correct and unusable: the
+    /// pilot runs `pii_filter = "near-ai"`, an LLM-backed filter does not
+    /// return identical spans for identical text, and so every previewed
+    /// entry was refused, re-offered, previewed again, and refused again --
+    /// the primary consent path never completed. Handing the pipeline the
+    /// approved bytes removes the divergence instead of detecting it: what
+    /// the contributor saw is what goes out, by construction.
+    ///
+    /// `None` restores the ordinary build-from-transcript path, which is
+    /// what armed auto-upload (never previewed, nothing shown to hold the
+    /// send to) still uses.
+    ///
+    /// One-shot: consumed by the next `submit_loaded` so an approved
+    /// envelope cannot leak onto an unrelated later session.
+    pub fn use_approved_envelope(&mut self, envelope: Option<TraceContributionEnvelope>) {
+        self.approved_envelope = envelope;
+    }
+
+    /// The effective contributor config this pipeline stamps onto
+    /// envelopes -- `cfg` with any per-invocation option overrides applied.
+    /// The daemon fingerprints this, not the raw config, so the fingerprint
+    /// describes what actually determines the envelope.
+    pub fn effective_cfg(&self) -> &ContributorConfig {
+        &self.effective_cfg
+    }
+
+    /// The NEAR AI privacy-filter settings in force, if any.
+    pub fn near_ai(&self) -> Option<&NearAiSettings> {
+        self.near_ai.as_ref()
+    }
+
+    /// Redact and submit one session, loading it from `source` first.
+    ///
+    /// Independent of every other session: a refusal or failure here never
+    /// affects a later call. The single exception is a fail-closed
+    /// precondition (`SubmitPreconditionFailure`), which aborts the batch.
+    pub async fn submit_one(
+        &mut self,
+        source: &dyn TraceSource,
+        session_ref: &SessionRef,
+    ) -> Result<SubmitOutcome> {
+        let transcript = match source.load(session_ref) {
             Ok(t) => t,
             Err(_) => {
-                outcomes.push(SubmitOutcome::SkippedParseFailure {
+                return Ok(SubmitOutcome::SkippedParseFailure {
                     reason_label: "parse-failed".to_string(),
                 });
-                continue;
             }
         };
+        self.submit_loaded(transcript).await
+    }
+
+    /// Redact and submit a transcript the caller has already loaded.
+    ///
+    /// This is what closes the window between the daemon's re-hash guard
+    /// and the bytes that actually go out. The uploader loads and hashes the
+    /// session to check that its content still matches what the contributor
+    /// approved; `submit_one` then loaded the file a second, independent
+    /// time, and it was *that* read -- never hashed, never compared -- whose
+    /// bytes were sent. A session appended to in between passed the guard
+    /// and shipped content the guard had never seen, which is precisely the
+    /// consent property the guard exists to enforce. The uploader calls this
+    /// with the transcript it verified, so the verified bytes are the sent
+    /// bytes.
+    pub async fn submit_loaded(
+        &mut self,
+        mut transcript: crate::source::SessionTranscript,
+    ) -> Result<SubmitOutcome> {
+        let opts = self.opts;
+        // Taken up front, not at the point it is used below: several paths
+        // return before that point (already-submitted, an unavailable
+        // filter, an over-size refusal), and an approved envelope left
+        // behind would apply to whatever session came next.
+        let approved_envelope = self.approved_envelope.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -210,7 +392,8 @@ pub async fn submit_sessions(
         // Take the most recent matching receipt, so a session that was
         // delivered and later accepted reports "accepted" rather than the
         // first status it ever had.
-        let prior = receipts
+        let prior = self
+            .receipts
             .iter()
             .filter(|r| {
                 r.session_hash == transcript.session_hash
@@ -221,11 +404,10 @@ pub async fn submit_sessions(
             let remediating_quarantined =
                 opts.remediate_quarantined && prior.status == "quarantined";
             if !remediating_quarantined {
-                outcomes.push(SubmitOutcome::AlreadySubmitted {
+                return Ok(SubmitOutcome::AlreadySubmitted {
                     submission_id: prior.submission_id,
                     prior_status: prior.status.clone(),
                 });
-                continue;
             }
         }
 
@@ -233,60 +415,76 @@ pub async fn submit_sessions(
             build_deterministic_preview_redactor(transcript.cwd.as_deref())
         } else {
             match build_redactor_with(
-                &effective_cfg,
+                &self.effective_cfg,
                 transcript.cwd.as_deref(),
-                near_ai_settings_from_env(),
+                self.near_ai.clone(),
             ) {
                 Ok(r) => r,
                 Err(_) => {
-                    outcomes.push(refused("pii-filter-unavailable", &transcript.session_hash));
-                    continue;
+                    return Ok(refused("pii-filter-unavailable", &transcript.session_hash));
                 }
             }
         };
 
-        if !canary_checked {
+        if !self.canary_checked {
             canary_self_test_async(&redactor)
                 .await
-                .context("privacy-filter-canary-failed")?;
-            canary_checked = true;
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
+            self.canary_checked = true;
+            self.canary_runs += 1;
         }
 
         let now = Utc::now();
-        let raw = if opts.unenrolled_preview {
-            build_preview_raw_contribution(&transcript, &effective_cfg, now)
-        } else {
-            build_raw_contribution(&transcript, &effective_cfg, now)
-        };
-        // Skip sessions that already exceed the envelope limit before the
-        // expensive redaction/privacy-filter pass; they would be refused for
-        // size after redaction anyway (envelope_size_ok below is the
-        // authoritative check).
-        if raw_contribution_size_ok(&raw).is_err() {
-            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-            outcomes.push(refused_for_size(&transcript.session_hash, size));
-            continue;
-        }
-        let mut envelope = match redact_to_envelope(&redactor, raw).await {
-            Ok(e) => e,
-            Err(_) => {
-                outcomes.push(refused("redaction-failed", &transcript.session_hash));
-                continue;
+        // The approved envelope, when there is one, is used *as it is*. No
+        // second redaction pass runs and nothing is compared: the bytes the
+        // contributor was shown are the bytes that go out. Everything
+        // downstream of here is unchanged and still applies to them -- the
+        // size ceiling, the residual-secret sweep, the granted scopes the
+        // issuer echoes back.
+        //
+        // The redactor above is still built and still canary-tested on this
+        // path. It is what the residual-secret sweep runs with, and a
+        // privacy filter that has gone bad must stop an upload whether or
+        // not this particular envelope was built through it.
+        let mut envelope = match approved_envelope {
+            Some(approved) => approved,
+            None => {
+                let raw = if opts.unenrolled_preview {
+                    build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
+                } else {
+                    build_raw_contribution(&transcript, &self.effective_cfg, now)
+                };
+                // Skip sessions that already exceed the envelope limit before
+                // the expensive redaction/privacy-filter pass; they would be
+                // refused for size after redaction anyway (envelope_size_ok
+                // below is the authoritative check).
+                if raw_contribution_size_ok(&raw).is_err() {
+                    let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+                    return Ok(refused_for_size(&transcript.session_hash, size));
+                }
+                match redact_to_envelope(&redactor, raw).await {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return Ok(refused("redaction-failed", &transcript.session_hash));
+                    }
+                }
             }
         };
-        if !near_ai_notice_recorded && effective_cfg.pii_filter.as_deref() == Some("near-ai") {
-            store
+
+        if !self.near_ai_notice_recorded
+            && self.effective_cfg.pii_filter.as_deref() == Some("near-ai")
+        {
+            self.store
                 .ensure_near_ai_notice_shown()
-                .context("recording NEAR AI first-use notice")?;
-            near_ai_notice_recorded = true;
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED))?;
+            self.near_ai_notice_recorded = true;
         }
 
         let size = match envelope_size_ok(&envelope) {
             Ok(s) => s,
             Err(_) => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                outcomes.push(refused_for_size(&transcript.session_hash, size));
-                continue;
+                return Ok(refused_for_size(&transcript.session_hash, size));
             }
         };
 
@@ -294,8 +492,7 @@ pub async fn submit_sessions(
             if let Some(outcome) =
                 residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
             {
-                outcomes.push(outcome);
-                continue;
+                return Ok(outcome);
             }
             if !opts.machine_readable {
                 if opts.unenrolled_preview {
@@ -311,64 +508,68 @@ pub async fn submit_sessions(
                     );
                 }
             }
-            outcomes.push(SubmitOutcome::Submitted {
+            return Ok(SubmitOutcome::Submitted {
                 submission_id: envelope.submission_id,
                 status: "dry-run".to_string(),
             });
-            continue;
         }
 
-        if !claim.as_ref().map(|c| c.is_fresh(now)).unwrap_or(false) {
-            let device = device
+        if !self
+            .claim
+            .as_ref()
+            .map(|c| c.is_fresh(now))
+            .unwrap_or(false)
+        {
+            let device = self
+                .device
                 .as_ref()
-                .context("device identity unavailable outside unenrolled preview")?;
-            match mint_claim(&issuer, cfg, device, now).await {
-                Ok(token) => claim = Some(token),
+                .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
+            match mint_claim(&self.issuer, self.cfg, device, now).await {
+                Ok(token) => self.claim = Some(token),
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("consent scopes not permitted")
                         || msg.contains("allowed uses not permitted")
                     {
                         println!("hint: re-run login --scopes with a narrower selection");
-                        outcomes.push(refused("scopes-not-permitted", &transcript.session_hash));
-                    } else {
-                        outcomes.push(SubmitOutcome::Failed {
-                            reason_label: "claim-mint-failed".to_string(),
-                        });
+                        return Ok(refused("scopes-not-permitted", &transcript.session_hash));
                     }
-                    continue;
+                    return Ok(SubmitOutcome::Failed {
+                        reason_label: "claim-mint-failed".to_string(),
+                    });
                 }
             }
         }
 
-        let token = claim
+        let token = self
+            .claim
             .as_ref()
             .expect("a claim must be minted before applying granted scopes")
             .clone();
-        stamp_granted_scopes(&mut envelope, &effective_cfg, &token);
+        stamp_granted_scopes(&mut envelope, &self.effective_cfg, &token);
 
         if let Some(outcome) =
             residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
         {
-            outcomes.push(outcome);
-            continue;
+            return Ok(outcome);
         }
 
         if envelope_size_ok(&envelope).is_err() {
             let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-            outcomes.push(refused_for_size(&transcript.session_hash, size));
-            continue;
+            return Ok(refused_for_size(&transcript.session_hash, size));
         }
 
+        let device = self
+            .device
+            .as_ref()
+            .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         match upload_with_retry(
-            cfg,
-            &issuer,
-            device
-                .as_ref()
-                .context("device identity unavailable outside unenrolled preview")?,
-            &mut claim,
+            self.cfg,
+            &self.issuer,
+            device,
+            &mut self.claim,
             &mut envelope,
-            &effective_cfg,
+            &self.effective_cfg,
         )
         .await
         {
@@ -380,30 +581,26 @@ pub async fn submit_sessions(
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
                 };
-                match store.append_receipt(&r) {
+                match self.store.append_receipt(&r) {
                     Ok(()) => {
-                        receipts.push(r);
-                        outcomes.push(SubmitOutcome::Submitted {
+                        self.receipts.push(r);
+                        Ok(SubmitOutcome::Submitted {
                             submission_id: envelope.submission_id,
                             status: receipt.status,
-                        });
+                        })
                     }
-                    Err(_) => outcomes.push(SubmitOutcome::Failed {
+                    Err(_) => Ok(SubmitOutcome::Failed {
                         reason_label: "receipt-write-failed".to_string(),
                     }),
                 }
             }
             Err(reason_label) if reason_label == "session-too-large" => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                outcomes.push(refused_for_size(&transcript.session_hash, size));
+                Ok(refused_for_size(&transcript.session_hash, size))
             }
-            Err(reason_label) => {
-                outcomes.push(SubmitOutcome::Failed { reason_label });
-            }
+            Err(reason_label) => Ok(SubmitOutcome::Failed { reason_label }),
         }
     }
-
-    Ok(outcomes)
 }
 
 /// Read back submission status for every locally recorded receipt. Returns
@@ -497,6 +694,42 @@ pub async fn set_profile(
         .call_json(Method::PUT, "/v1/community/profile", &[], Some(&req))
         .await
         .context("setting public profile")
+}
+
+/// Response of `POST /v1/account/login-links`. `url` is a ROOT-RELATIVE path
+/// carrying a single-use code; it is a secret for the few minutes it lives.
+/// `account_id` is returned by the server but not used here.
+#[derive(Debug, Clone, Deserialize)]
+struct MintLoginLinkResponse {
+    url: String,
+}
+
+/// Mint a single-use account login link for this device's principal.
+///
+/// Used by `crate::account_auth::sign_in` to open the human's browser at the
+/// EXISTING redeem flow. This is the same device-authenticated endpoint the
+/// account slice has always exposed, called with the same empty-scope claim as
+/// `status`: minting a login link is an authority the device key already has,
+/// and the loopback flow adds none.
+///
+/// Returns the root-relative path only. The caller joins it onto the
+/// configured ingest base URL; it is never logged.
+pub async fn mint_account_login_link(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for account sign-in")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let minted: MintLoginLinkResponse = client
+        .call_json(Method::POST, "/v1/account/login-links", &[], None::<&()>)
+        .await
+        .context("minting an account login link")?;
+    Ok(minted.url)
 }
 
 /// Withdraw this contributor's public attribution.
@@ -1171,6 +1404,160 @@ mod tests {
             0,
             "--no-reasoning must strip reasoning before upload"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_context_reuses_the_canary_across_sessions() {
+        // The canary is a per-batch precondition, not a per-session one. A
+        // daemon holding one context for weeks must not pay for -- or fail
+        // on -- a fresh self-test per trace.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+
+        let first = ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+        let second = ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+
+        assert!(
+            matches!(first, SubmitOutcome::Submitted { .. }),
+            "got {first:?}"
+        );
+        assert!(
+            matches!(second, SubmitOutcome::Submitted { .. }),
+            "got {second:?}"
+        );
+        assert_eq!(ctx.canary_runs(), 1, "canary must not re-run per session");
+    }
+
+    #[tokio::test]
+    async fn submit_loaded_sends_the_transcript_it_was_given_not_a_fresh_read() {
+        // The TOCTOU the daemon's re-hash guard could not close. The
+        // uploader loads and hashes the session to check it still matches
+        // what the contributor approved; `submit_one` then loaded the file
+        // a second, independent time, and it was *that* read -- never
+        // hashed, never compared -- whose bytes went out. A session
+        // appended to between the two reads passed the guard and shipped
+        // content the guard had never seen.
+        //
+        // Here the on-disk file is rewritten after the load, so the two
+        // reads would disagree. What arrives at ingest must be what was
+        // handed in.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(received.clone())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+
+        // A private copy of the fixture: this test rewrites the session
+        // file, and the checked-in fixture is shared by the whole module.
+        let session_root = dir.path().join("claude-root");
+        let project_dir = session_root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_path = project_dir.join("11111111-1111-1111-1111-111111111111.jsonl");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                "fixtures/claude-code/-Users-testuser-code-myproj/\
+                 11111111-1111-1111-1111-111111111111.jsonl",
+            ),
+            &session_path,
+        )
+        .unwrap();
+        let source = crate::source::claude_code::ClaudeCodeSource::new(session_root);
+        let session_ref = source.discover().unwrap().remove(0);
+        let verified = source.load(&session_ref).unwrap();
+        let verified_hash = verified.session_hash.clone();
+
+        // Whatever is on disk now, it is not what was verified.
+        std::fs::write(
+            &session_ref.path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"APPENDED \
+             AFTER THE GUARD RAN\"},\"cwd\":\"/Users/testuser/code/myproj\",\
+             \"timestamp\":\"2026-08-08T23:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"uuid\":\"z9\"}\n",
+        )
+        .unwrap();
+        assert_ne!(
+            source.load(&session_ref).unwrap().session_hash,
+            verified_hash,
+            "the fixture must actually differ, or this test proves nothing"
+        );
+
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let outcome = ctx.submit_loaded(verified).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let sent = received.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let body = serde_json::to_string(&sent[0]).unwrap();
+        assert!(
+            !body.contains("APPENDED AFTER THE GUARD RAN"),
+            "the verified bytes must be the sent bytes: {body}"
+        );
+
+        // And the receipt records the hash that was actually verified, so a
+        // later dedup check is against the right content.
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].session_hash, verified_hash);
+    }
+
+    #[tokio::test]
+    async fn submit_context_reruns_the_canary_after_invalidation() {
+        // A long-lived daemon re-checks the privacy filter periodically.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+
+        ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+        ctx.invalidate_canary();
+        ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+
+        assert_eq!(ctx.canary_runs(), 2);
     }
 
     #[tokio::test]

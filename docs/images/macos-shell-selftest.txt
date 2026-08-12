@@ -1,0 +1,25 @@
+trace-commons macOS shell self-test
+startup: running
+status.logged_in: false
+status.paused: false
+status.queue_depth: 2
+status.health: none
+health copy: (healthy)
+decisions owed (badge): 2
+  waiting: payments-api count=1 bytes=918
+  waiting: dotfiles count=1 bytes=426
+consent options: debugging_evaluation, benchmark_only, ranking_training, model_training, public_attribution
+entry: project=payments-api agent=Claude Code state=pending
+socket preview: would_send=3049 raw=918 events=3
+redaction receipt: scrubbed: 2 secret, 1 secret:aws access key, 1 secret:github token
+opening prompt: The Northwind settlement job is failing on retry. Can you look at the backoff lo
+ffi preview body bytes: 866
+search Northwind -> 2 match(es) at byte offsets [173, 791]
+search absent-string -> 0 match(es)
+redacted body contains raw AWS key: false
+redacted body contains raw GitHub token: false
+after approve: undo=true still-awaiting=false
+after undo: back-in-pending=false
+after pause: paused=true
+after resume: paused=false
+last action error: Too late to undo -- this one had already left the waiting list. History shows what happened to it.
