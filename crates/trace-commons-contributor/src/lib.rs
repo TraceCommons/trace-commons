@@ -3,6 +3,7 @@
 //! submits TraceContributionEnvelopes under instance-vouched per-user
 //! identities.
 
+pub mod account_auth;
 pub mod commands;
 pub mod config;
 pub mod consent;
@@ -13,3 +14,4 @@ pub mod issuer_client;
 pub mod picker;
 pub mod source;
 pub mod submit;
+pub mod withdraw;

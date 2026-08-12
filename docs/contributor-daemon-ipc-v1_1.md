@@ -349,6 +349,8 @@ history record, audit entry, notification text, or IPC response.
 | `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
 | `subscribe` | — | `subscribed: true`, then a `snapshot` event | |
 | `shutdown` | — | `stopping: true` | |
+| `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
+| `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 
 ### `status`
 
@@ -779,6 +781,118 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+### Withdrawal
+
+`withdraw` and `withdraw_bulk` call the server's
+`POST /v1/account/traces/{submission_id}/withdraw` (see
+`docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md` for the full
+design and the three response tiers). A successful `withdraw` reports
+`distribution_reach`, one of:
+
+- `not_distributed` -- the trace was `submitted` or `quarantined` and never
+  entered the commons. Its content is simply deleted.
+- `commons_not_distributed` -- the trace was `accepted` but not yet used in
+  any published export or benchmark. Its content is deleted and it is
+  excluded going forward.
+- `commons_distributed` -- the trace was `accepted` and already included in a
+  published export or benchmark. Its content is deleted and it is excluded
+  going forward, but copies already distributed cannot be recalled.
+
+**These are the server's names, and two of them were wrong in this document
+until 2026-08-10.** It previously said `in_commons` and `distributed`. A client
+built from the old text deserialises `not_distributed` correctly and fails on
+the other two -- which are exactly the tiers whose message a contributor most
+needs to be true. `wire_names_match_the_server` in
+`crates/trace-commons-contributor/src/withdraw.rs` pins them; if that test
+fails, this table is what to fix.
+
+#### Canonical confirmation copy
+
+Three applications are built from this document, and withdrawal is the one
+place where a plausible-sounding phrase becomes a false promise about erasure.
+Do not paraphrase per platform. Use these, adapted only for sentence case and
+platform punctuation conventions.
+
+**The tier is not knowable before the call, and that shapes everything below.**
+The server computes `distribution_reach` during the withdrawal, from live
+export membership. A client holds only the local `status`. So:
+
+- local status `submitted` or `quarantined` maps to `not_distributed`
+  reliably -- that is the server's own rule, and its copy can be shown before
+  the action.
+- local status `accepted` may resolve to EITHER `commons_not_distributed` or
+  `commons_distributed`, and the client cannot tell which. It must show
+  **both** bodies before the action, with the `commons_distributed` one given
+  the greater weight, and must say plainly that the outcome is decided on the
+  server. Showing only the gentler one would be a promise the client is not in
+  a position to make.
+- an unrecognised status shows the `commons_distributed` body alone, on the
+  grounds that the furthest reach cannot be ruled out.
+
+After the call, report the tier the server actually applied, using that tier's
+body. Never a generic "withdrawn".
+
+A contributor deciding whether to withdraw needs to know what it will achieve
+while they can still change their mind -- which here means knowing the range
+of what it might achieve, honestly, rather than a single confident sentence
+the client cannot support.
+
+| tier | confirmation body |
+|---|---|
+| `not_distributed` | "This trace never entered the commons. Withdrawing deletes it. Nothing was distributed and nothing needs recalling." |
+| `commons_not_distributed` | "This trace is in the commons but has not been included in any published export or benchmark yet. Withdrawing deletes it and excludes it from everything published from here on." |
+| `commons_distributed` | "This trace has already been included in a published export or benchmark. Withdrawing deletes our copy and excludes it from everything published from here on, **but copies that have already been distributed cannot be recalled.** Withdrawing does not undo that." |
+
+Rules that bind every application:
+
+1. **Never a generic "withdrawn".** The tier determines what actually
+   happened, and collapsing three outcomes into one word is the specific
+   failure this table exists to prevent.
+2. **Never claim more erasure than the tier achieved.** In particular
+   `commons_distributed` must not be phrased so a contributor could come away
+   believing distributed copies were retrieved.
+3. **Withdrawal does not reverse settled credit.** Do not state or imply that
+   it does. (Revocation used to claw credit back; that is being removed.)
+4. **`not_found` must not disclose which.** The server deliberately answers
+   the same way whether a submission belongs to someone else or does not exist
+   at all, so that account enumeration is impossible. An application must
+   therefore say something like "no trace with that id under your account",
+   and must NOT say "that trace belongs to someone else" or "that trace does
+   not exist" -- either phrasing leaks precisely what the server refuses to.
+5. **`confirmation_prompt` in the Rust client takes a `reach` the caller does
+   not have pre-action.** It is usable for the after-the-fact message, or with
+   a deliberately chosen worst case; it is not a pre-action lookup. Do not
+   build a flow that assumes the tier is known before the request.
+6. **Bulk withdrawal spans tiers.** `withdraw_bulk` reports only counts, so a
+   bulk confirmation cannot promise a per-tier outcome. It must say that the
+   selected traces may fall into different tiers and that some may already
+   have been distributed. If an application cannot say that clearly, it should
+   not offer bulk withdrawal.
+
+`withdraw_bulk` withdraws every submission currently at `status` in the
+local history cache (one of `submitted`, `quarantined`, or `accepted`; not
+`withdrawn` itself, and not the `other` bucket `history_rollup` reports,
+which covers statuses this client has no stable name for). It reports
+`withdrawn` and `failed` counts rather than per-submission detail -- a
+partial failure does not fail the whole call, and a contributor can retry
+individual traces with `withdraw` if some did not go through.
+
+Both update the local history cache immediately (the record's `status`
+becomes `withdrawn`) so a contributor sees the effect without needing a
+`refresh_history` round trip first.
+
+**Both methods answer `unavailable` / `account-session-required` today,
+always**, before ever attempting the call. Withdrawal is authenticated by an
+account session -- deliberately not the device key that authenticates every
+other call in this contract, so withdrawal survives losing the device that
+submitted the trace -- and this daemon does not yet acquire or store one; it
+only ever holds a device key. `account-session-required` is a distinct,
+documented error rather than a generic failure so a calling shell can route
+the contributor to account sign-in instead of showing a dead end, once
+account sign-in exists to route to. Acquiring an account session is separate
+work, tracked outside this document; nothing in this contract should be
+read as that flow already existing.
 
 ## Events
 

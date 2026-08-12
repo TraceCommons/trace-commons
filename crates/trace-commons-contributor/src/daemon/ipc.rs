@@ -177,7 +177,7 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 25] = [
+pub const METHODS: [&str; 27] = [
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
@@ -203,6 +203,8 @@ pub const METHODS: [&str; 25] = [
     "shutdown",
     "status",
     "subscribe",
+    "withdraw",
+    "withdraw_bulk",
 ];
 
 pub const EVENT_SNAPSHOT: &str = "snapshot";
@@ -1031,23 +1033,30 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         // subscribe is handled by the connection loop, which owns the stream.
         "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+        // Real network I/O when an account session exists to make the call
+        // with (it never does today -- see `daemon::withdraw`'s module doc);
+        // only handled for real by `handle_request_async`, same as
+        // `"enroll"` above.
+        "withdraw" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
+        "withdraw_bulk" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
         _ => Response::err(req.id, ERR_UNKNOWN_METHOD, "unknown-method"),
     }
 }
 
 /// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"preview_body"`, `"enroll"`) for real and delegates every other method,
-/// unchanged, to the
-/// synchronous `handle_request`. See the module doc's "Sync vs. async
-/// dispatch" section for why this is the only place that decides which
-/// methods are async, and why both real callers (the socket loop and
-/// `handle_local`) always go through this function rather than
-/// `handle_request` directly.
+/// `"preview_body"`, `"enroll"`, `"withdraw"`, `"withdraw_bulk"`) for real
+/// and delegates every other method, unchanged, to the synchronous
+/// `handle_request`. See the module doc's "Sync vs. async dispatch" section
+/// for why this is the only place that decides which methods are async, and
+/// why both real callers (the socket loop and `handle_local`) always go
+/// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
+        "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
+        "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
         _ => handle_request(shared, req),
     }
 }
@@ -2179,6 +2188,21 @@ mod tests {
             !id.contains("acme") && !id.contains("secret") && !id.contains('/'),
             "the id leaked a path component: {id}"
         );
+        // Only segments long enough that a coincidental match is implausible.
+        //
+        // The id is a prefix plus 16 hex characters, and a temp path on macOS
+        // contains short components that are themselves valid hex -- a real
+        // one is `/private/var/folders/d8/...`. Asserting the id does not
+        // contain "d8" fails about one run in seventeen purely because two
+        // hex characters agree, which is not a leak.
+        //
+        // A security test that cries wolf at that rate is worse than no test:
+        // it teaches everyone to re-run it, and a real leak is then waved
+        // through with the same shrug. Two separate agents hit this flake on
+        // 2026-08-10 while working on unrelated changes. Four characters puts
+        // a coincidental hit at roughly one in sixteen thousand while still
+        // catching any segment big enough to identify anybody.
+        const MIN_DISTINGUISHING_LEN: usize = 4;
         for segment in std::path::Path::new(&key)
             .parent()
             .unwrap()
@@ -2187,6 +2211,7 @@ mod tests {
                 std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
                 _ => None,
             })
+            .filter(|segment| segment.len() >= MIN_DISTINGUISHING_LEN)
         {
             assert!(
                 !id.contains(&segment),
