@@ -1062,6 +1062,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// decision, across ALL tenants. Runs on the narrow, cross-tenant
     /// `trace_gate_driver` pool (never the tenant-scoped runtime pool) — the
     /// permissive `USING (true)` SELECT policies installed by migration V36
+    /// authorize cross-tenant row visibility, and V42 narrows that grant to
+    /// the columns the driver's queries actually use (mirroring V38).
     /// authorize the read.
     ///
     /// A submission qualifies when: it has a `submitted_envelope` object ref
