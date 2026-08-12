@@ -127,6 +127,12 @@ pub struct PgBackend {
     /// unused until then.
     #[allow(dead_code)]
     pii_backstop_driver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the invite registry cache refresh and the
+    /// admin invite API. Built only when `invite_registry_url` is configured;
+    /// its DB user is the operator-provisioned `trace_invite_registry` role
+    /// (NOLOGIN base, NOBYPASSRLS, permissive policy from V42). `None` keeps
+    /// invite redemption fail-closed. NEVER aliased to `pool`.
+    invite_registry_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -310,15 +316,41 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small invite-registry pool only when a distinct
+        // invite-registry connection string is configured. This pool runs as
+        // the narrow `trace_invite_registry` role and is never aliased to the
+        // runtime pool. Mirrors the gate-driver pool above exactly.
+        let invite_registry_pool = match config.invite_registry_url() {
+            Some(invite_registry_url) => {
+                let invite_registry_config = invite_registry_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!("invalid invite-registry PostgreSQL URL: {e}"))
+                    })?;
+                let invite_registry_manager =
+                    deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
+                let invite_registry_pool =
+                    Pool::builder(invite_registry_manager).max_size(2).build()?;
+                Some(invite_registry_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
             gate_driver_pool,
             pii_backstop_driver_pool,
+            invite_registry_pool,
         })
     }
 
     pub(crate) fn trace_pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn trace_pool_for_test(&self) -> Pool {
         self.pool.clone()
     }
 
@@ -420,7 +452,245 @@ impl PgBackend {
             .await?;
         Ok(row.map(|r| r.get::<_, String>(0)))
     }
+
+    fn invite_registry_pool(&self) -> Result<Pool, DatabaseError> {
+        self.invite_registry_pool
+            .clone()
+            .ok_or_else(|| DatabaseError::Pool("invite registry pool not configured".to_string()))
+    }
+
+    fn invite_entry_from_row(
+        row: tokio_postgres::Row,
+    ) -> Result<crate::trace_invite_registry::InviteEntry, DatabaseError> {
+        let mode: String = row.get("tenant_mode");
+        let tenant_mode = match mode.as_str() {
+            "fixed" => crate::trace_invite_registry::InviteTenantMode::Fixed,
+            "derived" => crate::trace_invite_registry::InviteTenantMode::Derived,
+            other => {
+                return Err(DatabaseError::Serialization(format!(
+                    "unknown invite tenant_mode {other:?}"
+                )));
+            }
+        };
+        let max_uses: i32 = row.get("max_uses");
+        Ok(crate::trace_invite_registry::InviteEntry {
+            invite_subject_hash: row.get("invite_subject_hash"),
+            policy_label: row.get("policy_label"),
+            tenant_mode,
+            fixed_tenant_id: row.get("fixed_tenant_id"),
+            tenant_template_id: row.get("tenant_template_id"),
+            policy_version: row.get("policy_version"),
+            allowed_consent_scopes: row.get("allowed_consent_scopes"),
+            allowed_uses: row.get("allowed_uses"),
+            max_uses: max_uses as u32,
+            expires_at: row.get("expires_at"),
+            issuance_source: row.get("issuance_source"),
+            issued_by_label: row.get("issued_by_label"),
+            credential_binding_hash: row.get("credential_binding_hash"),
+            note_label: row.get("note_label"),
+            revoked_at: row.get("revoked_at"),
+        })
+    }
+
+    /// Cache-refresh and admin listing. Runs on the registry pool, whose
+    /// permissive V42 policy is what authorizes cross-invite reads. Excludes
+    /// revoked and expired rows: the cache only ever holds live invites.
+    pub async fn list_invite_grants(
+        &self,
+    ) -> Result<Vec<crate::trace_invite_registry::InviteEntry>, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}
+                       FROM onboarding_invite_grants
+                      WHERE revoked_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > NOW())"
+                ),
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.into_iter().map(Self::invite_entry_from_row).collect()
+    }
+
+    pub async fn insert_invite_grant(
+        &self,
+        write: crate::db::InviteGrantWrite,
+    ) -> Result<crate::db::InviteGrantInsertOutcome, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let tenant_mode = match write.tenant_mode {
+            crate::trace_invite_registry::InviteTenantMode::Fixed => "fixed",
+            crate::trace_invite_registry::InviteTenantMode::Derived => "derived",
+        };
+        let max_uses = i32::try_from(write.max_uses).map_err(|_| {
+            DatabaseError::Serialization("invite max_uses out of range".to_string())
+        })?;
+        let inserted = client
+            .query_opt(
+                "INSERT INTO onboarding_invite_grants (
+                    invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
+                    tenant_template_id, policy_version, allowed_consent_scopes,
+                    allowed_uses, max_uses, expires_at, issuance_source,
+                    issued_by_label, credential_binding_hash, note_label
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                 ON CONFLICT (invite_subject_hash) DO NOTHING
+                 RETURNING invite_subject_hash",
+                &[
+                    &write.invite_subject_hash,
+                    &write.policy_label,
+                    &tenant_mode,
+                    &write.fixed_tenant_id,
+                    &write.tenant_template_id,
+                    &write.policy_version,
+                    &write.allowed_consent_scopes,
+                    &write.allowed_uses,
+                    &max_uses,
+                    &write.expires_at,
+                    &write.issuance_source,
+                    &write.issued_by_label,
+                    &write.credential_binding_hash,
+                    &write.note_label,
+                ],
+            )
+            .await;
+
+        match inserted {
+            Ok(Some(_)) => Ok(crate::db::InviteGrantInsertOutcome::Inserted),
+            Ok(None) => Ok(crate::db::InviteGrantInsertOutcome::AlreadyExists),
+            Err(e) => {
+                // 23505 unique_violation from the partial credential index.
+                // Report it as a typed outcome, not an opaque 500, and never
+                // echo the credential hash into the error.
+                let is_unique_violation = e
+                    .code()
+                    .map(|c| c == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+                    .unwrap_or(false);
+                if is_unique_violation {
+                    Ok(crate::db::InviteGrantInsertOutcome::CredentialAlreadyBound)
+                } else {
+                    Err(DatabaseError::Postgres(e))
+                }
+            }
+        }
+    }
+
+    /// Soft revoke. Returns true only when this call is what revoked it, so a
+    /// second revoke is a reported no-op rather than an error.
+    pub async fn revoke_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let updated = client
+            .execute(
+                "UPDATE onboarding_invite_grants
+                    SET revoked_at = NOW(), updated_at = NOW()
+                  WHERE invite_subject_hash = $1 AND revoked_at IS NULL",
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(updated == 1)
+    }
+
+    /// Authoritative in-transaction re-check on the RUNTIME pool. Sets the
+    /// GUC the V42 invite_lookup policy reads, so this can only ever return
+    /// the invite whose code the caller presented.
+    pub async fn lookup_invite_grant_in_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        invite_subject_hash: &str,
+    ) -> Result<Option<crate::trace_invite_registry::InviteEntry>, DatabaseError> {
+        tx.execute(
+            "SELECT set_config('trace_commons.invite_subject', $1, true)",
+            &[&invite_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}
+                       FROM onboarding_invite_grants
+                      WHERE invite_subject_hash = $1
+                        AND revoked_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > NOW())
+                      FOR SHARE"
+                ),
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row.map(Self::invite_entry_from_row).transpose()
+    }
+
+    /// Authoritative redemption resolve. Runs on the RUNTIME pool under the
+    /// V42 GUC policy, re-checks revocation and expiry inside the transaction,
+    /// and holds FOR SHARE so a concurrent revoke serializes behind it.
+    ///
+    /// This does NOT increment the V29 counter; the caller does that in the
+    /// same transaction via the existing onboard_device_key path.
+    /// `Ok(None)` means the invite is not redeemable -- absent, revoked, or
+    /// expired, deliberately indistinguishable to the caller. `Err` is
+    /// reserved for genuine database failures, so a backend outage is never
+    /// reported to a contributor as an invalid invite.
+    pub async fn redeem_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+        user_subject: &str,
+    ) -> Result<Option<InviteRedemption>, DatabaseError> {
+        let pool = self.trace_pool();
+        let mut client = pool.get().await.map_err(DatabaseError::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(entry) = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash).await? else {
+            return Ok(None);
+        };
+
+        let tenant_id = match entry.tenant_mode {
+            crate::trace_invite_registry::InviteTenantMode::Fixed => {
+                entry.fixed_tenant_id.clone().ok_or_else(|| {
+                    DatabaseError::Serialization("invite fixed_tenant_id missing".to_string())
+                })?
+            }
+            crate::trace_invite_registry::InviteTenantMode::Derived => {
+                let template = entry.tenant_template_id.as_deref().ok_or_else(|| {
+                    DatabaseError::Serialization("invite tenant_template_id missing".to_string())
+                })?;
+                trace_commons_protocol::onboarding::derive_user_tenant_id(template, user_subject)
+            }
+        };
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(InviteRedemption {
+            tenant_id,
+            policy_version: entry.policy_version,
+            allowed_consent_scopes: entry.allowed_consent_scopes,
+            allowed_uses: entry.allowed_uses,
+            max_uses: entry.max_uses,
+        }))
+    }
 }
+
+/// Resolved grant for a redeemed invite.
+#[derive(Debug, Clone)]
+pub struct InviteRedemption {
+    pub tenant_id: String,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub max_uses: u32,
+}
+
+const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mode,
+    fixed_tenant_id, tenant_template_id, policy_version, allowed_consent_scopes,
+    allowed_uses, max_uses, expires_at, issuance_source, issued_by_label,
+    credential_binding_hash, note_label, revoked_at";
 
 #[async_trait]
 impl Database for PgBackend {
@@ -1338,6 +1608,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V42 makes the database authoritative for contributor invites.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&42_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V42__onboarding_invite_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&42_i32, &"onboarding_invite_grants"],
+                )
+                .await?;
+        }
         // V43 (not V42: that number is held by the unmerged
         // db-authoritative-invites branch) adds the contributor-withdrawal
         // tombstone and the trace_submissions.withdrawn_at column.
@@ -2207,6 +2498,12 @@ impl Database for PgBackend {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        let resolved_allowed_consent_scopes = resolve_onboarding_scope_override(
+            &device_key.allowed_consent_scopes,
+            &default_allowed_consent_scopes,
+        );
+        let resolved_allowed_uses =
+            resolve_onboarding_scope_override(&device_key.allowed_uses, &default_allowed_uses);
         self.ensure_trace_tenant(&device_key.tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
@@ -2231,8 +2528,8 @@ impl Database for PgBackend {
                     &tx,
                     &device_key.tenant_id,
                     &device_key.device_key_id,
-                    &default_allowed_consent_scopes,
-                    &default_allowed_uses,
+                    &resolved_allowed_consent_scopes,
+                    &resolved_allowed_uses,
                 )
                 .await?;
                 tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2306,8 +2603,8 @@ impl Database for PgBackend {
                         &tx,
                         &device_key.tenant_id,
                         &device_key.device_key_id,
-                        &default_allowed_consent_scopes,
-                        &default_allowed_uses,
+                        &resolved_allowed_consent_scopes,
+                        &resolved_allowed_uses,
                     )
                     .await?;
                     tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2342,8 +2639,8 @@ impl Database for PgBackend {
             &tx,
             &device_key.tenant_id,
             &device_key.device_key_id,
-            &default_allowed_consent_scopes,
-            &default_allowed_uses,
+            &resolved_allowed_consent_scopes,
+            &resolved_allowed_uses,
         )
         .await?;
 
@@ -4492,6 +4789,22 @@ fn normalize_provision_scope_values(value: &serde_json::Value, defaults: &[&str]
     normalized
 }
 
+/// Resolve the scopes to grant on `/v1/onboard`: an invite-supplied override
+/// when present and non-empty, otherwise the process-wide default. Empty is
+/// deliberately treated the same as absent -- invites imported from the file
+/// allowlist carry empty scope vectors (the file format never had a scopes
+/// column), and provisioning them with zero consent scopes would silently
+/// strip permissions the pilot already grants those invites.
+fn resolve_onboarding_scope_override(
+    override_scopes: &Option<Vec<String>>,
+    default: &[String],
+) -> Vec<String> {
+    match override_scopes {
+        Some(scopes) if !scopes.is_empty() => scopes.clone(),
+        _ => default.to_vec(),
+    }
+}
+
 async fn upsert_onboarding_device_tenant_access_grant(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
@@ -4652,6 +4965,32 @@ mod tests {
             normalize_provision_scope_values(&json!([1, "x"]), &d),
             d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn onboarding_scope_override_wins_when_non_empty() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        let overridden =
+            resolve_onboarding_scope_override(&Some(vec!["model_training".to_string()]), &default);
+        assert_eq!(overridden, vec!["model_training".to_string()]);
+    }
+
+    #[test]
+    fn onboarding_scope_override_falls_back_on_empty_or_absent() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        // Imported file invites carry `Some(vec![])`, not `None` -- both
+        // must resolve to the default, not to "grant nothing".
+        assert_eq!(
+            resolve_onboarding_scope_override(&Some(vec![]), &default),
+            default
+        );
+        assert_eq!(resolve_onboarding_scope_override(&None, &default), default);
     }
 
     #[test]

@@ -35,6 +35,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
         pii_backstop_driver_url:
             trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
+        invite_registry_url: None,
     })
 }
 

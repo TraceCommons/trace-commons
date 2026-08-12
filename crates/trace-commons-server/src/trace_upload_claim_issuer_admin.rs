@@ -26,15 +26,25 @@ pub struct AdminState {
     pub source: Option<Arc<dyn AllowlistSource>>,
     pub denial_counter: Arc<DenialCounter>,
     pub max_stale_seconds: u64,
+    pub invite_admin: Option<crate::trace_invite_admin::InviteAdminState>,
 }
 
 /// Build the admin router. Wires the single status endpoint and applies
 /// no auth middleware — the caller is responsible for binding only on
-/// loopback (or explicitly opting into a public bind).
+/// loopback (or explicitly opting into a public bind). Merges in the
+/// admin invite routes when `invite_admin` is configured; those routes
+/// carry their own EdDSA admin-token gate.
 pub fn admin_router(state: AdminState) -> Router {
-    Router::new()
+    let invite_admin = state.invite_admin.clone();
+    let router = Router::new()
         .route("/v1/admin/allowlist-status", get(allowlist_status_handler))
-        .with_state(state)
+        .with_state(state);
+    match invite_admin {
+        Some(invite_state) => {
+            router.merge(crate::trace_invite_admin::invite_admin_router(invite_state))
+        }
+        None => router,
+    }
 }
 
 async fn allowlist_status_handler(State(state): State<AdminState>) -> (StatusCode, Json<Value>) {
@@ -174,6 +184,7 @@ mod tests {
             source: None,
             denial_counter: Arc::new(DenialCounter::new(Duration::from_secs(3600))),
             max_stale_seconds: 3600,
+            invite_admin: None,
         };
         let (status, body) = get_status(admin_router(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -187,6 +198,7 @@ mod tests {
             source: Some(Arc::new(StaticSource::new(snap))),
             denial_counter: Arc::new(DenialCounter::new(Duration::from_secs(3600))),
             max_stale_seconds: 3600,
+            invite_admin: None,
         };
         let (status, body) = get_status(admin_router(state.clone())).await;
         assert_eq!(status, StatusCode::OK);
@@ -219,6 +231,7 @@ mod tests {
             source: Some(Arc::new(StaticSource::new(snap))),
             denial_counter: counter,
             max_stale_seconds: 3600,
+            invite_admin: None,
         };
         let (_, body) = get_status(admin_router(state)).await;
         assert_eq!(body["denials_last_hour"], json!(2));
@@ -231,6 +244,7 @@ mod tests {
             source: Some(Arc::new(StaticSource::new(snap))),
             denial_counter: Arc::new(DenialCounter::new(Duration::from_secs(3600))),
             max_stale_seconds: 0, // any non-zero age is stale
+            invite_admin: None,
         };
         // Give loaded_at.elapsed() a moment to clear zero.
         tokio::time::sleep(Duration::from_millis(5)).await;

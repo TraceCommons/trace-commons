@@ -827,6 +827,14 @@ async fn enroll_mint_submit_round_trip() {
         issuer: "trace-commons-upload-issuer".into(),
         audience: "trace-commons-upload".into(),
         max_ttl_seconds: 300,
+        // The fail-closed defaults documented on the fields: None leaves
+        // /v1/admin/invites* unmounted, and false keeps /v1/onboard on the
+        // unchanged file-allowlist path. This test exercises the pre-existing
+        // onboard/submit flow, so it must keep that behaviour rather than opt
+        // into the DB-authoritative registry.
+        invite_admin_backend: None,
+        invite_admin_registry: None,
+        invite_registry_authoritative: false,
         workload_public_key_pem: keys.public_key_pem.clone(),
         workload_issuer: None,
         workload_audience: None,

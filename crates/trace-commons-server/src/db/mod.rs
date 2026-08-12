@@ -9,11 +9,45 @@ use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TraceCorpusStore, TraceCreditSettlementBatchWrite, TraceNearCreditOutboxItemWrite,
 };
+use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
+
+pub use postgres::InviteRedemption;
+
+/// Insert payload for an invite grant. Mirrors `InviteEntry` minus
+/// `revoked_at`, which is only ever set by `revoke_invite_grant`.
+#[derive(Debug, Clone)]
+pub struct InviteGrantWrite {
+    pub invite_subject_hash: String,
+    pub policy_label: String,
+    pub tenant_mode: InviteTenantMode,
+    pub fixed_tenant_id: Option<String>,
+    pub tenant_template_id: Option<String>,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub max_uses: u32,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub issuance_source: String,
+    pub issued_by_label: Option<String>,
+    pub credential_binding_hash: Option<String>,
+    pub note_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteGrantInsertOutcome {
+    Inserted,
+    /// The partial unique index refused the write: this credential already has
+    /// a live invite in this pool.
+    CredentialAlreadyBound,
+    /// An invite with this hash already exists. Makes the file import
+    /// idempotent.
+    AlreadyExists,
+}
 
 /// Safe structural diagnostics for PostgreSQL TraceCommons RLS readiness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1490,6 +1524,18 @@ pub struct DeviceKeyWrite {
     pub public_key: String,
     pub invite_subject_hash: String,
     pub client_info: serde_json::Value,
+    /// Grant-scope override from the invite, when redemption goes through
+    /// the DB-authoritative registry. `None` (every pre-existing call site)
+    /// preserves today's behavior byte-for-byte: the hardcoded
+    /// `DEFAULT_ONBOARDING_CONSENT_SCOPES`. An empty `Some(vec![])` -- as
+    /// carried by invites imported from the file allowlist, which never had
+    /// a scopes column -- is treated the same as `None`, not as "grant
+    /// nothing": provisioning an imported invite with zero consent scopes
+    /// would silently strip permissions the pilot already granted it.
+    pub allowed_consent_scopes: Option<Vec<String>>,
+    /// Same override/empty-fallback behavior as `allowed_consent_scopes`,
+    /// against `DEFAULT_ONBOARDING_ALLOWED_USES`.
+    pub allowed_uses: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

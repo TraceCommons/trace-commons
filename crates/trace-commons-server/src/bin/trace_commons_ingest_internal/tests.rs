@@ -24,6 +24,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
         pii_backstop_driver_url:
             trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
+        invite_registry_url: None,
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -77858,6 +77859,9 @@ async fn mint_login_link_account_for_subject(
         onboarding_profile_url: None,
         onboarding_leaderboard_url: None,
         admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
+        invite_registry_authoritative: false,
     };
 
     // Build the claim request; include the per-user subject when provided.
@@ -78859,6 +78863,9 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         onboarding_profile_url: None,
         onboarding_leaderboard_url: None,
         admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
+        invite_registry_authoritative: false,
     };
 
     async fn post_device_claim(
