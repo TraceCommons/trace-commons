@@ -15,6 +15,7 @@ crates/trace-commons-contributor-gtk/target/
 community/.wrangler/
 .superpowers/
 
+# Local adversarial review artifacts (pre-PR gate)
 .review/
 
 # Operator exports can contain submission-level analysis data
