@@ -1,0 +1,215 @@
+import AppKit
+import SwiftUI
+
+/// The menu-bar item.
+///
+/// The mark, not a tray glyph. A menu bar holds twenty icons drawn from the
+/// same SF Symbol set and a generic tray is not findable among them; the
+/// TraceCommons mark is, and it is the same mark the community site carries,
+/// which is the point. It is drawn monochrome so the system can tint it for
+/// a light or dark menu bar and invert it when the menu is open, the way a
+/// template image behaves.
+///
+/// State precedence is unchanged from the shared design: decisions owed
+/// (numeric badge) -> unhealthy -> paused -> idle. The badge counts
+/// DECISIONS OWED; if it shows 3, there are exactly three things to say yes
+/// or no to. Every state that is not "idle" carries a second glyph as well
+/// as a count, because a dimmed mark on its own is not a state anybody can
+/// read.
+struct MenuBarLabel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 3) {
+            BrandMark(size: 15, monochrome: true)
+                .opacity(model.status.paused ? 0.5 : 1)
+            if model.decisionsOwed > 0 {
+                Text("\(model.decisionsOwed)").monospacedDigit()
+            } else if model.health != nil {
+                Image(systemName: "exclamationmark.triangle")
+                    .imageScale(.small)
+            } else if model.status.paused {
+                Image(systemName: "pause.fill")
+                    .imageScale(.small)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        if model.decisionsOwed > 0 {
+            return "Trace Commons. ^[\(model.decisionsOwed) session](inflect: true) waiting for your decision."
+        }
+        if model.health != nil { return "Trace Commons. Needs attention." }
+        if model.status.paused { return "Trace Commons. Paused." }
+        return "Trace Commons. Nothing waiting."
+    }
+}
+
+struct MenuBarContent: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Group {
+            waitingSection
+            Divider()
+            healthSection
+            armedSection
+            weekSection
+            Divider()
+            // A menu is not a shrunken window. There are no cards, no
+            // manifest strips and no brand colour down here -- an AppKit
+            // menu draws its own vibrancy, its own highlight and its own
+            // type, and anything painted over that reads as a bug. The only
+            // additions are leading glyphs, which menus have always had.
+            Button {
+                openMain()
+            } label: {
+                Label("Review waiting sessions…", systemImage: "tray.full")
+            }
+            pauseSection
+            Divider()
+            Button {
+                openMain()
+            } label: {
+                Label("Open Trace Commons", systemImage: "macwindow")
+            }
+            Button("Quit…") { confirmQuit() }
+        }
+        .onAppear { model.refreshAll() }
+    }
+
+    // MARK: - What is waiting
+
+    @ViewBuilder
+    private var waitingSection: some View {
+        switch model.startup {
+        case .starting:
+            Text("Starting…")
+        case .refused:
+            Text("Not watching anything")
+            Text("Open the window for what to do about it")
+        case .running:
+            if model.decisionsOwed == 0 {
+                Text("Nothing waiting")
+            } else {
+                Text("\(model.decisionsOwed) waiting for your decision")
+                // Not approve buttons. Deliberately inert lines: the only
+                // forward action in this menu is Review.
+                ForEach(model.waitingByProject, id: \.label) { row in
+                    Text("   \(row.label) — \(row.count) · \(Format.bytes(row.bytes))")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var healthSection: some View {
+        if let health = model.health {
+            Text(health.title)
+            Text(health.detail.replacingOccurrences(of: "\n", with: " "))
+        }
+    }
+
+    @ViewBuilder
+    private var armedSection: some View {
+        // Armed projects are shown persistently and never collapsed away, so
+        // a contributor always knows what uploads without asking.
+        if !model.armedProjects.isEmpty {
+            Divider()
+            Text("Armed: \(model.armedProjects.count) project(s) — contributed without asking")
+            ForEach(model.armedProjects) { project in
+                Text("   \(project.projectLabel)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var weekSection: some View {
+        if let rollup = model.rollup {
+            Divider()
+            Text("This week: \(rollup.week.submitted) contributed, "
+                + "\(rollup.week.quarantined) held for privacy review")
+        }
+    }
+
+    // MARK: - Pause
+
+    @ViewBuilder
+    private var pauseSection: some View {
+        if model.status.paused {
+            Button {
+                model.resume()
+            } label: {
+                Label("Resume watching", systemImage: "play.circle")
+            }
+        } else {
+            Menu("Pause") {
+                Button("For 1 hour") {
+                    model.pause(until: Date().addingTimeInterval(3600))
+                }
+                Button("Until tomorrow morning") {
+                    model.pause(until: Format.tomorrowMorning())
+                }
+                Button("Until I turn it back on") {
+                    model.pause(until: nil)
+                }
+            }
+        }
+    }
+
+    // MARK: - Quit
+
+    private func openMain() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: WindowID.main)
+    }
+
+    /// The quit confirmation says what actually happens.
+    ///
+    /// The shared spec's copy ("The background watcher keeps running") is
+    /// written for a shell with a separate daemon process. On macOS the app
+    /// IS the daemon -- that is the entire point of the in-process shape --
+    /// so the watcher stops when the app does, and this says so rather than
+    /// repeating a sentence that would be false here.
+    private func confirmQuit() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Quit Trace Commons?"
+        alert.informativeText = """
+        The watcher runs inside this app, so quitting stops it. Nothing will be \
+        noticed or sent while it is closed.
+
+        Sessions already waiting stay on this machine and will be here when you \
+        come back. Nothing is sent while nobody's approving.
+        """
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Keep running")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSApp.terminate(nil)
+        }
+    }
+}
+
+enum Format {
+    static func bytes(_ count: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        return formatter.string(fromByteCount: Int64(count))
+    }
+
+    static func when(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    static func tomorrowMorning() -> Date {
+        let calendar = Calendar.current
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+    }
+}

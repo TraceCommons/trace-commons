@@ -34,6 +34,12 @@ use trace_commons_protocol::trace_contribution::{
     rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
     retention_policy_for_trace, run_privacy_filter_canary,
 };
+use trace_commons_server::account_native_auth::{
+    IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
+    NATIVE_SESSION_CLIENT_KIND, NATIVE_SESSION_TTL_HOURS, PendingNativeAuth,
+    challenge_for_verifier, challenge_is_wellformed, is_native_token, native_token_parts,
+    native_token_value, secret_eq, validate_loopback_redirect_uri, verifier_is_wellformed,
+};
 use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
     generate_login_code, generate_session_secret, hash_secret,
@@ -51,7 +57,8 @@ use trace_commons_server::account_passkey::{
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{
-    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
+    TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -166,6 +173,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
 use trace_commons_server::trace_gate_service::{
@@ -464,9 +472,13 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
+const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
+    "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1123,7 +1135,24 @@ async fn main() -> anyhow::Result<()> {
         state.revocation_propagation_scheduler.as_ref(),
     )
     .await?;
+    validate_community_snapshot_invalidation_scheduler_config(
+        state.as_ref(),
+        state.community_snapshot_invalidation_scheduler.as_ref(),
+    )?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
+    spawn_community_snapshot_recompute_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
@@ -1153,6 +1182,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_revocation_propagation_scheduler_task(
         &state,
         state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
     );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
@@ -1196,6 +1229,11 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    /// How often to recompute the community snapshot in-process. `None`
+    /// leaves recompute admin-triggered only, which is the behaviour
+    /// every deployment had before this existed.
+    community_snapshot_interval: Option<StdDuration>,
+    community_analytics_publication_basis: CommunityAnalyticsPublicationBasis,
     accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
@@ -1270,6 +1308,10 @@ struct AppState {
     credit_settlement_scheduler: Option<TraceCreditSettlementSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
+    /// When the community surface is enabled, drain coalesced withdrawal
+    /// invalidations by recomputing the published snapshot on this interval.
+    community_snapshot_invalidation_scheduler:
+        Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -1313,6 +1355,17 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Loopback native-app sign-in: pending authorization requests, keyed by
+    /// `request_id`, holding only the PKCE challenge and the validated loopback
+    /// redirect. Single-use and TTL-bounded, same in-process store and same
+    /// single-instance limitation as `account_ceremony_store`. Deliberately
+    /// carries no account/tenant: starting a flow is unauthenticated and confers
+    /// nothing.
+    account_native_requests: Arc<CeremonyStore<PendingNativeAuth>>,
+    /// Loopback native-app sign-in: issued one-time authorization codes, keyed
+    /// by the raw code's sha256. Single-use and TTL-bounded; the first
+    /// successful `take` removes the entry, so a replayed code finds nothing.
+    account_native_codes: Arc<CeremonyStore<IssuedNativeCode>>,
     /// Slice 3a login-with-NEAR: the NEAR sign-in config, present only when
     /// `NearConfig` is fully configured. `None` makes the NEAR sign-in surface
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
@@ -1341,8 +1394,7 @@ struct AppState {
     // (see `TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR` above).
     #[allow(dead_code)]
     #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-    dedup_vector_index:
-        Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>>,
+    dedup_vector_index: Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>>,
     /// Companion reverse map for `dedup_vector_index`: `UsearchVectorIndex`'s
     /// public `VectorIndex::nearest()` only returns the u64 key of the inserted
     /// entry (zero-padded back into a `Uuid` — see that module's `nearest()`
@@ -1608,6 +1660,15 @@ struct TraceRevocationPropagationSchedulerConfig {
     limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process drain for community-snapshot invalidations enqueued by
+/// withdrawal. No worker token: the tick calls `recompute_community_snapshot`
+/// directly (the same function the admin handler uses), so contributor
+/// traffic never reaches a full rebuild.
+#[derive(Clone)]
+struct TraceCommunitySnapshotInvalidationSchedulerConfig {
+    interval: StdDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2604,6 +2665,15 @@ impl TenantCtx {
         event
     }
 
+    fn quarantine_remediated_audit_event(
+        &self,
+        record: &TraceCommonsSubmissionRecord,
+    ) -> TraceCommonsAuditEvent {
+        let mut event = TraceCommonsAuditEvent::quarantine_remediated(record, self.auth());
+        event.reason = Some(self.auth_method_reason());
+        event
+    }
+
     fn revoked_audit_event(&self, submission_id: Uuid, reason: &str) -> TraceCommonsAuditEvent {
         TraceCommonsAuditEvent::revoked(self.auth(), submission_id, reason)
     }
@@ -3299,6 +3369,9 @@ impl AppState {
             parse_trace_process_evaluation_scheduler_config_from_env()?;
         let revocation_propagation_scheduler =
             parse_trace_revocation_propagation_scheduler_config_from_env()?;
+        let community_leaderboard_enabled = env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED);
+        let community_snapshot_invalidation_scheduler =
+            parse_community_snapshot_invalidation_scheduler_config(community_leaderboard_enabled)?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -3451,6 +3524,8 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
+        let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
         // Score attestations: `from_env` fails startup on a partial
         // configuration (a signing key with no matching public key/kid is an
@@ -3488,7 +3563,10 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
-            community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_leaderboard_enabled,
+            community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
+            community_analytics_publication_basis:
+                parse_community_analytics_publication_basis_from_env()?,
             accept_medium_risk_submissions: env_truthy(
                 TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
             ),
@@ -3558,6 +3636,7 @@ impl AppState {
             credit_settlement_scheduler,
             process_evaluation_scheduler,
             revocation_propagation_scheduler,
+            community_snapshot_invalidation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3580,6 +3659,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_native_requests,
+            account_native_codes,
             account_near_config,
             attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -5268,8 +5349,7 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 /// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-fn build_dedup_vector_index_from_env()
--> Option<Arc<trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex>> {
+fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
     use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
     let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
@@ -6253,6 +6333,25 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
     }))
 }
 
+/// When the community surface is enabled, schedule coalesced withdrawal
+/// invalidation drains on the published snapshot interval (default 900s).
+fn parse_community_snapshot_invalidation_scheduler_config(
+    community_leaderboard_enabled: bool,
+) -> anyhow::Result<Option<TraceCommunitySnapshotInvalidationSchedulerConfig>> {
+    if !community_leaderboard_enabled {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS,
+        900,
+        30,
+        86_400,
+    )?;
+    Ok(Some(TraceCommunitySnapshotInvalidationSchedulerConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+    }))
+}
+
 fn parse_trace_allowed_use_env(name: &'static str, value: &str) -> anyhow::Result<TraceAllowedUse> {
     serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
         .with_context(|| format!("{name} must be a valid trace allowed use"))
@@ -6673,6 +6772,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/traces/{submission_id}/content",
             get(account_trace_content_handler),
         )
+        .route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post(account_trace_withdraw_handler),
+        )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
             "/v1/account/sessions/revoke-all",
@@ -6807,6 +6910,18 @@ fn app(state: Arc<AppState>) -> Router {
         //  - The redeem + passkey-login flows are the credential themselves (the
         //    single-use code / the WebAuthn assertion).
         .route("/v1/account/login-links", post(mint_login_link_handler))
+        // Loopback native-app sign-in. BOTH endpoints are unauthenticated by
+        // necessity, and neither confers anything on its own:
+        //  - `native/authorize` only parks a PKCE challenge and a validated
+        //    loopback redirect. No account, no tenant, no credential.
+        //  - `native/token` cannot require a session: it CREATES one. Its
+        //    credentials are the one-time code (minted only by a human
+        //    completing the browser redeem) plus the PKCE verifier.
+        .route(
+            "/v1/account/native/authorize",
+            post(native_authorize_start_handler),
+        )
+        .route("/v1/account/native/token", post(native_token_handler))
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -6855,6 +6970,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/review/{submission_id}/decision",
             post(review_decision_handler),
+        )
+        .route(
+            "/v1/review/{submission_id}/rescrub",
+            post(review_quarantine_rescrub_handler),
+        )
+        .route(
+            "/v1/review/quarantine/rescrub",
+            post(review_quarantine_rescrub_batch_handler),
         )
         .route(
             "/v1/review/leases/claim-next",
@@ -8360,6 +8483,169 @@ fn record_signed_token_managed_eddsa_keyset_refresh_failure(
     }
 }
 
+/// Minimum recompute interval. Each recompute is a full pass over the
+/// window for every tenant in the cohort, and the snapshot it produces is
+/// only read once per page load, so anything tighter costs database work
+/// nobody sees.
+const COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS: u64 = 60;
+
+/// Snapshots kept per window/metric. Only the newest is ever served; the
+/// rest are the record of what was published and under which controls, so
+/// this trims to a short history rather than to one. At the documented
+/// 900s interval that is a bit over a day.
+const COMMUNITY_SNAPSHOT_RETAINED: i64 = 96;
+
+fn parse_community_analytics_publication_basis_from_env()
+-> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS) {
+        Ok(configured) => parse_community_analytics_publication_basis(&configured),
+        // Absent means the stricter basis. Publishing without a mechanism is
+        // a decision an operator has to make explicitly; it is never what a
+        // deployment falls into by not setting something.
+        Err(_) => Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism),
+    }
+}
+
+fn parse_community_analytics_publication_basis(
+    configured: &str,
+) -> anyhow::Result<CommunityAnalyticsPublicationBasis> {
+    match configured.trim() {
+        "" | "approved_noise_mechanism" => {
+            Ok(CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism)
+        }
+        "suppression_only" => Ok(CommunityAnalyticsPublicationBasis::SuppressionOnly),
+        other => anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS} must be \
+             `approved_noise_mechanism` or `suppression_only`, got `{other}`"
+        ),
+    }
+}
+
+fn parse_community_snapshot_interval_from_env() -> anyhow::Result<Option<StdDuration>> {
+    match std::env::var(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS) {
+        Ok(configured) => parse_community_snapshot_interval(&configured),
+        Err(_) => Ok(None),
+    }
+}
+
+fn parse_community_snapshot_interval(configured: &str) -> anyhow::Result<Option<StdDuration>> {
+    let trimmed = configured.trim();
+    // Empty and 0 both mean "admin-triggered only", so an operator can
+    // disable the worker without deleting the line.
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let seconds: u64 = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be a whole number of seconds"
+        )
+    })?;
+    if seconds < COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "{TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS} must be at least {COMMUNITY_SNAPSHOT_MIN_INTERVAL_SECONDS} seconds"
+        );
+    }
+    Ok(Some(StdDuration::from_secs(seconds)))
+}
+
+/// Keep the published snapshot current without an operator POSTing to the
+/// admin route. Before this existed, a contributor who earned a row had no
+/// way for it to appear: the snapshot only moved when someone remembered
+/// to trigger it by hand.
+fn spawn_community_snapshot_recompute_task(state: &Arc<AppState>) {
+    if !state.community_leaderboard_enabled {
+        return;
+    }
+    let Some(interval) = state.community_snapshot_interval else {
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Each tick runs in its own task so a panic surfaces as a
+            // JoinError here rather than killing this loop. Without that,
+            // one panic leaves the process healthy and the snapshot
+            // silently frozen - the exact failure this worker exists to
+            // prevent, in the form least likely to be noticed.
+            let tick = tokio::spawn(community_snapshot_tick(state.clone(), interval));
+            if let Err(join_error) = tick.await {
+                tracing::error!(
+                    panicked = join_error.is_panic(),
+                    "community snapshot recompute tick did not complete; worker continuing"
+                );
+            }
+        }
+    });
+}
+
+/// One scheduled recompute, including the checks that make running this on
+/// a timer safe rather than merely automatic.
+async fn community_snapshot_tick(state: Arc<AppState>, interval: StdDuration) {
+    // Skip if something already produced a snapshot inside this interval:
+    // the admin route, or another process. This is a cheap coordination,
+    // not a mutual exclusion - two writers can still race inside the same
+    // instant. See the deployment note on the interval env var: the worker
+    // assumes a single writer, and a multi-replica deployment wanting
+    // stronger guarantees needs an elected scheduler or a distributed lock.
+    if let Some(db) = state.db_mirror.as_ref() {
+        if let Ok(Some(existing)) = db
+            .latest_leaderboard_snapshot(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+            )
+            .await
+        {
+            let age = Utc::now().signed_duration_since(existing.computed_at);
+            if age < chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::zero()) {
+                tracing::debug!("community snapshot already fresh; skipping scheduled recompute");
+                return;
+            }
+        }
+    }
+
+    let row = match recompute_community_snapshot(state.as_ref()).await {
+        Ok(row) => row,
+        // A 409 here is the publication gate refusing, which is a steady
+        // state rather than a fault: a deployment with controls
+        // unsatisfied would otherwise log an error every interval forever.
+        Err((status, _)) if status == StatusCode::CONFLICT => {
+            tracing::debug!(
+                "community snapshot recompute skipped: publication controls unsatisfied"
+            );
+            return;
+        }
+        Err((status, _)) => {
+            tracing::warn!(status = %status, "community snapshot recompute failed");
+            return;
+        }
+    };
+    tracing::info!(
+        snapshot_id = %row.snapshot_id,
+        "community snapshot recomputed on schedule"
+    );
+
+    // Retention runs after a successful write, so a failure here never
+    // costs the snapshot that was just published.
+    if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .prune_leaderboard_snapshots(
+                COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+                COMMUNITY_LEADERBOARD_METRIC,
+                COMMUNITY_SNAPSHOT_RETAINED,
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned superseded community snapshots"),
+            Err(error) => tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "pruning superseded community snapshots failed"
+            ),
+        }
+    }
+}
+
 fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {
     let Some(verifier) = state.signed_token_verifier.clone() else {
         return;
@@ -8934,6 +9220,84 @@ fn spawn_trace_revocation_propagation_scheduler_task(
             }
         }
     });
+}
+
+fn validate_community_snapshot_invalidation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(_) = config else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        state.community_leaderboard_enabled,
+        "community snapshot invalidation scheduler requires {TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED}"
+    );
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "community snapshot invalidation scheduler requires the DB mirror"
+    );
+    Ok(())
+}
+
+fn spawn_community_snapshot_invalidation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        "Trace Commons community snapshot invalidation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_community_snapshot_invalidation_scheduler_tick(state.as_ref()).await {
+                Ok(drained) => {
+                    if drained {
+                        tracing::info!(
+                            "Trace Commons community snapshot invalidation drain completed"
+                        );
+                    }
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons community snapshot invalidation drain failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn run_community_snapshot_invalidation_scheduler_tick(
+    state: &AppState,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community snapshot invalidation drain requires the DB mirror",
+        )
+    })?;
+    let pending = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if pending.is_none() {
+        return Ok(false);
+    }
+    // Recompute is admin-authored in code but scheduler-triggered; contributors
+    // only enqueue the coalesced invalidation watermark.
+    let row = recompute_community_snapshot(state).await?;
+    Ok(row.snapshot_id != uuid::Uuid::nil())
 }
 
 async fn validate_trace_export_job_scheduler_config(
@@ -10543,6 +10907,9 @@ struct TraceCommonsConfigStatusResponse {
     revocation_propagation_scheduler_interval_seconds: Option<u64>,
     revocation_propagation_scheduler_limit: Option<u32>,
     revocation_propagation_scheduler_dry_run: Option<bool>,
+    community_snapshot_invalidation_scheduler_configured: bool,
+    community_snapshot_invalidation_scheduler_interval_seconds: Option<u64>,
+    community_snapshot_max_age_seconds: u64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -11060,6 +11427,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .revocation_propagation_scheduler
             .as_ref()
             .map(|config| config.dry_run),
+        community_snapshot_invalidation_scheduler_configured: state
+            .community_snapshot_invalidation_scheduler
+            .is_some(),
+        community_snapshot_invalidation_scheduler_interval_seconds: state
+            .community_snapshot_invalidation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        community_snapshot_max_age_seconds: COMMUNITY_SNAPSHOT_MAX_AGE.num_seconds() as u64,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -11691,14 +12066,39 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     Json(mut envelope): Json<TraceContributionEnvelope>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    let tenant = authorize_tenant_access_grant_ctx(
-        state.as_ref(),
-        authenticate_ctx(state.as_ref(), &headers)?,
-    )
-    .await?;
+    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+
+    // Submission work includes the server re-scrub and gate preparation, so
+    // bound it before the tenant-access-grant query, envelope validation, or any
+    // submission-record read. Length-prefixing the authenticated tenant, method,
+    // and principal components makes every authentication boundary unambiguous.
+    // Static-token configuration has no stable caller identity beyond the
+    // credential, so that path is necessarily per credential; overlapping
+    // rotation credentials receive separate budgets.
+    let submit_key = submit_principal_rate_limit_key(
+        authenticated_tenant.tenant_id(),
+        authenticated_tenant.safe_auth_method(),
+        authenticated_tenant.principal_ref(),
+    );
+    let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
+    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
+        Some(guard) => guard,
+        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
+    };
+    #[cfg(test)]
+    pause_submit_after_rate_limit_for_test(&submit_key).await;
+    let tenant = authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?;
     validate_envelope(&envelope)?;
 
-    if let Some(existing) = tenant
+    // Idempotency: same submission_id always addresses the same record.
+    // Owned quarantined rows are the exception — a re-POST supersedes the
+    // stored envelope and reclassifies under current server rules (#214).
+    // Fresh submission ids for the same session are rejected: they would
+    // compete with themselves for novelty credit.
+    let remediating_prior = if let Some(existing) = tenant
         .read_submission_record(&state.root, envelope.submission_id)
         .map_err(internal_error)?
     {
@@ -11708,15 +12108,21 @@ async fn submit_trace_handler(
                 "submission id already belongs to another principal",
             ));
         }
-        let receipt = receipt_from_record(&existing);
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.idempotent_submit_audit_event(envelope.submission_id),
-        )
-        .map_err(internal_error)?;
-        return Ok(Json(receipt));
-    }
+        if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+            Some(existing)
+        } else {
+            let receipt = receipt_from_record(&existing);
+            append_audit_event(
+                &state.root,
+                tenant.tenant_id(),
+                tenant.idempotent_submit_audit_event(envelope.submission_id),
+            )
+            .map_err(internal_error)?;
+            return Ok(Json(receipt));
+        }
+    } else {
+        None
+    };
 
     let tenant_policy = tenant_submission_policy_for_request(state.as_ref(), tenant.auth()).await?;
     enforce_signed_claim_submission_restrictions(&tenant, &envelope)?;
@@ -11742,7 +12148,11 @@ async fn submit_trace_handler(
         &envelope.privacy.redaction_hash,
         &derived_precheck.canonical_summary_hash,
     )?;
-    enforce_submission_quota(state.as_ref(), &tenant)?;
+    // Same-id quarantine remediation does not consume a new quota slot — the
+    // prior quarantined row already counted.
+    if remediating_prior.is_none() {
+        enforce_submission_quota(state.as_ref(), &tenant)?;
+    }
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     apply_credit_estimate_to_envelope(&mut envelope);
     let corpus_status = status_for_risk(
@@ -11772,11 +12182,16 @@ async fn submit_trace_handler(
         state.pii_backstop_driver.is_some(),
     );
 
+    let artifact_label = if remediating_prior.is_some() {
+        "remediated-envelope"
+    } else {
+        "submitted-envelope"
+    };
     let stored_envelope = store_envelope(
         &state,
         tenant.tenant_id(),
         corpus_status,
-        "submitted-envelope",
+        artifact_label,
         &envelope,
     )
     .map_err(internal_error)?;
@@ -11787,14 +12202,23 @@ async fn submit_trace_handler(
         derived_precheck,
     );
     let retention_policy = retention_policy_for_trace(&envelope);
-    let received_at = Utc::now();
+    // Preserve original receipt time on remediation so retention and hourly
+    // quota windows stay anchored to first receipt of this submission_id.
+    let received_at = remediating_prior
+        .as_ref()
+        .map(|prior| prior.received_at)
+        .unwrap_or_else(Utc::now);
     let expires_at = retention_policy
         .max_age_days
         .map(|days| received_at + Duration::days(i64::from(days)));
-    let record = TraceCommonsSubmissionRecord {
+    let auth_principal_ref = remediating_prior
+        .as_ref()
+        .map(|prior| prior.auth_principal_ref.clone())
+        .unwrap_or_else(|| tenant.principal_ref().to_string());
+    let mut record = TraceCommonsSubmissionRecord {
         tenant_id: tenant.tenant_id().to_string(),
         tenant_storage_ref: tenant.tenant_storage_ref(),
-        auth_principal_ref: tenant.principal_ref().to_string(),
+        auth_principal_ref,
         submitted_tenant_scope_ref: tenant.submitted_tenant_scope_ref(),
         contributor_pseudonym: envelope.contributor.pseudonymous_contributor_id.clone(),
         submission_id: envelope.submission_id,
@@ -11819,6 +12243,14 @@ async fn submit_trace_handler(
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
     };
+    // Remediating a quarantined row always clears any outstanding review lease;
+    // the prior assessment is obsolete.
+    clear_review_lease_metadata(&mut record);
+    let audit_event = if remediating_prior.is_some() {
+        tenant.quarantine_remediated_audit_event(&record)
+    } else {
+        tenant.submitted_audit_event(&record)
+    };
     if state.require_db_mirror_writes {
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
@@ -11835,21 +12267,11 @@ async fn submit_trace_handler(
             .map_err(internal_error)?;
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
     } else {
         write_submission_record(&state.root, &record).map_err(internal_error)?;
         write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-        append_audit_event(
-            &state.root,
-            tenant.tenant_id(),
-            tenant.submitted_audit_event(&record),
-        )
-        .map_err(internal_error)?;
+        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
         let mirror_result =
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
                 .await;
@@ -11862,6 +12284,24 @@ async fn submit_trace_handler(
         }
         enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Best-effort cleanup of the pre-remediation artifact once the new
+    // pointers are durable. Same-path overwrite (status stayed quarantined) is
+    // a no-op because object keys match.
+    if let Some(prior) = remediating_prior.as_ref() {
+        let object_moved = prior.object_key != record.object_key
+            || prior.artifact_receipt.as_ref().map(|r| &r.object_key)
+                != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+        if object_moved {
+            if let Err(error) = delete_trace_objects_for_record(state.as_ref(), prior) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons prior quarantine artifact cleanup failed after remediation"
+                );
+            }
+        }
     }
 
     Ok(Json(receipt_from_record(&record)))
@@ -11956,6 +12396,20 @@ async fn revoke_submission(
             "revocation",
         )?;
     }
+    // Fail closed before anything is mutated. Revocation must leave the trace
+    // body unreachable, so a record that carries an encrypted artifact receipt
+    // can only be revoked on a deployment that can reach the store holding that
+    // ciphertext. Refusing here is preferable to tombstoning the record and
+    // silently leaving the payload in a store this process cannot delete from.
+    if let Some(record) = record.as_ref()
+        && record.artifact_receipt.is_some()
+        && state.artifact_store.is_none()
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation refused: missing control trace_artifact_store_unconfigured",
+        ));
+    }
     let revocation_reason =
         trace_revocation_reason_for_request(tenant.auth(), owner_self_revocation, reason)?;
     let mut derived = tenant
@@ -11975,9 +12429,17 @@ async fn revoke_submission(
             .map(|record| record.canonical_summary_hash.clone()),
     };
 
+    // Revocation flips status only. `credit_points_final` is deliberately left
+    // as-is: withdrawing a trace is a contributor's right, not an offence, and
+    // zeroing the awarded figure made the receipt read like a penalty. Nothing
+    // selects for settlement by this value -- `run_credit_settlement` gates on
+    // `status == Accepted` plus `!record.is_terminal()`, and the tenant credit
+    // summary only sums `credit_points_final` for Accepted records -- so the
+    // field is a display value here, not a control. Credit that has already
+    // settled is likewise left alone: revocation removes the trace from the
+    // commons and deletes its content, it does not reach back onto the chain.
     let mirrored_record = record.take().map(|mut record| {
         record.status = TraceCorpusStatus::Revoked;
-        record.credit_points_final = Some(0.0);
         record
     });
     let revoked_derived = derived.take().map(|mut derived| {
@@ -12090,6 +12552,18 @@ async fn revoke_submission(
         }
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Revoked means the content is gone, not merely relabelled. This runs last,
+    // after every hash-only tombstone, mirror, and invalidation has been written
+    // from the still-readable record -- `redaction_hash_for_record` reads the
+    // stored envelope, so deleting earlier would strip the tombstone of the very
+    // hashes it exists to carry. Errors propagate: a store that refuses deletion
+    // (a disabled remote object store returns an error) fails the request rather
+    // than leaving the payload behind under a revoked label. Deleting an object
+    // that is already gone is a no-op, so re-revoking is idempotent.
+    if let Some(record) = mirrored_record.as_ref() {
+        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -12227,7 +12701,12 @@ struct CommunitySnapshotContents {
     privacy: CommunitySnapshotPrivacy,
     leaderboard: Vec<LeaderboardEntry>,
     contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
-    analytics: CommunityCorpusAnalytics,
+    /// `None` when the analytics gate was unsatisfied at recompute time.
+    /// The aggregates are then never computed at all, rather than
+    /// computed and withheld, so nothing un-noised is written to the
+    /// snapshot table. `privacy.analytics_withheld_controls` says why.
+    #[serde(default)]
+    analytics: Option<CommunityCorpusAnalytics>,
 }
 
 const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
@@ -12238,20 +12717,102 @@ const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
 /// all. It is a placeholder, not a mechanism identifier: snapshots
 /// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+/// Published withdrawal bound for community snapshots. Matches the
+/// design/docs ≤15-minute removal promise: serve refuses a snapshot
+/// older than this, converting a silent privacy failure into an
+/// availability failure when the drain queue is wedged.
+const COMMUNITY_SNAPSHOT_MAX_AGE: Duration = Duration::seconds(900);
 
 /// Minimum aggregate cell size enforced before any community aggregate
 /// is published. A cell of size one is the contributor.
 const COMMUNITY_MIN_CELL_COUNT_FLOOR: usize = 2;
 
+/// Roster floor. A leaderboard row is not an aggregate that might happen
+/// to identify someone — it is a named person who asked to be named, and
+/// suppressing a contributor for having contributed once hides a
+/// participant rather than protecting a bystander. All this floor does is
+/// keep the SQL honest: below 1, a contributor with nothing accepted in
+/// the window would still take a row.
+///
+/// Note that despite its name, `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT`
+/// is only ever applied to the leaderboard query's HAVING clause.
+/// `compute_corpus_analytics_summary` takes no min-cell argument at all,
+/// so the corpus aggregates have never been cell-suppressed. The
+/// [`COMMUNITY_MIN_CELL_COUNT_FLOOR`] check below therefore gates
+/// analytics publication without suppressing anything inside it — a real
+/// gap, but one that only matters once a noise mechanism exists, since
+/// nothing publishes until then.
+const COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR: usize = 1;
+
 /// Minimum number of distinct tenants in the community cohort before
-/// publication. A single-tenant cohort republishes one tenant's corpus
-/// under a "community" label, which the leaderboard design forbids.
+/// corpus aggregates are published. A single-tenant cohort republishes
+/// one tenant's corpus under a "community" label.
+///
+/// Analytics only. The roster carries no such implication: it is a list
+/// of people who individually chose to appear, and how many tenants they
+/// span changes nothing about who consented to what. The claim of breadth
+/// lives in the aggregates, so the control belongs there.
 const COMMUNITY_MIN_TENANT_COHORT: usize = 2;
 
 /// Label-only missing-control name for an unapproved noise mechanism.
 /// Not an env var: no configuration value can approve a mechanism that
 /// has not been implemented.
 const COMMUNITY_NOISE_MECHANISM_CONTROL: &str = "community_noise_mechanism";
+
+/// What a published set of corpus aggregates rests on.
+///
+/// This exists so the answer is recorded rather than inferred. Previously
+/// the only way to publish analytics was to satisfy a noise-mechanism
+/// control, so anything published implied a mechanism had been approved.
+/// An operator who wants to publish without one should have to say so, and
+/// the snapshot should carry which basis was used, rather than a reader of
+/// the code or the artifact assuming noise was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommunityAnalyticsPublicationBasis {
+    /// Aggregates publish only under an approved, calibrated mechanism.
+    /// The default, and the only basis that supports a privacy claim
+    /// stronger than cell suppression.
+    ApprovedNoiseMechanism,
+    /// Aggregates publish under cell suppression alone: cells below the
+    /// min-cell floor are dropped, and nothing else is done to them. This
+    /// is a real protection and it is not differential privacy. Totals are
+    /// not suppressed, so at small corpus sizes they can still describe a
+    /// handful of contributors closely. Anything user-facing that describes
+    /// this deployment must say which basis is in force.
+    SuppressionOnly,
+}
+
+impl CommunityAnalyticsPublicationBasis {
+    fn strict() -> Self {
+        Self::ApprovedNoiseMechanism
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovedNoiseMechanism => "approved_noise_mechanism",
+            Self::SuppressionOnly => "suppression_only",
+        }
+    }
+}
+
+/// The two community surfaces, which carry different disclosure risks
+/// and therefore different controls.
+///
+/// The split is not cosmetic. Everyone on the roster holds
+/// `public_attribution` consent: their handle and their counts being
+/// public is the thing they asked for, and perturbing those figures
+/// protects nobody while making the published number wrong. The
+/// analytics aggregates span every contributor, including those who
+/// never opted in, so they are an inference surface over people who
+/// made no such choice and need a mechanism before they can leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommunitySurface {
+    /// Leaderboard rows and contributor profiles.
+    Roster,
+    /// Corpus aggregates.
+    Analytics,
+}
 
 /// Noise-seed prefixes belonging to mechanisms approved for community
 /// publication.
@@ -12284,19 +12845,33 @@ fn community_noise_mechanism_approved(noise_seed_hash: &str) -> bool {
 /// [`COMMUNITY_APPROVED_NOISE_SEED_PREFIXES`] is still empty. Callers
 /// derive it with [`community_noise_mechanism_approved`].
 fn community_publication_missing_controls(
+    surface: CommunitySurface,
+    basis: CommunityAnalyticsPublicationBasis,
     min_cell_count: usize,
     tenant_cohort_size: usize,
     noise_mechanism_approved: bool,
 ) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if min_cell_count < COMMUNITY_MIN_CELL_COUNT_FLOOR {
+    let min_cell_floor = match surface {
+        CommunitySurface::Roster => COMMUNITY_ROSTER_MIN_CELL_COUNT_FLOOR,
+        CommunitySurface::Analytics => COMMUNITY_MIN_CELL_COUNT_FLOOR,
+    };
+    // The min-cell floor is never waived for analytics. Under
+    // `SuppressionOnly` it stops being one control among several and becomes
+    // the only thing standing between a published aggregate and a small
+    // group, so it is required more strictly there, not less.
+    if min_cell_count < min_cell_floor {
         missing.push(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT);
     }
-    if !noise_mechanism_approved {
-        missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
-    }
-    if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
-        missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+    if surface == CommunitySurface::Analytics
+        && basis == CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    {
+        if !noise_mechanism_approved {
+            missing.push(COMMUNITY_NOISE_MECHANISM_CONTROL);
+        }
+        if tenant_cohort_size < COMMUNITY_MIN_TENANT_COHORT {
+            missing.push(TRACE_COMMONS_COMMUNITY_TENANT_IDS);
+        }
     }
     missing
 }
@@ -12304,8 +12879,13 @@ fn community_publication_missing_controls(
 /// Recompute-path preconditions, evaluated against live config. The
 /// seed is the one recompute would stamp on the snapshot it is about to
 /// write.
-fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'static str> {
+fn community_publication_missing_controls_for_state(
+    state: &AppState,
+    surface: CommunitySurface,
+) -> Vec<&'static str> {
     community_publication_missing_controls(
+        surface,
+        state.community_analytics_publication_basis,
         state.analytics_min_cell_count,
         state.community_tenant_ids.len(),
         community_noise_mechanism_approved(COMMUNITY_LEADERBOARD_NOISE_SEED_HASH),
@@ -12318,6 +12898,7 @@ fn community_publication_missing_controls_for_state(state: &AppState) -> Vec<&'s
 /// rather than grandfathered in.
 fn community_snapshot_missing_controls(
     row: &trace_commons_server::db::LeaderboardSnapshotRow,
+    surface: CommunitySurface,
 ) -> Vec<&'static str> {
     let cohort_size = row
         .contents
@@ -12325,11 +12906,35 @@ fn community_snapshot_missing_controls(
         .and_then(|privacy| privacy.get("tenant_cohort_size"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
+    let basis = row
+        .contents
+        .get("privacy")
+        .and_then(|privacy| privacy.get("publication_basis"))
+        .and_then(|basis| serde_json::from_value(basis.clone()).ok())
+        .unwrap_or_else(CommunityAnalyticsPublicationBasis::strict);
     community_publication_missing_controls(
+        surface,
+        basis,
         usize::try_from(row.min_cell_count).unwrap_or(0),
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
     )
+}
+
+/// Freshness / invalidation refusal reasons for a published community
+/// snapshot. Label-only: safe for error bodies and audit rows.
+fn community_snapshot_freshness_failure(
+    computed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    pending_invalidation_at: Option<DateTime<Utc>>,
+) -> Option<&'static str> {
+    if now.signed_duration_since(computed_at) > COMMUNITY_SNAPSHOT_MAX_AGE {
+        return Some("snapshot_exceeds_published_bound");
+    }
+    if pending_invalidation_at.is_some_and(|pending| computed_at < pending) {
+        return Some("snapshot_invalidated_by_withdrawal");
+    }
+    None
 }
 
 /// Privacy provenance recorded on every snapshot, so a published
@@ -12350,6 +12955,19 @@ struct CommunitySnapshotPrivacy {
     /// Per-contributor sensitivity the noise was calibrated to. `None`
     /// for the same reason.
     sensitivity: Option<f64>,
+    /// Empty when the aggregates were computed. Otherwise the
+    /// label-only control names that withheld them, in the same
+    /// convention as the serve path: no tenant ids, handles or counts,
+    /// so it is safe in a public body. A reader can tell "withheld"
+    /// from "no activity" from "bug", which a bare null cannot.
+    #[serde(default)]
+    analytics_withheld_controls: Vec<String>,
+    /// What the aggregates in this snapshot rest on. Absent on snapshots
+    /// written before the basis was explicit; those default to the strict
+    /// basis, so an old artifact is never read as having been published
+    /// under suppression alone.
+    #[serde(default = "CommunityAnalyticsPublicationBasis::strict")]
+    publication_basis: CommunityAnalyticsPublicationBasis,
 }
 
 impl CommunitySnapshotPrivacy {
@@ -12363,8 +12981,49 @@ impl CommunitySnapshotPrivacy {
             tenant_cohort_size: 0,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: Vec::new(),
+            publication_basis: CommunityAnalyticsPublicationBasis::strict(),
         }
     }
+}
+
+/// Drop disaggregated analytics cells below the configured minimum size.
+///
+/// A histogram bucket or gate outcome holding one or two records is a
+/// description of those records, and the whole point of a k-anonymity floor
+/// is that such a cell must not be published. `COMMUNITY_MIN_CELL_COUNT_FLOOR`
+/// already gates *whether* analytics publish; this applies the same number to
+/// *what* they contain, which nothing did before.
+///
+/// Suppression drops the cell rather than zeroing it, matching
+/// [`suppress_small_analytics_cells`] on the broad-release path. Dropping
+/// zero-count cells too is deliberate and is the stronger choice: an absent
+/// bucket is then indistinguishable between "no records" and "fewer records
+/// than the floor", where keeping the zeros would have told a reader which.
+///
+/// The totals are deliberately not suppressed: they are the top-level sums
+/// over everything, and blanking them would leave a page that says nothing
+/// while still claiming to be analytics. If a corpus is small enough that its
+/// totals are identifying, the control that should stop publication is the
+/// tenant-cohort floor, not this. Returns the number of cells removed.
+fn suppress_small_community_analytics_cells(
+    summary: &mut trace_commons_server::db::CorpusAnalyticsSummary,
+    min_cell_count: usize,
+) -> usize {
+    let floor = min_cell_count as i64;
+    if floor <= 1 {
+        // A floor of 0 or 1 suppresses nothing by definition: a cell of one
+        // already meets it. Leave the data alone rather than pretending to
+        // filter, and in particular do not strip the empty buckets that give
+        // the histogram its shape.
+        return 0;
+    }
+    let before = summary.novelty_histogram.len() + summary.gate_outcomes.len();
+    summary
+        .novelty_histogram
+        .retain(|(_, count)| *count >= floor);
+    summary.gate_outcomes.retain(|(_, count)| *count >= floor);
+    before.saturating_sub(summary.novelty_histogram.len() + summary.gate_outcomes.len())
 }
 
 /// Compute a fresh snapshot from current DB state and persist it.
@@ -12382,7 +13041,15 @@ async fn recompute_community_snapshot(
     // Fail closed before touching contributor data: a snapshot that
     // cannot be published is not worth computing, and computing it
     // anyway leaves un-noised aggregates sitting in the snapshot table.
-    let missing_controls = community_publication_missing_controls_for_state(state);
+    //
+    // That second clause is why the analytics gate is evaluated
+    // separately below rather than folded in here. When it fails we do
+    // not compute the aggregates at all, so there is nothing un-noised
+    // to sit anywhere — a stronger position than computing them and
+    // withholding at serve time. The roster has no such problem: it is
+    // published under consent, so failing its gate is still fatal here.
+    let missing_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Roster);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -12401,13 +13068,36 @@ async fn recompute_community_snapshot(
         )
         .await
         .map_err(internal_error)?;
-    let analytics = db
-        .compute_corpus_analytics_summary(
-            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
-            state.community_tenant_ids.as_ref(),
-        )
-        .await
-        .map_err(internal_error)?;
+    let analytics_withheld_controls =
+        community_publication_missing_controls_for_state(state, CommunitySurface::Analytics);
+    let analytics = if analytics_withheld_controls.is_empty() {
+        let mut summary = db
+            .compute_corpus_analytics_summary(
+                COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+                state.community_tenant_ids.as_ref(),
+            )
+            .await
+            .map_err(internal_error)?;
+        // The min-cell floor gates whether analytics may publish at all, but
+        // until now nothing applied it to what was published: the aggregation
+        // SQL takes no min-cell argument, so every bucket and gate outcome
+        // went out at its true count however small. Suppress here, where the
+        // configured floor is known.
+        let suppressed =
+            suppress_small_community_analytics_cells(&mut summary, state.analytics_min_cell_count);
+        if suppressed > 0 {
+            tracing::info!(
+                suppressed,
+                "suppressed community analytics cells below the min-cell floor"
+            );
+        }
+        Some(summary)
+    } else {
+        // Deliberately not computed. See the comment on the roster gate
+        // above: an aggregate that cannot be published is an aggregate
+        // that should never exist at rest.
+        None
+    };
 
     // Rank by novelty_credit (rolling 7d).
     let mut sorted = inputs;
@@ -12467,10 +13157,15 @@ async fn recompute_community_snapshot(
             tenant_cohort_size: state.community_tenant_ids.len() as i32,
             epsilon_charged: None,
             sensitivity: None,
+            analytics_withheld_controls: analytics_withheld_controls
+                .iter()
+                .map(|control| (*control).to_string())
+                .collect(),
+            publication_basis: state.community_analytics_publication_basis,
         },
         leaderboard,
         contributors,
-        analytics: CommunityCorpusAnalytics {
+        analytics: analytics.map(|analytics| CommunityCorpusAnalytics {
             window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
             total_submissions: analytics.total_submissions,
             total_accepted: analytics.total_accepted,
@@ -12485,7 +13180,7 @@ async fn recompute_community_snapshot(
                 })
                 .collect(),
             gate_outcomes: analytics.gate_outcomes.into_iter().collect(),
-        },
+        }),
     };
     let contents_json = serde_json::to_value(&contents).map_err(internal_error)?;
     let contents_canonical = serde_json::to_string(&contents).map_err(internal_error)?;
@@ -12499,9 +13194,23 @@ async fn recompute_community_snapshot(
         min_cell_count: state.analytics_min_cell_count as i32,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    db.insert_leaderboard_snapshot(write)
+    let row = db
+        .insert_leaderboard_snapshot(write)
         .await
-        .map_err(internal_error)
+        .map_err(internal_error)?;
+    // A successful recompute is the drain path for coalesced withdrawal
+    // invalidations. Concurrent withdrawals that requested after this
+    // snapshot's computed_at leave the pending watermark set.
+    let _ = db
+        .drain_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+            row.snapshot_id,
+            row.computed_at,
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(row)
 }
 
 /// Fetch the latest snapshot for the public read handlers and refuse to
@@ -12511,8 +13220,13 @@ async fn recompute_community_snapshot(
 /// into one and forgotten on another, and so snapshots already sitting
 /// in the table from before the gate existed stop being served the
 /// moment this ships - without requiring a data migration.
+///
+/// `surface` selects which controls apply. A caller has to name the
+/// surface it is serving, so adding a route cannot silently inherit the
+/// weaker gate.
 async fn latest_publishable_community_snapshot(
     state: &AppState,
+    surface: CommunitySurface,
 ) -> ApiResult<trace_commons_server::db::LeaderboardSnapshotRow> {
     if !state.community_leaderboard_enabled {
         return Err(api_error(
@@ -12539,7 +13253,7 @@ async fn latest_publishable_community_snapshot(
                 "no community snapshot has been computed yet",
             )
         })?;
-    let missing_controls = community_snapshot_missing_controls(&snapshot);
+    let missing_controls = community_snapshot_missing_controls(&snapshot, surface);
     if !missing_controls.is_empty() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12547,6 +13261,21 @@ async fn latest_publishable_community_snapshot(
                 "community snapshot is withheld by missing privacy controls: {}",
                 missing_controls.join(", ")
             ),
+        ));
+    }
+    let pending_invalidation = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if let Some(reason) =
+        community_snapshot_freshness_failure(snapshot.computed_at, Utc::now(), pending_invalidation)
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("community snapshot is withheld: {reason}"),
         ));
     }
     Ok(snapshot)
@@ -12578,15 +13307,67 @@ async fn recompute_community_snapshot_handler(
 async fn community_leaderboard_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
-    Ok(Json(snapshot.contents))
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
+
+    // Recompute writes `analytics: null` when the analytics gate is
+    // unsatisfied, so a snapshot produced by current code already omits
+    // them. A snapshot written before that gate existed does not: it
+    // carries aggregates computed under no approved mechanism, and this
+    // handler would hand them out through the roster's weaker gate.
+    //
+    // So the gate is re-evaluated against the stored snapshot here rather
+    // than trusted from when it was written. Withheld aggregates are
+    // replaced with null and the reason recorded, matching what recompute
+    // would have produced, so a reader can still tell "withheld" from
+    // "no activity".
+    let withheld = community_snapshot_missing_controls(&snapshot, CommunitySurface::Analytics);
+    Ok(Json(redact_withheld_analytics(
+        snapshot.contents,
+        &withheld,
+    )))
+}
+
+/// Replace withheld aggregates with null and record why, matching what
+/// recompute would have written. Separate from the handler so the
+/// redaction is testable without standing up a database.
+fn redact_withheld_analytics(
+    mut contents: serde_json::Value,
+    withheld: &[&'static str],
+) -> serde_json::Value {
+    if withheld.is_empty() {
+        return contents;
+    }
+    let Some(object) = contents.as_object_mut() else {
+        return contents;
+    };
+    object.insert("analytics".to_string(), serde_json::Value::Null);
+    let reasons = serde_json::Value::Array(
+        withheld
+            .iter()
+            .map(|control| serde_json::Value::String((*control).to_string()))
+            .collect(),
+    );
+    match object.get_mut("privacy").and_then(|p| p.as_object_mut()) {
+        Some(privacy) => {
+            privacy.insert("analytics_withheld_controls".to_string(), reasons);
+        }
+        None => {
+            object.insert(
+                "privacy".to_string(),
+                serde_json::json!({ "analytics_withheld_controls": reasons }),
+            );
+        }
+    }
+    contents
 }
 
 async fn community_contributor_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(handle): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Roster).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
     let profile = parsed
@@ -12599,11 +13380,23 @@ async fn community_contributor_handler(
 async fn community_analytics_summary_handler(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let snapshot = latest_publishable_community_snapshot(state.as_ref()).await?;
+    let snapshot =
+        latest_publishable_community_snapshot(state.as_ref(), CommunitySurface::Analytics).await?;
     let parsed: CommunitySnapshotContents =
         serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    // The gate above passes against current config, but this snapshot may
+    // predate that config: it was computed while analytics were withheld,
+    // so the aggregates were never calculated. Refuse rather than serve an
+    // empty body, and name the fix, since a recompute is all it takes.
+    let analytics = parsed.analytics.ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "latest community snapshot was computed without analytics; \
+             recompute to publish them",
+        )
+    })?;
     Ok(Json(
-        serde_json::to_value(&parsed.analytics).map_err(internal_error)?,
+        serde_json::to_value(&analytics).map_err(internal_error)?,
     ))
 }
 
@@ -12674,27 +13467,32 @@ async fn delete_community_profile_handler(
     let db = community_profile_db(state.as_ref())?;
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     enforce_public_attribution_scope(&tenant)?;
-    let withdrew = db
-        .withdraw_contributor_profile(tenant.tenant_id(), &tenant.auth().principal_ref)
+    let eviction = db
+        .withdraw_contributor_profile(
+            tenant.tenant_id(),
+            &tenant.auth().principal_ref,
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
         .await
         .map_err(internal_error)?;
     db.append_contributor_profile_audit(
         tenant.tenant_id(),
         &tenant.auth().principal_ref,
         "withdraw",
-        None,
+        eviction
+            .as_ref()
+            .and_then(|row| row.handle_normalized.as_deref()),
         Some("public_attribution"),
     )
     .await
     .map_err(internal_error)?;
-    if withdrew {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        // Idempotent: nothing to withdraw means the caller's view is
-        // already "not public." 204 keeps the API simple and
-        // matches the spec's "withdrawal is idempotent" property.
-        Ok(StatusCode::NO_CONTENT)
-    }
+    // Idempotent: nothing to withdraw means the caller's view is
+    // already "not public." 204 keeps the API simple and
+    // matches the spec's "withdrawal is idempotent" property.
+    // A successful withdrawal enqueued a coalesced snapshot invalidation
+    // in the same DB transaction as withdrawn_at + the eviction receipt.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn credit_handler(
@@ -13074,17 +13872,40 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_cookie_value) =
+    let (ctx, rotated_secret_value) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
             Err(err) => return err.into_response(),
         };
 
+    // A native token rotates exactly like a cookie session, but a native client
+    // has no cookie jar. Hand the new token back in a response header — the
+    // bearer analogue of `Set-Cookie`, on the same channel, to the same
+    // already-authenticated caller — and return early so no `Set-Cookie` is
+    // ever emitted for a native client.
+    let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    if native_rotation {
+        request.extensions_mut().insert(ctx);
+        let mut response = next.run(request).await;
+        if let Some(token) = rotated_secret_value {
+            if let Ok(value) = HeaderValue::from_str(&token) {
+                response
+                    .headers_mut()
+                    .insert(ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, value);
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+            }
+        }
+        return response;
+    }
+
     request.extensions_mut().insert(ctx);
     let mut response = next.run(request).await;
 
-    if let Some(cookie_value) = rotated_cookie_value {
+    if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -13136,63 +13957,115 @@ async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
 ) -> ApiResult<(AccountCtx, Option<String>)> {
-    let has_bearer = headers
+    let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim_start().starts_with("Bearer "))
-        .unwrap_or(false);
+        .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+        .map(str::trim);
     let cookie = cookie_value_from_headers(headers, ACCOUNT_SESSION_COOKIE);
 
-    match (has_bearer, cookie) {
-        (true, Some(_)) => Err(api_error(
+    match (bearer, cookie) {
+        (Some(_), Some(_)) => Err(api_error(
             StatusCode::BAD_REQUEST,
             "ambiguous credentials: present both a session cookie and a bearer token",
         )),
-        (true, None) => resolve_account_ctx_bearer(state, headers)
-            .await
-            .map(|ctx| (ctx, None)),
-        (false, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
-        (false, None) => Err(api_error(
+        // A `tcn1_`-prefixed bearer is a NATIVE ACCOUNT SESSION, not a device
+        // upload claim. The prefix is the whole dispatch: a device claim never
+        // carries it, so the two credential kinds cannot be confused in either
+        // direction, and a native token is never fed to the device authenticator.
+        (Some(bearer), None) if is_native_token(bearer) => {
+            resolve_account_ctx_native(state, bearer).await
+        }
+        // A device upload claim is NOT an account credential.
+        //
+        // This arm used to resolve one to a full `AccountCtx`, which meant a
+        // device key reached every `/v1/account/*` route -- withdrawal and
+        // account history included. A device key is provisioned to upload; a
+        // stolen one should not also be able to withdraw a contributor's
+        // traces or read their history, and the loopback native-session flow
+        // exists precisely so a native client never needs that authority.
+        //
+        // Nothing depends on the old behaviour: the contributor client
+        // authenticates these routes with a `tcn1_` native session, and no
+        // other caller in the tree sends a device bearer here.
+        (Some(_), None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
-            "account session cookie or device bearer token required",
+            "account session required: a device upload claim is not an account credential",
+        )),
+        (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
+        (None, None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session cookie or native session token required",
         )),
     }
 }
 
-/// Bearer path: device token → linked account → active-membership set.
-async fn resolve_account_ctx_bearer(
+/// Native-token path: the SAME session validation as the cookie path, reached
+/// through an `Authorization: Bearer tcn1_...` header instead of a cookie.
+///
+/// Everything that governs a browser session governs this one, because it IS a
+/// browser-session row: expiry, the idle cap, revocation (`revoke-all` sets
+/// `revoked_at`, and `validate_session` refuses a revoked row), and
+/// rotation-on-use. The only differences are the transport and the resulting
+/// `auth_method`.
+///
+/// The session's own `client_kind` is NOT propagated into `AccountCtx`: a native
+/// token is pinned WEAK (`'native'`) for the strong-authenticator gate no matter
+/// what browser session approved it, so it can read and withdraw but can never
+/// change authenticators or redirect a payout.
+async fn resolve_account_ctx_native(
     state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountCtx> {
-    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
-    let db = account_db(state)?;
-    let tenant_id = tenant.tenant_id().to_string();
-    let principal_ref = tenant.principal_ref().to_string();
+    bearer: &str,
+) -> ApiResult<(AccountCtx, Option<String>)> {
+    let invalid = || {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired account session",
+        )
+    };
 
-    let account_id = db
-        .resolve_account_for_principal(&tenant_id, &principal_ref)
+    let (tenant_id, token_hash) = native_token_parts(bearer).ok_or_else(invalid)?;
+
+    let db = account_db(state)?;
+    let session = db
+        .validate_session(&tenant_id, &token_hash)
         .await
         .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
+        .ok_or_else(invalid)?;
+    // A session row that is not a native session must NOT be reachable through
+    // this transport: that would mean a browser cookie's secret had been
+    // presented as a bearer, which is exactly the "make the browser session
+    // reachable by a native client" property this design forbids.
+    if session.client_kind != NATIVE_SESSION_CLIENT_KIND {
+        return Err(invalid());
+    }
+    let account_id = session.account_id;
     let account = AccountId::from_uuid(account_id);
     let principal_set = db
         .expand_account_principals(&tenant_id, account_id)
         .await
         .map_err(internal_error)?;
 
-    Ok(AccountCtx {
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::DeviceBearer,
-        tenant_id,
-        actor_ref: principal_ref,
-        // The bearer path is a device token, not a passkey assertion: there is no
-        // authenticating credential to flag as `this_device`.
-        auth_credential_id: None,
-        // A device bearer is NOT a strong authenticator for the authenticator-change
-        // gate: mark it weak so it is gated like a device-link cookie session.
-        client_kind: "device".to_string(),
-    })
+    // Rotation-on-use fires for native sessions exactly as for cookies. The
+    // middleware hands the new secret back in a response header (the bearer
+    // analogue of `Set-Cookie`) so the client can swap before the short
+    // prev-token grace lapses.
+    let rotated = session
+        .rotated_secret
+        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+
+    Ok((
+        AccountCtx {
+            account_id: account,
+            principal_set,
+            auth_method: AccountAuthMethod::NativeToken,
+            tenant_id,
+            actor_ref: account_actor_ref(&account),
+            auth_credential_id: None,
+            client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+        },
+        rotated,
+    ))
 }
 
 /// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
@@ -13660,6 +14533,335 @@ async fn account_trace_content_handler(
     Ok(response)
 }
 
+/// Label recorded on the withdrawal tombstone and returned to the client:
+/// the trace was never in the commons.
+const TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED: &str = "not_distributed";
+/// In the commons, but never published in an export or benchmark.
+const TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED: &str = "commons_not_distributed";
+/// In the commons AND already published. Copies cannot be recalled.
+const TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED: &str = "commons_distributed";
+
+/// Revocation reason recorded for a contributor-initiated withdrawal. Distinct
+/// from `contributor_revocation` so the audit trail separates "I revoked this
+/// submission" from "I withdrew my trace from the commons".
+const TRACE_WITHDRAWAL_REASON: &str = "contributor_withdrawal";
+
+/// Response body for `POST /v1/account/traces/{submission_id}/withdraw`.
+///
+/// The tier is reported explicitly so the client can tell the contributor the
+/// truth rather than a generic success. Nothing here is derived from the
+/// request body; every field comes from auth-derived tenant state.
+#[derive(Debug, Serialize)]
+struct AccountTraceWithdrawalResponse {
+    submission_id: Uuid,
+    withdrawn_at: DateTime<Utc>,
+    /// Label of the corpus status held immediately before withdrawal.
+    prior_status: String,
+    /// One of `not_distributed`, `commons_not_distributed`,
+    /// `commons_distributed`.
+    distribution_reach: String,
+    /// True only for `commons_distributed`. When true the content is deleted
+    /// and the trace is excluded going forward, but copies already distributed
+    /// cannot be recalled — and the API says so rather than implying otherwise.
+    already_distributed: bool,
+    /// Always true. Withdrawal is not a punishment: credit already awarded
+    /// stays awarded.
+    credit_retained: bool,
+}
+
+impl AccountTraceWithdrawalResponse {
+    fn from_record(record: StorageTraceWithdrawalRecord) -> Self {
+        let already_distributed =
+            record.distribution_reach == TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED;
+        Self {
+            submission_id: record.submission_id,
+            withdrawn_at: record.withdrawn_at,
+            prior_status: record.prior_status,
+            distribution_reach: record.distribution_reach,
+            already_distributed,
+            credit_retained: true,
+        }
+    }
+}
+
+/// Wire label for a storage corpus status. Used for the tombstone's
+/// `prior_status`; deliberately independent of the local `TraceCorpusStatus`
+/// projection, which DROPS `received` and would make those traces
+/// un-withdrawable.
+fn storage_corpus_status_label(status: StorageTraceCorpusStatus) -> &'static str {
+    match status {
+        StorageTraceCorpusStatus::Received => "received",
+        StorageTraceCorpusStatus::Accepted => "accepted",
+        StorageTraceCorpusStatus::Quarantined => "quarantined",
+        StorageTraceCorpusStatus::AwaitingPiiBackstop => "awaiting_pii_backstop",
+        StorageTraceCorpusStatus::Rejected => "rejected",
+        StorageTraceCorpusStatus::Revoked => "revoked",
+        StorageTraceCorpusStatus::Expired => "expired",
+        StorageTraceCorpusStatus::Purged => "purged",
+    }
+}
+
+/// Map a stored object-ref artifact kind onto the artifact-store kind carried
+/// on a receipt. Deletion keys on the object key, but the receipt is typed and
+/// the mapping is written out rather than guessed at the call site.
+fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> TraceArtifactKind {
+    match kind {
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+        | StorageTraceObjectArtifactKind::RescrubbedEnvelope => {
+            TraceArtifactKind::ContributionEnvelope
+        }
+        StorageTraceObjectArtifactKind::BenchmarkArtifact => TraceArtifactKind::BenchmarkConversion,
+        StorageTraceObjectArtifactKind::ExportArtifact => TraceArtifactKind::ReplayDatasetExport,
+        StorageTraceObjectArtifactKind::ReviewSnapshot
+        | StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::Other,
+    }
+}
+
+/// Delete every trace object this submission owns: the stored envelope and the
+/// encrypted artifact.
+///
+/// Three sources are swept, because no single one is complete:
+///
+/// 1. the file-side submission record, which is the ONLY place the encrypted
+///    artifact receipt survives (the DB projection drops it);
+/// 2. the `trace_object_refs` rows, so a submission with no file-side record
+///    still gets its encrypted artifact deleted;
+/// 3. every status-derived envelope path, because the object key encodes the
+///    corpus status and a transition may have left bytes at an earlier path.
+///
+/// Errors propagate: withdrawal must not report success while content survives.
+async fn delete_withdrawn_trace_objects(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
+        delete_trace_objects_for_record(state, &record)?;
+    }
+
+    let tenant_ref = tenant_storage_ref(tenant_id);
+    for object_ref in db.list_trace_object_refs(tenant_id, submission_id).await? {
+        if object_ref.deleted_at.is_some() {
+            continue;
+        }
+        if object_ref.object_store == TRACE_COMMONS_FILE_OBJECT_STORE {
+            remove_file_if_exists(&state.root.join(&object_ref.object_key))?;
+        } else if let Some(store) = state.artifact_store.as_ref()
+            && object_ref.object_store == store.object_store_name()
+        {
+            let receipt = EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_ref.clone(),
+                artifact_kind: trace_artifact_kind_from_storage(object_ref.artifact_kind),
+                object_key: object_ref.object_key.clone(),
+                ciphertext_sha256: object_ref
+                    .content_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&object_ref.content_sha256)
+                    .to_string(),
+                encrypted_at: Utc::now(),
+            };
+            store.delete_artifact(&tenant_ref, &receipt)?;
+        }
+        db.mark_trace_object_ref_deleted(
+            tenant_id,
+            submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await?;
+    }
+
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
+    }
+    Ok(())
+}
+
+/// Evict a withdrawn trace from every derived surface that would otherwise
+/// keep its content alive in derived form: the vector index (both the DB rows
+/// and the gate service's in-memory ANN index), the dedup clusters, and future
+/// export / benchmark membership.
+async fn evict_withdrawn_trace_from_derived_surfaces(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let vector_entry_ids = db
+        .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
+    // Canonical tenant_storage_ref: it must match the form the gate worker
+    // used at insertion time, or a sharded index routes the delete to the
+    // wrong shard and the embedding survives.
+    let gate_tenant = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
+    for vector_entry_id in vector_entry_ids {
+        state
+            .gate_service
+            .invalidate_vector_entry(&gate_tenant, vector_entry_id)
+            .context("VectorInvalidationFailed")?;
+    }
+
+    db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
+        .await?;
+
+    db.invalidate_trace_submission_artifacts(
+        tenant_id,
+        submission_id,
+        StorageTraceDerivedStatus::Revoked,
+    )
+    .await?;
+    db.invalidate_trace_export_manifests_for_submission(tenant_id, submission_id)
+        .await?;
+    db.invalidate_trace_export_manifest_items_for_submission(
+        tenant_id,
+        submission_id,
+        StorageTraceExportManifestItemInvalidationReason::Revoked,
+    )
+    .await?;
+    Ok(())
+}
+
+/// `POST /v1/account/traces/{submission_id}/withdraw` — contributor-initiated
+/// withdrawal, authenticated by the ACCOUNT SESSION (the same auth that guards
+/// the content read-back), not the device key: withdrawal is an account-level
+/// act and must survive losing a device.
+///
+/// Contract:
+///
+/// * Tenant-scoped through the auth-derived `AccountCtx`; ownership is checked
+///   against the account's active principal set BEFORE anything is touched.
+///   Not-found and not-owned collapse to the byte-identical `404` the detail
+///   and content handlers use — another tenant's submission id must not be
+///   distinguishable from one that never existed.
+/// * Idempotent. The tombstone is first-writer-wins, so withdrawing twice
+///   returns the same tier and the same `withdrawn_at`. Deletion and eviction
+///   are re-run on every call, so a partial failure converges on retry rather
+///   than leaving content behind under a tombstone that says it is gone.
+/// * Credit is NOT clawed back.
+/// * Fail-closed: any deletion or eviction failure is a generic label-only
+///   `500`. The withdrawal is not reported as complete while content or a
+///   derived copy may survive.
+async fn account_trace_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    // Ownership BEFORE any state change. The storage record is used directly
+    // rather than the local corpus-status projection, which drops `received`
+    // and would leave those traces permanently un-withdrawable.
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        _ => return Err(not_found()),
+    };
+
+    let withdrawal_failed = |error: &anyhow::Error| {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            %submission_id,
+            "Trace Commons trace withdrawal failed; failing closed"
+        );
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+    };
+
+    // Tier. An existing tombstone is authoritative: the reach recorded at the
+    // first withdrawal is the honest answer, and recomputing it against
+    // mutated export state could silently downgrade it.
+    let existing = db
+        .get_trace_withdrawal(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (prior_status, distribution_reach) = match existing.as_ref() {
+        Some(existing) => (
+            existing.prior_status.clone(),
+            existing.distribution_reach.clone(),
+        ),
+        None => {
+            let reach = if record.status != StorageTraceCorpusStatus::Accepted {
+                TRACE_WITHDRAWAL_REACH_NOT_DISTRIBUTED
+            } else {
+                let memberships = db
+                    .count_trace_export_memberships(&ctx.tenant_id, submission_id)
+                    .await
+                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+                if memberships > 0 {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_DISTRIBUTED
+                } else {
+                    TRACE_WITHDRAWAL_REACH_COMMONS_NOT_DISTRIBUTED
+                }
+            };
+            (
+                storage_corpus_status_label(record.status).to_string(),
+                reach.to_string(),
+            )
+        }
+    };
+
+    // Tombstone + status FIRST, bytes second: a crash between the two leaves a
+    // tombstone whose retry deletes the content, never content with no record
+    // that it was withdrawn.
+    let tombstone = db
+        .record_trace_withdrawal(
+            &ctx.tenant_id,
+            submission_id,
+            Utc::now(),
+            &prior_status,
+            &distribution_reach,
+        )
+        .await
+        .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+
+    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+
+    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
+    // account-actor ref, never contributor identity.
+    let audit_tenant = account_audit_tenant(&ctx);
+    let audit_event =
+        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
+    if let Err(error) = append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &audit_tenant,
+        audit_event,
+        StorageTraceAuditAction::Revoke,
+        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+    )
+    .await
+    {
+        // The content is already gone and the tombstone is durable; a failed
+        // audit append must not resurrect either. Log hash-only and continue.
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(&error),
+            %submission_id,
+            "Trace Commons withdrawal audit append failed"
+        );
+    }
+
+    Ok(Json(AccountTraceWithdrawalResponse::from_record(tombstone)))
+}
+
 /// Mint a single-use login link for the authenticated device's principal.
 ///
 /// Creates-or-reuses the durable account for the device principal, then issues
@@ -13732,6 +14934,325 @@ async fn mint_login_link_handler(
     }))
 }
 
+// --- Loopback native-app sign-in -------------------------------------------
+//
+// See `trace_commons_server::account_native_auth` for the threat model. The
+// shape here is deliberately the standard authorization-code + PKCE dance,
+// grafted onto the EXISTING login-link redeem rather than built beside it:
+//
+//   1. app  -> POST /v1/account/native/authorize  (PKCE challenge + loopback
+//              redirect; unauthenticated, confers nothing)
+//   2. app  -> POST /v1/account/login-links       (existing device-authenticated
+//              mint, unchanged)
+//   3. human-> GET  /account/login?code=..&native=<request_id>
+//              POST /account/login/confirm        (existing redeem, unchanged
+//              except that it now also honours `native`)
+//   4. server 303s the BROWSER to http://127.0.0.1:<port>/...?code=<one-time>
+//   5. app  -> POST /v1/account/native/token      (code + PKCE verifier)
+//              -> short-lived `tcn1_` bearer backed by a trace_sessions row
+//
+// What the device key gains: nothing. Step 2 is an authority it already has,
+// and the session it can ultimately reach is the same account its bearer token
+// already resolves to through `resolve_account_ctx_bearer`. See the report in
+// docs/superpowers/plans/account-loopback-auth-report.md.
+
+/// Response header carrying a rotated native session token. The bearer
+/// analogue of `Set-Cookie`, emitted by `account_auth_middleware` on the one
+/// response where rotation fired, to the already-authenticated caller that
+/// presented the old token.
+const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
+
+/// Query/form field naming the pending native authorization request that the
+/// browser redeem should complete. Optional everywhere: a plain browser login
+/// never carries it.
+const NATIVE_REQUEST_FIELD: &str = "native";
+
+/// Per-IP cap on `POST /v1/account/native/authorize` per window. Starting a
+/// flow is cheap and confers nothing, but it does consume store space.
+const NATIVE_AUTHORIZE_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native authorize-starts per window.
+const NATIVE_AUTHORIZE_GLOBAL_LIMIT: u32 = 600;
+/// Per-IP cap on `POST /v1/account/native/token` per window.
+const NATIVE_TOKEN_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native token exchanges per window.
+const NATIVE_TOKEN_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`code_hash` ceiling on exchange attempts per window. A code is
+/// single-use, so more than a couple of attempts against one code is a replay
+/// or a guess; this caps it independently of the source IP.
+const NATIVE_TOKEN_PER_CODE_LIMIT: u32 = 5;
+
+/// Request body for `POST /v1/account/native/authorize`.
+#[derive(Debug, Deserialize)]
+struct NativeAuthorizeStartRequest {
+    /// `base64url(sha256(code_verifier))`, unpadded.
+    code_challenge: String,
+    /// Must be `S256`. `plain` is refused: with `plain` the challenge IS the
+    /// verifier, so anyone who sees the start request can complete the flow.
+    code_challenge_method: String,
+    /// Must be exactly `http://127.0.0.1:{port}/trace-commons/native-auth/callback`.
+    redirect_uri: String,
+}
+
+/// Response for `POST /v1/account/native/authorize`. `request_id` is a
+/// 160-bit CSPRNG value; it is a flow handle, not a credential (holding it
+/// without the verifier gets you nothing).
+#[derive(Debug, Serialize)]
+struct NativeAuthorizeStartResponse {
+    request_id: String,
+    expires_in_secs: u64,
+}
+
+/// Request body for `POST /v1/account/native/token`.
+#[derive(Debug, Deserialize)]
+struct NativeTokenRequest {
+    request_id: String,
+    /// The one-time code delivered to the loopback listener.
+    code: String,
+    /// The PKCE verifier whose sha256 was registered at authorize-start.
+    code_verifier: String,
+}
+
+/// Response for `POST /v1/account/native/token`.
+///
+/// `access_token` is a SECRET. It is returned exactly once, is never persisted
+/// server-side in raw form (only `sha256` of its secret part reaches the
+/// database), and appears in no log line, error string, or audit row.
+#[derive(Debug, Serialize)]
+struct NativeTokenResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_in_secs: i64,
+    account_id: String,
+}
+
+/// The single uniform deny for the whole native flow.
+///
+/// Every failure mode — malformed body, bad redirect, unknown or expired or
+/// replayed code, wrong `request_id`, wrong verifier, rate limit, DB error —
+/// returns this identical response, so nothing about which of them occurred is
+/// observable. It carries no detail an attacker could use and no secret.
+fn native_generic_deny() -> axum::response::Response {
+    let mut response = (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "native sign-in could not be completed" })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `POST /v1/account/native/authorize` — park a PKCE challenge and a loopback
+/// redirect, and hand back the `request_id` that names them.
+///
+/// UNAUTHENTICATED, and safe to be: nothing is created but an entry in a
+/// short-TTL in-process map, bound to no account and no tenant. An attacker who
+/// floods this endpoint gets rate-limited and learns nothing.
+async fn native_authorize_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeAuthorizeStartRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-authorize-ip:{client_ip}"),
+        NATIVE_AUTHORIZE_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    if body.code_challenge_method != NATIVE_CODE_CHALLENGE_METHOD {
+        return native_generic_deny();
+    }
+    if !challenge_is_wellformed(&body.code_challenge) {
+        return native_generic_deny();
+    }
+    let Some(redirect) = validate_loopback_redirect_uri(&body.redirect_uri) else {
+        return native_generic_deny();
+    };
+
+    let request_id = generate_login_code();
+    state.account_native_requests.put(
+        request_id.clone(),
+        PendingNativeAuth {
+            code_challenge: body.code_challenge.clone(),
+            redirect,
+        },
+    );
+
+    let mut response = Json(NativeAuthorizeStartResponse {
+        request_id,
+        expires_in_secs: NATIVE_AUTH_REQUEST_TTL.as_secs(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Complete the native half of a browser redeem: mint the one-time code and
+/// return the absolute loopback `Location` the browser should be sent to.
+///
+/// Returns `None` when there is no live pending request under `request_id` (it
+/// expired, it was already completed, or it never existed). The caller then
+/// falls through to the ordinary post-login redirect: the human's browser login
+/// genuinely succeeded, so denying it would be wrong, and the native app simply
+/// times out waiting on its listener and reports a failed sign-in.
+fn issue_native_authorization_code(
+    state: &AppState,
+    request_id: &str,
+    tenant_id: &str,
+    account_id: uuid::Uuid,
+) -> Option<String> {
+    let pending = state.account_native_requests.take(request_id)?;
+    let code = generate_login_code();
+    // Keyed by the code's HASH so the store never holds the raw code.
+    state.account_native_codes.put(
+        hash_secret(&code),
+        IssuedNativeCode {
+            request_id: request_id.to_string(),
+            code_challenge: pending.code_challenge,
+            tenant_id: tenant_id.to_string(),
+            account_id,
+        },
+    );
+    // `code` and `request_id` are both unpadded base64url, so neither needs
+    // percent-encoding, and the redirect itself was validated to be an exact
+    // loopback URI with no query of its own.
+    Some(format!(
+        "{}?code={code}&request_id={request_id}",
+        pending.redirect.as_str()
+    ))
+}
+
+/// `POST /v1/account/native/token` — exchange a one-time code plus its PKCE
+/// verifier for a short-lived native session token.
+///
+/// UNAUTHENTICATED by necessity: this endpoint CREATES the session, so it
+/// cannot require one. Its credentials are the code (which only a human
+/// completing the browser redeem can cause to exist) and the verifier (which
+/// only the app that started the flow holds).
+async fn native_token_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    // Same fixed-latency floor as the login redeem, for the same reason: erase
+    // the found-vs-not-found (and rate-limited-vs-not) timing oracle across
+    // every branch below.
+    let start = std::time::Instant::now();
+    let response = native_token_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+async fn native_token_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-ip:{client_ip}"),
+        NATIVE_TOKEN_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    // Reject a malformed verifier before it is hashed, so nothing outside RFC
+    // 7636's shape can ever participate in the binding.
+    if !verifier_is_wellformed(&body.code_verifier) {
+        return native_generic_deny();
+    }
+
+    let code_hash = hash_secret(&body.code);
+    // Per-code ceiling, IP-independent: caps replay/guessing against one
+    // specific code even from rotating sources. The key is a sha256, so the
+    // limiter holds no cleartext secret.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-code:{code_hash}"),
+        NATIVE_TOKEN_PER_CODE_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+
+    // SINGLE USE: `take` removes the entry, so a replay of this exact code
+    // finds nothing here regardless of whether the first attempt succeeded.
+    let Some(issued) = state.account_native_codes.take(&code_hash) else {
+        return native_generic_deny();
+    };
+    // The code must be presented against the flow it was minted for.
+    if !secret_eq(&issued.request_id, &body.request_id) {
+        return native_generic_deny();
+    }
+    // PKCE: the verifier must hash to the challenge registered BEFORE the
+    // browser step. This is the check that makes an intercepted code useless.
+    if !secret_eq(
+        &issued.code_challenge,
+        &challenge_for_verifier(&body.code_verifier),
+    ) {
+        return native_generic_deny();
+    }
+
+    let Ok(db) = account_db(state.as_ref()) else {
+        return native_generic_deny();
+    };
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS);
+    if db
+        .issue_native_session(
+            &issued.tenant_id,
+            issued.account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at,
+            },
+            trace_commons_server::db::RedeemAudit {
+                action: "account_native_session_issue".to_string(),
+                outcome: "success".to_string(),
+                metadata: serde_json::json!({ "client_kind": NATIVE_SESSION_CLIENT_KIND }),
+            },
+        )
+        .await
+        .is_err()
+    {
+        return native_generic_deny();
+    }
+
+    // The raw token is built here and returned once. It is never logged and
+    // never audited; only `token_hash` above reached the database.
+    let mut response = Json(NativeTokenResponse {
+        access_token: native_token_value(&issued.tenant_id, &secret),
+        token_type: "Bearer",
+        expires_in_secs: NATIVE_SESSION_TTL_HOURS * 3600,
+        account_id: issued.account_id.to_string(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// Body extractor for the confirm POST. Accepts both a browser form post
 /// (`application/x-www-form-urlencoded`, the default) and a JSON body. On ANY
 /// extraction failure it rejects with the uniform redeem deny so a malformed
@@ -13784,6 +15305,12 @@ const ACCOUNT_VIEW_PATH: &str = "/account";
 #[derive(Debug, Deserialize)]
 struct LoginInterstitialQuery {
     code: String,
+    /// Optional pending native-authorization request id. Present only when a
+    /// native application opened this link; carried through to the confirm POST
+    /// so one human action both signs the browser in and releases the app's
+    /// one-time code. A plain browser login never sets it.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 /// Body for `POST /account/login/confirm`. Accepts either a form post (browser
@@ -13791,6 +15318,16 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Proof that this confirmation came from a browser that actually rendered
+    /// the interstitial. See [`LOGIN_CEREMONY_COOKIE`].
+    #[serde(default)]
+    ceremony: Option<String>,
+    /// Optional pending native-authorization request id (see
+    /// [`LoginInterstitialQuery::native`]). When present and still live, a
+    /// successful redeem ALSO mints the app's one-time authorization code and
+    /// redirects to the registered loopback URI instead of the account view.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 // --- Task 11: account-surface hardening (rate limit, timing floor) ----------
@@ -13860,6 +15397,62 @@ const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
+/// Per-principal cap on `POST /v1/traces` submissions per window. A submission
+/// performs more work than a content read, so this is half the content limit of
+/// 60 and matches the existing confirm-attempt ceiling of 30.
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+/// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
+/// path gets half the content-read concurrency allowance of 4.
+const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
+
+fn submit_principal_rate_limit_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    let auth_method = auth_method.storage_name();
+    format!(
+        "submit-principal:{}:{tenant_id}:{}:{auth_method}:{}:{principal_ref}",
+        tenant_id.len(),
+        auth_method.len(),
+        principal_ref.len()
+    )
+}
+
+// Most ingest unit tests share fixture principals while running in parallel.
+// Their state builders explicitly make those shared keys unbounded; focused
+// rate-limit tests leave their unique keys unset and therefore exercise these
+// production constants through the handler.
+static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
+> = std::sync::OnceLock::new();
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+        limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+    });
+    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+#[cfg(test)]
+fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
+    let limits = SUBMIT_RATE_LIMIT_TEST_LIMITS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    match limits.lock() {
+        Ok(mut limits) => {
+            limits.insert(key.to_string(), (rate, concurrency));
+        }
+        Err(poisoned) => {
+            poisoned
+                .into_inner()
+                .insert(key.to_string(), (rate, concurrency));
+        }
+    }
+}
 
 /// One fixed-window counter: a count and the instant the current window started.
 struct RateWindow {
@@ -13955,6 +15548,24 @@ impl AccountRateLimiter {
             Ok(mut concurrency) => concurrency.clear(),
             Err(poisoned) => poisoned.into_inner().clear(),
         }
+        if let Some(limits) = SUBMIT_RATE_LIMIT_TEST_LIMITS.get() {
+            match limits.lock() {
+                Ok(mut limits) => limits.clear(),
+                Err(poisoned) => poisoned.into_inner().clear(),
+            }
+        }
+        configure_submit_rate_limit_pause_for_test(None);
+    }
+
+    #[cfg(test)]
+    fn count_for_test(&self, key: &str) -> u32 {
+        match self.windows.lock() {
+            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .get(key)
+                .map_or(0, |window| window.count),
+        }
     }
 }
 
@@ -13967,7 +15578,56 @@ pub fn reset_account_rate_limiter_for_test() {
     ACCOUNT_RATE_LIMITER.reset_for_test();
 }
 
-/// RAII release of a per-account content concurrency slot.
+#[cfg(test)]
+fn submit_rate_limit_count_for_test(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> u32 {
+    ACCOUNT_RATE_LIMITER.count_for_test(&submit_principal_rate_limit_key(
+        tenant_id,
+        auth_method,
+        principal_ref,
+    ))
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct SubmitRateLimitTestPause {
+    key: String,
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    proceed: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static SUBMIT_RATE_LIMIT_TEST_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<SubmitRateLimitTestPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn configure_submit_rate_limit_pause_for_test(pause: Option<SubmitRateLimitTestPause>) {
+    match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(mut configured) => *configured = pause,
+        Err(poisoned) => *poisoned.into_inner() = pause,
+    }
+}
+
+#[cfg(test)]
+async fn pause_submit_after_rate_limit_for_test(key: &str) {
+    let pause = match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
+        Ok(configured) => configured.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let Some(pause) = pause.filter(|pause| pause.key == key) else {
+        return;
+    };
+    let _ = pause.entered.send(());
+    if let Ok(permit) = pause.proceed.acquire().await {
+        permit.forget();
+    }
+}
+
+/// RAII release of a per-key concurrency slot.
 struct ConcurrencyGuard<'a> {
     limiter: &'a AccountRateLimiter,
     key: String,
@@ -13979,7 +15639,7 @@ impl Drop for ConcurrencyGuard<'_> {
     }
 }
 
-/// Process-global account-surface limiter. Single-instance (see module note).
+/// Process-global authenticated-surface limiter. Single-instance (see module note).
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
@@ -14020,6 +15680,53 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
 /// vary status or body by cause (timing uniformity is Task 11).
+/// Cookie carrying the login-ceremony nonce.
+///
+/// `GET /account/login` mints a nonce, sets it here, and embeds the SAME value
+/// in the form it renders. `POST /account/login/confirm` requires both and
+/// requires them to match.
+///
+/// This is a possession proof, not a header check. Header-based origin
+/// signals (`Origin`, `Sec-Fetch-Site`) are absent on a plain HTTP client, and
+/// `confirm_is_same_origin` treats "neither signal present" as same-origin
+/// because a browser without fetch metadata must still work. That is the right
+/// call for compatibility and the wrong one for proving a browser was
+/// involved: anything that can reach the endpoint can satisfy it by sending
+/// nothing. A cookie set by the interstitial response cannot be produced by a
+/// caller that never fetched the interstitial.
+///
+/// `confirm_is_same_origin` is deliberately kept as well. This does not
+/// replace it; it covers what it cannot.
+const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+
+/// How long a rendered interstitial stays confirmable. Long enough for a human
+/// to read the page and click, short enough that a leaked nonce is not a
+/// standing credential.
+const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// A fresh, unguessable ceremony nonce.
+fn new_login_ceremony_nonce() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    // Same source as session secrets.
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Constant-time comparison, so a mismatched nonce cannot be recovered by
+/// timing the deny.
+fn ceremony_nonce_matches(cookie: &str, submitted: &str) -> bool {
+    if cookie.is_empty() || submitted.is_empty() || cookie.len() != submitted.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in cookie.bytes().zip(submitted.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
@@ -14070,6 +15777,17 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
     true
 }
 
+/// Escape a client-supplied string for use inside a double-quoted HTML
+/// attribute. Shared by every hidden field the interstitial renders so no field
+/// can be added later that forgets to escape.
+fn html_escape_attribute(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 /// `GET /account/login?code=...` — minimal "Activate" interstitial.
 ///
 /// Renders a self-contained HTML page with a form that POSTs the code to
@@ -14097,25 +15815,56 @@ async fn login_interstitial_handler(
     }
     // Minimal, self-contained HTML; the code rides in a hidden field. HTML-escape
     // it so a crafted code cannot break out of the attribute context.
-    let escaped_code = query
-        .code
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;");
+    let escaped_code = html_escape_attribute(&query.code);
+    // A native request id rides in a second hidden field, escaped identically.
+    // It is echoed back to the client that supplied it and is not otherwise
+    // trusted: the confirm handler looks it up in the pending-request store and
+    // ignores it when there is no live entry.
+    let native_field = match query.native.as_deref() {
+        Some(native) => format!(
+            "<input type=\"hidden\" name=\"{NATIVE_REQUEST_FIELD}\" value=\"{}\">",
+            html_escape_attribute(native)
+        ),
+        None => String::new(),
+    };
+    // When a native app opened this link, say so plainly: the human is being
+    // asked to grant an application on this computer access to their account,
+    // which is a different question from "sign this browser in".
+    let heading = if query.native.is_some() {
+        "<h1>Sign in an application</h1>\
+<p>An application on this computer asked to sign in to your account. \
+Confirm only if you started this.</p>"
+    } else {
+        "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
+    };
+    // The ceremony nonce: embedded in the form AND set as a cookie on this
+    // response. Confirm requires both, and requires them to match, so a caller
+    // that never rendered this page cannot confirm.
+    let ceremony = new_login_ceremony_nonce();
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Activate account</title></head><body>\
-<main><h1>Activate your account</h1>\
-<p>Confirm to sign in on this browser.</p>\
+<main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
-<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">\
-<button type=\"submit\">Activate</button></form></main></body></html>"
+<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
+<input type=\"hidden\" name=\"ceremony\" value=\"{}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>",
+        html_escape_attribute(&ceremony)
     );
     let mut response = axum::response::Html(body).into_response();
+    let ceremony_cookie = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ceremony))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/account/login")
+        .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
+        .build()
+        .to_string();
     let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&ceremony_cookie) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -14158,10 +15907,35 @@ async fn confirm_login_inner(
     body: ConfirmLoginForm,
 ) -> axum::response::Response {
     let code = body.0.code;
+    let native_request_id = body.0.native;
+    let submitted_ceremony = body.0.ceremony;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
         return redeem_generic_deny();
+    }
+
+    // Browser-possession enforcement.
+    //
+    // The check above cannot establish that a browser was involved: it reads
+    // `Origin` / `Sec-Fetch-Site`, and a plain HTTP client simply omits both,
+    // which `confirm_is_same_origin` treats as same-origin so that browsers
+    // without fetch metadata keep working. Satisfying it therefore requires
+    // sending nothing.
+    //
+    // The ceremony nonce is different in kind: it is minted by
+    // `GET /account/login`, returned in a `Secure` `HttpOnly` `SameSite=Strict`
+    // cookie AND embedded in the form that page renders. Confirming requires
+    // both halves and requires them to match, so a caller that never fetched
+    // the interstitial in a browser cannot produce it -- possession, not a
+    // self-asserted header.
+    //
+    // Fails into the SAME uniform deny as every other branch, so it adds no
+    // new distinguishable outcome and the timing floor still applies.
+    let cookie_ceremony = cookie_value_from_headers(&headers, LOGIN_CEREMONY_COOKIE);
+    match (cookie_ceremony, submitted_ceremony.as_deref()) {
+        (Some(from_cookie), Some(from_form)) if ceremony_nonce_matches(from_cookie, from_form) => {}
+        _ => return redeem_generic_deny(),
     }
 
     // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
@@ -14232,6 +16006,16 @@ async fn confirm_login_inner(
     };
     let _ = redeemed.session_id; // server-assigned; not surfaced to the client.
 
+    // If a native app opened this link, this ONE human action also releases the
+    // app's one-time authorization code, delivered by redirecting the browser to
+    // the loopback URI the app registered (and the server validated) at
+    // authorize-start. A missing or stale `native` id is not an error: the
+    // browser login itself succeeded, so we fall through to the ordinary
+    // account-view redirect and the app times out on its listener.
+    let native_location = native_request_id.as_deref().and_then(|request_id| {
+        issue_native_authorization_code(state.as_ref(), request_id, &tenant, redeemed.account_id)
+    });
+
     // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
     // Max-Age matching the 7d TTL. The VALUE encodes the tenant alongside the
     // secret as `{b64url(tenant_id)}.{secret}` so that browser session
@@ -14260,10 +16044,18 @@ async fn confirm_login_inner(
     // secret never leaks via cache or Referer.
     let mut response = StatusCode::SEE_OTHER.into_response();
     let resp_headers = response.headers_mut();
-    resp_headers.insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
-    );
+    // Either the code-free account view, or the app's exact loopback URI when a
+    // native flow was completed. Both are server-built: the loopback URI came
+    // from `validate_loopback_redirect_uri`, so this is not an open redirect —
+    // the only reachable off-view destination is 127.0.0.1 on one fixed path.
+    let location = match native_location.as_deref() {
+        Some(loopback) => match HeaderValue::from_str(loopback) {
+            Ok(value) => value,
+            Err(_) => return redeem_generic_deny(),
+        },
+        None => HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    };
+    resp_headers.insert(axum::http::header::LOCATION, location);
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
@@ -14312,6 +16104,24 @@ async fn account_logout_handler(
                 .await
                 .map_err(internal_error)?
         }
+        // Native token: there IS a session row behind this bearer, so logout
+        // must actually revoke it (a documented no-op here would leave a signed
+        // -out app holding a live token for the rest of its 12h TTL). Re-derive
+        // the hash from the presented bearer with the same shared parser the
+        // resolver used, and revoke exactly that row.
+        AccountAuthMethod::NativeToken => {
+            let bearer = headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+                .map(str::trim)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            let (_token_tenant, token_hash) = native_token_parts(bearer)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            db.revoke_current_session(&ctx.tenant_id, &token_hash)
+                .await
+                .map_err(internal_error)?
+        }
         // Bearer path: no browser session row to revoke. Documented 200 no-op.
         AccountAuthMethod::DeviceBearer => 0,
     };
@@ -14327,6 +16137,7 @@ async fn account_logout_handler(
             "auth_method": match ctx.auth_method {
                 AccountAuthMethod::SessionCookie => "session_cookie",
                 AccountAuthMethod::DeviceBearer => "device_bearer",
+                AccountAuthMethod::NativeToken => "native_token",
             },
             "revoked": revoked,
         }),
@@ -16512,6 +18323,310 @@ async fn review_quarantine_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(queue))
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuarantineRescrubBatchRequest {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    submission_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubResult {
+    submission_id: Uuid,
+    prior_status: String,
+    prior_privacy_risk: String,
+    status: String,
+    privacy_risk: String,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceQuarantineRescrubBatchSummary {
+    dry_run: bool,
+    scanned: usize,
+    changed: usize,
+    unchanged: usize,
+    failed: usize,
+    results: Vec<TraceQuarantineRescrubResult>,
+}
+
+/// Re-scrub a single quarantined submission under current server rules and
+/// reclassify its residual risk / corpus status in place (#214 operator path).
+async fn review_quarantine_rescrub_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+    Json(body): Json<TraceQuarantineRescrubRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubResult>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub");
+    let result = operator_rescrub_quarantined_submission(
+        state.as_ref(),
+        tenant.auth(),
+        submission_id,
+        reason,
+        false,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+/// Batch operator re-scrub over the reviewer's visible quarantine queue.
+/// Reclassifies under current residual-risk rules without minting new
+/// submission ids — the same content-addressed identity, version N+1.
+async fn review_quarantine_rescrub_batch_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceQuarantineRescrubBatchRequest>,
+) -> ApiResult<Json<TraceQuarantineRescrubBatchSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let limit = body.limit.unwrap_or(50).clamp(1, 500);
+    let reason = body
+        .reason
+        .as_deref()
+        .unwrap_or("operator_quarantine_rescrub_batch");
+    let TraceCommonsMetadataView { records, .. } =
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
+    let requested: Option<BTreeSet<Uuid>> =
+        body.submission_ids.map(|ids| ids.into_iter().collect());
+    let candidates = records
+        .into_iter()
+        .filter(|record| record.status == TraceCorpusStatus::Quarantined)
+        .filter(|record| {
+            requested
+                .as_ref()
+                .is_none_or(|set| set.contains(&record.submission_id))
+        })
+        .take(limit)
+        .map(|record| record.submission_id)
+        .collect::<Vec<_>>();
+
+    let mut summary = TraceQuarantineRescrubBatchSummary {
+        dry_run,
+        scanned: 0,
+        changed: 0,
+        unchanged: 0,
+        failed: 0,
+        results: Vec::new(),
+    };
+    for submission_id in candidates {
+        summary.scanned += 1;
+        match operator_rescrub_quarantined_submission(
+            state.as_ref(),
+            tenant.auth(),
+            submission_id,
+            reason,
+            dry_run,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.changed {
+                    summary.changed += 1;
+                } else {
+                    summary.unchanged += 1;
+                }
+                summary.results.push(result);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %submission_id,
+                    status = %error.0,
+                    "Trace Commons quarantine operator rescrub failed"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(Json(summary))
+}
+
+async fn operator_rescrub_quarantined_submission(
+    state: &AppState,
+    auth: &TenantAuth,
+    submission_id: Uuid,
+    reason: &str,
+    dry_run: bool,
+) -> ApiResult<TraceQuarantineRescrubResult> {
+    let mut record = read_submission_record(&state.root, &auth.tenant_id, submission_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if !can_access_submission(auth, &record) {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    }
+    if record.status != TraceCorpusStatus::Quarantined {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "only quarantined trace submissions are eligible for operator rescrub",
+        ));
+    }
+
+    let prior_status = record.status;
+    let prior_privacy_risk = record.privacy_risk;
+    let mut envelope = read_envelope_by_record(state, &record).map_err(internal_error)?;
+    rescrub_trace_envelope(&mut envelope)
+        .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
+    let target_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
+    let target_status = corpus_status_with_pii_backstop_hold(
+        target_status,
+        envelope.consent.message_text_included,
+        state.pii_backstop_driver.is_some(),
+    );
+    let changed = target_status != prior_status
+        || envelope.privacy.residual_pii_risk != prior_privacy_risk
+        || envelope.privacy.redaction_counts != record.redaction_counts;
+
+    let result = TraceQuarantineRescrubResult {
+        submission_id,
+        prior_status: prior_status.as_str().to_string(),
+        prior_privacy_risk: residual_pii_risk_name(prior_privacy_risk).to_string(),
+        status: target_status.as_str().to_string(),
+        privacy_risk: residual_pii_risk_name(envelope.privacy.residual_pii_risk).to_string(),
+        changed,
+    };
+    if dry_run {
+        return Ok(result);
+    }
+
+    // Match submit: estimate credit from the post-rescrub envelope, then
+    // zero it unless the risk-derived status is Accepted (including the
+    // Accepted→AwaitingPiiBackstop hold, which keeps pending credit).
+    apply_credit_estimate_to_envelope(&mut envelope);
+    if target_status != TraceCorpusStatus::Accepted
+        && target_status != TraceCorpusStatus::AwaitingPiiBackstop
+    {
+        envelope.value.credit_points_pending = 0.0;
+        envelope.value.explanation = vec![
+            "Submission is quarantined until privacy review completes; credit is held at 0.0."
+                .to_string(),
+        ];
+        envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+    }
+
+    let prior_object_key = record.object_key.clone();
+    let prior_artifact = record.artifact_receipt.clone();
+    let stored = store_envelope(
+        state,
+        &auth.tenant_id,
+        target_status,
+        "operator-rescrubbed-envelope",
+        &envelope,
+    )
+    .map_err(internal_error)?;
+    record.status = target_status;
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
+    record.credit_points_pending = envelope.value.credit_points_pending;
+    record.credit_points_final = envelope.value.credit_points_final;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    clear_review_lease_metadata(&mut record);
+
+    let existing_derived = read_all_derived_records(&state.root, &auth.tenant_id)
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    let derived_record =
+        build_derived_record(&auth.tenant_id, target_status, &envelope, derived_precheck);
+
+    if state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+            if let Err(cleanup_error) = delete_trace_objects_for_record(state, &record) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&cleanup_error),
+                    %submission_id,
+                    "Trace Commons operator-rescrub envelope cleanup failed after DB mirror failure"
+                );
+            }
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    write_submission_record(&state.root, &record).map_err(internal_error)?;
+    write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
+    append_audit_event(
+        &state.root,
+        &auth.tenant_id,
+        TraceCommonsAuditEvent::quarantine_operator_rescrub(
+            auth,
+            submission_id,
+            record.status,
+            Some(reason),
+        ),
+    )
+    .map_err(internal_error)?;
+
+    if !state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write quarantine rescrub mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
+            .map_err(internal_error)?;
+    }
+
+    let object_moved = prior_object_key != record.object_key
+        || prior_artifact.as_ref().map(|r| &r.object_key)
+            != record.artifact_receipt.as_ref().map(|r| &r.object_key);
+    if object_moved {
+        let prior_cleanup = TraceCommonsSubmissionRecord {
+            object_key: prior_object_key,
+            artifact_receipt: prior_artifact,
+            ..record.clone()
+        };
+        if let Err(error) = delete_trace_objects_for_record(state, &prior_cleanup) {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                %submission_id,
+                "Trace Commons prior quarantine artifact cleanup failed after operator rescrub"
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 async fn review_routing_summary_handler(
@@ -21274,6 +23389,35 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    // Live settlement serializes per tenant so two overlapping runs cannot both
+    // pass the source-event conflict check and finalize divergent batches (or
+    // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
+    let settlement_locks = if body.dry_run {
+        None
+    } else {
+        Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
+    };
+    let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
+    if let Some(locks) = settlement_locks {
+        // Settlement may already be durable; never convert a successful finalize into
+        // a caller-visible failure because advisory unlock hiccuped.
+        if let Err(error) = locks.release().await {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                tenant_id = %tenant.tenant_id,
+                "failed to release credit settlement run locks after settlement"
+            );
+        }
+    }
+    result
+}
+
+async fn run_credit_settlement_unlocked(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
     require_credit_settlement_policy_version_allowed_for_live(
@@ -21695,14 +23839,9 @@ async fn run_credit_settlement(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
+        append_credit_settlement_finalize_with_db_mirror(state, tenant, &batch, &near_outbox_items)
             .await
             .map_err(internal_error)?;
-        for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
-                .await
-                .map_err(internal_error)?;
-        }
     }
 
     Ok(TraceCreditSettlementRunResponse {
@@ -25200,6 +27339,14 @@ async fn append_utility_attestation_with_db_mirror(
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
 
+/// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
+/// which writes the batch and its NEAR outbox rows in one transaction. This
+/// batch-only variant is retained because it is the narrowest way to exercise
+/// `ensure_credit_settlement_batch_has_no_finalized_source_conflict` on its own;
+/// see the finalized-source-conflict test in the sibling test module. Without
+/// the allow, `-D warnings` fails the non-test build, since the only remaining
+/// caller is `#[cfg(test)]`.
+#[allow(dead_code)]
 async fn append_credit_settlement_batch_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -25228,6 +27375,237 @@ async fn append_credit_settlement_batch_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+/// Persist a finalized settlement batch and every NEAR outbox row it expects as
+/// one durability unit.
+///
+/// Design (#198):
+/// - When a DB mirror is required, batch + outbox rows commit in one Postgres
+///   transaction (`Database::upsert_credit_settlement_finalize`), then the file
+///   journal is updated. A process death cannot finalize the ledger without its
+///   payout work.
+/// - Across stores / process death after the batch is durable, each line item's
+///   `near_outbox_id` is the repair invariant: `repair_missing_near_credit_outbox_items_for_finalized_batches`
+///   re-emits any missing row. Finalize invokes that repair immediately if a
+///   post-batch outbox write fails, so the same request converges when the
+///   failure is transient.
+async fn append_credit_settlement_finalize_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    outbox_items: &[TraceNearCreditOutboxItem],
+) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
+    let outbox_writes = outbox_items
+        .iter()
+        .map(near_credit_outbox_item_to_storage_write)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if state.require_db_mirror_writes {
+        let Some(db) = state.db_mirror.as_ref() else {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for credit settlement finalize"
+            );
+        };
+        db.upsert_credit_settlement_finalize(
+            credit_settlement_batch_to_storage_write(batch)?,
+            outbox_writes,
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: credit settlement finalize")?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        let mut file_outbox_error: Option<anyhow::Error> = None;
+        for item in outbox_items {
+            if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            {
+                file_outbox_error = Some(error);
+                break;
+            }
+        }
+        if file_outbox_error.is_some() {
+            // DB already has the full set. Repair the file journal from the
+            // expected ids without going through the admin reader (which may be
+            // DB-authoritative and would otherwise skip already-mirrored rows).
+            let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                .into_iter()
+                .map(|item| item.near_outbox_id)
+                .collect::<BTreeSet<_>>();
+            let mut repaired = 0usize;
+            for item in outbox_items {
+                if present.contains(&item.near_outbox_id) {
+                    continue;
+                }
+                append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item).with_context(
+                    || {
+                        format!(
+                            "failed to repair file NEAR outbox item {} after DB-authoritative finalize",
+                            item.near_outbox_id
+                        )
+                    },
+                )?;
+                repaired += 1;
+            }
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired_outbox_count = repaired,
+                    settlement_batch_id = %batch.settlement_batch_id,
+                    tenant_id = %tenant.tenant_id,
+                    "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
+                );
+            }
+            if let Some(error) = file_outbox_error {
+                let expected = outbox_items.len();
+                let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                    .iter()
+                    .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                    .count();
+                if present < expected {
+                    return Err(error.context(format!(
+                        "settlement finalize left incomplete file NEAR outbox ({present}/{expected} present after repair)"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // File-primary path: batch is the commit marker (carries expected outbox
+    // ids). Append outbox rows next; on any failure, repair from the durable
+    // batch before propagating so callers do not observe a silent half-write.
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    let mut outbox_error: Option<anyhow::Error> = None;
+    for item in outbox_items {
+        if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item) {
+            outbox_error = Some(error);
+            break;
+        }
+    }
+    if outbox_error.is_some() {
+        let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state,
+            tenant,
+            std::slice::from_ref(batch),
+        )
+        .await
+        .context("settlement outbox repair after partial finalize failed")?;
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_outbox_count = repaired,
+                settlement_batch_id = %batch.settlement_batch_id,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items after partial settlement finalize"
+            );
+        }
+        if let Some(error) = outbox_error {
+            // Prefer reporting the original failure; repair ran best-effort so the
+            // next settlement / outbox tick can still converge if repair itself
+            // could not complete every row in this request.
+            let expected = outbox_items.len();
+            let existing = read_near_credit_outbox_items_for_admin(state, tenant)
+                .await
+                .unwrap_or_default();
+            let present = existing
+                .iter()
+                .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                .count();
+            if present < expected {
+                return Err(error.context(format!(
+                    "settlement finalize left incomplete NEAR outbox ({present}/{expected} present after repair)"
+                )));
+            }
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let mirror_result = db
+            .upsert_credit_settlement_finalize(
+                credit_settlement_batch_to_storage_write(batch)?,
+                outbox_writes,
+            )
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement finalize mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+    }
+    Ok(())
+}
+
+struct CreditSettlementRunLocks {
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
+    advisory: Option<CreditSettlementAdvisoryLock>,
+}
+
+impl CreditSettlementRunLocks {
+    async fn release(self) -> anyhow::Result<()> {
+        if let Some(advisory) = self.advisory {
+            advisory
+                .release()
+                .await
+                .context("failed to release credit settlement advisory lock")?;
+        }
+        Ok(())
+    }
+}
+
+fn credit_settlement_in_process_lock(tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(tenant_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn acquire_credit_settlement_run_locks(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<CreditSettlementRunLocks> {
+    let in_process = credit_settlement_in_process_lock(tenant_id);
+    let _in_process = match in_process.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "credit settlement already in progress for this tenant",
+            ));
+        }
+    };
+
+    let advisory = if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .try_acquire_credit_settlement_lock(tenant_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "credit settlement already in progress for this tenant",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(CreditSettlementRunLocks {
+        _in_process,
+        advisory,
+    })
 }
 
 async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
@@ -36320,6 +38698,29 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     config: &TraceNearCreditOutboxSchedulerConfig,
 ) -> ApiResult<TraceNearCreditOutboxSchedulerTickSummary> {
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    // Before draining, repair any finalized settlement whose expected outbox rows
+    // are missing (crash between batch commit and outbox append). Settlement runs
+    // already repair on entry; the outbox scheduler is the continuous path that
+    // must converge even when nobody re-triggers settlement (#198).
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &batches,
+    )
+    .await
+    .map_err(internal_error)?;
+    if repaired > 0 {
+        tracing::warn!(
+            repaired_outbox_count = repaired,
+            tenant_id = %tenant.tenant_id,
+            "repaired missing NEAR credit outbox items before outbox scheduler drain"
+        );
+    }
     let Json(submit) = near_credit_outbox_submit_worker_handler(
         State(state.clone()),
         headers.clone(),
@@ -38996,8 +41397,15 @@ async fn run_revocation_effects_drill(
                 })
         })
         .count();
-    let delayed_credit_reversal_ready = credit_reversal_item_count > 0
-        && credit_reversal_done_count == credit_reversal_item_count
+    // Revocation no longer claws back settled credit, so the expected item
+    // count for a canary revocation is zero and zero is the ready state: the
+    // check now proves the contributor was NOT charged for withdrawing. It is
+    // not vacuous -- any `ReverseCreditSettlement` item that does exist (an
+    // operator reversal of fraudulent or mistakenly settled credit, or an item
+    // enqueued before this policy change) must still be fully drained, with its
+    // reversal credit event and NEAR reverse receipt present, before the check
+    // reads ready.
+    let delayed_credit_reversal_ready = credit_reversal_done_count == credit_reversal_item_count
         && reversed_credit_event_count >= credit_reversal_item_count
         && near_reversal_outbox_count >= near_reversal_outbox_expected_count;
 
@@ -49736,6 +52144,17 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(&auth.principal_ref, record)
 }
 
+/// Owned quarantined submissions may be superseded by a corrected envelope on
+/// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
+/// classic-idempotent; reviewers use the dedicated rescrub route instead.
+fn principal_can_remediate_quarantined(
+    auth: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+) -> bool {
+    record.status == TraceCorpusStatus::Quarantined
+        && principal_can_self_revoke_submission(auth, record)
+}
+
 fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
     auth.role.can_review() || principal_owns_storage_submission(&auth.principal_ref, record)
 }
@@ -51957,14 +54376,15 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
-    let credit_reversal_items_enqueued = enqueue_credit_settlement_reversal_items_for_revocation(
-        db.as_ref(),
-        &tenant.tenant_id,
-        submission_id,
-        revocation_reason,
-    )
-    .await
-    .context("failed to enqueue credit settlement reversal propagation items")?;
+    // Revocation does NOT claw back credit that has already settled. Credit
+    // earned and settled stays earned: a contributor who is uneasy about a
+    // trace must be able to pull it back without being financially penalised,
+    // or the trace stays in the commons out of fear. Revocation removes the
+    // trace from the corpus and deletes its content -- it does not reach back
+    // onto the chain. The `ReverseCreditSettlement` propagation action and its
+    // worker remain, so an operator can still reverse a fraudulent or
+    // mistakenly settled credit and so any item enqueued before this change
+    // still drains; nothing on the revocation path enqueues one.
     let object_delete_items_enqueued = enqueue_object_payload_delete_items_for_revocation(
         db.as_ref(),
         &tenant.tenant_id,
@@ -52014,7 +54434,6 @@ async fn mirror_revocation_to_db(
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
-            || credit_reversal_items_enqueued > 0
             || object_delete_items_enqueued > 0
             || worker_queue_items_enqueued > 0
             || vector_entry_items_enqueued > 0)
@@ -52026,12 +54445,6 @@ async fn mirror_revocation_to_db(
             export_manifests_invalidated,
             export_manifest_items_invalidated,
         );
-        if credit_reversal_items_enqueued > 0 {
-            action_counts.insert(
-                "credit_reversal_items_enqueued".to_string(),
-                credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
-            );
-        }
         if object_delete_items_enqueued > 0 {
             action_counts.insert(
                 "object_delete_items_enqueued".to_string(),
@@ -52301,92 +54714,6 @@ async fn enqueue_object_payload_delete_items_for_revocation(
         })
         .await
         .context("failed to upsert object payload delete propagation item")?;
-        enqueued += 1;
-    }
-    Ok(enqueued)
-}
-
-async fn enqueue_credit_settlement_reversal_items_for_revocation(
-    db: &dyn Database,
-    tenant_id: &str,
-    submission_id: Uuid,
-    revocation_reason: &str,
-) -> anyhow::Result<usize> {
-    let existing_idempotency_keys = db
-        .list_trace_revocation_propagation_items(tenant_id, submission_id)
-        .await
-        .context("failed to read existing revocation propagation items")?
-        .into_iter()
-        .map(|item| item.idempotency_key)
-        .collect::<BTreeSet<_>>();
-    let settled_event_ids = db
-        .list_trace_credit_settlement_batches(tenant_id)
-        .await
-        .context("failed to read credit settlement batches for revocation propagation")?
-        .into_iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids)
-        .collect::<BTreeSet<_>>();
-    if settled_event_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut enqueued = 0usize;
-    for event in db
-        .list_trace_credit_events(tenant_id)
-        .await
-        .context("failed to read credit events for revocation propagation")?
-        .into_iter()
-        .filter(|event| event.submission_id == submission_id)
-        .filter(|event| event.settlement_state == StorageTraceCreditSettlementState::Final)
-        .filter(|event| settled_event_ids.contains(&event.credit_event_id))
-    {
-        let Ok(points_delta) = event.points_delta.parse::<f32>() else {
-            continue;
-        };
-        if !points_delta.is_finite() || points_delta <= 0.0 {
-            continue;
-        }
-        let idempotency_key = sha256_prefixed(&format!(
-            "trace_revocation_credit_settlement_reversal:v1:{tenant_id}:{submission_id}:{}",
-            event.credit_event_id
-        ));
-        if existing_idempotency_keys.contains(&idempotency_key) {
-            continue;
-        }
-        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
-            tenant_id: tenant_id.to_string(),
-            propagation_item_id: deterministic_trace_uuid_for_external_ref(
-                "revocation-credit-settlement-reversal",
-                tenant_id,
-                submission_id,
-                &event.credit_event_id.to_string(),
-            ),
-            source_submission_id: submission_id,
-            target: StorageTraceRevocationPropagationTarget::CreditSettlement {
-                credit_event_id: event.credit_event_id,
-                credit_account_ref: event.credit_account_ref,
-                settlement_state_at_selection: event.settlement_state,
-            },
-            action: StorageTraceRevocationPropagationAction::ReverseCreditSettlement,
-            status: StorageTraceRevocationPropagationItemStatus::Pending,
-            idempotency_key,
-            reason: format!(
-                "revoked trace settled credit reversal;reason_hash={}",
-                sha256_prefixed(revocation_reason)
-            ),
-            attempt_count: 0,
-            last_error: None,
-            next_attempt_at: None,
-            completed_at: None,
-            evidence_hash: None,
-            metadata: BTreeMap::from([(
-                "source".to_string(),
-                "mirror_revocation_to_db".to_string(),
-            )]),
-        })
-        .await
-        .context("failed to upsert credit settlement reversal propagation item")?;
         enqueued += 1;
     }
     Ok(enqueued)
@@ -58828,8 +61155,10 @@ async fn run_maintenance(
                 .or_insert_with(|| TRACE_DEFAULT_REVOCATION_REASON.to_string())
                 .clone();
             if !request.dry_run {
+                // Same decision as `revoke_submission`: reconciling a record
+                // against an existing tombstone marks it revoked and leaves the
+                // awarded credit figure untouched.
                 record.status = TraceCorpusStatus::Revoked;
-                record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
                 mirror_revocation_to_db(
                     state,
@@ -65663,6 +67992,49 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: None,
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_remediated(record: &TraceCommonsSubmissionRecord, auth: &TenantAuth) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            kind: "quarantine_remediated".to_string(),
+            created_at: Utc::now(),
+            status: Some(record.status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(record.auth_principal_ref.clone()),
+            reason: Some(format!("auth_method={}", auth.auth_method.storage_name())),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn quarantine_operator_rescrub(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        reason: Option<&str>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: "quarantine_operator_rescrub".to_string(),
+            created_at: Utc::now(),
+            status: Some(status),
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: reason.map(ToOwned::to_owned),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,

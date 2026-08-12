@@ -47,7 +47,7 @@ use crate::trace_corpus_storage::{
     TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
     TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceWithdrawalRecord, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -1223,6 +1223,184 @@ impl PgBackend {
         .map_err(DatabaseError::Postgres)?;
         Ok(tx)
     }
+
+    /// Write a finalized settlement batch and every expected NEAR outbox row in
+    /// one tenant-scoped transaction. A crash mid-loop can no longer leave the
+    /// ledger finalized while payout work is only partially present.
+    pub(crate) async fn upsert_credit_settlement_finalize_tx(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+        outbox_items: &[TraceNearCreditOutboxItemWrite],
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(&batch.tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &batch.tenant_id).await?;
+        insert_credit_settlement_batch_on_tx(&tx, &batch).await?;
+        for item in outbox_items {
+            if item.tenant_id != batch.tenant_id {
+                return Err(DatabaseError::Serialization(
+                    "NEAR outbox tenant_id does not match settlement batch".to_string(),
+                ));
+            }
+            if item.settlement_batch_id != batch.settlement_batch_id {
+                return Err(DatabaseError::Serialization(
+                    "NEAR outbox settlement_batch_id does not match settlement batch".to_string(),
+                ));
+            }
+            insert_near_credit_outbox_item_on_tx(&tx, item).await?;
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
+async fn insert_credit_settlement_batch_on_tx(
+    tx: &Transaction<'_>,
+    batch: &TraceCreditSettlementBatchWrite,
+) -> Result<(), DatabaseError> {
+    let status = enum_to_storage(batch.status)?;
+    let line_items_json = serde_json::to_value(&batch.line_items).map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "trace credit settlement line_items_json encode failed: {e}"
+        ))
+    })?;
+    let ranking_credit_events_excluded_count = i32::try_from(
+        batch.ranking_credit_events_excluded_count,
+    )
+    .map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "trace credit settlement excluded ranking count exceeds PostgreSQL integer range: {e}"
+        ))
+    })?;
+    let ranking_credit_events_excluded_reason_counts_json =
+        serde_json::to_value(&batch.ranking_credit_events_excluded_reason_counts).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement ranking exclusion reason counts encode failed: {e}"
+            ))
+        })?;
+    tx.execute(
+        "INSERT INTO trace_credit_settlement_batches (
+            tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+            issuer_approval_evidence_hash, source_credit_event_ids,
+            source_submission_ids, source_list_hash, settled_credit_points,
+            settled_credit_micros, line_items_json, near_contract_id,
+            ranking_model_version, ranking_target_use,
+            ranking_calibration_run_id, ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash,
+            ranking_credit_events_excluded_count,
+            ranking_credit_events_excluded_reason_counts_json,
+            actor_principal_ref
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21
+         )
+         ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
+            policy_version = excluded.policy_version,
+            status = excluded.status,
+            reason_hash = excluded.reason_hash,
+            issuer_approval_evidence_hash = excluded.issuer_approval_evidence_hash,
+            source_credit_event_ids = excluded.source_credit_event_ids,
+            source_submission_ids = excluded.source_submission_ids,
+            source_list_hash = excluded.source_list_hash,
+            settled_credit_points = excluded.settled_credit_points,
+            settled_credit_micros = excluded.settled_credit_micros,
+            line_items_json = excluded.line_items_json,
+            near_contract_id = excluded.near_contract_id,
+            ranking_model_version = excluded.ranking_model_version,
+            ranking_target_use = excluded.ranking_target_use,
+            ranking_calibration_run_id = excluded.ranking_calibration_run_id,
+            ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
+            ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
+            ranking_credit_events_excluded_reason_counts_json = excluded.ranking_credit_events_excluded_reason_counts_json,
+            actor_principal_ref = excluded.actor_principal_ref",
+        &[
+            &batch.tenant_id,
+            &batch.settlement_batch_id,
+            &batch.policy_version,
+            &status,
+            &batch.reason_hash,
+            &batch.issuer_approval_evidence_hash,
+            &batch.source_credit_event_ids,
+            &batch.source_submission_ids,
+            &batch.source_list_hash,
+            &batch.settled_credit_points,
+            &batch.settled_credit_micros,
+            &line_items_json,
+            &batch.near_contract_id,
+            &batch.ranking_model_version,
+            &batch.ranking_target_use,
+            &batch.ranking_calibration_run_id,
+            &batch.ranking_calibration_report_hash,
+            &batch.ranking_calibration_joined_evidence_hash,
+            &ranking_credit_events_excluded_count,
+            &ranking_credit_events_excluded_reason_counts_json,
+            &batch.actor_principal_ref,
+        ],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    Ok(())
+}
+
+async fn insert_near_credit_outbox_item_on_tx(
+    tx: &Transaction<'_>,
+    item: &TraceNearCreditOutboxItemWrite,
+) -> Result<(), DatabaseError> {
+    let status = enum_to_storage(item.status)?;
+    let account_operation = near_credit_call_method_name(&item.near_call_json)
+        .filter(|_| near_credit_call_is_account_operation(&item.near_call_json))
+        .map(str::to_string);
+    if let Some(account_operation) = account_operation {
+        tx.execute(
+            "INSERT INTO trace_near_credit_account_outbox (
+                tenant_id, near_outbox_id, credit_hold_id, operation,
+                credit_account_hash, near_call_json, status
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
+                credit_hold_id = excluded.credit_hold_id,
+                operation = excluded.operation,
+                credit_account_hash = excluded.credit_account_hash,
+                near_call_json = excluded.near_call_json,
+                status = excluded.status",
+            &[
+                &item.tenant_id,
+                &item.near_outbox_id,
+                &item.settlement_batch_id,
+                &account_operation,
+                &item.credit_account_hash,
+                &item.near_call_json,
+                &status,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO trace_near_credit_outbox (
+            tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+            near_call_json, status, payout_near_account_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
+            settlement_batch_id = excluded.settlement_batch_id,
+            credit_account_hash = excluded.credit_account_hash,
+            near_call_json = excluded.near_call_json,
+            status = excluded.status,
+            payout_near_account_id = excluded.payout_near_account_id",
+        &[
+            &item.tenant_id,
+            &item.near_outbox_id,
+            &item.settlement_batch_id,
+            &item.credit_account_hash,
+            &item.near_call_json,
+            &status,
+            &item.payout_near_account_id,
+        ],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    Ok(())
 }
 
 #[async_trait]
@@ -3573,6 +3751,165 @@ impl TraceCorpusStore for PgBackend {
                    AND submission_id = $2
                    AND source_invalidated_at IS NULL",
                 &[&tenant_id, &submission_id, &reason],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(updated)
+    }
+
+    async fn record_trace_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        withdrawn_at: DateTime<Utc>,
+        prior_status: &str,
+        distribution_reach: &str,
+    ) -> Result<TraceWithdrawalRecord, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // First writer wins. `DO NOTHING` + a RETURNING-less follow-up SELECT
+        // keeps a second withdrawal reporting the ORIGINAL tier and timestamp
+        // rather than silently restamping them.
+        tx.execute(
+            "INSERT INTO trace_withdrawals
+                 (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &submission_id,
+                &withdrawn_at,
+                &prior_status,
+                &distribution_reach,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        // The content is deleted by the caller, so the submission row goes to
+        // `revoked` (which every consumer/export predicate already excludes)
+        // and carries both `withdrawn_at` and `purged_at`. Credit columns are
+        // deliberately untouched: withdrawal is not a clawback.
+        tx.execute(
+            "UPDATE trace_submissions
+                SET status = 'revoked',
+                    withdrawn_at = COALESCE(withdrawn_at, $3),
+                    revoked_at = COALESCE(revoked_at, $3),
+                    purged_at = COALESCE(purged_at, $3),
+                    updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id, &withdrawn_at],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_one(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                 FROM trace_withdrawals
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(TraceWithdrawalRecord {
+            tenant_id: row.get("tenant_id"),
+            submission_id: row.get("submission_id"),
+            withdrawn_at: row.get("withdrawn_at"),
+            prior_status: row.get("prior_status"),
+            distribution_reach: row.get("distribution_reach"),
+        })
+    }
+
+    async fn get_trace_withdrawal(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<TraceWithdrawalRecord>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                 FROM trace_withdrawals
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| TraceWithdrawalRecord {
+            tenant_id: row.get("tenant_id"),
+            submission_id: row.get("submission_id"),
+            withdrawn_at: row.get("withdrawn_at"),
+            prior_status: row.get("prior_status"),
+            distribution_reach: row.get("distribution_reach"),
+        }))
+    }
+
+    async fn count_trace_export_memberships(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Deliberately counts invalidated memberships too: an export that was
+        // published and later invalidated still put copies in other hands.
+        let row = tx
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS membership_count
+                 FROM trace_export_manifest_items
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get("membership_count"))
+    }
+
+    async fn list_trace_vector_entry_ids_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT vector_entry_id FROM trace_vector_entries
+                   WHERE tenant_id = $1 AND submission_id = $2
+                 UNION
+                 SELECT vector_entry_id FROM trace_gate_decisions
+                   WHERE tenant_id = $1 AND submission_id = $2
+                     AND vector_entry_id IS NOT NULL
+                 UNION
+                 SELECT vector_entry_id FROM trace_gate_chunk_vector_entries
+                   WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn clear_trace_dedup_cluster_for_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
+                    SET dedup_simhash = NULL,
+                        dedup_cluster_id = NULL,
+                        dedup_cluster_size = NULL
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
             )
             .await
             .map_err(DatabaseError::Postgres)?;

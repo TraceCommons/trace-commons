@@ -62,7 +62,10 @@ pub struct SessionTranscript {
     pub events: Vec<SessionEvent>,
 }
 
-pub trait TraceSource {
+/// `Send + Sync` because the background daemon holds source adapters across
+/// await points on a multi-threaded runtime. Every adapter is stateless --
+/// each one holds only a root path -- so this costs nothing.
+pub trait TraceSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
@@ -77,6 +80,23 @@ pub fn session_hash(bytes: &[u8]) -> String {
 /// Deterministic submission id derived from the session hash string.
 pub fn submission_id_for(session_hash: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, session_hash.as_bytes())
+}
+
+/// Deterministic pre-enrollment preview id derived from the session hash.
+///
+/// Real submission ids are UUIDv5. Preview ids use UUIDv8 with an explicit
+/// domain separator, so the UUID version bits make the two namespaces
+/// structurally disjoint even for the same session hash.
+pub fn preview_submission_id_for(session_hash: &str) -> uuid::Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"trace-commons:unenrolled-preview:v1\0");
+    hasher.update(session_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 /// Construct the set of available `TraceSource` adapters, defaulting roots to
@@ -122,5 +142,15 @@ mod tests {
         let a = submission_id_for("sha256:aa");
         assert_eq!(a, submission_id_for("sha256:aa"));
         assert_ne!(a, submission_id_for("sha256:bb"));
+    }
+
+    #[test]
+    fn preview_ids_are_deterministic_and_disjoint_from_submission_ids() {
+        let preview = preview_submission_id_for("sha256:aa");
+        assert_eq!(preview, preview_submission_id_for("sha256:aa"));
+        assert_ne!(preview, preview_submission_id_for("sha256:bb"));
+        assert_ne!(preview, submission_id_for("sha256:aa"));
+        assert_eq!(preview.get_version_num(), 8);
+        assert_eq!(submission_id_for("sha256:aa").get_version_num(), 5);
     }
 }

@@ -79,6 +79,21 @@ impl<'a> EvalScorers<'a> {
     }
 }
 
+/// Evaluation abort carrying the slice support observed before the pooled
+/// failure-rate guard fired. The bake-off report preserves these counters
+/// instead of presenting an aborted candidate as having complete support.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "RunCandidateEval: candidate aborted; failure rate {failure_rate:.3} exceeds {threshold:.3} threshold"
+)]
+pub struct CandidateEvalAborted {
+    pub dropped_novel_rows: u64,
+    pub dropped_duplicate_rows: u64,
+    pub dropped_paraphrase_rows: u64,
+    failure_rate: f64,
+    threshold: f64,
+}
+
 /// Conversion of `u64` micros (scorer output) to floating-point. Centralized
 /// so the metric-feeding code reads as one boundary cross rather than a
 /// scatter of inline `as f64 / 1_000_000.0` divisions.
@@ -164,6 +179,37 @@ pub fn map_license(lic: &CandidateLicense) -> License {
         CandidateLicense::LlamaCommunity => License::LlamaCommunity,
         CandidateLicense::GemmaCustom => License::GemmaCustom,
     }
+}
+
+/// Convert a load or evaluation error into the fail-closed report row used by
+/// the bake-off binary. Pooled evaluation aborts preserve their observed
+/// support counters; errors before scoring retain zero counters.
+#[allow(dead_code)] // called by the gate-calibrate binary
+pub fn failed_candidate_result(
+    candidate: &Candidate,
+    error_class: &str,
+    error: &anyhow::Error,
+) -> CandidateResult {
+    let dropped_rows = error
+        .downcast_ref::<CandidateEvalAborted>()
+        .map(|aborted| {
+            (
+                aborted.dropped_novel_rows,
+                aborted.dropped_duplicate_rows,
+                aborted.dropped_paraphrase_rows,
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    CandidateResult::failed_with_dropped_rows(
+        candidate.id.clone(),
+        map_license(&candidate.license),
+        candidate.params_b.unwrap_or(0),
+        candidate.release_date_unix.unwrap_or(0),
+        error_class,
+        dropped_rows.0,
+        dropped_rows.1,
+        dropped_rows.2,
+    )
 }
 
 /// Maximum fraction of per-entry scoring failures we tolerate before aborting
@@ -351,11 +397,12 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_novel_rows = failures - novel_failures_before;
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "novel",
         scored = novel_perp.len().max(novel_rarity.len()) - novel_scored_before,
-        failed = failures - novel_failures_before,
+        failed = dropped_novel_rows,
         elapsed_seconds = novel_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
@@ -394,11 +441,12 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_duplicate_rows = failures - dup_failures_before;
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "duplicate",
         scored = dup_perp.len().max(dup_rarity.len()) - dup_scored_before,
-        failed = failures - dup_failures_before,
+        failed = dropped_duplicate_rows,
         elapsed_seconds = duplicate_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
@@ -453,6 +501,9 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    let dropped_paraphrase_rows = scorers
+        .perplexity
+        .map(|_| corpus.paraphrase.len() as u64 - para_pairs.len() as u64);
 
     tracing::info!(
         candidate_id = %candidate.id,
@@ -470,12 +521,18 @@ pub async fn run_candidate_eval(
     if attempts > 0 {
         let failure_rate = failures as f64 / attempts as f64;
         if failure_rate > FAILURE_RATE_ABORT {
-            anyhow::bail!(
-                "RunCandidateEval: candidate {} aborted; failure rate {:.3} exceeds {:.3} threshold",
-                candidate.id,
+            return Err(CandidateEvalAborted {
+                dropped_novel_rows,
+                dropped_duplicate_rows,
+                // A scorer-less paraphrase slice was not evaluated. The
+                // aborted row is already ineligible; count the whole slice as
+                // dropped rather than presenting absence as complete support.
+                dropped_paraphrase_rows: dropped_paraphrase_rows
+                    .unwrap_or(corpus.paraphrase.len() as u64),
                 failure_rate,
-                FAILURE_RATE_ABORT
-            );
+                threshold: FAILURE_RATE_ABORT,
+            }
+            .into());
         }
     }
 
@@ -483,9 +540,9 @@ pub async fn run_candidate_eval(
     // Perplexity-derived metrics populate the legacy `CandidateResult`
     // fields. When perplexity is absent (rarity-only mode), AUC is 0.5 (the
     // empty-input convention) and tail / paraphrase collapse to 0. The
-    // decision rule already requires `passed_determinism_gate = true` to
-    // pick a winner, so a rarity-only run cannot accidentally elect one
-    // through these zeroed fields.
+    // decision rule requires AUC above chance and evidenced paraphrase
+    // support, so a rarity-only run cannot accidentally elect one through
+    // these empty legacy fields.
     let auc = discrimination_auc(&novel_perp, &dup_perp);
     let para_delta = paraphrase_delta(&para_pairs);
     let tail_range = tail_fraction_range(&novel_tail, &dup_tail);
@@ -637,6 +694,15 @@ pub async fn run_candidate_eval(
         license: map_license(&candidate.license),
         params_b,
         passed_determinism_gate: passed_det_gate,
+        // Filled by run_bakeoff after comparison with the corpus-level
+        // structural baselines. Candidate evaluation has no baseline input.
+        passed_baseline_dominance: false,
+        dropped_novel_rows: Some(dropped_novel_rows),
+        dropped_duplicate_rows: Some(dropped_duplicate_rows),
+        // `None` means the selected scorer mode never evaluated paraphrases.
+        // Winner eligibility requires `Some(0)`, so rarity-only evidence
+        // cannot masquerade as complete paraphrase support.
+        dropped_paraphrase_rows,
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,

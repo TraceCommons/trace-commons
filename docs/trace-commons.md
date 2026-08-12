@@ -422,6 +422,9 @@ Review and analytics:
   `GET /v1/review/routing-summary`
 - `POST /v1/review/batch-decisions` (up to 50 ids),
   `POST /v1/review/{submission_id}/decision`
+- `POST /v1/review/{submission_id}/rescrub`,
+  `POST /v1/review/quarantine/rescrub` (operator re-scrub / reclassify of
+  quarantined rows under current residual-risk rules; optional dry-run batch)
 - `POST` / `DELETE /v1/review/{submission_id}/lease`
 - `POST /v1/review/{submission_id}/credit-events`
 - `GET /v1/analytics/summary` — optional `release_scope=operator|broad`
@@ -793,8 +796,9 @@ outbox carries publish/revoke rows.
 
 **Retention and revocation workers.** `POST /v1/workers/retention-maintenance`
 (purge automation, reviewer tokens rejected) and
-`POST /v1/workers/revocation-propagation` (idempotent fan-out of invalidation,
-credit reversal, and physical deletion). See
+`POST /v1/workers/revocation-propagation` (idempotent fan-out of invalidation
+and physical deletion; it also drains operator-raised credit-settlement
+reversals, which revocation itself never raises). See
 [Retention and legal hold](#retention-and-legal-hold).
 
 | Variable | Effect | Default |
@@ -1045,7 +1049,7 @@ ref stored only as a hash).
 | `POST /v1/admin/benchmark-readiness-drill` | benchmark artifacts, evaluator/registry/adapter-auth readiness |
 | `POST /v1/admin/credit-settlement-drill` | settlement promotion (risk summary + dry-run selector + central issuer profile) |
 | `POST /v1/admin/revocation-propagation-drill` | propagation through the real worker dry-run path |
-| `POST /v1/admin/revocation-effects-drill` | post-live proof: reversed credit, NEAR reversals, deleted refs, queue invalidation |
+| `POST /v1/admin/revocation-effects-drill` | post-live proof: no settled-credit clawback, deleted refs, queue invalidation |
 | `POST /v1/admin/audit-chain-drill` | audit-chain verification without maintenance side effects |
 
 Required smoke checks include `tenant_canary_isolation`,
@@ -1214,14 +1218,14 @@ but with production hardening still open.
 | Web settings + preview endpoints | MVP | Authenticated gateway endpoints and UI controls; server-side tenant/user checks are the trust boundary; queue/submit preflight scoped opt-in. |
 | Private ingestion service | MVP | Validates schema/consent, re-runs redaction, computes hashes/credit, optional hourly quotas, stores accepted/quarantined records, serves review/status/export routes; can dark-launch DB dual-write + encrypted artifacts. |
 | Tenant token roles | Partial | Static tokens (contributor/reviewer/admin + scoped workers) with optional expiry; HS256 and EdDSA signed claims with allow-lists; managed-keyset enforcement; tenant access grants binding signed-claim issuer/audience/sub. Fuller central RBAC/ABAC + RLS hardening open. |
-| Contributor credit ledger + delayed credit | Partial | Append-only local/central events; pending kept separate from settled; reason-gated reviewer mutation; ABAC-gated utility credit; per-account cap + policy-version allowlist + issuer-approval gates; revocation reversal with NEAR reverse receipts. Deeper fraud-review + issuer governance open. |
+| Contributor credit ledger + delayed credit | Partial | Append-only local/central events; pending kept separate from settled; reason-gated reviewer mutation; ABAC-gated utility credit; per-account cap + policy-version allowlist + issuer-approval gates; operator-raised settlement reversal with NEAR reverse receipts (revocation never raises one -- settled credit stays earned). Deeper fraud-review + issuer governance open. |
 | Quarantine / review workflow | Partial | Reviewer/admin decide quarantined traces; SLA/escalation + DB-backed leases; reason-required, lease-respecting, terminal/aggregate-only-safe decisions; bounded batch decisions; object-ref-backed body reads + `review_snapshot` mirror. Richer assignment policy + external router open. |
 | Replay dataset export | Partial | Reviewer/admin export of approved slices with guardrails, purposes, access-grant checks, DB-backed selection, object-ref body reads, durable manifests + item snapshots, dedicated worker/scheduler routes. Cloud object storage + broader bulk controls + revocation of published artifacts open. |
 | Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage + process-eval aggregates; min-cell suppression, privacy-budget accounting, keyed count-noise, epsilon ledger, fail-closed broad release. Rigorous DP proof open. |
 | Production DB + encrypted object storage | Partial | V1 PostgreSQL schema, `TraceCorpusStore`/`PgBackend`, DB mirror across all control planes, encrypted local + filesystem-remote object stores, object-primary modes, physical-delete execution, backfill/reconciliation diagnostics, RLS policies + FORCE RLS. Cloud remote read/write + parity enforcement + non-bypassing role hardening open. |
 | Central audit log | Partial | Hash-chained file rows + maintenance verifier; DB mirror with canonical-payload recomputation and `audit_sequence`; typed hash-only metadata across all privileged surfaces; bounded reviewer reads at the storage boundary. |
 | Retention enforcement | Partial | Server-derived retention ids/expiry; mismatch fail-closed across review/export/conversion; maintenance + dedicated worker mark/purge with legal-hold exemptions and durable ledger rows. Broader cloud purge rehearsal open. |
-| Revocation propagation | Partial | Tenant-scoped first-writer-wins tombstones; DB invalidation of object refs/derived/vector/manifest rows; benchmark lifecycle-revoke + registry revoke outbox; settled-credit reversal with NEAR receipts; physical delete of service-owned payloads. Deployed invalidator/deleter ops + rollout rehearsal open. |
+| Revocation propagation | Partial | Tenant-scoped first-writer-wins tombstones; DB invalidation of object refs/derived/vector/manifest rows; benchmark lifecycle-revoke + registry revoke outbox; no settled-credit clawback; physical delete of service-owned payloads. Deployed invalidator/deleter ops + rollout rehearsal open. |
 | Vector duplicate/novelty index | Partial | DB schema + dedicated worker + metadata indexer + object-ref gating + per-source content-read audits; exact-hash + deterministic-similarity scoring with optional private embedder/search adapters; stale/cross-profile neighbor diagnostics. Deployed vector-store ops + canary evidence open. |
 | Ranking/model utility pipeline | Partial | Offline utility-credit worker; immutable model manifests, calibration runs, holdout registry, server-owned floors, backtest/risk/readiness reports, prediction-credit, worker-run ledger, credit-cycle automation. Deployed evaluator ops + gold/holdout stewardship open. |
 | Benchmark conversion pipeline | Partial | Tenant-scoped candidate artifacts with lifecycle metadata, source-hash revalidation, audits, provenance, idempotent utility credit, evaluator/registry worker routes + outbox, readiness drill. Deployed external evaluator/registry adapter ops open. |

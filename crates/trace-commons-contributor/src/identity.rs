@@ -36,19 +36,31 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
+    /// Load and validate the persisted device key without creating one.
+    pub fn load(store: &ConfigStore) -> Result<Option<Self>> {
+        store
+            .load_device_key()
+            .context("loading device key")?
+            .map(|pkcs8_der| Self::from_pkcs8(&pkcs8_der))
+            .transpose()
+    }
+
     /// Load the persisted device key, or generate and persist a new one.
     pub fn load_or_generate(store: &ConfigStore) -> Result<Self> {
-        let pkcs8_der = match store.load_device_key().context("loading device key")? {
-            Some(der) => der,
-            None => {
-                let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-                    .map_err(|_| anyhow!("generating device keypair"))?;
-                let der = doc.as_ref().to_vec();
-                store.save_device_key(&der).context("saving device key")?;
-                der
-            }
-        };
-        let keypair = Ed25519KeyPair::from_pkcs8(&pkcs8_der)
+        if let Some(identity) = Self::load(store)? {
+            return Ok(identity);
+        }
+        let doc = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .map_err(|_| anyhow!("generating device keypair"))?;
+        let pkcs8_der = doc.as_ref().to_vec();
+        store
+            .save_device_key(&pkcs8_der)
+            .context("saving device key")?;
+        Self::from_pkcs8(&pkcs8_der)
+    }
+
+    fn from_pkcs8(pkcs8_der: &[u8]) -> Result<Self> {
+        let keypair = Ed25519KeyPair::from_pkcs8(pkcs8_der)
             .map_err(|_| anyhow!("parsing stored device key"))?;
         let public_key_bytes = keypair.public_key().as_ref().to_vec();
         let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(

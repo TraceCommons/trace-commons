@@ -48,7 +48,7 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
     // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
     // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     Some(backend)
 }
 
@@ -634,6 +634,7 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
 /// (2) settle the unlinked principal under its own principal hash with no payout.
 #[tokio::test]
 async fn settlement_groups_account_principals_and_routes_designated_payout() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -782,6 +783,7 @@ async fn settlement_groups_account_principals_and_routes_designated_payout() {
 /// unchanged.
 #[tokio::test]
 async fn linked_contributor_sees_account_keyed_settled_credit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -904,6 +906,7 @@ async fn linked_contributor_sees_account_keyed_settled_credit() {
 /// is enqueued.
 #[tokio::test]
 async fn settlement_holds_account_payout_when_none_enrolled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -978,6 +981,7 @@ async fn settlement_holds_account_payout_when_none_enrolled() {
 /// but HOLDS its payout with `ambiguous_no_designation` and enqueues no outbox row.
 #[tokio::test]
 async fn settlement_holds_account_payout_when_ambiguous() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -1585,8 +1589,12 @@ async fn confirm_login_issues_single_use_session_cookie() {
     same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
     let response = confirm_login_handler(
         State(state.clone()),
-        same_origin.clone(),
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        with_login_ceremony(same_origin.clone()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
     )
     .await
     .into_response();
@@ -1629,8 +1637,12 @@ async fn confirm_login_issues_single_use_session_cookie() {
     // Second redeem of the SAME code -> uniform generic deny (single-use).
     let reused = confirm_login_handler(
         State(state.clone()),
-        same_origin.clone(),
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        with_login_ceremony(same_origin.clone()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
     )
     .await
     .into_response();
@@ -1642,9 +1654,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     // Bogus code -> the SAME uniform generic deny (status + body identical).
     let bogus = confirm_login_handler(
         State(state.clone()),
-        same_origin,
+        with_login_ceremony(same_origin),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "totally-bogus-code".to_string(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1673,9 +1687,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
     let cross = confirm_login_handler(
         State(state.clone()),
-        cross_site,
+        with_login_ceremony(cross_site),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "another-code".to_string(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1709,8 +1725,12 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
     let response = confirm_login_handler(
         State(state.clone()),
-        same_origin,
-        ConfirmLoginForm(ConfirmLoginBody { code }),
+        with_login_ceremony(same_origin),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code,
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
     )
     .await
     .into_response();
@@ -1750,7 +1770,7 @@ fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
 }
 
 #[tokio::test]
-async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
+async fn account_ctx_refuses_a_device_bearer() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -1767,24 +1787,40 @@ async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
         false,
     );
 
-    // Mint creates-or-reuses the account linked to token-a's device principal.
+    // Minting a login link still works: that is an authority the device key
+    // has, and it is how a contributor starts the browser sign-in.
     let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
         .await
         .expect("mint links the principal to an account");
 
-    let ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+    // But the device claim itself must not resolve to an account context.
+    // It used to, which meant a device key reached every /v1/account/* route
+    // including withdrawal and account history. A device key is provisioned
+    // to upload; account authority comes from a browser session or the
+    // loopback native session, never from the upload credential.
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
         .await
-        .expect("bearer resolves to an account ctx");
-    assert_eq!(ctx.auth_method, AccountAuthMethod::DeviceBearer);
-    assert_eq!(ctx.tenant_id, "tenant-a");
-    let device_principal = principal_storage_ref("token-a");
-    assert_eq!(ctx.actor_ref, device_principal, "actor = device principal");
-    assert!(
-        ctx.principal_set.contains(&device_principal),
-        "principal set must contain the device principal"
-    );
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The same refusal, without a PostgreSQL backend, so it actually runs in CI.
+///
+/// The test above is pg-gated and skips silently when no database is
+/// configured -- which is exactly how it went on asserting the old behaviour
+/// unnoticed. This one needs no database: the dispatch refuses a device-shaped
+/// bearer before it ever reaches account storage.
+#[tokio::test]
+async fn account_ctx_refuses_a_device_bearer_without_a_database() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect_err("a device upload claim must not resolve to an account");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -2767,6 +2803,23 @@ async fn insert_account_test_submission(
     tenant_id: &str,
     auth_principal_ref: &str,
 ) -> Uuid {
+    insert_account_test_submission_with_status(
+        backend,
+        tenant_id,
+        auth_principal_ref,
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await
+}
+
+/// Same as [`insert_account_test_submission`], with an explicit corpus status
+/// so withdrawal-tier tests can stage `submitted` / `quarantined` rows.
+async fn insert_account_test_submission_with_status(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    status: StorageTraceCorpusStatus,
+) -> Uuid {
     use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
     let submission_id = Uuid::new_v4();
     let mut redaction_counts = BTreeMap::new();
@@ -2784,7 +2837,7 @@ async fn insert_account_test_submission(
             consent_scopes: vec!["debugging_evaluation".to_string()],
             allowed_uses: vec!["debugging".to_string()],
             retention_policy_id: "private_corpus_revocable".to_string(),
-            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            status,
             privacy_risk: "low".to_string(),
             redaction_pipeline_version: "deterministic-v1".to_string(),
             redaction_counts,
@@ -3221,6 +3274,506 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+// ---------------------------------------------------------------------------
+// Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
+// ---------------------------------------------------------------------------
+
+/// Stage a stub trace object at the production object-key layout for
+/// `(tenant, status, submission)` so withdrawal has real bytes to delete.
+fn stage_trace_object_file(
+    state: &AppState,
+    tenant_id: &str,
+    status: TraceCorpusStatus,
+    submission_id: Uuid,
+) -> PathBuf {
+    let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, b"{\"stub\":true}").expect("write stub object");
+    path
+}
+
+/// Read every column of the withdrawal tombstone row as text, so a test can
+/// assert the row leaks no content, path, or contributor identity.
+async fn read_withdrawal_tombstone_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<(String, String)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let rows = tx
+        .query(
+            "SELECT tenant_id, submission_id::TEXT AS submission_id,
+                    withdrawn_at::TEXT AS withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read tombstone");
+    tx.commit().await.expect("commit");
+    let mut out = Vec::new();
+    for row in rows {
+        for column in row.columns() {
+            let value: Option<String> = row.get(column.name());
+            out.push((column.name().to_string(), value.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+/// Read one scalar text column from a tenant-scoped table on the raw pool.
+async fn read_scalar_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    sql: &str,
+    submission_id: Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("begin");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let row = tx
+        .query_opt(sql, &[&tenant_id, &submission_id])
+        .await
+        .expect("scalar read");
+    tx.commit().await.expect("commit");
+    row.and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_quarantined_deletes_content_and_is_idempotent() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let object_path = stage_trace_object_file(
+        state.as_ref(),
+        "tenant-a",
+        TraceCorpusStatus::Quarantined,
+        owned,
+    );
+    assert!(object_path.exists(), "content is staged before withdrawal");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(first) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+    assert_eq!(first.submission_id, owned);
+    assert_eq!(first.prior_status, "quarantined");
+    assert_eq!(first.distribution_reach, "not_distributed");
+    assert!(!first.already_distributed);
+    assert!(
+        first.credit_retained,
+        "withdrawal must not claw back credit"
+    );
+
+    // The content is genuinely gone.
+    assert!(
+        !object_path.exists(),
+        "withdrawal must delete the stored content"
+    );
+
+    // Twice is a success, and reports the SAME tier and timestamp.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(second) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(second.withdrawn_at, first.withdrawn_at);
+    assert_eq!(second.distribution_reach, first.distribution_reach);
+    assert_eq!(second.prior_status, first.prior_status);
+
+    // The tombstone is hash-only/label-only: no content, no path, no identity.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", owned).await;
+    assert!(!columns.is_empty(), "a tombstone row is retained");
+    for (name, value) in &columns {
+        assert!(
+            !value.contains(&device_principal),
+            "tombstone column {name} must not carry contributor identity"
+        );
+        assert!(
+            !value.contains('/'),
+            "tombstone column {name} must not carry an object path"
+        );
+        assert!(
+            !value.contains("stub"),
+            "tombstone column {name} must not carry trace content"
+        );
+    }
+    let names = columns
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("submission_id"));
+    assert!(names.contains("withdrawn_at"));
+    assert!(names.contains("prior_status"));
+    assert!(names.contains("distribution_reach"));
+    assert!(
+        !names.contains("auth_principal_ref") && !names.contains("object_key"),
+        "the tombstone must not have identity or path columns at all"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let unowned_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(unowned))
+        .await
+        .expect_err("another contributor's trace -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let missing_err = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(random))
+        .await
+        .expect_err("missing -> 404");
+
+    // 404 and NOT 403: existence must not be disclosed.
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_ne!(unowned_err.0, StatusCode::FORBIDDEN);
+    assert_eq!(unowned_err.1.0.error, missing_err.1.0.error);
+
+    // The unowned row is untouched: no tombstone was written for it.
+    let columns = read_withdrawal_tombstone_columns(backend.as_ref(), "tenant-a", unowned).await;
+    assert!(
+        columns.is_empty(),
+        "a rejected withdrawal must not write a tombstone"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_reports_each_distribution_tier() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Tier 1: not yet in the commons. `received` deliberately exercises a
+    // status the local corpus-status projection DROPS, proving withdrawal is
+    // driven by the storage record rather than that projection.
+    let received = insert_account_test_submission_with_status(
+        backend.as_ref(),
+        "tenant-a",
+        &device_principal,
+        StorageTraceCorpusStatus::Received,
+    )
+    .await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier1) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(received))
+        .await
+        .expect("received withdraws");
+    assert_eq!(tier1.prior_status, "received");
+    assert_eq!(tier1.distribution_reach, "not_distributed");
+    assert!(!tier1.already_distributed);
+
+    // Tier 2: accepted into the commons, never used downstream.
+    let accepted =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier2) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(accepted))
+        .await
+        .expect("accepted withdraws");
+    assert_eq!(tier2.prior_status, "accepted");
+    assert_eq!(tier2.distribution_reach, "commons_not_distributed");
+    assert!(!tier2.already_distributed);
+
+    // Tier 3: accepted AND already published in an export manifest.
+    let exported =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let exported_record = backend
+        .get_trace_submission("tenant-a", exported)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+    let manifest_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: None,
+            audit_event_id: None,
+            source_submission_ids: vec![exported],
+            source_submission_ids_hash: "sha256:manifest".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("manifest writes");
+    backend
+        .upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: "tenant-a".to_string(),
+            export_manifest_id: manifest_id,
+            submission_id: exported,
+            trace_id: exported_record.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Accepted,
+            source_hash_at_export: "sha256:source".to_string(),
+        })
+        .await
+        .expect("manifest item writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(tier3) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(exported))
+        .await
+        .expect("exported trace withdraws");
+    assert_eq!(tier3.distribution_reach, "commons_distributed");
+    assert!(
+        tier3.already_distributed,
+        "the API must say copies were already distributed"
+    );
+
+    // Going forward the item is excluded from the export.
+    let invalidation_reason = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT source_invalidation_reason FROM trace_export_manifest_items
+         WHERE tenant_id = $1 AND submission_id = $2",
+        exported,
+    )
+    .await;
+    assert_eq!(invalidation_reason.as_deref(), Some("revoked"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+    let owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let record = backend
+        .get_trace_submission("tenant-a", owned)
+        .await
+        .expect("read staged submission")
+        .expect("staged submission exists");
+
+    let derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            trace_id: record.trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::Summary,
+            worker_version: "test-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:input".to_string(),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            task_success: None,
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            duplicate_score: None,
+            novelty_score: None,
+            cluster_id: None,
+        })
+        .await
+        .expect("derived record writes");
+
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id: owned,
+            derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:summary".to_string(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some("embedding:cluster".to_string()),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("vector entry writes");
+
+    let decision_id = Uuid::new_v4();
+    backend
+        .insert_trace_gate_decision(
+            "tenant-a",
+            StorageTraceGateDecisionRow {
+                decision_id,
+                submission_id: owned,
+                gate_policy_version: "test-policy".to_string(),
+                gate_version_hash: "sha256:gate".to_string(),
+                perplexity_micros: 7_000_000,
+                tail_fraction_micros: 0,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:evidence".to_string(),
+                attestation_chain_hash: "sha256:attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(vector_entry_id),
+                credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                chunks_capped: None,
+            },
+        )
+        .await
+        .expect("gate decision writes");
+    backend
+        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .await
+        .expect("dedup assignment writes");
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let Json(_) = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(owned))
+        .await
+        .expect("own trace withdraws");
+
+    // The vector index no longer returns the withdrawn trace.
+    let vector_status = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT status FROM trace_vector_entries
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(vector_status.as_deref(), Some("invalidated"));
+
+    // The dedup cluster no longer contains the withdrawn trace.
+    let dedup_cluster = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_cluster_id::TEXT FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_cluster, None,
+        "the withdrawn trace must leave its dedup cluster"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -3594,10 +4147,178 @@ fn test_state_with_submission_quota(
     state
 }
 
+/// Serialises the tests that drive a settlement run.
+///
+/// Settlement takes a process-global lock keyed by tenant, and these tests all
+/// use `tenant-a`, so under `cargo test`'s default parallelism they contend
+/// with each other and whichever loses gets
+/// `409 credit settlement already in progress for this tenant`. The failing
+/// set varied from run to run, which is what gave the race away.
+///
+/// This serialises the fixtures, not the property. That a second concurrent
+/// run for the same tenant is refused is still asserted by
+/// `credit_settlement_in_process_lock_rejects_concurrent_live_runs`, which
+/// holds its own tenant's lock and is unaffected by this guard.
+///
+/// The alternative -- a tenant per test -- was tried and abandoned: these
+/// tests share around twenty seeding and reading helpers that either derive
+/// the tenant from a token or assume `tenant-a` internally, so changing one
+/// test's tenant without changing its helpers breaks it differently, and
+/// changing the helpers breaks every other caller.
+static SETTLEMENT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Headers carrying a login-ceremony cookie, plus the matching form value.
+///
+/// `POST /account/login/confirm` requires a nonce that `GET /account/login`
+/// set as a cookie AND embedded in its form, so a confirm test has to present
+/// both halves the way a browser would. Tests that want to prove the gate
+/// itself simply omit one half.
+const TEST_LOGIN_CEREMONY: &str = "test-ceremony-nonce-0123456789";
+
+#[tokio::test]
+async fn confirm_refuses_without_the_ceremony_cookie() {
+    // The shape of a non-browser caller: it can hold a valid-looking code and
+    // send whatever headers it likes, but it never fetched the interstitial,
+    // so it has no ceremony cookie. Omitting Origin and Sec-Fetch-Site is what
+    // satisfies the same-origin check, which is exactly why that check cannot
+    // carry this on its own.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        HeaderMap::new(),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a confirm without the interstitial's cookie must be refused"
+    );
+}
+
+#[tokio::test]
+async fn confirm_refuses_when_the_ceremony_halves_disagree() {
+    // Holding the cookie is not enough: the form value must match it. This is
+    // what stops a leaked or replayed half being combined with a fresh one.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        with_login_ceremony(HeaderMap::new()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: Some("a-different-nonce-entirely-000".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn confirm_refuses_when_the_form_half_is_absent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        with_login_ceremony(HeaderMap::new()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
+    // The other half of the property: whatever confirm demands, the
+    // interstitial must actually supply, or the real browser flow breaks.
+    let response = login_interstitial_handler(
+        HeaderMap::new(),
+        Query(LoginInterstitialQuery {
+            code: "some-code".to_string(),
+            native: None,
+        }),
+    )
+    .await;
+
+    let set_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("tc_login_ceremony="))
+        .expect("interstitial sets the ceremony cookie")
+        .to_string();
+
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(set_cookie.contains("Secure"), "cookie must be Secure");
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict"
+    );
+
+    let nonce = set_cookie
+        .trim_start_matches("tc_login_ceremony=")
+        .split(';')
+        .next()
+        .expect("cookie value")
+        .to_string();
+    assert!(
+        nonce.len() >= 32,
+        "nonce must be long enough to be unguessable"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("interstitial body");
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains(&format!("name=\"ceremony\" value=\"{nonce}\"")),
+        "the same nonce must be embedded in the form the page renders"
+    );
+}
+
+fn with_login_ceremony(base: HeaderMap) -> HeaderMap {
+    let mut headers = base;
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("tc_login_ceremony={TEST_LOGIN_CEREMONY}"))
+            .expect("cookie header"),
+    );
+    headers
+}
+
 fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -> Arc<AppState> {
+    configure_unbounded_submit_limits_for_test(&tokens);
     let mut state = test_state(root);
     Arc::make_mut(&mut state).tokens = Arc::new(tokens);
     state
+}
+
+fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAuth>) {
+    for auth in tokens.values() {
+        let key =
+            submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+    }
 }
 
 fn mutate_test_signed_token_verifier(
@@ -3872,6 +4593,18 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -3928,6 +4661,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
+    configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
         tokens: Arc::new(tokens),
@@ -3956,6 +4690,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -4019,6 +4756,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         credit_settlement_scheduler: None,
         process_evaluation_scheduler: None,
         revocation_propagation_scheduler: None,
+        community_snapshot_invalidation_scheduler: None,
         ranking_calibration_max_age: None,
         ranking_require_calibration_dataset_registry: false,
         ranking_require_active_calibration_dataset: false,
@@ -4041,6 +4779,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
+        account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -4086,6 +4826,46 @@ fn auth_headers(token: &str) -> HeaderMap {
         HeaderValue::from_str(&value).expect("valid auth header"),
     );
     headers
+}
+
+const SUBMIT_RATE_LIMIT_TOKEN_A: &str = "submit-rate-limit-token-a";
+const SUBMIT_RATE_LIMIT_TOKEN_B: &str = "submit-rate-limit-token-b";
+
+fn submit_rate_limit_test_state(root: PathBuf) -> Arc<AppState> {
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_A,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        SUBMIT_RATE_LIMIT_TOKEN_B,
+        TokenRole::Contributor,
+    );
+    let mut state = test_state(root);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    state
+}
+
+fn submit_rate_limit_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn reset_account_rate_limiter_for_db_test() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+}
+
+fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
+    submit_principal_rate_limit_key(
+        tenant_id,
+        TraceAuthMethod::StaticToken,
+        &principal_storage_ref(token),
+    )
 }
 
 fn append_legacy_calibration_dataset_manifest_conflict(
@@ -4680,6 +5460,10 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
+    envelope.schema_version = "invalid.test.schema".to_string();
+}
+
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
     for event in &mut envelope.events {
         if event.event_type
@@ -4853,6 +5637,450 @@ async fn server_rescrub_redacts_free_text_side_channels() {
 }
 
 #[tokio::test]
+async fn submit_rate_limit_is_per_authenticated_principal() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("invalid envelope reaches validation while under the rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal over the submission rate limit is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
+        Json(invalid),
+    )
+    .await
+    .expect_err("a different principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_handler_honors_explicit_test_override() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, 1, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("first request reaches validation under the configured test limit");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("second request exceeds the configured test limit");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let grant_db = Arc::new(DeviceGrantScopeTestDb::new());
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(grant_db as Arc<dyn Database>);
+    state_mut.require_tenant_access_grants = true;
+    let envelope = sample_envelope().await;
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, Json(error)) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(envelope.clone()),
+        )
+        .await
+        .expect_err("grantless authenticated submission is forbidden under the rate limit");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error, "active tenant access grant required");
+    }
+
+    let (status, Json(error)) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await
+    .expect_err("grantless authenticated submission over the rate limit is denied early");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-collision-secret";
+    let state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let expires_at = (Utc::now() + Duration::minutes(5)).timestamp();
+    let token_a = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": expires_at
+        }),
+    );
+    let token_b = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a:b",
+            "role": "contributor",
+            "principal_ref": "c",
+            "exp": expires_at
+        }),
+    );
+    let principal_a = authenticate_ctx(state.as_ref(), &auth_headers(&token_a))
+        .expect("principal A authenticates");
+    let principal_b = authenticate_ctx(state.as_ref(), &auth_headers(&token_b))
+        .expect("principal B authenticates");
+    assert_eq!(
+        principal_a.principal_ref(),
+        principal_b.principal_ref(),
+        "the pre-existing signed-principal derivation collides for the review tuples"
+    );
+    let key_a = submit_principal_rate_limit_key(
+        principal_a.tenant_id(),
+        principal_a.safe_auth_method(),
+        principal_a.principal_ref(),
+    );
+    let key_b = submit_principal_rate_limit_key(
+        principal_b.tenant_id(),
+        principal_b.safe_auth_method(),
+        principal_b.principal_ref(),
+    );
+    assert_ne!(
+        key_a, key_b,
+        "tenant boundaries must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&token_a),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("principal A reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&token_a),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("principal A exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(&token_b), Json(invalid))
+        .await
+        .expect_err("principal B retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let secret = "submit-rate-limit-mixed-auth-secret";
+    let static_token = "signed:a:b:c";
+    let mut state =
+        test_state_with_signed_token_verifier(temp.path().to_path_buf(), secret, None, None);
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "a", static_token, TokenRole::Contributor);
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let signed_token = signed_tenant_token(
+        secret,
+        serde_json::json!({
+            "tenant_id": "a",
+            "role": "contributor",
+            "principal_ref": "b:c",
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+        }),
+    );
+    let static_principal = authenticate_ctx(state.as_ref(), &auth_headers(static_token))
+        .expect("static principal authenticates");
+    let signed_principal = authenticate_ctx(state.as_ref(), &auth_headers(&signed_token))
+        .expect("signed principal authenticates");
+    assert_eq!(static_principal.tenant_id(), signed_principal.tenant_id());
+    assert_eq!(
+        static_principal.principal_ref(),
+        signed_principal.principal_ref(),
+        "the pre-existing principal derivation erases the authentication method"
+    );
+    let static_key = submit_principal_rate_limit_key(
+        static_principal.tenant_id(),
+        static_principal.safe_auth_method(),
+        static_principal.principal_ref(),
+    );
+    let signed_key = submit_principal_rate_limit_key(
+        signed_principal.tenant_id(),
+        signed_principal.safe_auth_method(),
+        signed_principal.principal_ref(),
+    );
+    assert_ne!(
+        static_key, signed_key,
+        "authentication methods must produce distinct buckets"
+    );
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        let (status, _) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(&signed_token),
+            Json(invalid.clone()),
+        )
+        .await
+        .expect_err("signed principal reaches validation while under its rate limit");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&signed_token),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("signed principal exhausts its own bucket");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = submit_trace_handler(State(state), auth_headers(static_token), Json(invalid))
+        .await
+        .expect_err("static principal retains an independent bucket");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn db_backed_rate_limit_reset_waits_for_submit_test_lock() {
+    let lock = submit_rate_limit_test_lock().lock().await;
+    let mut reset = tokio::spawn(reset_account_rate_limiter_for_db_test());
+
+    tokio::time::timeout(StdDuration::from_millis(50), &mut reset)
+        .await
+        .expect_err("DB-backed reset must wait while a focused submit test owns the lock");
+
+    drop(lock);
+    tokio::time::timeout(StdDuration::from_secs(2), reset)
+        .await
+        .expect("DB-backed reset completes after the submit test releases the lock")
+        .expect("DB-backed reset task joins");
+}
+
+#[tokio::test]
+async fn submit_rate_limit_caps_in_flight_requests() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key,
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let mut in_flight = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        let state = state.clone();
+        let envelope = invalid.clone();
+        in_flight.push(tokio::spawn(async move {
+            submit_trace_handler(
+                State(state),
+                auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+                Json(envelope),
+            )
+            .await
+        }));
+    }
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("in-flight submission reaches the test pause")
+            .expect("test pause sender remains open");
+    }
+
+    let (status, Json(error)) = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        ),
+    )
+    .await
+    .expect("request beyond the concurrency cap returns without entering the pause")
+    .expect_err("request beyond the concurrency cap is denied");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "rate limited");
+
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(SUBMIT_PER_PRINCIPAL_CONCURRENCY as usize);
+    for task in in_flight {
+        let (status, _) = task
+            .await
+            .expect("in-flight submission task joins")
+            .expect_err("released invalid envelope reaches validation");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn submit_rate_limit_releases_guard_when_request_completes() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    configure_submit_rate_limits_for_test(&key, SUBMIT_PER_PRINCIPAL_LIMIT, 1);
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proceed = Arc::new(tokio::sync::Semaphore::new(0));
+    configure_submit_rate_limit_pause_for_test(Some(SubmitRateLimitTestPause {
+        key: key.clone(),
+        entered: entered_tx,
+        proceed: proceed.clone(),
+    }));
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let request = tokio::spawn(async move {
+        submit_trace_handler(
+            State(state),
+            auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+            Json(invalid),
+        )
+        .await
+    });
+    tokio::time::timeout(StdDuration::from_secs(2), entered_rx.recv())
+        .await
+        .expect("submission reaches the post-acquisition pause")
+        .expect("test pause sender remains open");
+
+    let handler_holds_only_slot = ACCOUNT_RATE_LIMITER.acquire(&key, 1).is_none();
+    configure_submit_rate_limit_pause_for_test(None);
+    proceed.add_permits(1);
+    let (status, _) = request
+        .await
+        .expect("submission task joins")
+        .expect_err("released invalid envelope reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        handler_holds_only_slot,
+        "the in-flight handler must own the configured submission slot"
+    );
+    let _released_slot = ACCOUNT_RATE_LIMITER
+        .acquire(&key, 1)
+        .expect("completed request releases its submission slot");
+}
+
+#[tokio::test]
+async fn submit_authentication_precedes_rate_limit_accounting() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let principal_ref = principal_storage_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(invalid.clone()),
+    )
+    .await
+    .expect_err("unauthenticated submission is rejected");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        0
+    );
+
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(invalid),
+    )
+    .await
+    .expect_err("authenticated request reaches validation");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        submit_rate_limit_count_for_test("tenant-a", TraceAuthMethod::StaticToken, &principal_ref),
+        1
+    );
+}
+
+#[tokio::test]
+async fn submit_under_rate_limits_succeeds_end_to_end() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+
+    let Json(receipt) = submit_trace_handler(
+        State(state),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission under both limits succeeds");
+
+    assert_eq!(receipt.status, "quarantined");
+    assert!(
+        read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .expect("submission record reads")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
@@ -4883,6 +6111,147 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         stored.contains(trace_commons_protocol::trace_contribution::SERVER_RESCRUB_PIPELINE_SUFFIX)
     );
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+#[tokio::test]
+async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id() {
+    // #214: same content-addressed submission_id; owned quarantined rows are
+    // remediable. Fresh ids for the same session are deliberately not minted.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut first);
+    // Force Medium via consent flags so the first landing is quarantined.
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    let Json(first_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(first.clone()),
+    )
+    .await
+    .expect("first submission quarantines");
+    assert_eq!(first_receipt.status, "quarantined");
+    let prior = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let prior_received_at = prior.received_at;
+
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    // Keep the same submission_id — remediation supersedes in place.
+    assert_eq!(corrected.submission_id, first.submission_id);
+
+    let Json(remediated) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(corrected.clone()),
+    )
+    .await
+    .expect("owned quarantined remediation supersedes");
+    assert_eq!(remediated.status, "accepted");
+
+    let record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.privacy_risk, ResidualPiiRisk::Low);
+    assert_eq!(
+        record.received_at, prior_received_at,
+        "remediation must preserve the original receipt timestamp"
+    );
+    assert_eq!(record.auth_principal_ref, prior.auth_principal_ref);
+
+    // Without ownership, another principal still gets the conflict.
+    let blocked = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a-2"),
+        Json(corrected),
+    )
+    .await
+    .expect_err("other principal cannot remediate");
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+
+    // Accepted rows stay classic-idempotent: a further POST returns the
+    // stored receipt without rewriting.
+    let mut again = sample_envelope().await;
+    again.submission_id = first.submission_id;
+    make_metadata_only_low_risk(&mut again);
+    again.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
+        .await
+        .expect("accepted remains idempotent");
+    assert_eq!(idempotent.status, "accepted");
+    let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        final_record.privacy_risk,
+        ResidualPiiRisk::Low,
+        "idempotent retry must not rewrite an accepted record"
+    );
+}
+
+#[tokio::test]
+async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    // Path-bearing content → Medium → quarantined under default pilot config.
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("medium-risk submission quarantines");
+    assert_eq!(receipt.status, "quarantined");
+
+    // Flip the pilot override after the row is stuck, then operator-rescrub
+    // so the same stored envelope reclassifies under current rules.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let Json(result) = review_quarantine_rescrub_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest {
+            reason: Some("pilot backlog reclassify".into()),
+        }),
+    )
+    .await
+    .expect("operator rescrub succeeds");
+    assert_eq!(result.submission_id, envelope.submission_id);
+    assert_eq!(result.prior_status, "quarantined");
+    assert!(result.changed);
+    assert_eq!(result.status, "accepted");
+    assert_eq!(result.privacy_risk, "medium");
+
+    let updated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(updated.status, TraceCorpusStatus::Accepted);
+    assert_eq!(updated.privacy_risk, ResidualPiiRisk::Medium);
+
+    // Dry-run batch leaves the record untouched when already accepted... but
+    // accepted rows are skipped by the quarantined filter. Confirm contributor
+    // cannot call the reviewer route.
+    let denied = review_quarantine_rescrub_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest { reason: None }),
+    )
+    .await
+    .expect_err("contributor cannot operator-rescrub");
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -5060,6 +6429,300 @@ async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
     .await
     .expect("owner can still revoke");
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// Withdrawal is not a punishment. Credit already awarded for a trace survives
+/// its revocation: the record flips to `Revoked` and `credit_points_final` is
+/// left exactly as it was. Settlement is gated on `status == Accepted`, not on
+/// this value, so leaving it alone changes no control -- only the receipt the
+/// contributor reads.
+#[tokio::test]
+async fn revocation_leaves_awarded_final_credit_unchanged() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(2.5);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after revocation")
+        .expect("record still exists after revocation");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(
+        revoked.credit_points_final,
+        Some(2.5),
+        "revocation must not claw back credit that was already awarded"
+    );
+}
+
+/// Revoked means the content is gone. Both the stored envelope body and the
+/// encrypted artifact are deleted; only the hash-only tombstone and the
+/// status-flipped metadata record remain.
+#[tokio::test]
+async fn revocation_deletes_stored_envelope_body_and_encrypted_artifact() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("encrypted artifact receipt is persisted");
+    let body_path = temp.path().join(&record.object_key);
+    assert!(body_path.exists(), "envelope body exists before revocation");
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_ok(),
+        "encrypted artifact reads before revocation"
+    );
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        !body_path.exists(),
+        "revocation must delete the stored envelope body"
+    );
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_err(),
+        "revocation must delete the encrypted artifact"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some(),
+        "the hash-only tombstone survives"
+    );
+}
+
+/// A deployment that cannot reach the store holding a record's ciphertext
+/// cannot make revocation mean anything, so it refuses rather than tombstoning
+/// the record and leaving the payload behind.
+#[tokio::test]
+async fn revocation_fails_closed_when_artifact_store_is_unconfigured() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state_with_store = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state_with_store),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds with an artifact store configured");
+
+    // Same root, no artifact store: the record still carries a receipt for
+    // ciphertext this process can no longer delete.
+    let state_without_store = test_state(temp.path().to_path_buf());
+    let error = revoke_trace_handler(
+        State(state_without_store),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect_err("revocation fails closed without a reachable artifact store");
+    assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        error
+            .1
+            .0
+            .error
+            .contains("trace_artifact_store_unconfigured"),
+        "the refusal names the missing control"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_none(),
+        "no tombstone is written when revocation is refused"
+    );
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_ne!(record.status, TraceCorpusStatus::Revoked);
+}
+
+/// The tombstone is hash-only: it carries the submission and tenant keys plus
+/// sha256 digests, never the contributor's identity, the storage path of the
+/// deleted object, or any trace content.
+#[tokio::test]
+async fn revocation_tombstone_carries_no_identity_path_or_content() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("tombstone lookup succeeds")
+        .expect("tombstone exists");
+    let serialized = serde_json::to_string(&tombstone).expect("tombstone serializes");
+    assert!(
+        !serialized.contains(&record.object_key),
+        "tombstone must not carry the storage path of the deleted object"
+    );
+    assert!(
+        !serialized.contains(record.auth_principal_ref.as_str()),
+        "tombstone must not carry contributor identity"
+    );
+    assert!(
+        !serialized.contains("Please inspect the workspace"),
+        "tombstone must not carry trace content"
+    );
+    for hash in [
+        tombstone.redaction_hash.as_deref(),
+        tombstone.canonical_summary_hash.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(
+            hash.starts_with("sha256:"),
+            "tombstone hashes are sha256 digests"
+        );
+    }
+}
+
+/// Revoking an already-revoked trace is a no-op that still answers 204: the
+/// content is already gone, so the second delete finds nothing, and the
+/// awarded credit is not touched on either pass.
+#[tokio::test]
+async fn revoking_twice_is_idempotent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(1.25);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+    let body_path = temp.path().join(&record.object_key);
+
+    let first = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("first revocation succeeds");
+    assert_eq!(first, StatusCode::NO_CONTENT);
+
+    let second = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("second revocation succeeds");
+    assert_eq!(second, StatusCode::NO_CONTENT);
+
+    assert!(!body_path.exists(), "content stays deleted");
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after two revocations")
+        .expect("record still exists");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(revoked.credit_points_final, Some(1.25));
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -5907,6 +7570,48 @@ fn parses_analytics_min_cell_count() {
         error
             .to_string()
             .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+    );
+}
+
+#[test]
+fn community_snapshot_interval_defaults_to_admin_triggered_only() {
+    // Absent, empty and 0 all mean the same thing: no worker, recompute
+    // stays admin-triggered. That is what every deployment had before the
+    // worker existed, so it has to remain reachable without deleting the
+    // config line.
+    assert!(
+        parse_community_snapshot_interval("")
+            .expect("empty parses")
+            .is_none()
+            && parse_community_snapshot_interval("0")
+                .expect("zero parses")
+                .is_none()
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_a_pointlessly_tight_schedule() {
+    let error = parse_community_snapshot_interval("30")
+        .expect_err("below the floor should be rejected at boot, not at runtime");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
+    );
+    assert_eq!(
+        parse_community_snapshot_interval("900").expect("15 minutes parses"),
+        Some(StdDuration::from_secs(900))
+    );
+}
+
+#[test]
+fn community_snapshot_interval_rejects_nonsense() {
+    let error = parse_community_snapshot_interval("every 15 minutes")
+        .expect_err("a non-numeric interval is a config error");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS)
     );
 }
 
@@ -7591,6 +9296,7 @@ fn required_postgres_trace_rls_gate_checks_expected_runtime_role_hash() {
 
 #[tokio::test]
 async fn admin_config_status_route_returns_safe_projection() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -8605,6 +10311,7 @@ async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_submitter_readiness_without_endpoint_secrets() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -8671,6 +10378,7 @@ async fn admin_config_status_reports_near_credit_submitter_readiness_without_end
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_confirmer_readiness_without_endpoint_secrets() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -8733,6 +10441,7 @@ async fn admin_config_status_reports_near_credit_confirmer_readiness_without_end
 
 #[tokio::test]
 async fn admin_config_status_reports_near_credit_outbox_scheduler_without_token_or_purpose() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -9490,6 +11199,7 @@ async fn admin_config_status_reports_process_evaluation_scheduler_without_secret
 
 #[tokio::test]
 async fn admin_config_status_reports_credit_cycle_scheduler_without_token_or_reason() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -9581,6 +11291,7 @@ async fn admin_config_status_reports_credit_cycle_scheduler_without_token_or_rea
 
 #[tokio::test]
 async fn admin_config_status_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -17458,6 +19169,7 @@ async fn export_job_scheduler_config_requires_export_worker_auth_at_startup() {
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_config_requires_utility_worker_auth_and_live_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
 
@@ -17557,6 +19269,7 @@ async fn near_credit_outbox_scheduler_config_requires_utility_worker_auth_and_li
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -17602,6 +19315,7 @@ async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_liv
 
 #[tokio::test]
 async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_live_contract() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
 
@@ -17694,6 +19408,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
 
 #[tokio::test]
 async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -18167,6 +19882,7 @@ async fn revocation_propagation_scheduler_config_requires_revocation_worker_auth
 
 #[tokio::test]
 async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -18244,6 +19960,7 @@ async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_nea
 
 #[tokio::test]
 async fn credit_cycle_scheduler_config_rejects_live_source_list_approval_mode() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -18316,6 +20033,7 @@ async fn credit_cycle_scheduler_config_rejects_live_source_list_approval_mode() 
 
 #[tokio::test]
 async fn credit_cycle_scheduler_requires_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -21146,6 +22864,7 @@ async fn operational_summary_reports_retention_scheduler_without_token_or_purpos
 
 #[tokio::test]
 async fn operational_summary_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     {
@@ -23519,6 +25238,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
 
 #[tokio::test]
 async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -23529,6 +25249,18 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
         tokens: Arc::new(tokens),
@@ -23557,6 +25289,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        community_snapshot_interval: None,
+        community_analytics_publication_basis:
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
         accept_medium_risk_submissions: false,
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
@@ -23622,6 +25357,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         credit_settlement_scheduler: None,
         process_evaluation_scheduler: None,
         revocation_propagation_scheduler: None,
+        community_snapshot_invalidation_scheduler: None,
         ranking_calibration_max_age: None,
         ranking_require_calibration_dataset_registry: false,
         ranking_require_active_calibration_dataset: false,
@@ -23644,6 +25380,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
+        account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -26574,6 +28312,7 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
 
 #[tokio::test]
 async fn revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -26889,8 +28628,10 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    assert!(propagation_items.iter().any(|item| {
-        item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+    // The canary trace had settled credit, and revocation left it settled: the
+    // drill proves the deletion effects landed without a clawback item.
+    assert!(propagation_items.iter().all(|item| {
+        item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
     }));
     assert!(propagation_items.iter().any(|item| {
         item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
@@ -26916,7 +28657,7 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     )
     .await
     .expect("revocation worker applies canary effects");
-    assert!(worker.completed >= 7);
+    assert!(worker.completed >= 6);
     assert_eq!(worker.failed, 0);
 
     let response = app(state.clone())
@@ -26951,8 +28692,12 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     );
     assert_eq!(value["object_deletion_refs_ready"], serde_json::json!(true));
     assert_eq!(value["blocking_gaps"], serde_json::json!([]));
-    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
-    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
+    // Zero is the ready state now: revocation does not claw back settled
+    // credit, so there is no reversal item, no reversal credit event, and no
+    // NEAR reverse receipt to verify.
+    assert_eq!(value["credit_reversal_item_count"], serde_json::json!(0));
+    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(0));
+    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(0));
     assert_eq!(value["object_delete_item_count"], serde_json::json!(6));
     assert_eq!(value["object_delete_done_count"], serde_json::json!(6));
     assert_eq!(value["deleted_object_ref_count"], serde_json::json!(6));
@@ -31669,6 +33414,7 @@ async fn admin_vector_entries_requires_configured_db() {
 
 #[tokio::test]
 async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_rows() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let settlement_batch_id = Uuid::new_v4();
@@ -33580,7 +35326,9 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     assert_eq!(statuses_after_revoke.len(), 1);
     assert_eq!(statuses_after_revoke[0].status, "revoked");
     assert_eq!(statuses_after_revoke[0].credit_points_ledger, 0.0);
-    assert_eq!(statuses_after_revoke[0].credit_points_final, Some(0.0));
+    // Revocation does not claw back the awarded figure; this record was never
+    // finalized, so it stays `None` rather than being punitively zeroed.
+    assert_eq!(statuses_after_revoke[0].credit_points_final, None);
     assert_eq!(statuses_after_revoke[0].credit_points_total, None);
     assert!(
         statuses_after_revoke[0]
@@ -33601,6 +35349,7 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
 
 #[tokio::test]
 async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_near_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -33765,6 +35514,7 @@ async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_nea
 
 #[tokio::test]
 async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_near_contract_id =
@@ -33870,6 +35620,7 @@ async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
 
 #[tokio::test]
 async fn credit_settlement_required_near_contract_blocks_live_without_config() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
@@ -33951,6 +35702,7 @@ async fn credit_settlement_required_near_contract_blocks_live_without_config() {
 
 #[tokio::test]
 async fn credit_settlement_rejects_unsafe_policy_version_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -33985,6 +35737,7 @@ async fn credit_settlement_rejects_unsafe_policy_version_before_side_effects() {
 
 #[tokio::test]
 async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
@@ -34121,6 +35874,7 @@ async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
 
 #[tokio::test]
 async fn credit_settlement_policy_allowlist_blocks_unapproved_issuer_approval_without_audit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
@@ -34182,6 +35936,7 @@ async fn credit_settlement_policy_allowlist_blocks_unapproved_issuer_approval_wi
 
 #[tokio::test]
 async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -34262,6 +36017,7 @@ async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
 
 #[tokio::test]
 async fn credit_settlement_approval_rejects_uppercase_hashes_without_audit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -34292,6 +36048,7 @@ async fn credit_settlement_approval_rejects_uppercase_hashes_without_audit() {
 
 #[tokio::test]
 async fn credit_settlement_approval_mirrors_typed_hash_only_audit_metadata() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -34361,6 +36118,7 @@ async fn credit_settlement_approval_mirrors_typed_hash_only_audit_metadata() {
 
 #[tokio::test]
 async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_writes() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -34451,6 +36209,7 @@ async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_
 
 #[tokio::test]
 async fn credit_settlement_can_require_central_issuer_approval_for_live_batches() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -34793,6 +36552,7 @@ async fn credit_settlement_can_require_central_issuer_approval_for_live_batches(
 
 #[tokio::test]
 async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -34953,6 +36713,7 @@ async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_co
 
 #[tokio::test]
 async fn contributor_credit_summary_nets_revocation_reversal_against_settled_balance() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -35127,6 +36888,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
 
 #[tokio::test]
 async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -35195,6 +36957,7 @@ async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_ef
 
 #[tokio::test]
 async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
@@ -35294,6 +37057,7 @@ async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outb
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_account_cap() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -35407,6 +37171,7 @@ async fn operational_summary_blocks_credit_settlement_without_account_cap() {
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_central_issuer_gate() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -35631,6 +37396,7 @@ async fn operational_summary_blocks_incomplete_central_issuer_profile_before_cre
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -35804,6 +37570,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_accounts() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36012,6 +37779,7 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
 
 #[tokio::test]
 async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36170,6 +37938,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth(
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36305,6 +38074,7 @@ async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
 
 #[tokio::test]
 async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36419,6 +38189,7 @@ async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -36510,6 +38281,7 @@ async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
@@ -36606,6 +38378,7 @@ async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_central_issuer_approval_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36830,6 +38603,7 @@ async fn credit_settlement_drill_requires_central_issuer_approval_when_configure
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_near_adapters_by_default() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -36964,6 +38738,7 @@ async fn credit_settlement_drill_requires_near_adapters_by_default() {
 
 #[tokio::test]
 async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37071,6 +38846,7 @@ async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
 
 #[tokio::test]
 async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37293,6 +39069,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
 
 #[tokio::test]
 async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_scope() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -37498,6 +39275,7 @@ async fn utility_credit_worker_route_rejects_reviewer_tokens_before_source_check
 
 #[tokio::test]
 async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_live_settlement() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -37618,6 +39396,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
 
 #[tokio::test]
 async fn credit_settlement_worker_run_respects_source_event_limit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37726,6 +39505,7 @@ async fn credit_settlement_worker_run_respects_source_event_limit() {
 
 #[tokio::test]
 async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -37880,6 +39660,7 @@ async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batc
 
 #[tokio::test]
 async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -38017,6 +39798,7 @@ async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch
 
 #[tokio::test]
 async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let tenant = test_reviewer_auth("tenant-a");
@@ -38085,6 +39867,7 @@ async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
 
 #[tokio::test]
 async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failure() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -38174,6 +39957,7 @@ async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failu
 
 #[tokio::test]
 async fn admin_credit_summary_counts_tenant_wide_settled_line_items() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut submissions = Vec::new();
@@ -40196,6 +41980,7 @@ async fn benchmark_registry_outbox_confirm_worker_keeps_oversized_failure_detail
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_confirmer = FakeNearCreditConfirmer::default();
@@ -40304,6 +42089,7 @@ async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_tick_submits_then_confirms_tenant_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -40372,6 +42158,7 @@ async fn near_credit_outbox_scheduler_tick_submits_then_confirms_tenant_outbox()
 
 #[tokio::test]
 async fn near_credit_outbox_scheduler_tick_dry_run_leaves_outbox_unchanged() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -40453,6 +42240,7 @@ async fn near_credit_outbox_scheduler_tick_dry_run_leaves_outbox_unchanged() {
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_rejects_mismatched_transaction_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
@@ -40498,6 +42286,7 @@ async fn near_credit_outbox_confirm_worker_rejects_mismatched_transaction_hash()
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_keeps_oversized_failure_detail_hash_only() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
@@ -40544,6 +42333,7 @@ async fn near_credit_outbox_confirm_worker_keeps_oversized_failure_detail_hash_o
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_confirmer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_confirmer = FakeNearCreditConfirmer::default();
@@ -40595,6 +42385,7 @@ async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_c
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_confirmed_transaction_hash_mismatch() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -40670,6 +42461,7 @@ async fn near_credit_outbox_mark_status_rejects_confirmed_transaction_hash_misma
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_malformed_transaction_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -40706,6 +42498,7 @@ async fn near_credit_outbox_mark_status_rejects_malformed_transaction_hash() {
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_oversized_error_detail_before_mutation() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let near_outbox_id = Uuid::new_v4();
@@ -40742,6 +42535,7 @@ async fn near_credit_outbox_mark_status_rejects_oversized_error_detail_before_mu
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_rejects_invalid_lifecycle_transitions() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let pending_outbox_id = Uuid::new_v4();
@@ -40807,6 +42601,7 @@ async fn near_credit_outbox_mark_status_rejects_invalid_lifecycle_transitions() 
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_requires_adapter_auth_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -40929,6 +42724,7 @@ async fn near_credit_outbox_mark_status_requires_adapter_auth_when_configured() 
 
 #[tokio::test]
 async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -40999,6 +42795,7 @@ async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
 
 #[tokio::test]
 async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_live_run() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let item = submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_1, 1_000_000);
@@ -41049,6 +42846,7 @@ async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_liv
 
 #[tokio::test]
 async fn near_credit_outbox_workers_require_adapter_auth_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41139,6 +42937,7 @@ async fn near_credit_outbox_workers_require_adapter_auth_when_configured() {
 
 #[tokio::test]
 async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41252,6 +43051,7 @@ async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live()
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitted() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41416,6 +43216,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_relayer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let fake_submitter = FakeNearCreditSubmitter::default();
@@ -41491,6 +43292,7 @@ async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_re
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
@@ -41573,6 +43375,7 @@ async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
 
 #[tokio::test]
 async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live_run() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -41620,6 +43423,7 @@ async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live
 
 #[tokio::test]
 async fn credit_settlement_requires_promotable_calibration_for_ranking_utility() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -41875,6 +43679,7 @@ async fn credit_settlement_requires_promotable_calibration_for_ranking_utility()
 
 #[tokio::test]
 async fn ranking_utility_settlement_requires_active_model() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -42013,6 +43818,7 @@ async fn ranking_utility_settlement_requires_active_model() {
 
 #[tokio::test]
 async fn ranking_utility_settlement_requires_prediction_ref() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -44168,6 +45974,7 @@ async fn ranking_prediction_credit_run_cannot_override_calibration_label_actor_u
 
 #[tokio::test]
 async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, prediction) =
@@ -44360,6 +46167,7 @@ async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_en
 
 #[tokio::test]
 async fn ranking_credit_paths_block_cold_start_calibration_labelers_when_support_gate_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, prediction) =
@@ -44690,6 +46498,7 @@ async fn ranking_prediction_credit_worker_requires_active_positive_prediction() 
 
 #[tokio::test]
 async fn ranking_credit_paths_reject_stale_or_underdiverse_calibration_when_gates_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -46703,6 +48512,7 @@ async fn seed_pairwise_ranking_prediction_source(
 
 #[tokio::test]
 async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let issuer_approval_evidence_hash = sha256_prefixed("credit-cycle-issuer-approval");
@@ -46855,6 +48665,7 @@ async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
 
 #[tokio::test]
 async fn credit_cycle_worker_can_submit_and_confirm_near_outbox() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -46925,6 +48736,7 @@ async fn credit_cycle_worker_can_submit_and_confirm_near_outbox() {
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_issuer_approval_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -46989,6 +48801,7 @@ async fn credit_cycle_worker_requires_issuer_approval_before_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_central_issuer_profile_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -47053,6 +48866,7 @@ async fn credit_cycle_worker_requires_central_issuer_profile_before_side_effects
 
 #[tokio::test]
 async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
@@ -47118,6 +48932,7 @@ async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effe
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -47182,6 +48997,7 @@ async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_req
 
 #[tokio::test]
 async fn credit_cycle_scheduler_runs_next_eligible_model() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -47292,6 +49108,7 @@ async fn credit_cycle_scheduler_runs_next_eligible_model() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_only_reports_eligible_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) =
@@ -47354,6 +49171,7 @@ async fn credit_cycle_scheduler_preflight_only_reports_eligible_without_side_eff
 
 #[tokio::test]
 async fn credit_cycle_scheduler_tick_preflights_next_model_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -47415,6 +49233,7 @@ async fn credit_cycle_scheduler_tick_preflights_next_model_without_side_effects(
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -47486,6 +49305,7 @@ async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_prof
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_reports_rollout_smoke_not_ready_when_required() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
@@ -47566,6 +49386,7 @@ async fn credit_cycle_scheduler_preflight_reports_rollout_smoke_not_ready_when_r
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -47672,6 +49493,7 @@ async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_pairwise_labels_from_single_actor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
@@ -47808,6 +49630,7 @@ async fn credit_cycle_scheduler_preflight_blocks_pairwise_labels_from_single_act
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_cold_start_calibration_labelers() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -47876,6 +49699,7 @@ async fn credit_cycle_scheduler_preflight_blocks_cold_start_calibration_labelers
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_legacy_training_calibration_overlap() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -47948,6 +49772,7 @@ async fn credit_cycle_scheduler_preflight_blocks_legacy_training_calibration_ove
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_blocks_missing_calibration_dataset_registry() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_ready_candidate(
@@ -48016,6 +49841,7 @@ async fn credit_cycle_scheduler_preflight_blocks_missing_calibration_dataset_reg
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_min_label_floor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_label_count = 2;
@@ -48082,6 +49908,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_min_label_floor() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_confidence_floor() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_confidence_threshold = 0.95;
@@ -48150,6 +49977,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_confidence_floor() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_preflight_applies_server_error_ceiling() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_max_average_absolute_error_micros = 50_000;
@@ -48234,6 +50062,7 @@ async fn credit_cycle_scheduler_preflight_applies_server_error_ceiling() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_live_skips_incomplete_central_issuer_profile() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
@@ -48307,6 +50136,7 @@ async fn credit_cycle_scheduler_live_skips_incomplete_central_issuer_profile() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_live_skips_source_list_approval_gate_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
@@ -48384,6 +50214,7 @@ async fn credit_cycle_scheduler_live_skips_source_list_approval_gate_before_clai
 
 #[tokio::test]
 async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_before_discovery() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -48436,6 +50267,7 @@ async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_befor
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_live_claim_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let Json(candidate) = ranking_model_version_handler(
@@ -48539,6 +50371,7 @@ async fn credit_cycle_scheduler_skips_live_claim_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_rejects_contributors_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -48586,6 +50419,7 @@ async fn credit_cycle_scheduler_rejects_contributors_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_rejects_invalid_limit_without_claiming_work() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -48631,6 +50465,7 @@ async fn credit_cycle_scheduler_rejects_invalid_limit_without_claiming_work() {
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_candidate_without_ranking_evidence_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let Json(candidate) = ranking_model_version_handler(
@@ -48715,6 +50550,7 @@ async fn credit_cycle_scheduler_skips_candidate_without_ranking_evidence_before_
 
 #[tokio::test]
 async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) = seed_credit_cycle_candidate_with_prediction(
@@ -48805,6 +50641,7 @@ async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_cla
 
 #[tokio::test]
 async fn credit_cycle_scheduler_skips_pairwise_policy_risk_before_claiming() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
@@ -48866,6 +50703,7 @@ async fn credit_cycle_scheduler_skips_pairwise_policy_risk_before_claiming() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -48918,6 +50756,7 @@ async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_oversized_reason_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -48973,6 +50812,7 @@ async fn credit_cycle_worker_rejects_oversized_reason_without_side_effects() {
 
 #[tokio::test]
 async fn credit_cycle_worker_rejects_overlapping_live_cycle_without_side_effects() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let active_cycle_id = Uuid::new_v4();
@@ -49064,6 +50904,7 @@ async fn credit_cycle_worker_rejects_overlapping_live_cycle_without_side_effects
 
 #[tokio::test]
 async fn credit_cycle_worker_marks_failed_when_later_step_fails() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
 
@@ -49954,6 +51795,7 @@ async fn ranking_model_promotion_rejects_nonpromotable_calibration() {
 
 #[tokio::test]
 async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut envelope = sample_envelope().await;
@@ -50028,6 +51870,7 @@ async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection
 
 #[tokio::test]
 async fn admin_credit_hold_release_unblocks_settlement() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -50190,6 +52033,7 @@ async fn admin_credit_hold_release_unblocks_settlement() {
 
 #[tokio::test]
 async fn admin_credit_hold_routes_are_tenant_scoped() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -50319,6 +52163,7 @@ async fn admin_credit_hold_routes_are_tenant_scoped() {
 
 #[tokio::test]
 async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configured() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_near_contract_id =
@@ -50447,6 +52292,7 @@ async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configu
 
 #[tokio::test]
 async fn credit_hold_mutations_require_authorized_central_issuer() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
@@ -50457,6 +52303,18 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
         TokenRole::Reviewer,
     );
     insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+    // A second admin tenant, used only by the settlement in-process-lock
+    // test. That test must HOLD the settlement lock while calling the
+    // handler, and the lock is process-global and keyed by tenant -- so
+    // holding tenant-a's lock fails every other settlement test that runs in
+    // parallel with it. Giving it its own tenant keeps the contention real
+    // and local.
+    insert_token(
+        &mut tokens,
+        "tenant-lock",
+        "admin-token-lock",
+        TokenRole::Admin,
+    );
     insert_token(
         &mut tokens,
         "tenant-a",
@@ -51211,6 +53069,7 @@ async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db()
 
 #[tokio::test]
 async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -51641,7 +53500,8 @@ fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
+async fn revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -51714,58 +53574,55 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
     .expect("contributor can revoke settled trace");
     assert_eq!(revoke_status, StatusCode::NO_CONTENT);
 
+    // Settled credit is NOT clawed back when the contributor withdraws the
+    // trace. Revocation removes the trace from the commons and deletes its
+    // content; it does not reach back onto the chain. No reversal propagation
+    // item is enqueued, so the worker has nothing to reverse, no negative
+    // credit event appears, and no `reverse_credit_receipt` NEAR outbox row is
+    // written.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(reversal_items[0].source_submission_id, submission_id);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: event.event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a settled-credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_settled_credit_for_revocation".to_string()),
+            purpose: Some("drain_revocation_propagation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
         .expect("DB credit events read");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!("revocation_credit_reversal:{}", event.event_id))
-        })
-        .expect("reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
+                != Some(&format!("revocation_credit_reversal:{}", event.event_id))
+        }),
+        "revocation must not mirror a reversal credit event"
     );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
+    let settled_event = db_credit_events
+        .iter()
+        .find(|record| record.credit_event_id == event.event_id)
+        .expect("the settled credit event survives revocation");
+    assert_eq!(
+        settled_event.settlement_state,
+        StorageTraceCreditSettlementState::Final
+    );
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -51780,29 +53637,19 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
             .iter()
             .any(|item| item.near_call.method_name == "settle_credit_receipt")
     );
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
-    );
-    assert_eq!(
-        reverse_items[0].status,
-        StorageTraceCreditSettlementNearStatus::Pending
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and_near_receipt() {
+async fn revocation_leaves_settled_benchmark_conversion_credit_intact() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -51894,63 +53741,46 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
     .await
     .expect("contributor can revoke settled benchmark source");
 
+    // A settled benchmark-conversion credit survives the contributor
+    // withdrawing the source trace: no reversal item, no negative credit event,
+    // no NEAR reverse receipt, and the contributor's settled balance is intact.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: benchmark_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a benchmark credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_benchmark_credit_for_revocation".to_string()),
+            purpose: Some("drain_benchmark_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled benchmark credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after benchmark credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after benchmark revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{benchmark_credit_event_id}"
                 ))
-        })
-        .expect("benchmark conversion reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::BenchmarkConversion
+        }),
+        "revocation must not mirror a benchmark reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-2.0000");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -51960,39 +53790,27 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(2_000_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[benchmark_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 2.0);
 
     let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects benchmark reversal");
-    assert_eq!(credit.credit_points_settled, 0.0);
-    assert_eq!(credit.credit_points_reversed, 2.0);
-    assert_eq!(credit.credit_points_total, 0.0);
+        .expect("credit summary keeps settled benchmark credit");
+    assert_eq!(credit.credit_points_settled, 2.0);
+    assert_eq!(credit.credit_points_reversed, 0.0);
+    assert_eq!(credit.credit_points_total, 2.0);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near_receipt() {
+async fn revocation_leaves_settled_ranking_utility_credit_intact() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -52104,63 +53922,45 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
     .await
     .expect("contributor can revoke settled ranking source");
 
+    // Settled ranking-utility credit is likewise untouched by a contributor
+    // withdrawing the source trace.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", prediction.submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: ranking_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a ranking credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_ranking_credit_for_revocation".to_string()),
+            purpose: Some("drain_ranking_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled ranking credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after ranking credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after ranking revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{ranking_credit_event_id}"
                 ))
-        })
-        .expect("ranking utility reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, prediction.submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::RankingUtility
+        }),
+        "revocation must not mirror a ranking reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -52170,33 +53970,20 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[ranking_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 1.25);
 
     let Json(credit_summary) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects ranking reversal");
-    assert_eq!(credit_summary.credit_points_settled, 0.0);
-    assert_eq!(credit_summary.credit_points_reversed, 1.25);
-    assert_eq!(credit_summary.credit_points_total, 0.0);
+        .expect("credit summary keeps settled ranking credit");
+    assert_eq!(credit_summary.credit_points_settled, 1.25);
+    assert_eq!(credit_summary.credit_points_reversed, 0.0);
+    assert_eq!(credit_summary.credit_points_total, 1.25);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -55901,6 +57688,7 @@ async fn active_ranking_model_risk_report_flags_required_calibration_dataset_reg
 
 #[tokio::test]
 async fn active_ranking_model_risk_report_flags_post_calibration_evidence_drift() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let mut calibration_envelope = sample_envelope().await;
@@ -56909,6 +58697,7 @@ async fn active_ranking_model_risk_report_flags_legacy_calibration_label_actor_u
 
 #[tokio::test]
 async fn ranking_utility_settlement_blocks_uncleared_active_model_risk() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let (candidate, _) =
@@ -58579,6 +60368,7 @@ async fn operational_summary_blocks_required_worker_cache_invalidator_without_ad
 
 #[tokio::test]
 async fn admin_operational_summary_and_metrics_report_near_credit_outbox_readiness() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -63363,6 +65153,7 @@ async fn score_one_submission_skips_duplicate_ci_without_postgres() {
 /// the most direct verification available for a pure hash-only log line.
 #[tokio::test]
 async fn score_one_submission_failed_scorer_bumps_attempt_count_ci_without_postgres() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
     let (artifact_store, _object_store_name) =
@@ -67693,7 +69484,13 @@ async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
 #[test]
 fn community_publication_blocks_when_min_cell_count_is_unset() {
     // Absent config parses to 0, which disables suppression entirely.
-    let missing = community_publication_missing_controls(0, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
@@ -67701,19 +69498,358 @@ fn community_publication_blocks_when_min_cell_count_is_unset() {
 fn community_publication_blocks_when_min_cell_count_is_one() {
     // A threshold of 1 admits every opted-in row: the SQL HAVING
     // clause is satisfied by a cell of size one.
-    let missing = community_publication_missing_controls(1, 4, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        4,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]);
 }
 
 #[test]
+fn community_roster_publishes_without_an_approved_noise_mechanism() {
+    // The whole point of the split. Everyone on the roster holds
+    // public_attribution consent: their handle and counts being public
+    // is what they asked for, so a mechanism that exists to protect
+    // people who made no such choice is not the control that applies.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "roster should publish on consent + cohort shape alone, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_analytics_still_blocks_where_the_roster_publishes() {
+    // Same inputs, opposite answer. If these two ever agree, the split
+    // has collapsed and analytics are riding out on the roster's gate.
+    let inputs = (2usize, 2usize, false);
+    let roster = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    let analytics = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        inputs.0,
+        inputs.1,
+        inputs.2,
+    );
+    assert!(roster.is_empty());
+    assert_eq!(analytics, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
+}
+
+#[test]
+fn roster_payload_strips_aggregates_a_pregate_snapshot_still_carries() {
+    // The bug this exists to prevent, found in production: recompute
+    // writes analytics: null when they are withheld, but a snapshot
+    // written before that gate existed already has them populated. The
+    // roster's weaker gate would then hand out aggregates computed under
+    // no approved mechanism.
+    let stored = serde_json::json!({
+        "leaderboard": [{"display_handle": "someone", "rank": 1}],
+        "analytics": {"total_submissions": 41, "total_accepted": 40},
+    });
+    let redacted = redact_withheld_analytics(stored, &[COMMUNITY_NOISE_MECHANISM_CONTROL]);
+
+    assert_eq!(redacted["analytics"], serde_json::Value::Null);
+    assert_eq!(
+        redacted["privacy"]["analytics_withheld_controls"],
+        serde_json::json!([COMMUNITY_NOISE_MECHANISM_CONTROL]),
+        "a reader must be able to tell withheld from no activity"
+    );
+    // The roster itself is untouched: those people consented.
+    assert_eq!(redacted["leaderboard"][0]["display_handle"], "someone");
+}
+
+#[test]
+fn roster_payload_keeps_aggregates_once_analytics_are_publishable() {
+    let stored = serde_json::json!({"analytics": {"total_submissions": 41}});
+    let kept = redact_withheld_analytics(stored, &[]);
+    assert_eq!(kept["analytics"]["total_submissions"], 41);
+}
+
+fn analytics_summary_fixture() -> trace_commons_server::db::CorpusAnalyticsSummary {
+    trace_commons_server::db::CorpusAnalyticsSummary {
+        total_submissions: 43,
+        total_accepted: 40,
+        total_rejected: 3,
+        accept_rate: 0.93,
+        novelty_histogram: vec![(0, 0), (100_000, 1), (200_000, 2), (300_000, 37)],
+        gate_outcomes: vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2),
+            ("perplexity_failed".to_string(), 1),
+            ("both_failed".to_string(), 0),
+        ],
+    }
+}
+
+#[test]
+fn publication_basis_defaults_to_requiring_a_mechanism() {
+    // Publishing without a mechanism must be something an operator opts
+    // into, never something a deployment falls into by leaving a variable
+    // unset or empty.
+    assert_eq!(
+        parse_community_analytics_publication_basis("").expect("empty parses"),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("approved_noise_mechanism").unwrap(),
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism
+    );
+    assert_eq!(
+        parse_community_analytics_publication_basis("suppression_only").unwrap(),
+        CommunityAnalyticsPublicationBasis::SuppressionOnly
+    );
+    assert!(
+        parse_community_analytics_publication_basis("none").is_err(),
+        "an unrecognised basis must fail at boot rather than pick one"
+    );
+}
+
+#[test]
+fn suppression_only_waives_the_mechanism_but_never_the_cell_floor() {
+    // Under this basis cell suppression stops being one control among
+    // several and becomes the only thing between a published aggregate and
+    // a small group, so the floor is required, not relaxed.
+    assert!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            2,
+            1,
+            false,
+        )
+        .is_empty(),
+        "suppression_only should publish at min-cell 2 with one tenant and no mechanism"
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::SuppressionOnly,
+            1,
+            9,
+            true,
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT],
+        "the cell floor is never waived under suppression_only"
+    );
+}
+
+fn snapshot_row_with_privacy(
+    privacy: serde_json::Value,
+) -> trace_commons_server::db::LeaderboardSnapshotRow {
+    trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({ "privacy": privacy }),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    }
+}
+
+#[test]
+fn a_malformed_publication_basis_falls_back_to_strict() {
+    // The serve gate parses the stored basis permissively and falls back to
+    // the strict one. That is deliberate: an unreadable provenance field must
+    // never be the reason aggregates publish. Pinned because the failure mode
+    // is silent by construction - nothing errors, it just gets stricter.
+    for malformed in [
+        serde_json::json!("banana"),
+        serde_json::json!(null),
+        serde_json::json!(7),
+        serde_json::json!({"nested": true}),
+    ] {
+        let row = snapshot_row_with_privacy(
+            serde_json::json!({"tenant_cohort_size": 9, "publication_basis": malformed}),
+        );
+        assert_eq!(
+            community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+            vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+            "a basis of {malformed} must be read as strict, not as permission to publish"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_keeps_the_basis_it_was_published_under() {
+    // The serve gate reads the stored snapshot, never live config, so
+    // changing the operator setting cannot retroactively re-license an
+    // artifact in either direction.
+    let permissive = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 1,
+        "publication_basis": "suppression_only",
+    }));
+    assert!(
+        community_snapshot_missing_controls(&permissive, CommunitySurface::Analytics).is_empty(),
+        "a snapshot published under suppression_only stays servable when config turns strict"
+    );
+
+    let strict = snapshot_row_with_privacy(serde_json::json!({
+        "tenant_cohort_size": 9,
+        "publication_basis": "approved_noise_mechanism",
+    }));
+    assert_eq!(
+        community_snapshot_missing_controls(&strict, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "a snapshot published under the strict basis is not loosened by permissive config"
+    );
+}
+
+#[test]
+fn a_pregate_snapshot_is_not_read_as_suppression_only() {
+    // The basis is absent on snapshots written before it existed. Defaulting
+    // those to the strict basis keeps an old artifact from being served as
+    // though someone had chosen to publish it without a mechanism.
+    let row = trace_commons_server::db::LeaderboardSnapshotRow {
+        snapshot_id: Uuid::new_v4(),
+        computed_at: Utc::now(),
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: serde_json::json!({"privacy": {"tenant_cohort_size": 9}}),
+        contents_sha256: "sha256:deadbeef".to_string(),
+        min_cell_count: 2,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
+        vec![COMMUNITY_NOISE_MECHANISM_CONTROL],
+        "an absent basis must fall back to requiring a mechanism"
+    );
+}
+
+#[test]
+fn community_analytics_cells_below_the_floor_are_suppressed() {
+    // The floor gated whether analytics could publish, but nothing applied
+    // it to what was published: compute_corpus_analytics_summary takes no
+    // min-cell argument, so a bucket holding one record went out at its
+    // true count.
+    let mut summary = analytics_summary_fixture();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 2);
+
+    assert_eq!(suppressed, 4, "0, 1, 1 and 0 valued cells should all go");
+    assert_eq!(summary.novelty_histogram, vec![(200_000, 2), (300_000, 37)]);
+    assert_eq!(
+        summary.gate_outcomes,
+        vec![
+            ("both_passed".to_string(), 40),
+            ("novelty_failed".to_string(), 2)
+        ]
+    );
+    // Totals are the top-level sums and are deliberately left alone.
+    assert_eq!(summary.total_submissions, 43);
+}
+
+#[test]
+fn a_floor_of_one_leaves_the_histogram_shape_intact() {
+    // A floor of 1 suppresses nothing by definition, and must not strip the
+    // empty buckets that give the distribution its shape. Getting this wrong
+    // would silently reshape every chart on the analytics page.
+    let mut summary = analytics_summary_fixture();
+    let before = summary.novelty_histogram.clone();
+    let suppressed = suppress_small_community_analytics_cells(&mut summary, 1);
+
+    assert_eq!(suppressed, 0);
+    assert_eq!(summary.novelty_histogram, before);
+    assert_eq!(summary.gate_outcomes.len(), 4);
+}
+
+#[test]
+fn community_roster_publishes_a_single_tenant_cohort_at_min_cell_one() {
+    // The pilot's real shape: one tenant, min-cell 1, no mechanism. Every
+    // person on the roster individually asked to be listed, so neither the
+    // cohort size nor a cell of one tells us anything about consent.
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Roster,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        1,
+        1,
+        false,
+    );
+    assert!(
+        missing.is_empty(),
+        "a consented single-tenant roster should publish, got {missing:?}"
+    );
+}
+
+#[test]
+fn community_roster_still_blocks_a_zero_min_cell() {
+    // Not a privacy floor, a sanity one: at 0 the HAVING clause admits
+    // contributors with nothing accepted in the window.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Roster,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            0,
+            2,
+            false
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+}
+
+#[test]
+fn community_analytics_keeps_both_cohort_floors() {
+    // Everything the roster stopped enforcing is still enforced here,
+    // because these aggregates cover people who never opted into anything.
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            1,
+            2,
+            true
+        ),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
+    );
+    assert_eq!(
+        community_publication_missing_controls(
+            CommunitySurface::Analytics,
+            CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+            2,
+            1,
+            true
+        ),
+        vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]
+    );
+}
+
+#[test]
 fn community_publication_blocks_on_unapproved_noise_mechanism() {
-    let missing = community_publication_missing_controls(4, 4, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        4,
+        false,
+    );
     assert_eq!(missing, vec![COMMUNITY_NOISE_MECHANISM_CONTROL]);
 }
 
 #[test]
 fn community_publication_blocks_single_tenant_cohort() {
-    let missing = community_publication_missing_controls(4, 1, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        4,
+        1,
+        true,
+    );
     assert_eq!(missing, vec![TRACE_COMMONS_COMMUNITY_TENANT_IDS]);
 }
 
@@ -67722,7 +69858,13 @@ fn community_publication_reports_every_missing_control_at_once() {
     // The pilot's actual configuration: no min-cell value, one tenant,
     // placeholder seed. An operator should see all three, not just the
     // first, so a single fix does not look like it unblocked the path.
-    let missing = community_publication_missing_controls(0, 1, false);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        0,
+        1,
+        false,
+    );
     assert_eq!(
         missing,
         vec![
@@ -67735,7 +69877,13 @@ fn community_publication_reports_every_missing_control_at_once() {
 
 #[test]
 fn community_publication_allows_a_fully_configured_cohort() {
-    let missing = community_publication_missing_controls(2, 2, true);
+    let missing = community_publication_missing_controls(
+        CommunitySurface::Analytics,
+        CommunityAnalyticsPublicationBasis::ApprovedNoiseMechanism,
+        2,
+        2,
+        true,
+    );
     assert!(
         missing.is_empty(),
         "min-cell 2, cohort 2 and an approved mechanism should publish, got {missing:?}"
@@ -67770,7 +69918,7 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
         min_cell_count: 0,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    let missing = community_snapshot_missing_controls(&row);
+    let missing = community_snapshot_missing_controls(&row, CommunitySurface::Analytics);
     assert_eq!(
         missing,
         vec![
@@ -67778,6 +69926,15 @@ fn community_snapshot_written_before_privacy_metadata_is_not_publishable() {
             COMMUNITY_NOISE_MECHANISM_CONTROL,
             TRACE_COMMONS_COMMUNITY_TENANT_IDS,
         ]
+    );
+    // And the roster surface refuses it too, which is the point: the split
+    // must not become a way for a snapshot predating the privacy block to
+    // reach the public read path. It reports one control rather than two
+    // now that cohort size is an analytics concern, but a pre-gate snapshot
+    // records min_cell_count 0 and so is still refused.
+    assert_eq!(
+        community_snapshot_missing_controls(&row, CommunitySurface::Roster),
+        vec![TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT]
     );
 }
 
@@ -67800,7 +69957,7 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         noise_seed_hash: "v1:calibrated_laplace:abcd".to_string(),
     };
     assert_eq!(
-        community_snapshot_missing_controls(&row),
+        community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
 }
@@ -67826,6 +69983,56 @@ async fn community_snapshot_recompute_requires_admin_token() {
         .expect("response");
     // token-a is a contributor token in the test fixture; admin is required.
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn community_snapshot_freshness_refuses_beyond_published_bound() {
+    let computed_at = Utc::now() - Duration::seconds(901);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), None);
+    assert_eq!(failure, Some("snapshot_exceeds_published_bound"));
+}
+
+#[test]
+fn community_snapshot_freshness_accepts_snapshot_within_bound() {
+    let computed_at = Utc::now() - Duration::seconds(60);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), None);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn community_snapshot_freshness_refuses_pre_invalidation_snapshot() {
+    let computed_at = Utc::now() - Duration::seconds(30);
+    let pending = Some(Utc::now() - Duration::seconds(10));
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), pending);
+    assert_eq!(failure, Some("snapshot_invalidated_by_withdrawal"));
+}
+
+#[test]
+fn community_snapshot_freshness_accepts_snapshot_after_invalidation() {
+    let pending = Some(Utc::now() - Duration::seconds(30));
+    let computed_at = Utc::now() - Duration::seconds(5);
+    let failure = community_snapshot_freshness_failure(computed_at, Utc::now(), pending);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn community_snapshot_max_age_matches_published_bound() {
+    assert_eq!(COMMUNITY_SNAPSHOT_MAX_AGE, Duration::seconds(900));
+}
+
+#[test]
+fn community_snapshot_invalidation_scheduler_parses_when_community_enabled() {
+    let config = parse_community_snapshot_invalidation_scheduler_config(true)
+        .expect("scheduler config parses");
+    let config = config.expect("enabled community surface enables drain scheduler");
+    assert_eq!(config.interval.as_secs(), 900);
+}
+
+#[test]
+fn community_snapshot_invalidation_scheduler_absent_when_community_disabled() {
+    let config = parse_community_snapshot_invalidation_scheduler_config(false)
+        .expect("scheduler config parses");
+    assert!(config.is_none());
 }
 
 #[tokio::test]
@@ -68060,9 +70267,11 @@ async fn confirm_deny_respects_timing_floor() {
     let start = std::time::Instant::now();
     let response = confirm_login_handler(
         State(state.clone()),
-        cross_site,
+        with_login_ceremony(cross_site),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "bogus".to_string(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -68103,8 +70312,12 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
     for _ in 0..CONFIRM_PER_CODE_LIMIT {
         let resp = confirm_login_handler(
             State(state.clone()),
-            same_origin.clone(),
-            ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+            with_login_ceremony(same_origin.clone()),
+            ConfirmLoginForm(ConfirmLoginBody {
+                code: code.clone(),
+                native: None,
+                ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+            }),
         )
         .await
         .into_response();
@@ -68112,8 +70325,12 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
     }
     let exhausted = confirm_login_handler(
         State(state.clone()),
-        same_origin,
-        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        with_login_ceremony(same_origin),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: code.clone(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
     )
     .await
     .into_response();
@@ -73695,6 +75912,7 @@ async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
 
 #[tokio::test]
 async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     // Disabled mode == no submitter configured. The worker refuses (cannot advance)
     // and the pending row stays pending; credit is never marked submitted.
@@ -73732,6 +75950,7 @@ async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
 
 #[tokio::test]
 async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     // DryRun mode wires the in-process deterministic submitter + confirmer.
@@ -73819,6 +76038,7 @@ async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
 
 #[tokio::test]
 async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -73852,6 +76072,7 @@ async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
 
 #[tokio::test]
 async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
@@ -73893,6 +76114,7 @@ async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
 
 #[tokio::test]
 async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -74066,6 +76288,7 @@ impl TraceNearCreditSubmitter for BlockingCountingNearCreditSubmitter {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submit() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -74209,6 +76432,7 @@ async fn settlement_submit_worker_advisory_lock_prevents_concurrent_double_submi
 /// external submitter fires EXACTLY ONCE total for the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -74341,6 +76565,7 @@ async fn settlement_submit_worker_reads_under_lock_skips_already_submitted_row()
 /// allow-list still writes unconditionally.
 #[tokio::test]
 async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).near_credit_submitter =
@@ -74420,6 +76645,7 @@ async fn near_credit_outbox_status_update_guard_blocks_advancing_submitted_row()
 /// external submitter for it — the external submitter fires zero times here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -74558,6 +76784,7 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
 /// worker must REFUSE (503 missing-control) and mutate nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -75514,6 +77741,7 @@ async fn mint_login_link_account_for_subject(
 /// when neither is set. Run with `--test-threads=1`.
 #[tokio::test]
 async fn per_user_subjects_resolve_to_distinct_accounts() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -79738,4 +81966,1544 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
         apply_credit_settlement_account_cap(vec![event("solo", 1.5)], cap, &HashMap::new());
     assert!(over.is_empty());
     assert_eq!(over_excluded, 1);
+}
+
+/// The dedup index must be held as a trait object so Phase 2 can substitute a
+/// remote implementation without touching AppState's shape.
+///
+/// This is a compile-time assertion. `Option<Arc<UsearchVectorIndex>>` does NOT
+/// coerce to `Option<Arc<dyn VectorIndex>>` — unsizing does not reach through
+/// `Option` — so this fails to build until the builder's return type changes.
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+#[test]
+fn dedup_vector_index_builder_returns_a_trait_object() {
+    use std::sync::Arc;
+    use trace_commons_gate_enclave::VectorIndex;
+
+    let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
+}
+
+// --- Loopback native-app sign-in -------------------------------------------
+//
+// These tests are the attack list from the design, not the happy path alone:
+// an intercepted code without the verifier, a replayed code, a mismatched
+// request handle, a browser cookie secret presented as a bearer, an expired
+// token, and `revoke-all`. They run WITHOUT PostgreSQL — the account suite's
+// pg-gated tests silently skip when no database is configured, and the checks
+// below are exactly the ones that must never be skipped.
+//
+// Redirect matching is unit-tested exhaustively in
+// `trace_commons_server::account_native_auth`, against every non-loopback
+// spelling; the handler-level test here pins that the endpoint actually calls
+// that validator.
+
+#[derive(Clone)]
+struct NativeTestSession {
+    tenant_id: String,
+    account_id: Uuid,
+    token_hash: String,
+    client_kind: String,
+    expires_at: DateTime<Utc>,
+    revoked: bool,
+}
+
+/// In-memory `Database` covering only the handful of calls the native sign-in
+/// flow makes. Everything else keeps the trait's fail-closed default.
+#[derive(Default)]
+struct NativeAuthTestDb {
+    sessions: std::sync::Mutex<Vec<NativeTestSession>>,
+}
+
+impl NativeAuthTestDb {
+    fn session_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Insert a session row directly, so a test can pin an ALREADY-expired or
+    /// non-native session without waiting or reaching for a second code path.
+    fn insert_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        token_hash: &str,
+        client_kind: &str,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.sessions.lock().unwrap().push(NativeTestSession {
+            tenant_id: tenant_id.to_string(),
+            account_id,
+            token_hash: token_hash.to_string(),
+            client_kind: client_kind.to_string(),
+            expires_at,
+            revoked: false,
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl Database for NativeAuthTestDb {
+    async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        _p: trace_commons_server::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<trace_commons_server::db::InstanceEnrollmentOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("stub".into()))
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
+
+    async fn get_device_key(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<trace_commons_server::db::DeviceKeyRecord>, DatabaseError> {
+        Ok(None)
+    }
+
+    async fn issue_native_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: trace_commons_server::db::NewSession<'_>,
+        _audit: trace_commons_server::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        self.insert_session(
+            tenant_id,
+            account_id,
+            session.token_hash,
+            session.client_kind,
+            session.expires_at,
+        );
+        Ok(())
+    }
+
+    async fn validate_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<Option<trace_commons_server::db::ValidatedSession>, DatabaseError> {
+        let now = Utc::now();
+        let sessions = self.sessions.lock().unwrap();
+        Ok(sessions
+            .iter()
+            .find(|s| {
+                s.tenant_id == tenant_id
+                    && s.token_hash == token_hash
+                    && !s.revoked
+                    && s.expires_at > now
+            })
+            .map(|s| trace_commons_server::db::ValidatedSession {
+                account_id: s.account_id,
+                auth_credential_id: None,
+                client_kind: s.client_kind.clone(),
+                rotated_secret: None,
+            }))
+    }
+
+    async fn expand_account_principals(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+    ) -> Result<AccountPrincipalSet, DatabaseError> {
+        Ok(AccountPrincipalSet::from_iter_for_test_only([
+            "principal_sha256:native-test".to_string(),
+        ]))
+    }
+
+    async fn revoke_all_account_sessions(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut revoked = 0;
+        for s in sessions.iter_mut() {
+            if s.tenant_id == tenant_id && s.account_id == account_id && !s.revoked {
+                s.revoked = true;
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn revoke_current_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut revoked = 0;
+        for s in sessions.iter_mut() {
+            if s.tenant_id == tenant_id && s.token_hash == token_hash && !s.revoked {
+                s.revoked = true;
+                revoked += 1;
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn append_account_audit(
+        &self,
+        _tenant_id: &str,
+        _action: &str,
+        _actor_ref: &str,
+        _outcome: &str,
+        _metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+}
+
+fn native_test_state(db: Arc<NativeAuthTestDb>) -> (tempfile::TempDir, Arc<AppState>) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = db;
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    (temp, state)
+}
+
+/// A well-formed verifier/challenge pair, distinct per call so the per-code
+/// rate limiter in one test cannot affect another.
+fn native_test_pkce() -> (String, String) {
+    let verifier = format!("{}{}", "verifier-", Uuid::new_v4().simple()).repeat(2);
+    let verifier = format!("{verifier}{}", "x".repeat(64))
+        .chars()
+        .take(64)
+        .collect::<String>();
+    let challenge = challenge_for_verifier(&verifier);
+    (verifier, challenge)
+}
+
+fn native_loopback_redirect() -> String {
+    "http://127.0.0.1:49152/trace-commons/native-auth/callback".to_string()
+}
+
+async fn native_start(
+    state: &Arc<AppState>,
+    challenge: &str,
+    redirect: &str,
+) -> (StatusCode, Option<String>) {
+    let body = serde_json::json!({
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "redirect_uri": redirect,
+    });
+    let response = native_authorize_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(
+            serde_json::from_value(body).expect("valid start body"),
+        )),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::OK {
+        return (status, None);
+    }
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("start body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("start json");
+    let request_id = parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .expect("request_id")
+        .to_string();
+    (status, Some(request_id))
+}
+
+async fn native_exchange(
+    state: &Arc<AppState>,
+    request_id: &str,
+    code: &str,
+    verifier: &str,
+) -> (StatusCode, Option<String>) {
+    let body = serde_json::json!({
+        "request_id": request_id,
+        "code": code,
+        "code_verifier": verifier,
+    });
+    let response = native_token_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(
+            serde_json::from_value(body).expect("valid token body"),
+        )),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::OK {
+        return (status, None);
+    }
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("token body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("token json");
+    let token = parsed
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .expect("access_token")
+        .to_string();
+    (status, Some(token))
+}
+
+/// Drive the flow to the point where a one-time code exists, WITHOUT needing a
+/// database for the browser half: `issue_native_authorization_code` is exactly
+/// what the confirm handler calls once a human has redeemed a login link.
+async fn native_flow_to_code(
+    state: &Arc<AppState>,
+    challenge: &str,
+    account_id: Uuid,
+) -> (String, String) {
+    let (status, request_id) = native_start(state, challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK, "authorize start succeeds");
+    let request_id = request_id.expect("request id");
+    let location =
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", account_id)
+            .expect("a live pending request yields a loopback redirect");
+    assert!(
+        location.starts_with("http://127.0.0.1:49152/trace-commons/native-auth/callback?code="),
+        "code is delivered only to the registered loopback URI: {location}"
+    );
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("code in the loopback redirect")
+        .to_string();
+    (request_id, code)
+}
+
+#[tokio::test]
+async fn native_authorize_refuses_a_redirect_that_is_not_loopback() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (_verifier, challenge) = native_test_pkce();
+    for redirect in [
+        "http://localhost:49152/trace-commons/native-auth/callback",
+        "https://evil.example.com/trace-commons/native-auth/callback",
+        "http://127.0.0.1:49152/somewhere-else",
+    ] {
+        let (status, request_id) = native_start(&state, &challenge, redirect).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "must refuse {redirect}");
+        assert!(request_id.is_none());
+    }
+}
+
+#[tokio::test]
+async fn native_authorize_refuses_plain_pkce() {
+    // `plain` would make the challenge equal the verifier, so anyone who saw the
+    // start request could finish the flow. Only S256 is accepted.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (verifier, _challenge) = native_test_pkce();
+    let body = serde_json::json!({
+        "code_challenge": verifier,
+        "code_challenge_method": "plain",
+        "redirect_uri": native_loopback_redirect(),
+    });
+    let response = native_authorize_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        Ok(Json(serde_json::from_value(body).expect("body"))),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_intercepted_code_without_the_verifier_is_useless() {
+    // THE central property. Another local process races the loopback listener
+    // and gets the code. It does not have the verifier, so the exchange fails
+    // and no session is ever created.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (_verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (attacker_verifier, _) = native_test_pkce();
+    let (status, token) = native_exchange(&state, &request_id, &code, &attacker_verifier).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "wrong verifier is refused");
+    assert!(token.is_none());
+    assert_eq!(
+        db.session_count(),
+        0,
+        "no session may exist after a failed exchange"
+    );
+}
+
+#[tokio::test]
+async fn a_replayed_code_fails() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    assert_eq!(status, StatusCode::OK, "the honest exchange succeeds");
+    assert!(token.expect("token").starts_with("tcn1_"));
+    assert_eq!(db.session_count(), 1);
+
+    // Same code, same verifier, second time.
+    let (status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a replayed code is refused"
+    );
+    assert!(token.is_none());
+    assert_eq!(
+        db.session_count(),
+        1,
+        "a replay must not mint a second session"
+    );
+}
+
+#[tokio::test]
+async fn a_code_presented_against_another_request_fails() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (_request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+
+    let (_other_verifier, other_challenge) = native_test_pkce();
+    let (status, other_request_id) =
+        native_start(&state, &other_challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, token) = native_exchange(
+        &state,
+        &other_request_id.expect("second request id"),
+        &code,
+        &verifier,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code is bound to its own request"
+    );
+    assert!(token.is_none());
+    assert_eq!(db.session_count(), 0);
+}
+
+#[tokio::test]
+async fn a_native_token_authenticates_the_account_surface_as_a_weak_session() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("the native token resolves");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "actor must be the reserved-prefix account actor, never a device ref"
+    );
+    assert!(
+        !ctx.is_strong_session(),
+        "a native token must stay WEAK: read and withdraw, never change authenticators"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_kills_a_native_token() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    assert!(resolve_account_ctx(state.as_ref(), &headers).await.is_ok());
+
+    let revoked = db
+        .revoke_all_account_sessions("tenant-a", account_id)
+        .await
+        .expect("revoke-all");
+    assert_eq!(revoked, 1, "the native session is an ordinary session row");
+
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a revoked native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_expired_native_token_is_denied() {
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let account_id = Uuid::new_v4();
+    let secret = "expired-native-secret";
+    db.insert_session(
+        "tenant-a",
+        account_id,
+        &hash_secret(secret),
+        "native",
+        Utc::now() - Duration::minutes(1),
+    );
+    let token = native_token_value("tenant-a", secret);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("an expired native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_browser_session_secret_is_not_usable_as_a_native_bearer() {
+    // The cookie's HttpOnly/SameSite=Strict shape exists so a native process
+    // cannot reach the browser session. Even if a `'web'` session's secret were
+    // somehow obtained and re-encoded as a `tcn1_` bearer, the client_kind guard
+    // refuses it.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let account_id = Uuid::new_v4();
+    let secret = "a-browser-session-secret";
+    db.insert_session(
+        "tenant-a",
+        account_id,
+        &hash_secret(secret),
+        "web",
+        Utc::now() + Duration::days(7),
+    );
+    let token = native_token_value("tenant-a", secret);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a web session must not be reachable as a native bearer");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_stale_native_request_id_cannot_be_completed_twice() {
+    // The pending request is single-use: a second confirm carrying the same
+    // `native` id (a replayed browser POST, or a second tab) mints no second
+    // code.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db);
+    let (_verifier, challenge) = native_test_pkce();
+    let (status, request_id) = native_start(&state, &challenge, &native_loopback_redirect()).await;
+    assert_eq!(status, StatusCode::OK);
+    let request_id = request_id.expect("request id");
+    assert!(
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", Uuid::new_v4())
+            .is_some()
+    );
+    assert!(
+        issue_native_authorization_code(state.as_ref(), &request_id, "tenant-a", Uuid::new_v4())
+            .is_none(),
+        "a pending native request is consumed by the first completion"
+    );
+}
+
+#[tokio::test]
+async fn logging_out_a_native_token_revokes_its_session_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    // Unlike the device-bearer path (a documented no-op), a native token HAS a
+    // session row, so logout must actually revoke it rather than leave a
+    // signed-out app holding a live token.
+    let db = Arc::new(NativeAuthTestDb::default());
+    let (_temp, state) = native_test_state(db.clone());
+    let (verifier, challenge) = native_test_pkce();
+    let account_id = Uuid::new_v4();
+    let (request_id, code) = native_flow_to_code(&state, &challenge, account_id).await;
+    let (_status, token) = native_exchange(&state, &request_id, &code, &verifier).await;
+    let token = token.expect("token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer header"),
+    );
+    let ctx = account_ctx_ext(&state, &headers).await;
+    account_logout_handler(State(state.clone()), ctx, headers.clone())
+        .await
+        .expect("logout succeeds");
+
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("a logged-out native token must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
+// The corpus-storage half of `Database` is unreachable from the native
+// sign-in flow: it touches only sessions, account principals, and the
+// account audit. Stubbed the same way every other focused test double in
+// this file stubs it.
+#[async_trait::async_trait]
+impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
+    async fn upsert_trace_submission(
+        &self,
+        _: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCorpusStatus,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        _: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        _: &str,
+        _: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
+}
+
+// --- #198 settlement batch-to-outbox atomicity ---
+
+/// Postgres advisory lock: a second acquire while the first is held returns None.
+#[tokio::test]
+async fn credit_settlement_advisory_lock_serializes_overlapping_acquires() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let first = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("first acquire")
+        .expect("first acquire succeeds");
+    let second = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("second acquire attempt");
+    assert!(
+        second.is_none(),
+        "overlapping settlement lock must not be granted"
+    );
+    first.release().await.expect("release first lock");
+    let third = backend
+        .try_acquire_credit_settlement_lock("tenant-a")
+        .await
+        .expect("third acquire")
+        .expect("lock is free after release");
+    third.release().await.expect("release third lock");
+}
+
+/// Two overlapping live settlement runs: the second must conflict rather than
+/// race the source-event conflict check (#198 concurrent-run requirement).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_settlement_in_process_lock_rejects_concurrent_live_runs() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    // Hold the in-process lock the way a live settlement run would.
+    //
+    // tenant-lock, not tenant-a: this lock is process-global and keyed by
+    // tenant, and holding tenant-a's for the length of this test fails every
+    // other settlement test that happens to run in parallel with it. The
+    // contention under test is unchanged -- the handler below runs as
+    // tenant-lock and finds the lock already held.
+    let held = credit_settlement_in_process_lock("tenant-lock");
+    let _guard = held
+        .try_lock_owned()
+        .expect("test acquires the settlement lock");
+
+    let err = credit_settlement_handler(
+        State(state),
+        auth_headers("admin-token-lock"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "overlapping settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: None,
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect_err("overlapping live settlement must conflict");
+    assert_eq!(err.0, StatusCode::CONFLICT);
+}
+
+fn sample_finalized_settlement_with_outbox_ids(
+    outbox_ids: &[Uuid],
+) -> (
+    TraceCreditSettlementBatchRecord,
+    Vec<TraceNearCreditOutboxItem>,
+) {
+    let settlement_batch_id = Uuid::new_v4();
+    let mut line_items = Vec::new();
+    let mut outbox_items = Vec::new();
+    for (index, near_outbox_id) in outbox_ids.iter().copied().enumerate() {
+        let credit_account_ref = format!("principal-{}", index);
+        let credit_account_hash = sha256_prefixed(&credit_account_ref);
+        let item_source_list_hash = sha256_prefixed(&format!("settlement-item-sources-{index}"));
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: item_source_list_hash.clone(),
+            attestation_hash: sha256_prefixed(&format!("settlement-attestation-{index}")),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: sha256_prefixed(&format!("settlement-issuer-signature-{index}")),
+        };
+        line_items.push(StorageTraceCreditAccountSettlementLineItem {
+            credit_account_ref,
+            credit_account_hash: credit_account_hash.clone(),
+            settled_credit_delta_micros: 1_000_000,
+            source_credit_event_ids: vec![Uuid::new_v4()],
+            source_submission_ids: vec![Uuid::new_v4()],
+            source_list_hash: item_source_list_hash,
+            near_status: StorageTraceCreditSettlementNearStatus::Pending,
+            near_outbox_id: Some(near_outbox_id),
+            near_payout_hold_reason: None,
+        });
+        outbox_items.push(TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash,
+            near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                .expect("NEAR call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
+            created_at: Utc::now(),
+            submitted_at: None,
+            near_transaction_hash: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        });
+    }
+    let batch = TraceCreditSettlementBatchRecord {
+        settlement_batch_id,
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        status: StorageTraceCreditSettlementBatchStatus::Finalized,
+        reason_hash: "sha256:settlement-reason".to_string(),
+        issuer_approval_evidence_hash: None,
+        source_credit_event_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_credit_event_ids.iter().copied())
+            .collect(),
+        source_submission_ids: line_items
+            .iter()
+            .flat_map(|item| item.source_submission_ids.iter().copied())
+            .collect(),
+        source_list_hash: "sha256:settlement-sources".to_string(),
+        settled_credit_points: outbox_ids.len() as f32,
+        settled_credit_micros: (outbox_ids.len() as i64) * 1_000_000,
+        line_items,
+        near_contract_id: Some("trace-credits.testnet".to_string()),
+        ranking_model_version: None,
+        ranking_target_use: None,
+        ranking_calibration_run_id: None,
+        ranking_calibration_report_hash: None,
+        ranking_calibration_joined_evidence_hash: None,
+        ranking_credit_events_excluded_count: 0,
+        ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+        actor_principal_ref: principal_storage_ref("admin-token-a"),
+        created_at: Utc::now(),
+    };
+    (batch, outbox_items)
+}
+
+/// DB-authoritative finalize commits batch + outbox in one transaction.
+#[tokio::test]
+async fn settlement_finalize_db_transaction_writes_batch_and_outbox_atomically() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("db-authoritative finalize");
+
+    let db_batches = backend
+        .list_trace_credit_settlement_batches("tenant-a")
+        .await
+        .expect("list batches");
+    assert_eq!(db_batches.len(), 1);
+    assert_eq!(db_batches[0].settlement_batch_id, batch.settlement_batch_id);
+
+    let db_outbox = backend
+        .list_trace_near_credit_outbox_items("tenant-a")
+        .await
+        .expect("list outbox");
+    assert_eq!(db_outbox.len(), 2);
+    let db_ids = db_outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(db_ids, outbox_ids.into_iter().collect::<BTreeSet<_>>());
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// File-primary finalize writes batch + outbox together and remains repairable.
+#[tokio::test]
+async fn settlement_finalize_writes_batch_and_outbox_together() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_finalize_with_db_mirror(state.as_ref(), &tenant, &batch, &items)
+        .await
+        .expect("finalize writes");
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1);
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 2);
+    assert_eq!(
+        outbox
+            .iter()
+            .map(|item| item.near_outbox_id)
+            .collect::<BTreeSet<_>>(),
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
+}
+
+/// Crash after the batch write and before any outbox row: repair must re-emit every
+/// expected row from the line-item `near_outbox_id` invariant (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_batch_only_crash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    // Simulate: batch durable, outbox loop never started.
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    assert!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .is_empty(),
+        "crash left zero outbox rows"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        std::slice::from_ref(&batch),
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 3, "repair re-emits every expected outbox row");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>(),
+        "repaired ids match the batch line-item invariant"
+    );
+    assert_eq!(outbox.len(), expected_items.len());
+
+    let repaired_again = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair re-run");
+    assert_eq!(repaired_again, 0, "repair is idempotent");
+}
+
+/// Crash after item k of n: repair must fill only the missing suffix (#198).
+#[tokio::test]
+async fn settlement_outbox_repair_converges_after_partial_outbox_crash() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let tenant = test_reviewer_auth("tenant-a");
+    let outbox_ids = vec![
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let (batch, expected_items) = sample_finalized_settlement_with_outbox_ids(&outbox_ids);
+
+    append_credit_settlement_batch(temp.path(), "tenant-a", &batch).expect("batch durable");
+    // Survive the first two appends; crash before the third.
+    for item in &expected_items[..2] {
+        append_near_credit_outbox_item(temp.path(), "tenant-a", item).expect("partial outbox");
+    }
+    assert_eq!(
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads")
+            .len(),
+        2,
+        "crash left a partial outbox"
+    );
+
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &[batch],
+    )
+    .await
+    .expect("repair runs");
+    assert_eq!(repaired, 2, "repair fills only the missing suffix");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 4);
+    let recovered_ids = outbox
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        recovered_ids,
+        outbox_ids.into_iter().collect::<BTreeSet<_>>()
+    );
 }
