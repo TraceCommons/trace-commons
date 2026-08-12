@@ -1589,10 +1589,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
     let response = confirm_login_handler(
         State(state.clone()),
-        same_origin.clone(),
+        with_login_ceremony(same_origin.clone()),
         ConfirmLoginForm(ConfirmLoginBody {
             code: code.clone(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1636,10 +1637,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     // Second redeem of the SAME code -> uniform generic deny (single-use).
     let reused = confirm_login_handler(
         State(state.clone()),
-        same_origin.clone(),
+        with_login_ceremony(same_origin.clone()),
         ConfirmLoginForm(ConfirmLoginBody {
             code: code.clone(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1652,10 +1654,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     // Bogus code -> the SAME uniform generic deny (status + body identical).
     let bogus = confirm_login_handler(
         State(state.clone()),
-        same_origin,
+        with_login_ceremony(same_origin),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "totally-bogus-code".to_string(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1684,10 +1687,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
     cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
     let cross = confirm_login_handler(
         State(state.clone()),
-        cross_site,
+        with_login_ceremony(cross_site),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "another-code".to_string(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -1721,8 +1725,12 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
     let response = confirm_login_handler(
         State(state.clone()),
-        same_origin,
-        ConfirmLoginForm(ConfirmLoginBody { code, native: None }),
+        with_login_ceremony(same_origin),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code,
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
     )
     .await
     .into_response();
@@ -4158,6 +4166,145 @@ fn test_state_with_submission_quota(
 /// test's tenant without changing its helpers breaks it differently, and
 /// changing the helpers breaks every other caller.
 static SETTLEMENT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Headers carrying a login-ceremony cookie, plus the matching form value.
+///
+/// `POST /account/login/confirm` requires a nonce that `GET /account/login`
+/// set as a cookie AND embedded in its form, so a confirm test has to present
+/// both halves the way a browser would. Tests that want to prove the gate
+/// itself simply omit one half.
+const TEST_LOGIN_CEREMONY: &str = "test-ceremony-nonce-0123456789";
+
+#[tokio::test]
+async fn confirm_refuses_without_the_ceremony_cookie() {
+    // The shape of a non-browser caller: it can hold a valid-looking code and
+    // send whatever headers it likes, but it never fetched the interstitial,
+    // so it has no ceremony cookie. Omitting Origin and Sec-Fetch-Site is what
+    // satisfies the same-origin check, which is exactly why that check cannot
+    // carry this on its own.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        HeaderMap::new(),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a confirm without the interstitial's cookie must be refused"
+    );
+}
+
+#[tokio::test]
+async fn confirm_refuses_when_the_ceremony_halves_disagree() {
+    // Holding the cookie is not enough: the form value must match it. This is
+    // what stops a leaked or replayed half being combined with a fresh one.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        with_login_ceremony(HeaderMap::new()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: Some("a-different-nonce-entirely-000".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn confirm_refuses_when_the_form_half_is_absent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = confirm_login_handler(
+        State(state),
+        with_login_ceremony(HeaderMap::new()),
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "any-code".to_string(),
+            native: None,
+            ceremony: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
+    // The other half of the property: whatever confirm demands, the
+    // interstitial must actually supply, or the real browser flow breaks.
+    let response = login_interstitial_handler(
+        HeaderMap::new(),
+        Query(LoginInterstitialQuery {
+            code: "some-code".to_string(),
+            native: None,
+        }),
+    )
+    .await;
+
+    let set_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("tc_login_ceremony="))
+        .expect("interstitial sets the ceremony cookie")
+        .to_string();
+
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(set_cookie.contains("Secure"), "cookie must be Secure");
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict"
+    );
+
+    let nonce = set_cookie
+        .trim_start_matches("tc_login_ceremony=")
+        .split(';')
+        .next()
+        .expect("cookie value")
+        .to_string();
+    assert!(
+        nonce.len() >= 32,
+        "nonce must be long enough to be unguessable"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("interstitial body");
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains(&format!("name=\"ceremony\" value=\"{nonce}\"")),
+        "the same nonce must be embedded in the form the page renders"
+    );
+}
+
+fn with_login_ceremony(base: HeaderMap) -> HeaderMap {
+    let mut headers = base;
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("tc_login_ceremony={TEST_LOGIN_CEREMONY}"))
+            .expect("cookie header"),
+    );
+    headers
+}
 
 fn test_state_with_tokens(root: PathBuf, tokens: BTreeMap<String, TenantAuth>) -> Arc<AppState> {
     configure_unbounded_submit_limits_for_test(&tokens);
@@ -69893,10 +70040,11 @@ async fn confirm_deny_respects_timing_floor() {
     let start = std::time::Instant::now();
     let response = confirm_login_handler(
         State(state.clone()),
-        cross_site,
+        with_login_ceremony(cross_site),
         ConfirmLoginForm(ConfirmLoginBody {
             code: "bogus".to_string(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
@@ -69937,10 +70085,11 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
     for _ in 0..CONFIRM_PER_CODE_LIMIT {
         let resp = confirm_login_handler(
             State(state.clone()),
-            same_origin.clone(),
+            with_login_ceremony(same_origin.clone()),
             ConfirmLoginForm(ConfirmLoginBody {
                 code: code.clone(),
                 native: None,
+                ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
             }),
         )
         .await
@@ -69949,10 +70098,11 @@ async fn confirm_per_code_ceiling_exhausts_a_code() {
     }
     let exhausted = confirm_login_handler(
         State(state.clone()),
-        same_origin,
+        with_login_ceremony(same_origin),
         ConfirmLoginForm(ConfirmLoginBody {
             code: code.clone(),
             native: None,
+            ceremony: Some(TEST_LOGIN_CEREMONY.to_string()),
         }),
     )
     .await
