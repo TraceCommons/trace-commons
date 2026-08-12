@@ -57,7 +57,8 @@ use trace_commons_server::account_passkey::{
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{
-    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
+    TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -471,13 +472,13 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
 const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
     "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
-const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
-    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -1134,6 +1135,10 @@ async fn main() -> anyhow::Result<()> {
         state.revocation_propagation_scheduler.as_ref(),
     )
     .await?;
+    validate_community_snapshot_invalidation_scheduler_config(
+        state.as_ref(),
+        state.community_snapshot_invalidation_scheduler.as_ref(),
+    )?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     // Say it out loud at boot. Publishing aggregates without a mechanism is
     // a deliberate choice, and an operator reading the log should not have to
@@ -1177,6 +1182,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_revocation_propagation_scheduler_task(
         &state,
         state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
     );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
@@ -1299,6 +1308,10 @@ struct AppState {
     credit_settlement_scheduler: Option<TraceCreditSettlementSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
+    /// When the community surface is enabled, drain coalesced withdrawal
+    /// invalidations by recomputing the published snapshot on this interval.
+    community_snapshot_invalidation_scheduler:
+        Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -1647,6 +1660,15 @@ struct TraceRevocationPropagationSchedulerConfig {
     limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process drain for community-snapshot invalidations enqueued by
+/// withdrawal. No worker token: the tick calls `recompute_community_snapshot`
+/// directly (the same function the admin handler uses), so contributor
+/// traffic never reaches a full rebuild.
+#[derive(Clone)]
+struct TraceCommunitySnapshotInvalidationSchedulerConfig {
+    interval: StdDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3347,6 +3369,9 @@ impl AppState {
             parse_trace_process_evaluation_scheduler_config_from_env()?;
         let revocation_propagation_scheduler =
             parse_trace_revocation_propagation_scheduler_config_from_env()?;
+        let community_leaderboard_enabled = env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED);
+        let community_snapshot_invalidation_scheduler =
+            parse_community_snapshot_invalidation_scheduler_config(community_leaderboard_enabled)?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -3538,7 +3563,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
-            community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_leaderboard_enabled,
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             community_analytics_publication_basis:
                 parse_community_analytics_publication_basis_from_env()?,
@@ -3611,6 +3636,7 @@ impl AppState {
             credit_settlement_scheduler,
             process_evaluation_scheduler,
             revocation_propagation_scheduler,
+            community_snapshot_invalidation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -6304,6 +6330,25 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
         limit,
         dry_run: env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN),
         purpose,
+    }))
+}
+
+/// When the community surface is enabled, schedule coalesced withdrawal
+/// invalidation drains on the published snapshot interval (default 900s).
+fn parse_community_snapshot_invalidation_scheduler_config(
+    community_leaderboard_enabled: bool,
+) -> anyhow::Result<Option<TraceCommunitySnapshotInvalidationSchedulerConfig>> {
+    if !community_leaderboard_enabled {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS,
+        900,
+        30,
+        86_400,
+    )?;
+    Ok(Some(TraceCommunitySnapshotInvalidationSchedulerConfig {
+        interval: StdDuration::from_secs(interval_seconds),
     }))
 }
 
@@ -9177,6 +9222,84 @@ fn spawn_trace_revocation_propagation_scheduler_task(
     });
 }
 
+fn validate_community_snapshot_invalidation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(_) = config else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        state.community_leaderboard_enabled,
+        "community snapshot invalidation scheduler requires {TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED}"
+    );
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "community snapshot invalidation scheduler requires the DB mirror"
+    );
+    Ok(())
+}
+
+fn spawn_community_snapshot_invalidation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        "Trace Commons community snapshot invalidation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_community_snapshot_invalidation_scheduler_tick(state.as_ref()).await {
+                Ok(drained) => {
+                    if drained {
+                        tracing::info!(
+                            "Trace Commons community snapshot invalidation drain completed"
+                        );
+                    }
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons community snapshot invalidation drain failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn run_community_snapshot_invalidation_scheduler_tick(
+    state: &AppState,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community snapshot invalidation drain requires the DB mirror",
+        )
+    })?;
+    let pending = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if pending.is_none() {
+        return Ok(false);
+    }
+    // Recompute is admin-authored in code but scheduler-triggered; contributors
+    // only enqueue the coalesced invalidation watermark.
+    let row = recompute_community_snapshot(state).await?;
+    Ok(row.snapshot_id != uuid::Uuid::nil())
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -10784,6 +10907,9 @@ struct TraceCommonsConfigStatusResponse {
     revocation_propagation_scheduler_interval_seconds: Option<u64>,
     revocation_propagation_scheduler_limit: Option<u32>,
     revocation_propagation_scheduler_dry_run: Option<bool>,
+    community_snapshot_invalidation_scheduler_configured: bool,
+    community_snapshot_invalidation_scheduler_interval_seconds: Option<u64>,
+    community_snapshot_max_age_seconds: u64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -11301,6 +11427,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .revocation_propagation_scheduler
             .as_ref()
             .map(|config| config.dry_run),
+        community_snapshot_invalidation_scheduler_configured: state
+            .community_snapshot_invalidation_scheduler
+            .is_some(),
+        community_snapshot_invalidation_scheduler_interval_seconds: state
+            .community_snapshot_invalidation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        community_snapshot_max_age_seconds: COMMUNITY_SNAPSHOT_MAX_AGE.num_seconds() as u64,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -12549,6 +12683,11 @@ const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
 /// all. It is a placeholder, not a mechanism identifier: snapshots
 /// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+/// Published withdrawal bound for community snapshots. Matches the
+/// design/docs ≤15-minute removal promise: serve refuses a snapshot
+/// older than this, converting a silent privacy failure into an
+/// availability failure when the drain queue is wedged.
+const COMMUNITY_SNAPSHOT_MAX_AGE: Duration = Duration::seconds(900);
 
 /// Minimum aggregate cell size enforced before any community aggregate
 /// is published. A cell of size one is the contributor.
@@ -12746,6 +12885,22 @@ fn community_snapshot_missing_controls(
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
     )
+}
+
+/// Freshness / invalidation refusal reasons for a published community
+/// snapshot. Label-only: safe for error bodies and audit rows.
+fn community_snapshot_freshness_failure(
+    computed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    pending_invalidation_at: Option<DateTime<Utc>>,
+) -> Option<&'static str> {
+    if now.signed_duration_since(computed_at) > COMMUNITY_SNAPSHOT_MAX_AGE {
+        return Some("snapshot_exceeds_published_bound");
+    }
+    if pending_invalidation_at.is_some_and(|pending| computed_at < pending) {
+        return Some("snapshot_invalidated_by_withdrawal");
+    }
+    None
 }
 
 /// Privacy provenance recorded on every snapshot, so a published
@@ -13005,9 +13160,23 @@ async fn recompute_community_snapshot(
         min_cell_count: state.analytics_min_cell_count as i32,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    db.insert_leaderboard_snapshot(write)
+    let row = db
+        .insert_leaderboard_snapshot(write)
         .await
-        .map_err(internal_error)
+        .map_err(internal_error)?;
+    // A successful recompute is the drain path for coalesced withdrawal
+    // invalidations. Concurrent withdrawals that requested after this
+    // snapshot's computed_at leave the pending watermark set.
+    let _ = db
+        .drain_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+            row.snapshot_id,
+            row.computed_at,
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(row)
 }
 
 /// Fetch the latest snapshot for the public read handlers and refuse to
@@ -13058,6 +13227,21 @@ async fn latest_publishable_community_snapshot(
                 "community snapshot is withheld by missing privacy controls: {}",
                 missing_controls.join(", ")
             ),
+        ));
+    }
+    let pending_invalidation = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if let Some(reason) =
+        community_snapshot_freshness_failure(snapshot.computed_at, Utc::now(), pending_invalidation)
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("community snapshot is withheld: {reason}"),
         ));
     }
     Ok(snapshot)
@@ -13249,27 +13433,32 @@ async fn delete_community_profile_handler(
     let db = community_profile_db(state.as_ref())?;
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     enforce_public_attribution_scope(&tenant)?;
-    let withdrew = db
-        .withdraw_contributor_profile(tenant.tenant_id(), &tenant.auth().principal_ref)
+    let eviction = db
+        .withdraw_contributor_profile(
+            tenant.tenant_id(),
+            &tenant.auth().principal_ref,
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
         .await
         .map_err(internal_error)?;
     db.append_contributor_profile_audit(
         tenant.tenant_id(),
         &tenant.auth().principal_ref,
         "withdraw",
-        None,
+        eviction
+            .as_ref()
+            .and_then(|row| row.handle_normalized.as_deref()),
         Some("public_attribution"),
     )
     .await
     .map_err(internal_error)?;
-    if withdrew {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        // Idempotent: nothing to withdraw means the caller's view is
-        // already "not public." 204 keeps the API simple and
-        // matches the spec's "withdrawal is idempotent" property.
-        Ok(StatusCode::NO_CONTENT)
-    }
+    // Idempotent: nothing to withdraw means the caller's view is
+    // already "not public." 204 keeps the API simple and
+    // matches the spec's "withdrawal is idempotent" property.
+    // A successful withdrawal enqueued a coalesced snapshot invalidation
+    // in the same DB transaction as withdrawn_at + the eviction receipt.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn credit_handler(
@@ -13753,13 +13942,26 @@ async fn resolve_account_ctx_with_rotation(
         (Some(bearer), None) if is_native_token(bearer) => {
             resolve_account_ctx_native(state, bearer).await
         }
-        (Some(_), None) => resolve_account_ctx_bearer(state, headers)
-            .await
-            .map(|ctx| (ctx, None)),
+        // A device upload claim is NOT an account credential.
+        //
+        // This arm used to resolve one to a full `AccountCtx`, which meant a
+        // device key reached every `/v1/account/*` route -- withdrawal and
+        // account history included. A device key is provisioned to upload; a
+        // stolen one should not also be able to withdraw a contributor's
+        // traces or read their history, and the loopback native-session flow
+        // exists precisely so a native client never needs that authority.
+        //
+        // Nothing depends on the old behaviour: the contributor client
+        // authenticates these routes with a `tcn1_` native session, and no
+        // other caller in the tree sends a device bearer here.
+        (Some(_), None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session required: a device upload claim is not an account credential",
+        )),
         (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
         (None, None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
-            "account session cookie or device bearer token required",
+            "account session cookie or native session token required",
         )),
     }
 }
@@ -13830,42 +14032,6 @@ async fn resolve_account_ctx_native(
         },
         rotated,
     ))
-}
-
-/// Bearer path: device token → linked account → active-membership set.
-async fn resolve_account_ctx_bearer(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountCtx> {
-    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
-    let db = account_db(state)?;
-    let tenant_id = tenant.tenant_id().to_string();
-    let principal_ref = tenant.principal_ref().to_string();
-
-    let account_id = db
-        .resolve_account_for_principal(&tenant_id, &principal_ref)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
-    let account = AccountId::from_uuid(account_id);
-    let principal_set = db
-        .expand_account_principals(&tenant_id, account_id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(AccountCtx {
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::DeviceBearer,
-        tenant_id,
-        actor_ref: principal_ref,
-        // The bearer path is a device token, not a passkey assertion: there is no
-        // authenticating credential to flag as `this_device`.
-        auth_credential_id: None,
-        // A device bearer is NOT a strong authenticator for the authenticator-change
-        // gate: mark it weak so it is gated like a device-link cookie session.
-        client_kind: "device".to_string(),
-    })
 }
 
 /// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
@@ -15118,6 +15284,10 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Proof that this confirmation came from a browser that actually rendered
+    /// the interstitial. See [`LOGIN_CEREMONY_COOKIE`].
+    #[serde(default)]
+    ceremony: Option<String>,
     /// Optional pending native-authorization request id (see
     /// [`LoginInterstitialQuery::native`]). When present and still live, a
     /// successful redeem ALSO mints the app's one-time authorization code and
@@ -15476,6 +15646,53 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
 /// vary status or body by cause (timing uniformity is Task 11).
+/// Cookie carrying the login-ceremony nonce.
+///
+/// `GET /account/login` mints a nonce, sets it here, and embeds the SAME value
+/// in the form it renders. `POST /account/login/confirm` requires both and
+/// requires them to match.
+///
+/// This is a possession proof, not a header check. Header-based origin
+/// signals (`Origin`, `Sec-Fetch-Site`) are absent on a plain HTTP client, and
+/// `confirm_is_same_origin` treats "neither signal present" as same-origin
+/// because a browser without fetch metadata must still work. That is the right
+/// call for compatibility and the wrong one for proving a browser was
+/// involved: anything that can reach the endpoint can satisfy it by sending
+/// nothing. A cookie set by the interstitial response cannot be produced by a
+/// caller that never fetched the interstitial.
+///
+/// `confirm_is_same_origin` is deliberately kept as well. This does not
+/// replace it; it covers what it cannot.
+const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+
+/// How long a rendered interstitial stays confirmable. Long enough for a human
+/// to read the page and click, short enough that a leaked nonce is not a
+/// standing credential.
+const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// A fresh, unguessable ceremony nonce.
+fn new_login_ceremony_nonce() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    // Same source as session secrets.
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Constant-time comparison, so a mismatched nonce cannot be recovered by
+/// timing the deny.
+fn ceremony_nonce_matches(cookie: &str, submitted: &str) -> bool {
+    if cookie.is_empty() || submitted.is_empty() || cookie.len() != submitted.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in cookie.bytes().zip(submitted.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
@@ -15586,6 +15803,10 @@ Confirm only if you started this.</p>"
     } else {
         "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
     };
+    // The ceremony nonce: embedded in the form AND set as a cookie on this
+    // response. Confirm requires both, and requires them to match, so a caller
+    // that never rendered this page cannot confirm.
+    let ceremony = new_login_ceremony_nonce();
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -15593,10 +15814,23 @@ Confirm only if you started this.</p>"
 <main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
 <input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
-<button type=\"submit\">Activate</button></form></main></body></html>"
+<input type=\"hidden\" name=\"ceremony\" value=\"{}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>",
+        html_escape_attribute(&ceremony)
     );
     let mut response = axum::response::Html(body).into_response();
+    let ceremony_cookie = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ceremony))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/account/login")
+        .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
+        .build()
+        .to_string();
     let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&ceremony_cookie) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -15640,10 +15874,34 @@ async fn confirm_login_inner(
 ) -> axum::response::Response {
     let code = body.0.code;
     let native_request_id = body.0.native;
+    let submitted_ceremony = body.0.ceremony;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
         return redeem_generic_deny();
+    }
+
+    // Browser-possession enforcement.
+    //
+    // The check above cannot establish that a browser was involved: it reads
+    // `Origin` / `Sec-Fetch-Site`, and a plain HTTP client simply omits both,
+    // which `confirm_is_same_origin` treats as same-origin so that browsers
+    // without fetch metadata keep working. Satisfying it therefore requires
+    // sending nothing.
+    //
+    // The ceremony nonce is different in kind: it is minted by
+    // `GET /account/login`, returned in a `Secure` `HttpOnly` `SameSite=Strict`
+    // cookie AND embedded in the form that page renders. Confirming requires
+    // both halves and requires them to match, so a caller that never fetched
+    // the interstitial in a browser cannot produce it -- possession, not a
+    // self-asserted header.
+    //
+    // Fails into the SAME uniform deny as every other branch, so it adds no
+    // new distinguishable outcome and the timing floor still applies.
+    let cookie_ceremony = cookie_value_from_headers(&headers, LOGIN_CEREMONY_COOKIE);
+    match (cookie_ceremony, submitted_ceremony.as_deref()) {
+        (Some(from_cookie), Some(from_form)) if ceremony_nonce_matches(from_cookie, from_form) => {}
+        _ => return redeem_generic_deny(),
     }
 
     // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
@@ -23097,6 +23355,35 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    // Live settlement serializes per tenant so two overlapping runs cannot both
+    // pass the source-event conflict check and finalize divergent batches (or
+    // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
+    let settlement_locks = if body.dry_run {
+        None
+    } else {
+        Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
+    };
+    let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
+    if let Some(locks) = settlement_locks {
+        // Settlement may already be durable; never convert a successful finalize into
+        // a caller-visible failure because advisory unlock hiccuped.
+        if let Err(error) = locks.release().await {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                tenant_id = %tenant.tenant_id,
+                "failed to release credit settlement run locks after settlement"
+            );
+        }
+    }
+    result
+}
+
+async fn run_credit_settlement_unlocked(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
     require_credit_settlement_policy_version_allowed_for_live(
@@ -23518,14 +23805,9 @@ async fn run_credit_settlement(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
+        append_credit_settlement_finalize_with_db_mirror(state, tenant, &batch, &near_outbox_items)
             .await
             .map_err(internal_error)?;
-        for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
-                .await
-                .map_err(internal_error)?;
-        }
     }
 
     Ok(TraceCreditSettlementRunResponse {
@@ -27023,6 +27305,14 @@ async fn append_utility_attestation_with_db_mirror(
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
 
+/// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
+/// which writes the batch and its NEAR outbox rows in one transaction. This
+/// batch-only variant is retained because it is the narrowest way to exercise
+/// `ensure_credit_settlement_batch_has_no_finalized_source_conflict` on its own;
+/// see the finalized-source-conflict test in the sibling test module. Without
+/// the allow, `-D warnings` fails the non-test build, since the only remaining
+/// caller is `#[cfg(test)]`.
+#[allow(dead_code)]
 async fn append_credit_settlement_batch_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -27051,6 +27341,237 @@ async fn append_credit_settlement_batch_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+/// Persist a finalized settlement batch and every NEAR outbox row it expects as
+/// one durability unit.
+///
+/// Design (#198):
+/// - When a DB mirror is required, batch + outbox rows commit in one Postgres
+///   transaction (`Database::upsert_credit_settlement_finalize`), then the file
+///   journal is updated. A process death cannot finalize the ledger without its
+///   payout work.
+/// - Across stores / process death after the batch is durable, each line item's
+///   `near_outbox_id` is the repair invariant: `repair_missing_near_credit_outbox_items_for_finalized_batches`
+///   re-emits any missing row. Finalize invokes that repair immediately if a
+///   post-batch outbox write fails, so the same request converges when the
+///   failure is transient.
+async fn append_credit_settlement_finalize_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    outbox_items: &[TraceNearCreditOutboxItem],
+) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
+    let outbox_writes = outbox_items
+        .iter()
+        .map(near_credit_outbox_item_to_storage_write)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if state.require_db_mirror_writes {
+        let Some(db) = state.db_mirror.as_ref() else {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for credit settlement finalize"
+            );
+        };
+        db.upsert_credit_settlement_finalize(
+            credit_settlement_batch_to_storage_write(batch)?,
+            outbox_writes,
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: credit settlement finalize")?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        let mut file_outbox_error: Option<anyhow::Error> = None;
+        for item in outbox_items {
+            if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            {
+                file_outbox_error = Some(error);
+                break;
+            }
+        }
+        if file_outbox_error.is_some() {
+            // DB already has the full set. Repair the file journal from the
+            // expected ids without going through the admin reader (which may be
+            // DB-authoritative and would otherwise skip already-mirrored rows).
+            let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                .into_iter()
+                .map(|item| item.near_outbox_id)
+                .collect::<BTreeSet<_>>();
+            let mut repaired = 0usize;
+            for item in outbox_items {
+                if present.contains(&item.near_outbox_id) {
+                    continue;
+                }
+                append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item).with_context(
+                    || {
+                        format!(
+                            "failed to repair file NEAR outbox item {} after DB-authoritative finalize",
+                            item.near_outbox_id
+                        )
+                    },
+                )?;
+                repaired += 1;
+            }
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired_outbox_count = repaired,
+                    settlement_batch_id = %batch.settlement_batch_id,
+                    tenant_id = %tenant.tenant_id,
+                    "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
+                );
+            }
+            if let Some(error) = file_outbox_error {
+                let expected = outbox_items.len();
+                let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                    .iter()
+                    .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                    .count();
+                if present < expected {
+                    return Err(error.context(format!(
+                        "settlement finalize left incomplete file NEAR outbox ({present}/{expected} present after repair)"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // File-primary path: batch is the commit marker (carries expected outbox
+    // ids). Append outbox rows next; on any failure, repair from the durable
+    // batch before propagating so callers do not observe a silent half-write.
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    let mut outbox_error: Option<anyhow::Error> = None;
+    for item in outbox_items {
+        if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item) {
+            outbox_error = Some(error);
+            break;
+        }
+    }
+    if outbox_error.is_some() {
+        let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state,
+            tenant,
+            std::slice::from_ref(batch),
+        )
+        .await
+        .context("settlement outbox repair after partial finalize failed")?;
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_outbox_count = repaired,
+                settlement_batch_id = %batch.settlement_batch_id,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items after partial settlement finalize"
+            );
+        }
+        if let Some(error) = outbox_error {
+            // Prefer reporting the original failure; repair ran best-effort so the
+            // next settlement / outbox tick can still converge if repair itself
+            // could not complete every row in this request.
+            let expected = outbox_items.len();
+            let existing = read_near_credit_outbox_items_for_admin(state, tenant)
+                .await
+                .unwrap_or_default();
+            let present = existing
+                .iter()
+                .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                .count();
+            if present < expected {
+                return Err(error.context(format!(
+                    "settlement finalize left incomplete NEAR outbox ({present}/{expected} present after repair)"
+                )));
+            }
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let mirror_result = db
+            .upsert_credit_settlement_finalize(
+                credit_settlement_batch_to_storage_write(batch)?,
+                outbox_writes,
+            )
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement finalize mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+    }
+    Ok(())
+}
+
+struct CreditSettlementRunLocks {
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
+    advisory: Option<CreditSettlementAdvisoryLock>,
+}
+
+impl CreditSettlementRunLocks {
+    async fn release(self) -> anyhow::Result<()> {
+        if let Some(advisory) = self.advisory {
+            advisory
+                .release()
+                .await
+                .context("failed to release credit settlement advisory lock")?;
+        }
+        Ok(())
+    }
+}
+
+fn credit_settlement_in_process_lock(tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(tenant_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn acquire_credit_settlement_run_locks(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<CreditSettlementRunLocks> {
+    let in_process = credit_settlement_in_process_lock(tenant_id);
+    let _in_process = match in_process.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "credit settlement already in progress for this tenant",
+            ));
+        }
+    };
+
+    let advisory = if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .try_acquire_credit_settlement_lock(tenant_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "credit settlement already in progress for this tenant",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(CreditSettlementRunLocks {
+        _in_process,
+        advisory,
+    })
 }
 
 async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
@@ -38143,6 +38664,29 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     config: &TraceNearCreditOutboxSchedulerConfig,
 ) -> ApiResult<TraceNearCreditOutboxSchedulerTickSummary> {
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    // Before draining, repair any finalized settlement whose expected outbox rows
+    // are missing (crash between batch commit and outbox append). Settlement runs
+    // already repair on entry; the outbox scheduler is the continuous path that
+    // must converge even when nobody re-triggers settlement (#198).
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &batches,
+    )
+    .await
+    .map_err(internal_error)?;
+    if repaired > 0 {
+        tracing::warn!(
+            repaired_outbox_count = repaired,
+            tenant_id = %tenant.tenant_id,
+            "repaired missing NEAR credit outbox items before outbox scheduler drain"
+        );
+    }
     let Json(submit) = near_credit_outbox_submit_worker_handler(
         State(state.clone()),
         headers.clone(),
