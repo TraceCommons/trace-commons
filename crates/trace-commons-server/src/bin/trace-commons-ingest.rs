@@ -12396,6 +12396,20 @@ async fn revoke_submission(
             "revocation",
         )?;
     }
+    // Fail closed before anything is mutated. Revocation must leave the trace
+    // body unreachable, so a record that carries an encrypted artifact receipt
+    // can only be revoked on a deployment that can reach the store holding that
+    // ciphertext. Refusing here is preferable to tombstoning the record and
+    // silently leaving the payload in a store this process cannot delete from.
+    if let Some(record) = record.as_ref()
+        && record.artifact_receipt.is_some()
+        && state.artifact_store.is_none()
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation refused: missing control trace_artifact_store_unconfigured",
+        ));
+    }
     let revocation_reason =
         trace_revocation_reason_for_request(tenant.auth(), owner_self_revocation, reason)?;
     let mut derived = tenant
@@ -12415,9 +12429,17 @@ async fn revoke_submission(
             .map(|record| record.canonical_summary_hash.clone()),
     };
 
+    // Revocation flips status only. `credit_points_final` is deliberately left
+    // as-is: withdrawing a trace is a contributor's right, not an offence, and
+    // zeroing the awarded figure made the receipt read like a penalty. Nothing
+    // selects for settlement by this value -- `run_credit_settlement` gates on
+    // `status == Accepted` plus `!record.is_terminal()`, and the tenant credit
+    // summary only sums `credit_points_final` for Accepted records -- so the
+    // field is a display value here, not a control. Credit that has already
+    // settled is likewise left alone: revocation removes the trace from the
+    // commons and deletes its content, it does not reach back onto the chain.
     let mirrored_record = record.take().map(|mut record| {
         record.status = TraceCorpusStatus::Revoked;
-        record.credit_points_final = Some(0.0);
         record
     });
     let revoked_derived = derived.take().map(|mut derived| {
@@ -12530,6 +12552,18 @@ async fn revoke_submission(
         }
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Revoked means the content is gone, not merely relabelled. This runs last,
+    // after every hash-only tombstone, mirror, and invalidation has been written
+    // from the still-readable record -- `redaction_hash_for_record` reads the
+    // stored envelope, so deleting earlier would strip the tombstone of the very
+    // hashes it exists to carry. Errors propagate: a store that refuses deletion
+    // (a disabled remote object store returns an error) fails the request rather
+    // than leaving the payload behind under a revoked label. Deleting an object
+    // that is already gone is a no-op, so re-revoking is idempotent.
+    if let Some(record) = mirrored_record.as_ref() {
+        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -41363,8 +41397,15 @@ async fn run_revocation_effects_drill(
                 })
         })
         .count();
-    let delayed_credit_reversal_ready = credit_reversal_item_count > 0
-        && credit_reversal_done_count == credit_reversal_item_count
+    // Revocation no longer claws back settled credit, so the expected item
+    // count for a canary revocation is zero and zero is the ready state: the
+    // check now proves the contributor was NOT charged for withdrawing. It is
+    // not vacuous -- any `ReverseCreditSettlement` item that does exist (an
+    // operator reversal of fraudulent or mistakenly settled credit, or an item
+    // enqueued before this policy change) must still be fully drained, with its
+    // reversal credit event and NEAR reverse receipt present, before the check
+    // reads ready.
+    let delayed_credit_reversal_ready = credit_reversal_done_count == credit_reversal_item_count
         && reversed_credit_event_count >= credit_reversal_item_count
         && near_reversal_outbox_count >= near_reversal_outbox_expected_count;
 
@@ -54335,14 +54376,15 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
-    let credit_reversal_items_enqueued = enqueue_credit_settlement_reversal_items_for_revocation(
-        db.as_ref(),
-        &tenant.tenant_id,
-        submission_id,
-        revocation_reason,
-    )
-    .await
-    .context("failed to enqueue credit settlement reversal propagation items")?;
+    // Revocation does NOT claw back credit that has already settled. Credit
+    // earned and settled stays earned: a contributor who is uneasy about a
+    // trace must be able to pull it back without being financially penalised,
+    // or the trace stays in the commons out of fear. Revocation removes the
+    // trace from the corpus and deletes its content -- it does not reach back
+    // onto the chain. The `ReverseCreditSettlement` propagation action and its
+    // worker remain, so an operator can still reverse a fraudulent or
+    // mistakenly settled credit and so any item enqueued before this change
+    // still drains; nothing on the revocation path enqueues one.
     let object_delete_items_enqueued = enqueue_object_payload_delete_items_for_revocation(
         db.as_ref(),
         &tenant.tenant_id,
@@ -54392,7 +54434,6 @@ async fn mirror_revocation_to_db(
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
-            || credit_reversal_items_enqueued > 0
             || object_delete_items_enqueued > 0
             || worker_queue_items_enqueued > 0
             || vector_entry_items_enqueued > 0)
@@ -54404,12 +54445,6 @@ async fn mirror_revocation_to_db(
             export_manifests_invalidated,
             export_manifest_items_invalidated,
         );
-        if credit_reversal_items_enqueued > 0 {
-            action_counts.insert(
-                "credit_reversal_items_enqueued".to_string(),
-                credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
-            );
-        }
         if object_delete_items_enqueued > 0 {
             action_counts.insert(
                 "object_delete_items_enqueued".to_string(),
@@ -54679,92 +54714,6 @@ async fn enqueue_object_payload_delete_items_for_revocation(
         })
         .await
         .context("failed to upsert object payload delete propagation item")?;
-        enqueued += 1;
-    }
-    Ok(enqueued)
-}
-
-async fn enqueue_credit_settlement_reversal_items_for_revocation(
-    db: &dyn Database,
-    tenant_id: &str,
-    submission_id: Uuid,
-    revocation_reason: &str,
-) -> anyhow::Result<usize> {
-    let existing_idempotency_keys = db
-        .list_trace_revocation_propagation_items(tenant_id, submission_id)
-        .await
-        .context("failed to read existing revocation propagation items")?
-        .into_iter()
-        .map(|item| item.idempotency_key)
-        .collect::<BTreeSet<_>>();
-    let settled_event_ids = db
-        .list_trace_credit_settlement_batches(tenant_id)
-        .await
-        .context("failed to read credit settlement batches for revocation propagation")?
-        .into_iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids)
-        .collect::<BTreeSet<_>>();
-    if settled_event_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut enqueued = 0usize;
-    for event in db
-        .list_trace_credit_events(tenant_id)
-        .await
-        .context("failed to read credit events for revocation propagation")?
-        .into_iter()
-        .filter(|event| event.submission_id == submission_id)
-        .filter(|event| event.settlement_state == StorageTraceCreditSettlementState::Final)
-        .filter(|event| settled_event_ids.contains(&event.credit_event_id))
-    {
-        let Ok(points_delta) = event.points_delta.parse::<f32>() else {
-            continue;
-        };
-        if !points_delta.is_finite() || points_delta <= 0.0 {
-            continue;
-        }
-        let idempotency_key = sha256_prefixed(&format!(
-            "trace_revocation_credit_settlement_reversal:v1:{tenant_id}:{submission_id}:{}",
-            event.credit_event_id
-        ));
-        if existing_idempotency_keys.contains(&idempotency_key) {
-            continue;
-        }
-        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
-            tenant_id: tenant_id.to_string(),
-            propagation_item_id: deterministic_trace_uuid_for_external_ref(
-                "revocation-credit-settlement-reversal",
-                tenant_id,
-                submission_id,
-                &event.credit_event_id.to_string(),
-            ),
-            source_submission_id: submission_id,
-            target: StorageTraceRevocationPropagationTarget::CreditSettlement {
-                credit_event_id: event.credit_event_id,
-                credit_account_ref: event.credit_account_ref,
-                settlement_state_at_selection: event.settlement_state,
-            },
-            action: StorageTraceRevocationPropagationAction::ReverseCreditSettlement,
-            status: StorageTraceRevocationPropagationItemStatus::Pending,
-            idempotency_key,
-            reason: format!(
-                "revoked trace settled credit reversal;reason_hash={}",
-                sha256_prefixed(revocation_reason)
-            ),
-            attempt_count: 0,
-            last_error: None,
-            next_attempt_at: None,
-            completed_at: None,
-            evidence_hash: None,
-            metadata: BTreeMap::from([(
-                "source".to_string(),
-                "mirror_revocation_to_db".to_string(),
-            )]),
-        })
-        .await
-        .context("failed to upsert credit settlement reversal propagation item")?;
         enqueued += 1;
     }
     Ok(enqueued)
@@ -61206,8 +61155,10 @@ async fn run_maintenance(
                 .or_insert_with(|| TRACE_DEFAULT_REVOCATION_REASON.to_string())
                 .clone();
             if !request.dry_run {
+                // Same decision as `revoke_submission`: reconciling a record
+                // against an existing tombstone marks it revoked and leaves the
+                // awarded credit figure untouched.
                 record.status = TraceCorpusStatus::Revoked;
-                record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
                 mirror_revocation_to_db(
                     state,

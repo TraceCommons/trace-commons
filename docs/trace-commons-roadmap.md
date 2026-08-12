@@ -33,8 +33,9 @@ What the standalone server has today:
   scoped credit-cycle scheduler. Central-issuer principal allowlist gates
   every credit-bearing route.
 - Ranking evidence storage with calibration / promotion / model-risk gates.
-- Revocation propagation worker for object refs, credit ledger reversals,
-  worker-queue invalidation, and service-owned artifact deletion.
+- Revocation propagation worker for object refs, worker-queue invalidation,
+  and service-owned artifact deletion. Revocation does not claw back settled
+  credit; the reversal action remains for operator-raised corrections.
 - Hash-only audit and operational surfaces. `/v1/admin/config-status` and
   `/v1/admin/operational-summary` expose only safe label / hash / boolean fields.
 

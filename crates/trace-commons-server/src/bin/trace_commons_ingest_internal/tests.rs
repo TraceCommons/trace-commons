@@ -6431,6 +6431,300 @@ async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// Withdrawal is not a punishment. Credit already awarded for a trace survives
+/// its revocation: the record flips to `Revoked` and `credit_points_final` is
+/// left exactly as it was. Settlement is gated on `status == Accepted`, not on
+/// this value, so leaving it alone changes no control -- only the receipt the
+/// contributor reads.
+#[tokio::test]
+async fn revocation_leaves_awarded_final_credit_unchanged() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(2.5);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after revocation")
+        .expect("record still exists after revocation");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(
+        revoked.credit_points_final,
+        Some(2.5),
+        "revocation must not claw back credit that was already awarded"
+    );
+}
+
+/// Revoked means the content is gone. Both the stored envelope body and the
+/// encrypted artifact are deleted; only the hash-only tombstone and the
+/// status-flipped metadata record remain.
+#[tokio::test]
+async fn revocation_deletes_stored_envelope_body_and_encrypted_artifact() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("encrypted artifact receipt is persisted");
+    let body_path = temp.path().join(&record.object_key);
+    assert!(body_path.exists(), "envelope body exists before revocation");
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_ok(),
+        "encrypted artifact reads before revocation"
+    );
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        !body_path.exists(),
+        "revocation must delete the stored envelope body"
+    );
+    assert!(
+        artifact_store
+            .read_artifact(&record.tenant_storage_ref, &receipt)
+            .is_err(),
+        "revocation must delete the encrypted artifact"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some(),
+        "the hash-only tombstone survives"
+    );
+}
+
+/// A deployment that cannot reach the store holding a record's ciphertext
+/// cannot make revocation mean anything, so it refuses rather than tombstoning
+/// the record and leaving the payload behind.
+#[tokio::test]
+async fn revocation_fails_closed_when_artifact_store_is_unconfigured() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let artifact_store = test_artifact_store(artifact_temp.path());
+    let state_with_store = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        Some(artifact_store),
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state_with_store),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds with an artifact store configured");
+
+    // Same root, no artifact store: the record still carries a receipt for
+    // ciphertext this process can no longer delete.
+    let state_without_store = test_state(temp.path().to_path_buf());
+    let error = revoke_trace_handler(
+        State(state_without_store),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect_err("revocation fails closed without a reachable artifact store");
+    assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        error
+            .1
+            .0
+            .error
+            .contains("trace_artifact_store_unconfigured"),
+        "the refusal names the missing control"
+    );
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_none(),
+        "no tombstone is written when revocation is refused"
+    );
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_ne!(record.status, TraceCorpusStatus::Revoked);
+}
+
+/// The tombstone is hash-only: it carries the submission and tenant keys plus
+/// sha256 digests, never the contributor's identity, the storage path of the
+/// deleted object, or any trace content.
+#[tokio::test]
+async fn revocation_tombstone_carries_no_identity_path_or_content() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+
+    let status = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("owner can revoke");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("tombstone lookup succeeds")
+        .expect("tombstone exists");
+    let serialized = serde_json::to_string(&tombstone).expect("tombstone serializes");
+    assert!(
+        !serialized.contains(&record.object_key),
+        "tombstone must not carry the storage path of the deleted object"
+    );
+    assert!(
+        !serialized.contains(record.auth_principal_ref.as_str()),
+        "tombstone must not carry contributor identity"
+    );
+    assert!(
+        !serialized.contains("Please inspect the workspace"),
+        "tombstone must not carry trace content"
+    );
+    for hash in [
+        tombstone.redaction_hash.as_deref(),
+        tombstone.canonical_summary_hash.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(
+            hash.starts_with("sha256:"),
+            "tombstone hashes are sha256 digests"
+        );
+    }
+}
+
+/// Revoking an already-revoked trace is a no-op that still answers 204: the
+/// content is already gone, so the second delete finds nothing, and the
+/// awarded credit is not touched on either pass.
+#[tokio::test]
+async fn revoking_twice_is_idempotent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("tenant-a submission succeeds");
+
+    let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.credit_points_final = Some(1.25);
+    write_submission_record(temp.path(), &record).expect("awarded final credit persists");
+    let body_path = temp.path().join(&record.object_key);
+
+    let first = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("first revocation succeeds");
+    assert_eq!(first, StatusCode::NO_CONTENT);
+
+    let second = revoke_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("second revocation succeeds");
+    assert_eq!(second, StatusCode::NO_CONTENT);
+
+    assert!(!body_path.exists(), "content stays deleted");
+    let revoked = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads after two revocations")
+        .expect("record still exists");
+    assert_eq!(revoked.status, TraceCorpusStatus::Revoked);
+    assert_eq!(revoked.credit_points_final, Some(1.25));
+    assert!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("tombstone lookup succeeds")
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn revoke_rejects_mismatched_file_record_tenant_before_side_effects() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -28334,8 +28628,10 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    assert!(propagation_items.iter().any(|item| {
-        item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+    // The canary trace had settled credit, and revocation left it settled: the
+    // drill proves the deletion effects landed without a clawback item.
+    assert!(propagation_items.iter().all(|item| {
+        item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
     }));
     assert!(propagation_items.iter().any(|item| {
         item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
@@ -28361,7 +28657,7 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     )
     .await
     .expect("revocation worker applies canary effects");
-    assert!(worker.completed >= 7);
+    assert!(worker.completed >= 6);
     assert_eq!(worker.failed, 0);
 
     let response = app(state.clone())
@@ -28396,8 +28692,12 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     );
     assert_eq!(value["object_deletion_refs_ready"], serde_json::json!(true));
     assert_eq!(value["blocking_gaps"], serde_json::json!([]));
-    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
-    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
+    // Zero is the ready state now: revocation does not claw back settled
+    // credit, so there is no reversal item, no reversal credit event, and no
+    // NEAR reverse receipt to verify.
+    assert_eq!(value["credit_reversal_item_count"], serde_json::json!(0));
+    assert_eq!(value["reversed_credit_event_count"], serde_json::json!(0));
+    assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(0));
     assert_eq!(value["object_delete_item_count"], serde_json::json!(6));
     assert_eq!(value["object_delete_done_count"], serde_json::json!(6));
     assert_eq!(value["deleted_object_ref_count"], serde_json::json!(6));
@@ -35026,7 +35326,9 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     assert_eq!(statuses_after_revoke.len(), 1);
     assert_eq!(statuses_after_revoke[0].status, "revoked");
     assert_eq!(statuses_after_revoke[0].credit_points_ledger, 0.0);
-    assert_eq!(statuses_after_revoke[0].credit_points_final, Some(0.0));
+    // Revocation does not claw back the awarded figure; this record was never
+    // finalized, so it stays `None` rather than being punitively zeroed.
+    assert_eq!(statuses_after_revoke[0].credit_points_final, None);
     assert_eq!(statuses_after_revoke[0].credit_points_total, None);
     assert!(
         statuses_after_revoke[0]
@@ -53198,7 +53500,7 @@ fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
+async fn revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -53272,58 +53574,55 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
     .expect("contributor can revoke settled trace");
     assert_eq!(revoke_status, StatusCode::NO_CONTENT);
 
+    // Settled credit is NOT clawed back when the contributor withdraws the
+    // trace. Revocation removes the trace from the commons and deletes its
+    // content; it does not reach back onto the chain. No reversal propagation
+    // item is enqueued, so the worker has nothing to reverse, no negative
+    // credit event appears, and no `reverse_credit_receipt` NEAR outbox row is
+    // written.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(reversal_items[0].source_submission_id, submission_id);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: event.event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a settled-credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_settled_credit_for_revocation".to_string()),
+            purpose: Some("drain_revocation_propagation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
         .expect("DB credit events read");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!("revocation_credit_reversal:{}", event.event_id))
-        })
-        .expect("reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
+                != Some(&format!("revocation_credit_reversal:{}", event.event_id))
+        }),
+        "revocation must not mirror a reversal credit event"
     );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
+    let settled_event = db_credit_events
+        .iter()
+        .find(|record| record.credit_event_id == event.event_id)
+        .expect("the settled credit event survives revocation");
+    assert_eq!(
+        settled_event.settlement_state,
+        StorageTraceCreditSettlementState::Final
+    );
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -53338,29 +53637,18 @@ async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_revers
             .iter()
             .any(|item| item.near_call.method_name == "settle_credit_receipt")
     );
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
-    );
-    assert_eq!(
-        reverse_items[0].status,
-        StorageTraceCreditSettlementNearStatus::Pending
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and_near_receipt() {
+async fn revocation_leaves_settled_benchmark_conversion_credit_intact() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -53453,63 +53741,46 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
     .await
     .expect("contributor can revoke settled benchmark source");
 
+    // A settled benchmark-conversion credit survives the contributor
+    // withdrawing the source trace: no reversal item, no negative credit event,
+    // no NEAR reverse receipt, and the contributor's settled balance is intact.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: benchmark_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a benchmark credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_benchmark_credit_for_revocation".to_string()),
+            purpose: Some("drain_benchmark_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled benchmark credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after benchmark credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after benchmark revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{benchmark_credit_event_id}"
                 ))
-        })
-        .expect("benchmark conversion reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::BenchmarkConversion
+        }),
+        "revocation must not mirror a benchmark reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-2.0000");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -53519,39 +53790,26 @@ async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(2_000_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[benchmark_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 2.0);
 
     let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects benchmark reversal");
-    assert_eq!(credit.credit_points_settled, 0.0);
-    assert_eq!(credit.credit_points_reversed, 2.0);
-    assert_eq!(credit.credit_points_total, 0.0);
+        .expect("credit summary keeps settled benchmark credit");
+    assert_eq!(credit.credit_points_settled, 2.0);
+    assert_eq!(credit.credit_points_reversed, 0.0);
+    assert_eq!(credit.credit_points_total, 2.0);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 #[tokio::test]
-async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near_receipt() {
+async fn revocation_leaves_settled_ranking_utility_credit_intact() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -53664,63 +53922,45 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
     .await
     .expect("contributor can revoke settled ranking source");
 
+    // Settled ranking-utility credit is likewise untouched by a contributor
+    // withdrawing the source trace.
     let propagation_items = backend
         .list_trace_revocation_propagation_items("tenant-a", prediction.submission_id)
         .await
         .expect("revocation propagation items read");
-    let reversal_items = propagation_items
-        .iter()
-        .filter(|item| {
-            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reversal_items.len(), 1);
-    assert_eq!(
-        reversal_items[0].target,
-        StorageTraceRevocationPropagationTarget::CreditSettlement {
-            credit_event_id: ranking_credit_event_id,
-            credit_account_ref: principal_storage_ref("token-a"),
-            settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
-        }
+    assert!(
+        propagation_items.iter().all(|item| {
+            item.action != StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }),
+        "revocation must not enqueue a ranking credit reversal item"
     );
 
     let Json(response) = revocation_propagation_worker_handler(
         State(state.clone()),
         auth_headers("revocation-worker-token-a"),
         Json(TraceRevocationPropagationWorkerRequest {
-            purpose: Some("reverse_ranking_credit_for_revocation".to_string()),
+            purpose: Some("drain_ranking_revocation_without_clawback".to_string()),
             dry_run: false,
             limit: 10,
         }),
     )
     .await
-    .expect("revocation worker reverses settled ranking credit");
-    assert_eq!(response.completed, 1);
+    .expect("revocation worker drains remaining propagation items");
     assert_eq!(response.failed, 0);
 
     let db_credit_events = backend
         .list_trace_credit_events("tenant-a")
         .await
-        .expect("DB credit events read after ranking credit reversal");
-    let reversal_event = db_credit_events
-        .iter()
-        .find(|record| {
+        .expect("DB credit events read after ranking revocation");
+    assert!(
+        db_credit_events.iter().all(|record| {
             record.external_ref.as_deref()
-                == Some(&format!(
+                != Some(&format!(
                     "revocation_credit_reversal:{ranking_credit_event_id}"
                 ))
-        })
-        .expect("ranking utility reversal credit event is mirrored");
-    assert_eq!(reversal_event.submission_id, prediction.submission_id);
-    assert_eq!(
-        reversal_event.event_type,
-        StorageTraceCreditEventType::RankingUtility
+        }),
+        "revocation must not mirror a ranking reversal credit event"
     );
-    assert_eq!(
-        reversal_event.settlement_state,
-        StorageTraceCreditSettlementState::Reversed
-    );
-    assert_eq!(reversal_event.points_delta, "-1.2500");
 
     let db_outbox = backend
         .list_trace_near_credit_outbox_items("tenant-a")
@@ -53730,33 +53970,20 @@ async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near
         .map(near_credit_outbox_item_from_storage)
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("DB NEAR outbox records convert");
-    let reverse_items = db_outbox
-        .iter()
-        .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
-        .collect::<Vec<_>>();
-    assert_eq!(reverse_items.len(), 1);
-    assert_eq!(
-        reverse_items[0].settlement_batch_id,
-        finalized.settlement_batch_id
+    assert!(
+        db_outbox
+            .iter()
+            .all(|item| item.near_call.method_name != "reverse_credit_receipt"),
+        "revocation must not enqueue a NEAR reverse receipt"
     );
-    assert_eq!(
-        reverse_items[0].near_call.args["amount_micros"],
-        serde_json::json!(1_250_000)
-    );
-    assert_eq!(
-        reverse_items[0].near_call.args["source_list_hash"],
-        serde_json::json!(source_credit_event_ids_hash(
-            "trace-credit-policy-v1",
-            &[ranking_credit_event_id],
-        ))
-    );
+    assert_eq!(finalized.settled_credit_points, 1.25);
 
     let Json(credit_summary) = credit_handler(State(state), auth_headers("token-a"))
         .await
-        .expect("credit summary reflects ranking reversal");
-    assert_eq!(credit_summary.credit_points_settled, 0.0);
-    assert_eq!(credit_summary.credit_points_reversed, 1.25);
-    assert_eq!(credit_summary.credit_points_total, 0.0);
+        .expect("credit summary keeps settled ranking credit");
+    assert_eq!(credit_summary.credit_points_settled, 1.25);
+    assert_eq!(credit_summary.credit_points_reversed, 0.0);
+    assert_eq!(credit_summary.credit_points_total, 1.25);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
