@@ -112,9 +112,9 @@ pub struct PgBackend {
     /// Narrow, SEPARATE pool for the cross-tenant gate-driver enumeration
     /// query. Built only when `gate_driver_url` is configured; its DB user is
     /// the operator-provisioned `trace_gate_driver` role (NOLOGIN base,
-    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
-    /// V36). `None` keeps the gate driver's enumeration path fail-closed.
-    /// NEVER aliased to `pool`.
+    /// NOBYPASSRLS, V36 USING(true) cross-tenant policies, V42 column-scoped
+    /// SELECT grants mirroring `trace_pii_backstop_driver`). `None` keeps the
+    /// gate driver's enumeration path fail-closed. NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
     /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
     /// enumeration query (server-side NEAR AI PII backstop). Built only when
@@ -1380,6 +1380,29 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&44_i32, &"native_session_client_kind"],
+                )
+                .await?;
+        }
+        // V45 retrofits V36's table-wide SELECT grants to the V38
+        // column-scoped convention. Safe to apply after V36+; the USING(true)
+        // policies stay.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&45_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V45__trace_gate_driver_column_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&45_i32, &"trace_gate_driver_column_grants"],
                 )
                 .await?;
         }
@@ -4065,8 +4088,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's submissions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's submissions.
         let rows = client
             .query(
                 // DISTINCT: a submission can carry more than one active
@@ -4176,8 +4200,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's decisions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's decisions.
         //
         // DISTINCT + `received_at` in the projection mirrors the sibling
         // `list_submissions_needing_gate_decision` query: `received_at` is a
