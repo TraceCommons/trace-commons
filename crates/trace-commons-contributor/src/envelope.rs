@@ -312,10 +312,31 @@ fn build_raw_contribution_with_id(
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
     );
-    feature_flags.insert(
-        "project".to_string(),
-        t.project.clone().unwrap_or_else(|| "unknown".to_string()),
-    );
+    // The project basename is NOT sent, in any form.
+    //
+    // It used to ship in the clear as `project`, which was the leak in #207:
+    // it is derived from the same working directory `cwd_hash` exists to
+    // protect, and a repo or client name identifies on its own.
+    //
+    // It is not hashed either, and that was a deliberate choice rather than
+    // an oversight. `session_hash` is unsalted SHA-256, and basenames are
+    // dictionary-shaped -- `dotfiles`, `api`, `backend`, `monorepo` -- so a
+    // wordlist inverts them in constant time. Worse, an unsalted digest is
+    // stable across every contributor forever, so it preserves exactly the
+    // cross-contributor linkage the cleartext field had (two people working
+    // on identically named repos are still linkable) while reading as though
+    // it were protected. Removing the evidence of a capability without
+    // removing the capability is worse than leaving it visible.
+    //
+    // Nothing server-side reads this key -- the only `"project"` in
+    // trace-commons-protocol is an unrelated issue-identity redaction rule --
+    // so there is no consumer to preserve. Local `--project` scoping matches
+    // on the in-memory field and never needed the serialized one.
+    //
+    // If per-project grouping is ever actually wanted, the answer is an HMAC
+    // keyed by the device key, which keeps a contributor's own traces
+    // groupable while destroying both the dictionary attack and the
+    // cross-contributor linkage. Do not reintroduce a bare hash.
     feature_flags.insert(
         "cwd_hash".to_string(),
         t.cwd
@@ -324,7 +345,11 @@ fn build_raw_contribution_with_id(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    let events: Vec<RawTraceContributionEvent> =
+        t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    // The declaration describes the payload above, rather than asserting a
+    // constant. See `declared_content_presence`.
+    let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
@@ -350,8 +375,8 @@ fn build_raw_contribution_with_id(
                     parsed
                 }
             },
-            message_text_included: true,
-            tool_payloads_included: true,
+            message_text_included,
+            tool_payloads_included,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -420,6 +445,53 @@ pub fn apply_granted_scopes(
         .find(|s| **s != ConsentScope::PublicAttribution)
         .copied()
         .unwrap_or(ConsentScope::DebuggingEvaluation);
+}
+
+/// Whether the built events actually carry message text / tool payloads.
+///
+/// `docs/trace-spec.md` defines these consent booleans as a FACTUAL
+/// DECLARATION of what the envelope contains, not a preference and not a
+/// default. This client hardcoded both to `true` on every envelope, which is
+/// wrong in both directions:
+///
+/// - It over-declares. A trace with no tool calls declared
+///   `tool_payloads_included: true`, which puts it at Medium residual risk and
+///   quarantines it on a default deployment -- for content it never carried.
+/// - It ignores what the trace is. The declaration is supposed to describe the
+///   payload, and a constant cannot.
+///
+/// Derived from the events as built, after any content gating, so the
+/// declaration and the payload cannot disagree.
+fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, bool) {
+    let mut message_text = false;
+    let mut tool_payloads = false;
+
+    for event in events {
+        let has_content = event
+            .content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty());
+        if has_content {
+            match event.event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => tool_payloads = true,
+            }
+        }
+        // A structured payload is tool-call content regardless of event kind.
+        // A bare `tool_name` deliberately does NOT count: the name is metadata
+        // about which tool ran, not the payload the flag declares.
+        if !event.structured_payload.is_null() {
+            tool_payloads = true;
+        }
+    }
+
+    (message_text, tool_payloads)
 }
 
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
@@ -531,8 +603,12 @@ mod tests {
         assert!(!json.contains("sk-fake-fixture-secret-1234"));
         // The full local path prefix must not survive.
         assert!(!json.contains("/Users/testuser"));
-        // Project basename and agent tag do survive.
-        assert!(json.contains("myproj"));
+        // The project basename must not survive at all -- not in the clear,
+        // and not as a digest either. See the note at the feature-flag block
+        // for why a bare hash of a dictionary-shaped basename was rejected.
+        assert!(!json.contains("myproj"));
+        assert!(!json.contains(&session_hash("myproj".as_bytes())));
+        // The agent tag does survive.
         assert!(json.contains("claude-code"));
     }
 
@@ -745,6 +821,119 @@ mod tests {
         assert!(raw_contribution_size_ok(&small).is_ok());
     }
 
+    /// The declaration must describe the payload, not assert a constant.
+    ///
+    /// This is the case the hardcoded `true` got wrong in the direction that
+    /// costs contributors traces: a transcript with no tool calls declared
+    /// `tool_payloads_included: true`, which lands it at Medium residual risk
+    /// and quarantines it on a default deployment -- for tool payloads it does
+    /// not carry.
+    #[test]
+    fn transcript_without_tool_calls_does_not_declare_tool_payloads() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::User,
+                timestamp: None,
+                content: Some("what does this function do?".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::Assistant,
+                timestamp: None,
+                content: Some("it parses the config".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            raw.consent.message_text_included,
+            "the transcript carries message text, so it must be declared"
+        );
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "no event carries a tool payload, so it must not be declared"
+        );
+    }
+
+    /// A tool name is metadata about which tool ran, not the payload. Counting
+    /// it would re-introduce the over-declaration this fixes, since the
+    /// recorded-trace path keeps tool names for structure even when it strips
+    /// payloads for privacy.
+    #[test]
+    fn a_bare_tool_name_is_not_a_tool_payload() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::Value::Null,
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "a tool name without a payload must not declare tool payloads"
+        );
+        assert!(
+            !raw.consent.message_text_included,
+            "a tool call is not message text"
+        );
+    }
+
+    /// A tool call that does carry a payload must declare it -- the fix must
+    /// not under-declare, which would misrepresent the envelope in the
+    /// direction that matters for consent.
+    #[test]
+    fn tool_payloads_are_declared_when_present() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::json!({"path": "src/main.rs"}),
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(raw.consent.tool_payloads_included);
+    }
+
+    /// A structure-only trace declares neither, which is what lets it stay out
+    /// of quarantine on a default deployment.
+    #[test]
+    fn content_free_transcript_declares_neither() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some(String::new()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(!raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
+    }
+
     #[test]
     fn reasoning_events_map_to_the_reasoning_event_type() {
         let event = crate::source::SessionEvent {
@@ -769,12 +958,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.json");
         let mut f = std::fs::File::create(&path).unwrap();
-        // `cwd` is nested one level below the "secretproj" marker: the
-        // project field derived from the cwd basename ("workdir") is
-        // expected to survive into the raw contribution (same as every
-        // other source), but the full cwd path -- and therefore the
-        // "secretproj" marker itself -- must never appear in the
-        // serialized output. Only its hash (`cwd_hash`) may.
+        // `cwd` is nested one level below the "secretproj" marker. Neither
+        // the full cwd path (and therefore the "secretproj" marker) nor the
+        // project basename ("workdir") may appear in the serialized output.
+        // The cwd crosses only as `cwd_hash`; the basename does not cross at
+        // all, in any form.
         f.write_all(
             br#"[
               {"role":"meta","source":"openhands","cwd":"/home/dev/secretproj/workdir","model":"gpt-5"},
@@ -805,6 +993,24 @@ mod tests {
         assert!(
             !serialized.contains("secretproj"),
             "cwd must never be serialized"
+        );
+        assert!(
+            !serialized.contains("workdir"),
+            "project basename must never be serialized in the clear"
+        );
+        assert!(
+            !serialized.contains(&session_hash("workdir".as_bytes())),
+            "the basename must not cross as a digest either -- an unsalted \
+             hash of a dictionary-shaped name is reversible and is a stable \
+             cross-contributor identifier"
+        );
+        assert!(
+            !raw.ironclaw.feature_flags.contains_key("project"),
+            "the cleartext project flag must be gone"
+        );
+        assert!(
+            !raw.ironclaw.feature_flags.contains_key("project_hash"),
+            "and it must not have been replaced by a hashed one"
         );
     }
 }

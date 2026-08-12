@@ -258,7 +258,17 @@ jobs:
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 40, not the 20 this started with, and not the 30 the other Rust jobs
+    # use. This job builds TWO cargo workspaces -- the root one for the daemon
+    # and the GTK crate, which is deliberately excluded from the root
+    # workspace so the root still builds on macOS -- on top of a large apt
+    # install, a compositor, a portal stack and OCR.
+    #
+    # On a cold cargo cache that exceeded 20 minutes and the job was cancelled
+    # mid-build. A cancellation reads as a red required check with no failing
+    # assertion, which is the most confusing possible signal: it looks like the
+    # PR broke desktop integration when nothing ever ran.
+    timeout-minutes: 40
     # crates/trace-commons-contributor-gtk is excluded from the root
     # workspace (it cannot build on macOS) and was previously verified only
     # under Xvfb with no portal/tray service on the bus at all -- see

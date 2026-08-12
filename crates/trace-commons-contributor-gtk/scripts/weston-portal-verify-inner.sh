@@ -133,8 +133,38 @@ else
 
     # Give the window time to realize and composite at least one frame
     # before asking the compositor for a screenshot.
-    sleep 6
-    WAYLAND_DISPLAY="$WAYLAND_SOCKET" weston-screenshooter || true
+    # Capture until the frame actually contains text, not once after a fixed
+    # wait.
+    #
+    # `sleep 6` then one shot was a race, and it failed in the way races do:
+    # the job went red on documentation PRs that never touch this crate, with
+    # "OCR did not find the expected header-bar text". Comparing artifacts
+    # showed a 76 KB frame on the failures against 158 KB on the pass -- the
+    # window had been composited enough to be non-uniform (so the blank check
+    # passed) but had not finished painting its text. Under a loaded runner
+    # six seconds is simply not a guarantee.
+    #
+    # This does NOT weaken the assertion: the loop still requires readable
+    # text, and still fails if it never appears. It removes a timing
+    # dependency, which is the thing that was making a required gate flaky and
+    # therefore ignorable.
+    CAPTURED=0
+    for attempt in $(seq 1 10); do
+      sleep 3
+      rm -f "$WORKDIR"/*.png 2>/dev/null || true
+      WAYLAND_DISPLAY="$WAYLAND_SOCKET" weston-screenshooter || true
+      CANDIDATE=$(ls -t "$WORKDIR"/*.png 2>/dev/null | head -1 || true)
+      [ -z "$CANDIDATE" ] && continue
+      if tesseract "$CANDIDATE" - 2>/dev/null | grep -qi 'queue'; then
+        echo "frame with readable text captured on attempt $attempt"
+        CAPTURED=1
+        break
+      fi
+      echo "attempt $attempt: frame captured but no readable text yet"
+    done
+    if [ "$CAPTURED" -ne 1 ]; then
+      echo "no frame containing readable text after 10 attempts" >&2
+    fi
 
     wait "$APP_PID"
   )

@@ -67,7 +67,7 @@ absolute values are less informative than rate.
 | `revocation_propagation_terminal_failed_derived_records` | new (A6 retrofit) | Count of derived-record revocations terminal-failed. Cross-reference `DerivedRecordInvalidationFailed`. **Should be zero.** |
 | `revocation_propagation_terminal_failed_benchmark_artifacts` | new (A6 retrofit) | Count of benchmark-artifact revocations terminal-failed. Cross-reference `BenchmarkArtifactInvalidationFailed`. **Should be zero.** |
 | `revocation_propagation_terminal_failed_ranker_artifacts` | new (A6 retrofit) | Count of ranker-artifact revocations terminal-failed. Cross-reference `RankerArtifactInvalidationFailed`. **Should be zero.** |
-| `revocation_propagation_terminal_failed_credit_settlements` | new (A6 retrofit) | Count of credit-settlement reversals terminal-failed (often NEAR outbox dependency). Cross-reference `CreditSettlementReversalFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_credit_settlements` | new (A6 retrofit) | Count of operator-raised credit-settlement reversals terminal-failed (often NEAR outbox dependency); revocation never enqueues one. Cross-reference `CreditSettlementReversalFailed`. **Should be zero.** |
 | `revocation_propagation_terminal_failed_worker_queues` | new (A6 retrofit) | Count of worker-queue invalidations terminal-failed (typically missing external invalidator). Cross-reference `WorkerQueueInvalidationFailed`. **Should be zero.** |
 | `revocation_propagation_terminal_failed_physical_delete_receipts` | new (A6 retrofit) | Count of physical-delete-receipt records terminal-failed after delete. Cross-reference `PhysicalDeleteReceiptRecordFailed`. **Should be zero.** |
 | `audit_chain_drift_rejected_total` | — | Cumulative |

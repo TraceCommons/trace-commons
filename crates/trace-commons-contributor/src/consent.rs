@@ -111,7 +111,7 @@ pub fn prompt_consent_answers(
 ) -> Result<ConsentAnswers> {
     writeln!(
         output,
-        "How may your submitted traces be used? (you can revoke submitted traces later)"
+        "How may your submitted traces be used? (you can revoke submitted traces later; credit you have already earned is kept)"
     )?;
     writeln!(
         output,
