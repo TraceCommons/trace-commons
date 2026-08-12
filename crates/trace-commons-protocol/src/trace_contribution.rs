@@ -3769,8 +3769,21 @@ pub struct EnvelopeContentPresence {
 /// Minimum concordance rule (issue #208):
 /// - non-empty `redacted_content` on user / assistant / reasoning (and other
 ///   prose event types), or `outcome.human_correction`, implies message text;
-/// - tool-call / tool-result / http content, a non-null `structured_payload`,
-///   or a `tool_name` implies tool payloads.
+/// - tool-call / tool-result / http content, or a non-null `structured_payload`,
+///   implies tool payloads.
+///
+/// A bare `tool_name` deliberately does NOT imply tool payloads. The name is
+/// metadata about which tool ran, not the payload the flag declares, and
+/// stripping payloads while keeping names is a supported privacy mode -- it is
+/// what keeps a trace structurally trainable when content is absent. Counting
+/// the name would correct every structure-preserved trace upward to
+/// `tool_payloads_included = true`, push it to Medium residual risk, and
+/// quarantine it on a default deployment for payloads it does not carry.
+///
+/// This matches the client-side derivation in the contributor crate, which
+/// makes the same call. The two halves must agree: if the client declares
+/// honestly and the server then corrects that declaration upward anyway, the
+/// contributor is penalised for telling the truth.
 ///
 /// Does not mutate the envelope. Callers that need enforcement should use
 /// [`reconcile_consent_declarations`], which only corrects flags upward.
@@ -3796,12 +3809,7 @@ pub fn derive_envelope_content_presence(
                 | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
             }
         }
-        if !event.structured_payload.is_null()
-            || event
-                .tool_name
-                .as_ref()
-                .is_some_and(|name| !name.is_empty())
-        {
+        if !event.structured_payload.is_null() {
             presence.tool_payloads = true;
         }
     }
@@ -6634,7 +6642,48 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_consent_raises_tool_payloads_for_tool_name_or_payload() {
+    fn reconcile_consent_raises_tool_payloads_for_a_structured_payload() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls -la"}),
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    /// A tool name without a payload must NOT be corrected upward.
+    ///
+    /// Stripping payloads while keeping tool names is a supported privacy
+    /// mode -- it is what keeps a trace structurally trainable when content is
+    /// absent. Raising the flag here would push every structure-preserved
+    /// trace to Medium residual risk and quarantine it on a default
+    /// deployment, for payloads it does not carry.
+    ///
+    /// The contributor client makes the same call when it builds the
+    /// declaration. The two halves must agree, or a client that declares
+    /// honestly gets corrected upward anyway and is penalised for it.
+    #[test]
+    fn reconcile_consent_leaves_a_bare_tool_name_alone() {
         use super::*;
         let mut envelope = bare_envelope();
         envelope.events.push(TraceContributionEvent {
@@ -6657,10 +6706,12 @@ mod tests {
 
         let presence = reconcile_consent_declarations(&mut envelope);
 
+        assert!(!presence.tool_payloads, "a tool name is not a tool payload");
+        assert!(
+            !envelope.consent.tool_payloads_included,
+            "an honest false declaration must survive reconciliation"
+        );
         assert!(!presence.message_text);
-        assert!(presence.tool_payloads);
-        assert!(!envelope.consent.message_text_included);
-        assert!(envelope.consent.tool_payloads_included);
     }
 
     #[test]
