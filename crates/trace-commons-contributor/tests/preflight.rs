@@ -345,8 +345,13 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     use trace_commons_contributor::source::TraceSource as _;
 
     let fixture_dir = tempfile::tempdir().unwrap();
+    // Sized with headroom rather than tuned to the byte. The claim under test
+    // is that the preview and enrolled paths agree on canonical size; sitting
+    // a handful of bytes above MAX_ENVELOPE_BYTES made the precondition break
+    // on any change to serialized length, including a consent boolean
+    // flipping between `true` and `false`.
     let trajectory =
-        write_trajectory_with_source(fixture_dir.path(), &"x".repeat(1_497_756), "boundary-test");
+        write_trajectory_with_source(fixture_dir.path(), &"x".repeat(1_499_000), "boundary-test");
     let source = trace_commons_contributor::source::trajectory::TrajectorySource::new(trajectory);
     let session_ref = source.discover().unwrap().remove(0);
     let transcript = source.load(&session_ref).unwrap();

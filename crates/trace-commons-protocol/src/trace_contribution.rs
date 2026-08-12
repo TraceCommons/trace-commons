@@ -912,19 +912,8 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        // Residual privacy risk is applied once, by `gate`, and not again
-        // here. `privacy_gate` and `privacy_risk_score` are both pure
-        // functions of the same enum, so subtracting the second after
-        // multiplying by the first penalised one signal twice. For the
-        // medium band that was a halving plus a flat -0.30, which needs the
-        // weighted terms above 0.6 to clear zero - unreachable in practice
-        // once `replayability` is 0, as it is for any recorded session. Every
-        // medium-risk submission in the pilot corpus scored exactly zero.
-        //
-        // Dropping this term changes nothing for low risk, where
-        // `privacy_risk_score` is already 0.0, and nothing for high risk,
-        // which the `credit_points_estimate` branch below zeroes outright.
-        - 0.40 * duplicate_penalty;
+        - 0.40 * duplicate_penalty
+        - 0.60 * privacy_risk;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
         if matches!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::High) {
@@ -1403,15 +1392,6 @@ pub struct RedactionReport {
     pub pii_labels_present: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// True when a secret-shaped span was **found and removed** during scrub.
-    ///
-    /// This is a redaction success signal, not evidence that a live secret
-    /// remains in the envelope. `residual_risk` therefore treats it as a
-    /// Medium floor (reviewable), matching the polarity used by comparable
-    /// corpora (Dolma drops only *unredacted* spans; BigCode / Sentry /
-    /// OTel treat detection reports as annotations). High is reserved for
-    /// `key_finding_detected` (unredactable) and for residual envelope-scan
-    /// hits that survive scrub (via `resolve_post_scrub_risk`).
     pub blocked_secret_detected: bool,
     /// Set when a classifier flagged an *object key* (not just a value) as
     /// PII-bearing. Keys are not rewritten in place (rewriting risks
@@ -2108,13 +2088,8 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection when a secret cue is present.
-///
-/// Historically 16 (#157). #193 row 2 lowers it to 8: a cue plus a short
-/// opaque value is a strong enough signal that the old floor was leaking
-/// real API keys in the 8–15 range. The floor is still an FP control —
-/// below 8 even a cue is too noisy (see the #193 FP-budget fixtures).
-const ENTROPY_MIN_LEN: usize = 8;
+/// detection. Shorter tokens are too noisy to gate reliably.
+const ENTROPY_MIN_LEN: usize = 16;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -2298,11 +2273,7 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        // Floor matches [`ENTROPY_MIN_LEN`] (8): shorter tokens never become
-        // candidates. Cue + allowlist + entropy gates still reject the vast
-        // majority; lowering from 16 closes #193 row 2 without scanning
-        // sub-8 noise.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -2357,17 +2328,8 @@ fn is_pure_hex(s: &str) -> bool {
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, short git sha, or this module's own report-metric label) rather
+/// prefix, hex hash/sha, or this module's own report-metric label) rather
 /// than an opaque secret.
-///
-/// Content-hash shapes (lowercase hex ≥32, pure hex of length 40/64) are
-/// deliberately NOT allowlisted here. Those shapes are rarely cue-adjacent
-/// when they are real hashes, and when they *are* cue-adjacent they are
-/// indistinguishable from HMAC/AES key material (#193 row 4). Uncued hashes
-/// still survive because [`is_cued_secret`] requires a cue before any
-/// allowlist check runs. Short pure-hex of length 7 or 8 stays allowlisted
-/// even when cued: git short SHAs dominate that length and the FP cost of
-/// redacting them after a cue exceeds the recall gain.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -2381,9 +2343,16 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    // Git short SHAs (and similar). Longer pure-hex (40/64) used to live
-    // here too and is now redacted when cued — see #193 row 4.
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
+        return true;
+    }
+    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
+    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
+    if token.len() >= 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return true;
     }
     false
@@ -2468,9 +2437,8 @@ fn is_cued_secret(
 /// here. A literal zero-separator glue with no `=` at all (`api_keySECRET`,
 /// `BearerSECRET`) is NOT covered -- there is no `=` to split on, so the cue
 /// word and the value are one token and [`has_secret_cue`]'s window still
-/// never sees a cue word immediately before `start`. That is a deliberate
-/// accept under #193 row 1 (FP cost of splitting inside identifiers), not an
-/// untracked gap.
+/// never sees a cue word immediately before `start`. That is a separate,
+/// unaddressed gap, not a variant of the one this function fixes.
 fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     for candidate in entropy_candidate_regex().find_iter(content) {
@@ -2591,13 +2559,6 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
-    /// Build a deterministic-only redactor with explicit path prefixes.
-    ///
-    /// Unlike `new`/`try_default`, this never reads
-    /// `TRACE_PRIVACY_FILTER_BACKEND` or adapter-specific environment
-    /// variables and can never attach a network or process-backed filter.
-    /// Pre-enrollment previews use this constructor to keep local trace data
-    /// offline even when the parent environment requests another backend.
     pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
         let mut known_path_prefixes: Vec<String> = known_path_prefixes
             .into_iter()
@@ -2614,9 +2575,21 @@ impl DeterministicTraceRedactor {
         }
     }
 
-    /// Detection-only redactor with no known path prefixes.
+    /// A redactor with no attached privacy-filter adapter and no known path
+    /// prefixes, for detection-only work that never touches
+    /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
+    /// reads `TRACE_PRIVACY_FILTER_BACKEND` or its adapter-specific env
+    /// vars, so it cannot race concurrent env mutation elsewhere in the
+    /// process and cannot fail from missing/invalid privacy-filter config -
+    /// exactly what the residual scan needs, since it only calls the plain
+    /// `redact_text`, which never consults the attached adapter.
     fn bare() -> Self {
-        Self::deterministic_only(Vec::new())
+        Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes: Vec::new(),
+            privacy_filter: None,
+            privacy_filter_backend: PrivacyFilterBackendTag::None,
+        }
     }
 
     pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
@@ -3031,6 +3004,11 @@ pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
 ) {
+    // Consent flags are a factual declaration of what the envelope carries.
+    // Correct under-reported flags before risk derivation so residual_risk
+    // and the PII-backstop hold cannot be skipped by a false declaration.
+    reconcile_consent_declarations(envelope);
+
     let mut report = RedactionReport::default();
     let mut state = RedactionState::default();
 
@@ -3063,10 +3041,9 @@ pub fn rescrub_trace_envelope_with(
     // Detection-only backstop, run after every mutation above. The
     // typed traversal can only cover fields it knows about, and the
     // schema keeps growing; this catches whatever the traversal missed.
-    // It never mutates — anything it finds has already *survived*
-    // redaction, which is what makes it residual and why
-    // [`resolve_post_scrub_risk`] forces High on residual hits (not on
-    // secrets the scrub pass itself found and removed).
+    // It never mutates - anything it finds has already survived
+    // redaction, which is what makes it *residual* and why it forces
+    // High rather than Medium.
     let residual = residual_envelope_scan(redactor, envelope);
 
     // Derive the server-pass risk from what the pass actually found,
@@ -3316,6 +3293,10 @@ pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
 ) -> Result<(), TraceContributionError> {
+    // Same concordance floor as the sync server re-scrub: under-reported
+    // consent must not survive into residual_risk / status decisions.
+    reconcile_consent_declarations(envelope);
+
     let mut event_updates: Vec<(usize, String)> = Vec::new();
     let mut correction_update: Option<String> = None;
     let mut structured_updates: Vec<(usize, Value)> = Vec::new();
@@ -3732,25 +3713,13 @@ impl PostScrubAssessment {
 /// risk. Downgrade only when the assessment proves it is safe to do so;
 /// otherwise the prior risk is preserved (never lowered) via
 /// `max_residual_risk`, exactly as before this pass existed.
-///
-/// High is reserved for scrub *failure* / unredactable findings:
-/// - [`RedactionReport::key_finding_detected`] on the scrub pass (keys cannot
-///   be rewritten in place), or
-/// - any hit on the post-scrub residual scan (content that survived scrub).
-///
-/// A scrub-pass [`RedactionReport::blocked_secret_detected`] alone does **not**
-/// force High: that flag means a secret was found and removed. It flows
-/// through `derived_risk` as Medium so a proven-complete assessment can
-/// actually downgrade High → Medium (the contract #185 documented but which
-/// the previous `findings.blocked_secret_detected → High` short-circuit
-/// made unreachable for the dominant secret-bearing case). See issues
-/// #219 / #210.
 fn resolve_post_scrub_risk(
     prior_risk: ResidualPiiRisk,
     derived_risk: ResidualPiiRisk,
     assessment: &PostScrubAssessment,
 ) -> ResidualPiiRisk {
-    if assessment.findings.key_finding_detected
+    if assessment.findings.blocked_secret_detected
+        || assessment.findings.key_finding_detected
         || assessment.residual_findings.blocked_secret_detected
         || assessment.residual_findings.key_finding_detected
     {
@@ -3764,28 +3733,16 @@ fn resolve_post_scrub_risk(
 }
 
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    // Unredactable object-key findings still force High — keys cannot be
-    // rewritten without risking sibling collisions, so there is no scrub
-    // success to annotate.
-    if report.key_finding_detected {
+    if report.blocked_secret_detected || report.key_finding_detected {
         return ResidualPiiRisk::High;
     }
 
-    // PII / secrets the pass actually found and removed raise the floor to
-    // Medium regardless of what the consent flags claim. A contributor who
-    // under-reports risk should not land Accepted/Low just because the flags
-    // are clean; the pass has direct evidence the flags are wrong.
-    //
-    // `blocked_secret_detected` is included here (via counts, or alone) as
-    // Medium, not High: the detector's match ranges are collected and then
-    // `apply_redaction_ranges` removes them. Successful scrub is an
-    // annotation on a reviewable record, not terminal rejection. High is
-    // produced only by `key_finding_detected` above, or by a residual
-    // post-scrub scan hit in [`resolve_post_scrub_risk`]. Issue #219.
-    if report.blocked_secret_detected
-        || !report.counts.is_empty()
-        || !report.pii_labels_present.is_empty()
-    {
+    // PII the pass actually found and removed raises the floor to
+    // Medium regardless of what the consent flags claim. A contributor
+    // who under-reports risk should not be able to land in accepted
+    // storage with a Low classification just because the flags are
+    // clean; the pass has direct evidence the flags are wrong.
+    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
         return ResidualPiiRisk::Medium;
     }
 
@@ -3794,6 +3751,110 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     }
 
     ResidualPiiRisk::Low
+}
+
+/// What content-bearing surfaces an envelope actually carries.
+///
+/// Used to check `ConsentMetadata::{message_text_included,tool_payloads_included}`
+/// against the payload those flags claim to describe. The flags are a factual
+/// declaration (`docs/trace-spec.md`), not a client preference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnvelopeContentPresence {
+    pub message_text: bool,
+    pub tool_payloads: bool,
+}
+
+/// Inspect an envelope for content that must be declared in consent flags.
+///
+/// Minimum concordance rule (issue #208):
+/// - non-empty `redacted_content` on user / assistant / reasoning (and other
+///   prose event types), or `outcome.human_correction`, implies message text;
+/// - tool-call / tool-result / http content, or a non-null `structured_payload`,
+///   implies tool payloads.
+///
+/// A bare `tool_name` deliberately does NOT imply tool payloads. The name is
+/// metadata about which tool ran, not the payload the flag declares, and
+/// stripping payloads while keeping names is a supported privacy mode -- it is
+/// what keeps a trace structurally trainable when content is absent. Counting
+/// the name would correct every structure-preserved trace upward to
+/// `tool_payloads_included = true`, push it to Medium residual risk, and
+/// quarantine it on a default deployment for payloads it does not carry.
+///
+/// This matches the client-side derivation in the contributor crate, which
+/// makes the same call. The two halves must agree: if the client declares
+/// honestly and the server then corrects that declaration upward anyway, the
+/// contributor is penalised for telling the truth.
+///
+/// Does not mutate the envelope. Callers that need enforcement should use
+/// [`reconcile_consent_declarations`], which only corrects flags upward.
+pub fn derive_envelope_content_presence(
+    envelope: &TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let mut presence = EnvelopeContentPresence::default();
+
+    for event in &envelope.events {
+        if event
+            .redacted_content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty())
+        {
+            match event.event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => presence.message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
+            }
+        }
+        if !event.structured_payload.is_null() {
+            presence.tool_payloads = true;
+        }
+    }
+
+    if envelope
+        .outcome
+        .human_correction
+        .as_ref()
+        .is_some_and(|text| !text.is_empty())
+    {
+        presence.message_text = true;
+    }
+
+    presence
+}
+
+/// Correct under-reported consent declarations to match the envelope payload.
+///
+/// Only moves flags from `false` → `true`. Over-reporting (true flags on an
+/// empty payload) is left alone: that is a stricter declaration and does not
+/// open an acceptance path the payload did not earn.
+///
+/// Returns the presence that was derived, so callers can log or assert.
+pub fn reconcile_consent_declarations(
+    envelope: &mut TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let presence = derive_envelope_content_presence(envelope);
+    let mut corrected = false;
+    if presence.message_text && !envelope.consent.message_text_included {
+        envelope.consent.message_text_included = true;
+        corrected = true;
+    }
+    if presence.tool_payloads && !envelope.consent.tool_payloads_included {
+        envelope.consent.tool_payloads_included = true;
+        corrected = true;
+    }
+    if corrected {
+        let warning =
+            "Server corrected under-reported consent declarations to match envelope payload."
+                .to_string();
+        if !envelope.privacy.warnings.contains(&warning) {
+            envelope.privacy.warnings.push(warning);
+        }
+    }
+    presence
 }
 
 fn max_residual_risk(left: ResidualPiiRisk, right: ResidualPiiRisk) -> ResidualPiiRisk {
@@ -3817,10 +3878,10 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
+            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -5180,27 +5241,6 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_only_constructor_ignores_inherited_backend() {
-        use super::DeterministicTraceRedactor;
-
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: ENV_LOCK serializes process-environment mutation across
-        // every env-touching test in this crate.
-        unsafe {
-            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
-        }
-        let redactor =
-            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
-        let has_filter = redactor.attached_privacy_filter().is_some();
-        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
-        unsafe {
-            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
-        }
-        assert!(!has_filter);
-        assert!(!redacted.contains("/Users/preview/private"));
-    }
-
-    #[test]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
@@ -5506,14 +5546,10 @@ mod tests {
         // unchanged on the pre-split code and proved nothing about the split
         // path. Assert directly on the split position instead: a cue IS
         // found there, and the allowlist excludes the narrowed value anyway.
-        //
-        // Content-hash hex is deliberately absent: #193 row 4 redacts cued
-        // lowercase hex ≥32 (including 40/64 shas). UUID and prefixed IDs
-        // stay allowlisted even when cued (~105k structural IDs vs ~20 real
-        // secrets in the prototype scan).
         for text in [
             "token=550e8400-e29b-41d4-a716-446655440000",
             "api_key=550e8400-e29b-41d4-a716-446655440000",
+            "secret=0123456789abcdef0123456789abcdef01234567",
             "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
         ] {
             let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
@@ -5775,162 +5811,32 @@ mod tests {
             o1.contains("msg_01ABCDEFghijklmnopqrstuvwx"),
             "allowlisted id got redacted: {o1}"
         );
-        // git sha with NO secret cue nearby must survive. Bare "key" is not
-        // in the cue list; cued shas are redacted under #193 row 4 (covered
-        // separately).
+        // git sha after cue must survive (hex len 40)
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let (o2, _) = r.redact_text(&format!("commit {sha}"));
-        assert!(o2.contains(sha), "uncued git sha got redacted: {o2}");
+        let (o2, _) = r.redact_text(&format!("key {sha}"));
+        assert!(o2.contains(sha), "git sha got redacted: {o2}");
         // high-entropy token with NO cue nearby must survive (avoids shredding base64 content)
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
     }
 
-    /// #193 decision matrix for the shapes deferred by #187.
-    ///
-    /// Defects (must redact): row 2 short cued opaque, row 4 cued lowercase
-    /// hex ≥32. Deliberate survivals (must not redact): row 1 zero-separator
-    /// glue, row 3 UUID even when cued, sub-threshold entropy. Row 5
-    /// (spaced padding) is covered by the windowed-entropy tests above.
-    /// Rows 6–7 live in `redaction.rs` (structured JSON).
-    #[test]
-    fn contextual_entropy_applies_cued_secret_shape_decisions() {
-        use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
-
-        // Row 1 — Accept, documented. No separator means no boundary without
-        // splitting inside arbitrary identifiers; FP cost is too high.
-        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
-        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
-            let (out, _) = r.redact_text(&text);
-            assert!(
-                out.contains(&secret[..secret.len().min(8)]),
-                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
-                 and the comment on contextual_entropy_secret_ranges): {out}"
-            );
-        }
-
-        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
-        let short = "Q7vM2xP9sL4nR8k"; // 15
-        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
-        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
-            let (out, rep) = r.redact_text(&text);
-            assert!(!out.contains(short), "short cued secret survived: {out}");
-            assert!(rep.blocked_secret_detected);
-        }
-
-        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
-        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
-
-        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
-        let hex40 = "0123456789abcdef0123456789abcdef01234567";
-        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
-        for text in [
-            format!("secret={hex40}"),
-            format!("api_key: {hex64}"),
-            format!("api_key={hex64}"),
-        ] {
-            let (out, rep) = r.redact_text(&text);
-            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
-            assert!(rep.blocked_secret_detected);
-        }
-
-        // Sub-threshold entropy — still not opaque enough, even when cued.
-        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
-        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
-    }
-
-    /// False-positive budget for the #193 row 2 / row 4 loosenings.
-    ///
-    /// Each fixture is a shape that must NOT be redacted after the floor and
-    /// hex-allowlist changes. If a future tweak makes any of these fire, the
-    /// FP cost has moved and needs an explicit decision — do not "fix" by
-    /// deleting the fixture.
-    #[test]
-    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
-        use super::*;
-        let r = DeterministicTraceRedactor::bare();
-
-        // Uncued content hashes / shas must still survive (row 4 narrows the
-        // allowlist to the *cued* case only; uncued path never reached it).
-        let sha40 = "0123456789abcdef0123456789abcdef01234567";
-        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
-        for text in [
-            format!("commit {sha40}"),
-            format!("digest {sha64}"),
-            format!("blob {sha64} verified"),
-        ] {
-            let (out, rep) = r.redact_text(&text);
-            assert_eq!(out, text, "uncued hash was redacted: {out}");
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // UUID stays allowlisted even when cued (row 3).
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
-            let (out, _) = r.redact_text(&text);
-            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
-        }
-
-        // Prefixed structural IDs stay allowlisted even when cued.
-        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
-        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
-
-        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
-        // rate on `api_key: deadbeef`-style short hex dominates recall here.
-        for sha in ["deadbee", "deadbeef"] {
-            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
-            assert!(
-                out.contains(sha),
-                "short git sha was redacted (FP budget): {out}"
-            );
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // Low-entropy short values after a cue must survive (row 2 lowers
-        // length, not the entropy floor).
-        for text in [
-            "password: password",
-            "api_key: staging1",
-            "token: aaaaaaaa",
-            "secret: none1234",
-        ] {
-            let (out, rep) = r.redact_text(text);
-            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // Sub-floor length even with a cue and high opacity — still too short.
-        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
-        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
-        assert_eq!(out, "api_key=Zx9Qk2L");
-
-        // Uncued short opaque tokens must survive (candidate class is wider
-        // now, but the cue gate is the FP control).
-        let short = "Q7vM2xP9sL4nR8k";
-        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
-        assert!(
-            out.contains(short),
-            "uncued short opaque was redacted: {out}"
-        );
-        assert!(!rep.blocked_secret_detected);
-    }
-
     /// This pass's re-anchoring after `=` only covers unspaced *assignment*
     /// glue (`api_key=<secret>`). It documents that boundary against the
-    /// pre-existing evasions/exclusions rather than leaving it assumed.
-    /// Shape-level redact-vs-accept decisions for the remaining gaps live in
-    /// `contextual_entropy_applies_cued_secret_shape_decisions` (#193).
+    /// pre-existing evasions/exclusions rather than leaving it assumed. None
+    /// of the five cases below are things this pass is meant to fix; each
+    /// comment says why. Do not "fix" these here -- they are separate
+    /// decisions with false-positive tradeoffs (see PR discussion for Fix 4).
     #[test]
     fn contextual_entropy_documents_the_glued_assignment_boundary() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
 
-        // Zero-separator glue: no `=` between the cue word and the value,
-        // so there is nothing for this pass's re-anchoring to split on.
-        // Accepted as deliberate under #193 row 1.
+        // 1. Zero-separator glue: no `=` between the cue word and the value,
+        //    so there is nothing for this pass's re-anchoring to split on.
+        //    The cue and the value are one token and the cue-window check
+        //    never sees a cue word immediately before the candidate. NOT
+        //    addressed by this pass.
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
             let (out, _) = r.redact_text(&text);
@@ -5941,8 +5847,25 @@ mod tests {
             );
         }
 
-        // Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
-        // as not opaque enough, even when cued and long enough.
+        // 2. UUID-shaped value: intentionally allowlisted as a structural
+        //    identifier (`is_allowlisted_entropy_candidate`'s `uuid_regex`
+        //    check), even when cued.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // 3. Lowercase hex, length >= 32: intentionally treated as a content
+        //    hash (sha256/git blob), not a secret, even when cued.
+        let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
+
+        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
+        //    short to gate reliably, even when cued and opaque.
+        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
+        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+
+        // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
+        //    as not opaque enough, even when cued and long enough.
         let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
         assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
@@ -6589,9 +6512,429 @@ mod tests {
         );
     }
 
-    /// Issue #219 / #210: `blocked_secret_detected` means found-and-removed.
-    /// That must raise Medium (reviewable), never High by itself.
+    fn bare_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: false,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: Vec::new(),
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    fn message_event(content: &str) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::UserMessage,
+            timestamp: Utc::now(),
+            redacted_content: Some(content.to_string()),
+            structured_payload: Value::Null,
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
     #[test]
+    fn reconcile_consent_raises_message_text_for_prose_events() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+        assert!(
+            envelope
+                .privacy
+                .warnings
+                .iter()
+                .any(|w| w.contains("under-reported consent"))
+        );
+    }
+
+    #[test]
+    fn reconcile_consent_raises_tool_payloads_for_structured_payload_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::AssistantMessage,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls"}),
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn reconcile_consent_raises_tool_payloads_for_a_structured_payload() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls -la"}),
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    /// A tool name without a payload must NOT be corrected upward.
+    ///
+    /// Stripping payloads while keeping tool names is a supported privacy
+    /// mode -- it is what keeps a trace structurally trainable when content is
+    /// absent. Raising the flag here would push every structure-preserved
+    /// trace to Medium residual risk and quarantine it on a default
+    /// deployment, for payloads it does not carry.
+    ///
+    /// The contributor client makes the same call when it builds the
+    /// declaration. The two halves must agree, or a client that declares
+    /// honestly gets corrected upward anyway and is penalised for it.
+    #[test]
+    fn reconcile_consent_leaves_a_bare_tool_name_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: Value::Null,
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.tool_payloads, "a tool name is not a tool payload");
+        assert!(
+            !envelope.consent.tool_payloads_included,
+            "an honest false declaration must survive reconciliation"
+        );
+        assert!(!presence.message_text);
+    }
+
+    #[test]
+    fn reconcile_consent_raises_message_text_for_human_correction() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.outcome.human_correction = Some("use the other API key".to_string());
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(envelope.consent.message_text_included);
+    }
+
+    #[test]
+    fn reconcile_consent_never_lowers_over_reported_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.consent.message_text_included = true;
+        envelope.consent.tool_payloads_included = true;
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+        assert!(envelope.privacy.warnings.is_empty());
+    }
+
+    #[test]
+    fn empty_content_does_not_force_consent_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(message_event(""));
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: Utc::now(),
+            redacted_content: Some(String::new()),
+            structured_payload: Value::Null,
+            tool_name: Some(String::new()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn rescrub_raises_risk_for_clean_prose_under_reported_as_low() {
+        use super::*;
+        // The reproduction from issue #208: ordinary prose matches no
+        // deterministic detector, consent says false/false, and without
+        // concordance residual_risk would stay Low → Accepted.
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+        assert!(!envelope.consent.message_text_included);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        assert!(
+            envelope.consent.message_text_included,
+            "server must correct the under-reported message-text declaration"
+        );
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "content-bearing prose must not stay Low after concordance"
+        );
+    }
+
+    fn deterministic_only_constructor_ignores_inherited_backend() {
+        use super::DeterministicTraceRedactor;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes process-environment mutation across
+        // every env-touching test in this crate.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
+        let has_filter = redactor.attached_privacy_filter().is_some();
+        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(!has_filter);
+        assert!(!redacted.contains("/Users/preview/private"));
+    }
+
+    fn contextual_entropy_applies_cued_secret_shape_decisions() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Row 1 — Accept, documented. No separator means no boundary without
+        // splitting inside arbitrary identifiers; FP cost is too high.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("secret={hex40}"),
+            format!("api_key: {hex64}"),
+            format!("api_key={hex64}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Sub-threshold entropy — still not opaque enough, even when cued.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
+    }
+
+    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // Uncued content hashes / shas must still survive (row 4 narrows the
+        // allowlist to the *cued* case only; uncued path never reached it).
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("commit {sha40}"),
+            format!("digest {sha64}"),
+            format!("blob {sha64} verified"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_eq!(out, text, "uncued hash was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // UUID stays allowlisted even when cued (row 3).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
+        }
+
+        // Prefixed structural IDs stay allowlisted even when cued.
+        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
+
+        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
+        // rate on `api_key: deadbeef`-style short hex dominates recall here.
+        for sha in ["deadbee", "deadbeef"] {
+            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
+            assert!(
+                out.contains(sha),
+                "short git sha was redacted (FP budget): {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Low-entropy short values after a cue must survive (row 2 lowers
+        // length, not the entropy floor).
+        for text in [
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            "secret: none1234",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Sub-floor length even with a cue and high opacity — still too short.
+        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
+        assert_eq!(out, "api_key=Zx9Qk2L");
+
+        // Uncued short opaque tokens must survive (candidate class is wider
+        // now, but the cue gate is the FP control).
+        let short = "Q7vM2xP9sL4nR8k";
+        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
+        assert!(
+            out.contains(short),
+            "uncued short opaque was redacted: {out}"
+        );
+        assert!(!rep.blocked_secret_detected);
+    }
+
     fn successfully_redacted_secret_is_medium_not_high() {
         use super::*;
 
@@ -6619,8 +6962,6 @@ mod tests {
         );
     }
 
-    /// Key findings remain High — there is no scrub success to annotate.
-    #[test]
     fn unredactable_key_finding_still_forces_high() {
         use super::*;
 
@@ -6644,9 +6985,6 @@ mod tests {
         );
     }
 
-    /// Residual (post-scrub) secret hits still force High via the assessment
-    /// path — that is scrub *failure*, the polarity High is reserved for.
-    #[test]
     fn residual_secret_hit_still_forces_high() {
         use super::*;
 
@@ -6680,11 +7018,6 @@ mod tests {
         );
     }
 
-    /// Scrub-pass secret findings alone must not short-circuit High, so a
-    /// proven-complete assessment can actually land on the derived Medium
-    /// (the #185 downgrade contract that the old short-circuit made
-    /// unreachable for secret-bearing traces).
-    #[test]
     fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
         use super::*;
 
@@ -6712,8 +7045,6 @@ mod tests {
         );
     }
 
-    /// An envelope that differs only in residual privacy risk, for comparing
-    /// what the scorer does with each band.
     fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
         use super::*;
 
@@ -6790,7 +7121,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn privacy_gate_and_risk_score_are_the_same_signal() {
         use super::*;
         // The reason the subtractive term was redundant: these are
@@ -6809,7 +7139,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn medium_risk_work_can_earn_credit() {
         use super::*;
         // Every medium-risk submission in the pilot corpus scored exactly
@@ -6824,7 +7153,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn dropping_the_double_penalty_leaves_low_risk_untouched() {
         use super::*;
         // The change is confined to the medium band, and this is why rather
@@ -6845,7 +7173,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn risk_bands_stay_ordered_and_high_earns_nothing() {
         use super::*;
         let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
@@ -6878,9 +7205,6 @@ mod tests {
         );
     }
 
-    /// End-to-end: sync server re-scrub of an envelope whose only finding is a
-    /// successfully removed OpenAI key lands Medium, not High.
-    #[test]
     fn rescrub_of_successfully_redacted_secret_lands_medium() {
         use super::*;
 

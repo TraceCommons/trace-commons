@@ -5462,6 +5462,26 @@ fn make_metadata_only_low_risk(envelope: &mut TraceContributionEnvelope) {
     }
 }
 
+/// Give a metadata-only envelope a distinguishing feature that is NOT message
+/// text, so two otherwise-identical Low-risk fixtures stay distinct without
+/// either of them acquiring content that would classify them Medium.
+///
+/// A tool name is metadata about which tool ran, not a payload, so this keeps
+/// the envelope genuinely Low and its false/false consent declaration honest.
+fn set_metadata_only_tool_name(envelope: &mut TraceContributionEnvelope, name: &str) {
+    for event in &mut envelope.events {
+        if event.event_type
+            == trace_commons_protocol::trace_contribution::TraceContributionEventType::ToolCall
+        {
+            event.tool_name = Some(name.to_string());
+            return;
+        }
+    }
+    if let Some(event) = envelope.events.first_mut() {
+        event.tool_name = Some(name.to_string());
+    }
+}
+
 fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
     envelope.schema_version = "invalid.test.schema".to_string();
 }
@@ -5576,10 +5596,22 @@ async fn server_rescrub_leaves_a_genuinely_clean_envelope_low() {
 
     rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
 
+    // Medium, not Low, and deliberately so as of the consent-concordance
+    // change. `make_metadata_only_low_risk` declares
+    // `message_text_included = false`, then `set_metadata_only_user_message`
+    // puts prose in the envelope -- exactly the under-declaration the
+    // reconciliation corrects. Once the flag is raised to match the payload,
+    // the pre-existing floor `message_text_included || tool_payloads_included
+    // -> Medium` applies.
+    //
+    // The point of the test survives: no scan finding invented a risk here,
+    // and the envelope's own hashes, uuids and handles were not mistaken for
+    // secrets. What changed is that a false declaration can no longer buy a
+    // Low classification.
     assert_eq!(
         envelope.privacy.residual_pii_risk,
-        ResidualPiiRisk::Low,
-        "a clean metadata-only envelope must not be pushed above Low"
+        ResidualPiiRisk::Medium,
+        "content-bearing prose must not stay Low by under-declaring consent"
     );
 }
 
@@ -16633,6 +16665,12 @@ async fn bulk_export_limit_cap_is_applied_by_export_callers() {
     Arc::get_mut(&mut state)
         .expect("state is uniquely owned")
         .max_export_items_per_request = 1;
+    // See the note on the sibling export tests: consent concordance pushes
+    // these prose-bearing fixtures to Medium, which quarantines unless the
+    // deployment accepts Medium. This test is about the export cap.
+    Arc::get_mut(&mut state)
+        .expect("state is uniquely owned")
+        .accept_medium_risk_submissions = true;
 
     for index in 0..3 {
         let mut envelope = sample_envelope().await;
@@ -16840,6 +16878,15 @@ async fn export_access_grants_gate_replay_dataset_call_site() {
 async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let tenant =
         authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
 
@@ -16888,7 +16935,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_benchmark".to_string()),
             consent_scope: Some("benchmark-only".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             external_ref: None,
         },
         expired_benchmark_grant,
@@ -16916,7 +16963,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_ranker_candidates".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("ranking-training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         },
         wrong_tenant_ranker_grant,
         now,
@@ -16943,7 +16990,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
             purpose: Some("grant_ranker_pairs".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("model-training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         },
         valid_pair_grant,
         now,
@@ -20365,6 +20412,15 @@ async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_art
 async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::BenchmarkOnly];
@@ -23197,6 +23253,13 @@ fn legacy_benchmark_conversion_artifact_defaults_lifecycle_metadata() {
 async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // `tenant_a_quarantined` is deliberately left content-bearing so it
+    // quarantines and is excluded from the export -- that exclusion is the
+    // point of this test. Accepting Medium submissions wholesale would admit
+    // it and silently destroy the assertion, so the fixtures stay genuinely
+    // Low instead: `make_metadata_only_low_risk` strips content and declares
+    // false/false, and nothing puts prose back. The two exported traces are
+    // distinguished by `submission_score`, which is what the ranker orders on.
     let mut tenant_a_best = sample_envelope().await;
     make_metadata_only_low_risk(&mut tenant_a_best);
     tenant_a_best.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23209,15 +23272,7 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
     tenant_a_lower.trace_card.consent_scope = ConsentScope::RankingTraining;
     tenant_a_lower.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     tenant_a_lower.value.submission_score = 0.25;
-    for event in &mut tenant_a_lower.events {
-        if event.event_type
-            == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
-        {
-            event.redacted_content =
-                Some("Please inspect the lower-ranked ranker trace".to_string());
-            break;
-        }
-    }
+    set_metadata_only_tool_name(&mut tenant_a_lower, "lower_ranked_probe");
     let tenant_a_lower_id = tenant_a_lower.submission_id;
     let mut tenant_a_quarantined = sample_envelope().await;
     tenant_a_quarantined.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23501,6 +23556,15 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
 async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23638,6 +23702,15 @@ async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credi
 async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut original = sample_envelope().await;
     make_metadata_only_low_risk(&mut original);
     original.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -23763,6 +23836,15 @@ async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
 async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // These fixtures build envelopes with `make_metadata_only_low_risk` and
+    // then put prose back in them, so consent concordance corrects
+    // `message_text_included` upward and the `message_text -> Medium` floor
+    // applies. That is the honest classification: the traces really do carry
+    // message text. The deployment accepts Medium (the policy the product
+    // runs with) and the export below asks for Medium to match, rather than
+    // filtering for a Low tier these traces no longer belong to.
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -54928,6 +55010,9 @@ async fn ranking_label_sources_require_matching_authority_role() {
 async fn ranker_training_pairs_include_explicit_preference_labels_before_score_heuristics() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
+    // Both fixtures stay genuinely Low: content is stripped and the false/false
+    // consent declaration is honest, so consent concordance has nothing to
+    // correct upward and the default risk policy applies.
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -54941,15 +55026,11 @@ async fn ranker_training_pairs_include_explicit_preference_labels_before_score_h
     rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
     rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     rejected.value.submission_score = 0.95;
-    for event in &mut rejected.events {
-        if event.event_type
-            == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
-        {
-            event.redacted_content =
-                Some("This explicit preference rejection is a distinct trace".to_string());
-            break;
-        }
-    }
+    // Distinguished by metadata rather than prose: the trace only needs to be
+    // a distinct trace, and giving it message text would classify it Medium
+    // while its sibling stayed Low, so no single risk filter could return the
+    // pair.
+    set_metadata_only_tool_name(&mut rejected, "explicit_preference_rejection");
     let rejected_submission_id = rejected.submission_id;
 
     let _ = submit_trace_handler(
