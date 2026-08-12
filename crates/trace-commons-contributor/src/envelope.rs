@@ -324,7 +324,11 @@ fn build_raw_contribution_with_id(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events = t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    let events: Vec<RawTraceContributionEvent> =
+        t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    // The declaration describes the payload above, rather than asserting a
+    // constant. See `declared_content_presence`.
+    let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
@@ -350,8 +354,8 @@ fn build_raw_contribution_with_id(
                     parsed
                 }
             },
-            message_text_included: true,
-            tool_payloads_included: true,
+            message_text_included,
+            tool_payloads_included,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -420,6 +424,53 @@ pub fn apply_granted_scopes(
         .find(|s| **s != ConsentScope::PublicAttribution)
         .copied()
         .unwrap_or(ConsentScope::DebuggingEvaluation);
+}
+
+/// Whether the built events actually carry message text / tool payloads.
+///
+/// `docs/trace-spec.md` defines these consent booleans as a FACTUAL
+/// DECLARATION of what the envelope contains, not a preference and not a
+/// default. This client hardcoded both to `true` on every envelope, which is
+/// wrong in both directions:
+///
+/// - It over-declares. A trace with no tool calls declared
+///   `tool_payloads_included: true`, which puts it at Medium residual risk and
+///   quarantines it on a default deployment -- for content it never carried.
+/// - It ignores what the trace is. The declaration is supposed to describe the
+///   payload, and a constant cannot.
+///
+/// Derived from the events as built, after any content gating, so the
+/// declaration and the payload cannot disagree.
+fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, bool) {
+    let mut message_text = false;
+    let mut tool_payloads = false;
+
+    for event in events {
+        let has_content = event
+            .content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty());
+        if has_content {
+            match event.event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => tool_payloads = true,
+            }
+        }
+        // A structured payload is tool-call content regardless of event kind.
+        // A bare `tool_name` deliberately does NOT count: the name is metadata
+        // about which tool ran, not the payload the flag declares.
+        if !event.structured_payload.is_null() {
+            tool_payloads = true;
+        }
+    }
+
+    (message_text, tool_payloads)
 }
 
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
@@ -743,6 +794,119 @@ mod tests {
 
         let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&small).is_ok());
+    }
+
+    /// The declaration must describe the payload, not assert a constant.
+    ///
+    /// This is the case the hardcoded `true` got wrong in the direction that
+    /// costs contributors traces: a transcript with no tool calls declared
+    /// `tool_payloads_included: true`, which lands it at Medium residual risk
+    /// and quarantines it on a default deployment -- for tool payloads it does
+    /// not carry.
+    #[test]
+    fn transcript_without_tool_calls_does_not_declare_tool_payloads() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::User,
+                timestamp: None,
+                content: Some("what does this function do?".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::Assistant,
+                timestamp: None,
+                content: Some("it parses the config".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            raw.consent.message_text_included,
+            "the transcript carries message text, so it must be declared"
+        );
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "no event carries a tool payload, so it must not be declared"
+        );
+    }
+
+    /// A tool name is metadata about which tool ran, not the payload. Counting
+    /// it would re-introduce the over-declaration this fixes, since the
+    /// recorded-trace path keeps tool names for structure even when it strips
+    /// payloads for privacy.
+    #[test]
+    fn a_bare_tool_name_is_not_a_tool_payload() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::Value::Null,
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "a tool name without a payload must not declare tool payloads"
+        );
+        assert!(
+            !raw.consent.message_text_included,
+            "a tool call is not message text"
+        );
+    }
+
+    /// A tool call that does carry a payload must declare it -- the fix must
+    /// not under-declare, which would misrepresent the envelope in the
+    /// direction that matters for consent.
+    #[test]
+    fn tool_payloads_are_declared_when_present() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::json!({"path": "src/main.rs"}),
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(raw.consent.tool_payloads_included);
+    }
+
+    /// A structure-only trace declares neither, which is what lets it stay out
+    /// of quarantine on a default deployment.
+    #[test]
+    fn content_free_transcript_declares_neither() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some(String::new()),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(!raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
     }
 
     #[test]
