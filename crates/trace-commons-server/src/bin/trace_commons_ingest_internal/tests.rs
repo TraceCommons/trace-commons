@@ -83708,3 +83708,13 @@ async fn settlement_outbox_repair_converges_after_partial_outbox_crash() {
         outbox_ids.into_iter().collect::<BTreeSet<_>>()
     );
 }
+
+#[test]
+fn raw_envelope_corpus_dataset_kind_round_trips_through_storage_name() {
+    let kind = TraceExportDatasetKind::RawEnvelopeCorpus;
+    assert_eq!(kind.storage_name(), "raw_envelope_corpus");
+    assert_eq!(
+        trace_export_dataset_kind_from_storage_name("raw_envelope_corpus").unwrap(),
+        TraceExportDatasetKind::RawEnvelopeCorpus
+    );
+}

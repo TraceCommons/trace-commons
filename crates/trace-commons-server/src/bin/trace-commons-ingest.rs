@@ -1854,6 +1854,7 @@ enum TraceExportDatasetKind {
     BenchmarkConversion,
     RankerTrainingCandidates,
     RankerTrainingPairs,
+    RawEnvelopeCorpus,
 }
 
 impl TraceExportDatasetKind {
@@ -1863,6 +1864,7 @@ impl TraceExportDatasetKind {
             Self::BenchmarkConversion => "benchmark conversion",
             Self::RankerTrainingCandidates => "ranker training candidates",
             Self::RankerTrainingPairs => "ranker training pairs",
+            Self::RawEnvelopeCorpus => "raw envelope corpus",
         }
     }
 
@@ -1872,6 +1874,7 @@ impl TraceExportDatasetKind {
             Self::BenchmarkConversion => "benchmark_conversion",
             Self::RankerTrainingCandidates => "ranker_training_candidates",
             Self::RankerTrainingPairs => "ranker_training_pairs",
+            Self::RawEnvelopeCorpus => "raw_envelope_corpus",
         }
     }
 }
@@ -39442,6 +39445,10 @@ async fn execute_claimed_export_job(
                 ranker_pair_export: Some(export),
             })
         }
+        TraceExportDatasetKind::RawEnvelopeCorpus => Err(api_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "raw envelope corpus export execution is not yet implemented",
+        )),
     }
 }
 
@@ -39494,6 +39501,7 @@ fn trace_export_dataset_kind_from_storage_name(value: &str) -> ApiResult<TraceEx
         "benchmark_conversion" => Ok(TraceExportDatasetKind::BenchmarkConversion),
         "ranker_training_candidates" => Ok(TraceExportDatasetKind::RankerTrainingCandidates),
         "ranker_training_pairs" => Ok(TraceExportDatasetKind::RankerTrainingPairs),
+        "raw_envelope_corpus" => Ok(TraceExportDatasetKind::RawEnvelopeCorpus),
         _ => Err(api_error(
             StatusCode::BAD_REQUEST,
             format!("unsupported export dataset kind: {value}"),
