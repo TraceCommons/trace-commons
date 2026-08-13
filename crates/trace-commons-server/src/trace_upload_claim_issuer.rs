@@ -520,6 +520,10 @@ impl TraceUploadClaimIssuerConfig {
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
             invite_registry_authoritative: self.invite_registry_authoritative,
+            near_legion_claim: crate::near_legion_claim::NearLegionClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
         }))
     }
 }
@@ -666,6 +670,11 @@ struct TraceUploadClaimIssuerState {
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
     invite_registry_authoritative: bool,
+    /// Self-serve NEAR Legion claim surface. `None` — routes unmounted —
+    /// unless the feature is enabled AND NEAR sign-in and the invite backend
+    /// are both configured. Built once here so the in-flight challenge store
+    /// is shared across requests rather than rebuilt per call.
+    near_legion_claim: Option<crate::near_legion_claim::NearLegionClaimState>,
 }
 
 impl TraceUploadClaimIssuerState {
@@ -1009,21 +1018,7 @@ pub fn trace_upload_claim_issuer_router(
     let request_timeout = StdDuration::from_secs(config.request_timeout_seconds.max(1));
     let max_request_bytes = config.max_request_bytes.max(1);
     let state = config.build_state()?;
-    Ok(Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/.well-known/trace-commons-ed25519-keyset.json",
-            get(keyset_handler),
-        )
-        .route("/onboard", get(invite_landing_handler))
-        .route("/v1/trace-upload-claim", post(issue_claim_handler))
-        .route("/v1/onboard", post(onboard_handler))
-        .route("/v1/enroll", post(enroll_handler))
-        .layer(DefaultBodyLimit::max(max_request_bytes))
-        .layer(axum::middleware::from_fn(move |req, next| {
-            request_timeout_middleware(req, next, request_timeout)
-        }))
-        .with_state(state))
+    Ok(router_from_state(state, request_timeout, max_request_bytes))
 }
 
 async fn request_timeout_middleware(
@@ -1095,7 +1090,11 @@ fn router_from_state(
     request_timeout: StdDuration,
     max_request_bytes: usize,
 ) -> Router {
-    Router::new()
+    // Built before `with_state` because the claim sub-router carries its own
+    // state; merging it in keeps the self-serve surface unmounted (404) on any
+    // deployment that has not configured it.
+    let near_legion = state.near_legion_claim.clone();
+    let router = Router::new()
         .route("/health", get(health_handler))
         .route(
             "/.well-known/trace-commons-ed25519-keyset.json",
@@ -1105,11 +1104,20 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .with_state(state);
+
+    let router = match near_legion {
+        Some(claim_state) => router.merge(crate::near_legion_claim::near_legion_claim_router(
+            claim_state,
+        )),
+        None => router,
+    };
+
+    router
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(axum::middleware::from_fn(move |req, next| {
             request_timeout_middleware(req, next, request_timeout)
         }))
-        .with_state(state)
 }
 
 async fn serve_both_with_graceful_shutdown(
@@ -4228,6 +4236,9 @@ mod tests {
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
+                // The self-serve claim surface has its own hermetic tests in
+                // `near_legion_claim`; these issuer tests build state without it.
+                near_legion_claim: None,
             }
         }
     }
