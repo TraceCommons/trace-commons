@@ -258,16 +258,27 @@ measurement rather than assumption.
 - **Object-ref coverage.** 331 of 331, with all 352 `submitted_envelope` refs
   live and none invalidated or deleted.
 
-## Open question
+## Contributor attribution
 
-**Contributor attribution.** The tenant holds 13 distinct contributor
-principals. One accounts for 326 of 352 submissions across roughly two months;
-the remainder hold between 1 and 8 each. If the dominant principal is not the
-tenant operator, the great majority of this corpus belongs to another
-contributor who submitted into an operator-owned tenant rather than
-self-enrolling. Their submitted consent scope permits this export, but the
-handoff should still be confirmed with them directly. Resolution: check
-`trace_account_principals` for that principal before delivery.
+The tenant holds 13 distinct contributor principals. One accounts for 326 of
+352 submissions across roughly two months; the remainder hold between 1 and 8
+each. The great majority of this corpus was therefore contributed by someone
+other than the tenant operator, submitting into an operator-owned tenant rather
+than self-enrolling.
+
+The operator has confirmed the handoff proceeds on that basis. The submitted
+`debugging_evaluation` consent scope and `evaluation` allowed use permit it.
+
+Note that the exported set is **not** that principal's 326 submissions. The
+export is the 331 records that are accepted, low privacy-risk, and unrevoked
+across all 13 principals. It excludes whichever of the 326 carry an elevated
+risk tier or a non-accepted status, and includes records from the other 12
+principals. The two counts are close by coincidence and should not be used
+interchangeably when reporting what was handed over.
+
+A separate consequence, out of scope here: traces submitted into an
+operator-owned tenant are attributed to that tenant for credit purposes, which
+is unlikely to be what either party intended.
 
 ## Non-goals
 
