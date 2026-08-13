@@ -65738,6 +65738,20 @@ struct TraceReplayDatasetExport {
     items: Vec<TraceReplayDatasetItem>,
 }
 
+// Task 3 constructs this via the raw-envelope export route.
+#[allow(dead_code)]
+#[derive(Debug, Serialize)]
+struct TraceRawEnvelopeDatasetExport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    export_id: Uuid,
+    audit_event_id: Uuid,
+    created_at: DateTime<Utc>,
+    item_count: usize,
+    manifest: TraceReplayExportManifest,
+    items: Vec<TraceRawEnvelopeDatasetItem>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceExportManifestSummary {
     tenant_id: String,
@@ -66184,6 +66198,35 @@ impl TraceReplayDatasetItem {
             source_status_at_export: record.status,
             source_hash_at_export,
             object_ref_id,
+        }
+    }
+}
+
+// Task 3 constructs these via the raw-envelope export route; unlike
+// TraceReplayDatasetItem, this type deliberately retains the full envelope
+// rather than a metadata subset.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+struct TraceRawEnvelopeDatasetItem {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    privacy_risk: ResidualPiiRisk,
+    redaction_counts: BTreeMap<String, u32>,
+    envelope: TraceContributionEnvelope,
+}
+
+#[allow(dead_code)]
+impl TraceRawEnvelopeDatasetItem {
+    fn from_record(
+        record: &TraceCommonsSubmissionRecord,
+        envelope: &TraceContributionEnvelope,
+    ) -> Self {
+        Self {
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            privacy_risk: record.privacy_risk,
+            redaction_counts: record.redaction_counts.clone(),
+            envelope: envelope.clone(),
         }
     }
 }

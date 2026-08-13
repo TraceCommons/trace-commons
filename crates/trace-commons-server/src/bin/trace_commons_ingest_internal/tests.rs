@@ -70268,6 +70268,27 @@ fn submission_record_with_principal(auth_principal_ref: &str) -> TraceCommonsSub
     serde_json::from_value(value).expect("submission record fixture deserializes")
 }
 
+/// `TraceRawEnvelopeDatasetItem` is the export item that deliberately retains
+/// the full envelope (unlike `TraceReplayDatasetItem`, which keeps only a
+/// metadata subset). This is the privacy boundary Task 4 pins down; here we
+/// just confirm the type carries what it claims to.
+#[tokio::test]
+async fn raw_envelope_item_retains_the_envelope_events() {
+    let record = submission_record_with_principal("principal_a");
+    let envelope = sample_envelope().await;
+    let item = TraceRawEnvelopeDatasetItem::from_record(&record, &envelope);
+
+    assert_eq!(item.submission_id, record.submission_id);
+    assert_eq!(item.privacy_risk, record.privacy_risk);
+    assert_eq!(item.envelope.events.len(), envelope.events.len());
+
+    let json = serde_json::to_value(&item).unwrap();
+    assert!(
+        json.get("envelope").and_then(|e| e.get("events")).is_some(),
+        "serialized raw envelope item must carry envelope.events"
+    );
+}
+
 /// (a) An account set of {principal_a} sees ONLY principal_a's record — not
 /// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
 /// the legacy reviewer/contributor surface honours. Pure set membership.
