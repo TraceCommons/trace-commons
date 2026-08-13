@@ -105,11 +105,52 @@ so it is testable against a fixture without a live corpus.
 
 ### 3. Deliver
 
+**Mechanism: a GCS object with a time-limited, named grant.** The operator
+uploads `corpus.jsonl` and `handoff-manifest.json` to a dedicated bucket and
+grants the recipient read on those objects.
+
+The recipient already holds operator SSH on the pilot host, so this is **not**
+an access restriction and should not be described as one — he could read the
+corpus off the box regardless. GCS is chosen for three other reasons:
+
+1. **A defined artifact.** The handoff is a named, checksummed pair of objects,
+   not "a file that was on the server at some point." What was handed over
+   stays answerable later.
+2. **An audit trail.** Cloud Audit Logs record the fetch. A `scp` off the host
+   does not, so nothing else can answer "was it actually collected, and when."
+3. **An expiry.** The grant lapses on its own. A file left in a home directory
+   persists until someone remembers it.
+
+Concretely:
+
+- Upload to a bucket used **only** for third-party handoffs — not the artifact
+  bucket behind `trace_artifact_store`. A misconfigured grant on a shared
+  bucket exposes far more than the handoff.
+- Object layout `near-benchmark-handoff/{export_id}/{corpus.jsonl,
+  handoff-manifest.json}`, keyed by `export_id` so the objects tie back to the
+  export grant and its `dataset_export` audit event.
+- Record a SHA-256 of `corpus.jsonl` **in** `handoff-manifest.json` and report
+  it out-of-band, so the recipient can verify he received what was sent and a
+  later dispute has a fixed referent.
+- **Prefer an IAM read grant to the recipient's Google identity over a signed
+  URL.** A signed URL is a bearer capability: anyone holding the link has the
+  corpus, it survives in chat logs and browser history, and it cannot be
+  revoked before expiry. An IAM grant is attributable and revocable. If a
+  signed URL is unavoidable, keep the TTL short and treat the URL itself as
+  sensitive.
+- Delete the objects once the fetch is confirmed in the audit log. Bucket
+  versioning must be off, or deletion leaves a recoverable copy.
+- Google-managed encryption at rest is sufficient here: the corpus is redacted,
+  policy-excluded down to the `low` privacy-risk tier, and already covered by
+  the `evaluation` allowed-use. CMEK is not proposed.
+
 Withdrawal terms are stated in writing at handoff. `trace_withdrawals` and
 `trace_community_withdrawal_evictions` let a contributor withdraw a trace from
 this system, but nothing propagates that to a third party holding raw
 envelopes. This limitation is contractual, not technical, and must be recorded
-as such rather than implied to contributors.
+as such rather than implied to contributors. Delivering to an object the
+operator can delete does **not** change this: once fetched, the copy is beyond
+recall, and the expiry bounds re-fetch, not retention.
 
 ## Error handling
 
