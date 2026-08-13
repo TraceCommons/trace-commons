@@ -517,8 +517,70 @@ git show --stat HEAD
 
 ---
 
+---
+
+### Task 7: Deploy and run the live export
+
+**Files:** none. This task is operational, not code.
+
+**Interfaces:**
+- Consumes: Tasks 1-6.
+- Produces: `corpus.jsonl` + `handoff-manifest.json` for the handoff.
+
+**This task runs against production.** Each step below that mutates the pilot — the deploy, and the export call — requires explicit operator go-ahead at the moment it is performed. Do not batch them behind a single approval.
+
+- [ ] **Step 1: Confirm the built binary contains the new route**
+
+The pilot host's git checkout is known to be weeks stale relative to its running binary, so `git log` on the host proves nothing about what is deployed. Verify against the artifact itself:
+
+```bash
+strings target/release/trace-commons-ingest | grep -c "raw-envelope-export"
+```
+
+Expected: non-zero before deploying. Re-run the equivalent check against the deployed binary after deploying.
+
+- [ ] **Step 2: Deploy to tc-pilot-host**
+
+Follow the repo's existing deploy procedure for the ingest binary. Do not invent one. If no documented procedure exists, STOP and ask — an undocumented hand-deploy to the pilot is not something to improvise.
+
+After deploy, confirm the route is live:
+
+```
+POST /v1/workers/raw-envelope-export   (no parameters)
+```
+
+Expected: **400** with a guardrail message naming a missing parameter. A 404 means the deploy did not take effect. A 400 proves both that the route exists and that guardrails are active.
+
+- [ ] **Step 3: Re-run the pre-run verification**
+
+Per the Task 6 runbook. Record the eligible count and the object-ref coverage count. They must be equal. Measured 331/331 on 2026-08-13; re-measure rather than assume.
+
+- [ ] **Step 4: Run the export**
+
+```
+POST /v1/workers/raw-envelope-export
+  ?purpose=near_benchmark_handoff
+  &status=accepted
+  &privacy_risk=low
+  &consent_scope=debugging_evaluation
+```
+
+Save the response to a file. If `item_count` is below the Step 3 eligible count, STOP — do not package a short export.
+
+- [ ] **Step 5: Package**
+
+```bash
+python3 scripts/operator/near-benchmark-handoff.py --input <export.json> --output-dir <dir>
+```
+
+- [ ] **Step 6: Deliver**
+
+Per the spec's Deliver section: dedicated bucket, `near-benchmark-handoff/{export_id}/`, IAM grant rather than a signed URL, `corpus_sha256` reported out of band, objects deleted once the fetch is confirmed in audit logs, bucket versioning off. Withdrawal terms stated in writing.
+
+---
+
 ## Out of scope for this plan
 
-- Running the live export against the pilot. That creates grant, job, and audit rows on production and requires explicit operator authorization.
-- Any delivery to NEAR.
-- Resolving the spec's open contributor-attribution question. That is a decision, not an implementation step, and it gates delivery rather than this build.
+- Loosening `is_export_eligible()` or the guardrails to reach the 21 excluded records.
+- Any change to replay export's payload.
+- Fixing credit attribution for traces submitted into an operator-owned tenant. Real, but a separate piece of work.
