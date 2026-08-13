@@ -9,8 +9,17 @@ Hand the `tenant-zaki-pilot` trace corpus to NEAR as a raw redacted dataset for
 benchmarking. NEAR receives redacted trace envelopes, not derived benchmark
 artifacts.
 
-This is a one-off operator handoff built on the existing replay-export
-subsystem. It is not a new product surface and not a recurring pipeline.
+This requires a new export dataset kind. The existing replay-export route reads
+each envelope and then discards the body, emitting only replay metadata
+(`required_tools`, `expected_assertions`, `task_success`, `canonical_summary`).
+That is a deliberate boundary, and this design does not weaken it: replay export
+is left exactly as it is, and a separate raw-envelope kind is added alongside.
+
+The derived `benchmark_conversion` path is not an option. It requires the
+`benchmark_generation` allowed-use, and no trace in this corpus carries it.
+
+It is a one-off operator handoff. It is not a general third-party export
+product and not a recurring pipeline.
 
 ## Corpus definition
 
@@ -58,12 +67,43 @@ quarantine-inclusive export would select the same rows. No change to
 
 ## Architecture
 
-Three stages, only the middle one requiring new code.
+Three stages. Stage 1 adds a new server dataset kind; stage 2 adds an operator
+script.
 
-### 1. Extract — existing route, no changes
+### 1. Extract — new raw-envelope dataset kind
 
-`POST /v1/workers/replay-export` with the export-worker bearer credential and
-all four guardrail parameters supplied explicitly:
+A new `TraceExportDatasetKind::RawEnvelopeCorpus` (storage name
+`raw_envelope_corpus`) served by `POST /v1/workers/raw-envelope-export`, built
+by copying the shape of the existing replay-export handler rather than inventing
+a new one.
+
+It reuses, unchanged:
+
+- the one-shot grant, validated job, manifest, and `dataset_export` audit event;
+- `enforce_dataset_export_guardrails`;
+- `is_export_eligible()` (`Accepted && !revoked`);
+- `record_matches_export_policy_abac(..., TraceAllowedUse::Evaluation)`;
+- `read_envelope_for_replay_export`, which already enforces the exporter role,
+  tenant match, and export eligibility, and already returns the full envelope.
+
+The single difference from replay export is the emitted item type. Where
+`TraceReplayDatasetItem::from_record` extracts a metadata subset and drops the
+envelope, `TraceRawEnvelopeDatasetItem` retains it:
+
+| field | source |
+|---|---|
+| `submission_id`, `trace_id` | submission record |
+| `privacy_risk` | submission record |
+| `redaction_counts` | submission record |
+| `envelope` | `TraceContributionEnvelope`, serialized whole |
+
+`TraceContributionEnvelope` already derives `Serialize`, so no protocol change is
+needed. `envelope.events` is the trace body this handoff exists to deliver.
+
+Replay export is not modified. No existing route changes behavior.
+
+The request carries the export-worker bearer credential and all four guardrail
+parameters explicitly:
 
 - `purpose=near_benchmark_handoff`
 - `status=accepted`
@@ -79,20 +119,22 @@ drift detection. Corpus drift is detected instead by comparing the returned
 `item_count` against a freshly queried eligible count taken immediately before
 the run.
 
-The route creates a one-shot export grant, a validated export job, a manifest,
-and a `dataset_export` audit event, and returns `TraceReplayDatasetExport`
-containing the redacted envelopes.
+The route returns `TraceRawEnvelopeDatasetExport`, carrying the same envelope
+fields as `TraceReplayDatasetExport` (`tenant_id`, `export_id`,
+`audit_event_id`, `item_count`, `manifest`) with `items` of the raw-envelope
+item type.
 
 ### 2. Package — new converter
 
 A script under `scripts/operator/` (not an admin subcommand — a subcommand
 implies a supported product surface this does not warrant) that reads the
-`TraceReplayDatasetExport` JSON and emits:
+`TraceRawEnvelopeDatasetExport` JSON and emits:
 
-- `corpus.jsonl` — one redacted envelope per line.
+- `corpus.jsonl` — one redacted envelope per line, taken from each item's
+  `envelope` field.
 - `handoff-manifest.json` — `export_id`, `source_submission_ids_hash`,
-  `item_count`, the consent basis, and per-trace `submission_id`,
-  `privacy_risk`, and a `redaction_counts` summary.
+  `item_count`, the consent basis, a SHA-256 of `corpus.jsonl`, and per-trace
+  `submission_id`, `privacy_risk`, and a `redaction_counts` summary.
 
 The manifest is provenance rather than risk triage. Since every exported record
 is `privacy_risk=low` by construction, the per-trace labels document what was
@@ -176,12 +218,18 @@ recall, and the expiry bounds re-fetch, not retention.
 
 ## Testing
 
-- Converter unit tests against a fixture `TraceReplayDatasetExport`: JSONL line
-  count matches `item_count`; every manifest entry has a corresponding JSONL
-  line; `source_submission_ids_hash` is carried through unmodified.
+- Server tests for the new route, following the existing replay-export test
+  shape: guardrail rejection when any of the four parameters is missing;
+  non-exporter roles refused; a `medium` privacy-risk record excluded; the
+  emitted item carries the full `envelope` including `events`.
+- A server test asserting replay export still emits **no** envelope field, so a
+  future change cannot quietly collapse the two paths.
+- Converter unit tests against a fixture `TraceRawEnvelopeDatasetExport`: JSONL
+  line count matches `item_count`; every manifest entry has a corresponding
+  JSONL line; `source_submission_ids_hash` is carried through unmodified; the
+  recorded SHA-256 matches the bytes written.
 - A fixture exercising an envelope large enough to confirm line-oriented output
   handles it; the pilot corpus contains traces in the hundreds of kilobytes.
-- No new server tests: stage 1 adds no server code.
 
 Fixtures for this converter must not be authored from the converter's own
 output. A fixture and its consumer written together will agree with each other
@@ -200,7 +248,13 @@ measurement rather than assumption.
   row granting the `evaluation` use must exist before any export runs.
 - **Consent basis.** All 331 exportable records carry the
   `debugging_evaluation` consent scope and the `evaluation` allowed use, which
-  is what authorizes replay export under `docs/trace-commons.md`.
+  is what authorizes replay export under `docs/trace-commons.md`. The new
+  raw-envelope kind is gated on the same `evaluation` use. This is an
+  operator decision recorded deliberately: the existing `evaluation` path ships
+  replay metadata only, so gating body export on the same use extends what
+  `evaluation` delivers rather than inheriting a settled precedent. Revisit if
+  a consent-scope taxonomy distinguishing metadata from body export is
+  introduced.
 - **Object-ref coverage.** 331 of 331, with all 352 `submitted_envelope` refs
   live and none invalidated or deleted.
 
