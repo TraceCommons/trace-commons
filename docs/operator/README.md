@@ -32,6 +32,7 @@ the link.
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
+| Delivering the one-off NEAR benchmark corpus | [`./near-benchmark-handoff.md`](./near-benchmark-handoff.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
@@ -103,6 +104,9 @@ Every runbook in this directory, with a one-line description.
   knobs, peak/representative columns, per-chunk revocation.
 - [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
   perplexity model or embedder and the gate-version implications.
+- [`./near-benchmark-handoff.md`](./near-benchmark-handoff.md) — one-off raw
+  envelope export, corpus packaging, provenance verification, and controlled
+  GCS delivery to NEAR.
 - [`./operational-summary.md`](./operational-summary.md) — field-by-field
   meaning and alarm guidance for `/v1/admin/operational-summary`.
 - [`./operator-binaries.md`](./operator-binaries.md) — operator CLI
