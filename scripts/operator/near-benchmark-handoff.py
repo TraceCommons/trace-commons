@@ -96,7 +96,10 @@ def convert(source: dict[str, Any], output_dir: Path) -> dict[str, Any]:
             "source_submission_ids_hash"
         ),
         "item_count": len(entries),
-        "consent_basis": manifest_source.get("consent_scopes", []),
+        # Distinct scopes, not one entry per trace. The export manifest carries a
+        # scope per item, which for a single-scope corpus repeats one value
+        # hundreds of times and buries the fact being recorded.
+        "consent_basis": sorted(set(manifest_source.get("consent_scopes", []))),
         "corpus_sha256": digest,
         "items": entries,
     }
