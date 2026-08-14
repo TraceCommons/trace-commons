@@ -68,8 +68,33 @@ the freshly measured eligible count as `EXPECTED_ITEM_COUNT` below.
 
 ## 2. Run the export
 
-The export-worker bearer must be in `TRACE_COMMONS_EXPORT_WORKER_BEARER`. Keep
-the response in a mode-0700 working directory because it contains the corpus:
+**The pilot does not accept static bearer tokens.** It sets
+`TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS=true` and carries no
+`TRACE_COMMONS_TENANT_TOKENS`, so a static credential is rejected with
+`403 invalid signed tenant token` before any handler runs. Mint a short-lived
+signed token instead:
+
+```sh
+EXPORT_TOKEN="$(sudo python3 scripts/operator/mint-signed-token.py \
+  --key /etc/tracecommons/issuer-signing-v1.pem \
+  --kid "$(curl -sS https://issuer.tracecommons.ai/.well-known/trace-commons-ed25519-keyset.json \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["keys"][0]["kid"])')" \
+  --tenant tenant-zaki-pilot \
+  --role export_worker \
+  --issuer https://issuer.tracecommons.ai \
+  --audience trace-commons-ingest \
+  --ttl-seconds 900)"
+```
+
+Read the `kid` from the live keyset rather than pasting a literal, so the token
+follows key rotation instead of silently failing after it.
+
+The token is a bearer credential for the duration of its TTL and cannot be
+revoked short of rotating the signing key. Keep the TTL short, do not persist it
+to disk or shell history, and let it expire rather than reusing it.
+
+Keep the response in a mode-0700 working directory because it contains the
+corpus:
 
 ```sh
 umask 077
@@ -78,7 +103,7 @@ EXPORT_JSON="$HANDOFF_WORK_DIR/raw-envelope-export.json"
 
 curl --silent --show-error --fail-with-body \
   --request POST \
-  --header "authorization: Bearer ${TRACE_COMMONS_EXPORT_WORKER_BEARER}" \
+  --header "authorization: Bearer ${EXPORT_TOKEN}" \
   --header "content-type: application/json" \
   --data '{
     "purpose": "near_benchmark_handoff",
