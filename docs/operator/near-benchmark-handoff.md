@@ -127,6 +127,15 @@ any item whose `privacy_risk` is not `low`. Record the printed
 
 Use a bucket dedicated to third-party handoffs. It must not be the artifact
 bucket used by `trace_artifact_store`, and object versioning must be off.
+
+The pilot's handoff bucket was provisioned on 2026-08-14 as
+`tc-near-benchmark-handoff-20260814` (us-central1, versioning off, uniform
+bucket-level access, public access prevention enforced). Uniform bucket-level
+access is required: the prefix-scoped IAM grant below cannot be applied to a
+bucket still using ACLs. Do not substitute `tc-pilot-artifacts-20260518` — a
+misconfigured grant there would expose the whole artifact store rather than one
+handoff.
+
 Upload to an export-ID-scoped prefix:
 
 ```sh
