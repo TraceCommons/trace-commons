@@ -70442,6 +70442,20 @@ async fn raw_envelope_item_retains_the_envelope_events() {
     );
 }
 
+#[tokio::test]
+async fn replay_dataset_item_does_not_serialize_the_envelope() {
+    let record = submission_record_with_principal("principal_a");
+    let envelope = sample_envelope().await;
+    let item = TraceReplayDatasetItem::from_record(&record, None, &envelope, None);
+    let json = serde_json::to_value(&item).unwrap();
+
+    assert!(
+        json.get("envelope").is_none(),
+        "replay export must not carry trace bodies; use the raw envelope corpus kind"
+    );
+    assert!(json.get("events").is_none());
+}
+
 /// (a) An account set of {principal_a} sees ONLY principal_a's record — not
 /// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
 /// the legacy reviewer/contributor surface honours. Pure set membership.
