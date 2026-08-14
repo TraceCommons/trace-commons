@@ -134,15 +134,26 @@ EXPORT_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ex
 HANDOFF_BUCKET=<dedicated-handoff-bucket>
 OBJECT_PREFIX="near-benchmark-handoff/${EXPORT_ID}"
 
-gcloud storage buckets describe "gs://${HANDOFF_BUCKET}" \
-  --format='value(versioning_enabled)'
+VERSIONING="$(gcloud storage buckets describe "gs://${HANDOFF_BUCKET}" \
+  --format='value(versioning_enabled)')"
+if [ "$VERSIONING" != "False" ] && [ -n "$VERSIONING" ]; then
+  echo "STOP: gs://${HANDOFF_BUCKET} has versioning_enabled=${VERSIONING}." >&2
+  echo "Deleting the handoff objects would leave recoverable generations." >&2
+  exit 1
+fi
+
 gcloud storage cp \
   "$PACKAGE_DIR/corpus.jsonl" \
   "$PACKAGE_DIR/handoff-manifest.json" \
   "gs://${HANDOFF_BUCKET}/${OBJECT_PREFIX}/"
 ```
 
-The versioning check must report false or empty. Grant the recipient's named
+This is a hard stop, not an advisory read. Uploading to a versioned bucket
+would make the deletion step below cosmetic: the objects would survive as
+recoverable generations after the visible copies are removed, and the cleanup
+guarantee this runbook makes would be false.
+
+Grant the recipient's named
 Google identity time-limited `roles/storage.objectViewer` access restricted to
 `near-benchmark-handoff/${EXPORT_ID}/`. Prefer that attributable, revocable IAM
 grant over a signed URL. If a signed URL is unavoidable, treat it as a secret

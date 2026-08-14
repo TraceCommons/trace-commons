@@ -38176,7 +38176,7 @@ async fn run_dataset_raw_envelope_export_job(
     tenant_policy: Option<TenantSubmissionPolicy>,
     purpose: String,
 ) -> ApiResult<Json<TraceRawEnvelopeDatasetExport>> {
-    let TraceCommonsMetadataView { records, .. } =
+    let TraceCommonsMetadataView { records, derived } =
         match read_replay_export_metadata_view(state, tenant).await {
             Ok(view) => view,
             Err(error) => {
@@ -38189,6 +38189,14 @@ async fn run_dataset_raw_envelope_export_job(
                 .await;
             }
         };
+    // The manifest mirror prefers the derived canonical summary hash, matching
+    // the replay export path. The fallback hash covers only tenant, submission,
+    // trace, and schema version, so it does not change when trace content
+    // changes and cannot stand alone as export-time provenance.
+    let derived_by_submission = derived
+        .into_iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
     let limit = job.max_item_cap;
     let mut items = Vec::new();
     let mut item_mirrors = Vec::new();
@@ -38250,7 +38258,10 @@ async fn run_dataset_raw_envelope_export_job(
             trace_id: record.trace_id,
             consent_scopes: body_read.envelope.consent.scopes.clone(),
             source_status_at_export: record.status,
-            source_hash_at_export: fallback_replay_source_hash(&record, &body_read.envelope),
+            source_hash_at_export: derived_by_submission
+                .get(&record.submission_id)
+                .map(|derived| derived.canonical_summary_hash.clone())
+                .unwrap_or_else(|| fallback_replay_source_hash(&record, &body_read.envelope)),
             object_ref_id: body_read.object_ref_id,
         });
         items.push(TraceRawEnvelopeDatasetItem::from_record(
