@@ -168,6 +168,38 @@ Google identity time-limited `roles/storage.objectViewer` access restricted to
 grant over a signed URL. If a signed URL is unavoidable, treat it as a secret
 and use the shortest practical TTL.
 
+```sh
+RECIPIENT=user:<recipient-google-account>
+GRANT_EXPIRY=<RFC3339 UTC, e.g. 2026-08-21T00:00:00Z>
+
+gcloud storage buckets add-iam-policy-binding "gs://${HANDOFF_BUCKET}" \
+  --member="$RECIPIENT" \
+  --role=roles/storage.objectViewer \
+  --condition="title=near-handoff-${EXPORT_ID},\
+expression=resource.name.startsWith('projects/_/buckets/${HANDOFF_BUCKET}/objects/${OBJECT_PREFIX}/') \
+&& request.time < timestamp('${GRANT_EXPIRY}')"
+```
+
+Two consequences of that condition, both intended:
+
+- **The recipient cannot list the bucket.** A list call is authorized against
+  the bucket resource, whose name does not match the object prefix, so the
+  condition denies it. Object reads by exact path still work. Send the two full
+  object paths with the handoff; do not tell the recipient to browse the bucket.
+- **The grant lapses on its own** at `GRANT_EXPIRY`. Removing the binding after
+  the fetch is still required — expiry is the backstop, not the cleanup.
+
+Verify the binding landed, and that no broader binding exists on this bucket:
+
+```sh
+gcloud storage buckets get-iam-policy "gs://${HANDOFF_BUCKET}" \
+  --format='yaml(bindings)'
+```
+
+Any unconditional `objectViewer`, `objectUser`, or `storage.admin` binding for
+a non-operator principal is a finding: it grants the whole bucket, not this
+handoff.
+
 Send the manifest's `corpus_sha256` through a separate channel. Confirm the
 recipient fetch in Cloud Audit Logs, then remove the IAM grant and delete both
 objects. Because versioning is off, deletion does not leave a recoverable
