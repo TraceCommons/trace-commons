@@ -16511,6 +16511,159 @@ async fn export_guardrails_require_explicit_filters_when_enabled() {
 }
 
 #[tokio::test]
+async fn raw_envelope_export_rejects_request_missing_privacy_risk() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_export_guardrails(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/workers/raw-envelope-export")
+                .header(AUTHORIZATION, "Bearer export-worker-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "limit": 10,
+                        "purpose": "near_benchmark_handoff",
+                        "status": "accepted",
+                        "consent_scope": "debugging_evaluation"
+                    }))
+                    .expect("request serializes"),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("raw envelope export response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("error json parses");
+    assert!(
+        value["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("requires privacy_risk=low")),
+        "guardrail response must identify the missing low-risk filter: {value}"
+    );
+}
+
+#[tokio::test]
+async fn raw_envelope_export_emits_full_envelopes_for_accepted_low_records() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_export_guardrails(temp.path().to_path_buf());
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    assert!(!envelope.events.is_empty());
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope),
+    )
+    .await
+    .expect("low-risk submission succeeds");
+
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/workers/raw-envelope-export")
+                .header(AUTHORIZATION, "Bearer export-worker-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "limit": 10,
+                        "purpose": "near_benchmark_handoff",
+                        "status": "accepted",
+                        "privacy_risk": "low",
+                        "consent_scope": "debugging_evaluation"
+                    }))
+                    .expect("request serializes"),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("raw envelope export response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("export json parses");
+    assert_eq!(value["item_count"], serde_json::json!(1));
+    assert_eq!(
+        value["items"][0]["submission_id"],
+        serde_json::json!(submission_id)
+    );
+    assert!(
+        value["items"][0]["envelope"]["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "raw envelope export must retain the full events array"
+    );
+}
+
+#[tokio::test]
+async fn raw_envelope_export_excludes_medium_privacy_risk_records() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_export_guardrails(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let mut low = sample_envelope().await;
+    make_metadata_only_low_risk(&mut low);
+    let low_submission_id = low.submission_id;
+    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(low))
+        .await
+        .expect("low-risk submission succeeds");
+
+    let medium = sample_envelope().await;
+    assert_eq!(medium.privacy.residual_pii_risk, ResidualPiiRisk::Medium);
+    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(medium))
+        .await
+        .expect("medium-risk submission succeeds when enabled");
+
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/workers/raw-envelope-export")
+                .header(AUTHORIZATION, "Bearer export-worker-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "limit": 10,
+                        "purpose": "near_benchmark_handoff",
+                        "status": "accepted",
+                        "privacy_risk": "low",
+                        "consent_scope": "debugging_evaluation"
+                    }))
+                    .expect("request serializes"),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("raw envelope export response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("export json parses");
+    assert_eq!(value["item_count"], serde_json::json!(1));
+    assert_eq!(
+        value["items"][0]["submission_id"],
+        serde_json::json!(low_submission_id)
+    );
+}
+
+#[tokio::test]
 async fn replay_export_rejects_extended_retention_expiration_before_body_read() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());

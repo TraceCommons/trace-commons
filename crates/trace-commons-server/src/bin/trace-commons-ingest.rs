@@ -7104,6 +7104,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(worker_replay_export_handler).post(worker_replay_export_body_handler),
         )
         .route(
+            "/v1/workers/raw-envelope-export",
+            post(worker_raw_envelope_export_handler),
+        )
+        .route(
             "/v1/workers/export/jobs/claim-next",
             post(worker_export_job_claim_next_handler),
         )
@@ -38057,6 +38061,314 @@ async fn run_dataset_replay_export_job(
     }))
 }
 
+async fn worker_raw_envelope_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(query): Json<DatasetExportQuery>,
+) -> ApiResult<Json<TraceRawEnvelopeDatasetExport>> {
+    run_worker_raw_envelope_export(state, headers, query).await
+}
+
+async fn run_worker_raw_envelope_export(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    query: DatasetExportQuery,
+) -> ApiResult<Json<TraceRawEnvelopeDatasetExport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_export_worker_operator(&tenant)?;
+    let now = Utc::now();
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "trace_commons_raw_envelope_corpus",
+    );
+    let grant = create_one_shot_export_grant(
+        state.as_ref(),
+        &tenant,
+        TraceExportDatasetKind::RawEnvelopeCorpus,
+        purpose,
+        query.limit,
+        now,
+    );
+    run_dataset_raw_envelope_export_with_grant(state.as_ref(), &tenant, query, grant, now).await
+}
+
+async fn run_dataset_raw_envelope_export_with_grant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: DatasetExportQuery,
+    grant: TraceExportAccessGrant,
+    now: DateTime<Utc>,
+) -> ApiResult<Json<TraceRawEnvelopeDatasetExport>> {
+    let (consent_scope, tenant_policy, purpose) =
+        prepare_raw_envelope_export_execution(state, tenant, &query).await?;
+    let job = create_validated_export_job_slice(
+        state,
+        tenant,
+        TraceExportJobRequest {
+            requested_dataset_kind: TraceExportDatasetKind::RawEnvelopeCorpus,
+            purpose: purpose.clone(),
+            requested_limit: query.limit,
+            grant: grant.clone(),
+            metadata: export_job_request_metadata(
+                query.limit,
+                query.status,
+                query.privacy_risk,
+                consent_scope,
+                None,
+            ),
+        },
+        now,
+    )?;
+    enforce_export_job_mirror_result(
+        state,
+        "raw envelope export job start",
+        mirror_export_job_started_to_db(state, tenant, &grant, &job).await,
+    )
+    .await
+    .map_err(internal_error)?;
+    run_dataset_raw_envelope_export_job(
+        state,
+        tenant,
+        query,
+        job,
+        consent_scope,
+        tenant_policy,
+        purpose,
+    )
+    .await
+}
+
+async fn prepare_raw_envelope_export_execution(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: &DatasetExportQuery,
+) -> ApiResult<(Option<ConsentScope>, Option<TenantSubmissionPolicy>, String)> {
+    let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
+    enforce_dataset_export_guardrails(
+        state,
+        "raw envelope corpus",
+        query.purpose.as_deref(),
+        query.status,
+        query.privacy_risk,
+        consent_scope,
+    )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state,
+        tenant,
+        "raw envelope corpus",
+        consent_scope,
+        TraceAllowedUse::Evaluation,
+    )
+    .await?;
+    let purpose = normalized_export_purpose(
+        query.purpose.as_deref(),
+        "trace_commons_raw_envelope_corpus",
+    );
+    Ok((consent_scope, tenant_policy, purpose))
+}
+
+async fn run_dataset_raw_envelope_export_job(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: DatasetExportQuery,
+    job: TraceExportJobSlice,
+    consent_scope: Option<ConsentScope>,
+    tenant_policy: Option<TenantSubmissionPolicy>,
+    purpose: String,
+) -> ApiResult<Json<TraceRawEnvelopeDatasetExport>> {
+    let TraceCommonsMetadataView { records, .. } =
+        match read_replay_export_metadata_view(state, tenant).await {
+            Ok(view) => view,
+            Err(error) => {
+                return fail_export_job_with_internal_error(
+                    state,
+                    &job,
+                    "raw envelope export job failure",
+                    error,
+                )
+                .await;
+            }
+        };
+    let limit = job.max_item_cap;
+    let mut items = Vec::new();
+    let mut item_mirrors = Vec::new();
+    let mut candidate_records = Vec::new();
+    for record in records
+        .into_iter()
+        .filter(|record| query.status.is_none_or(|status| record.status == status))
+        .filter(|record| {
+            query
+                .privacy_risk
+                .is_none_or(|risk| record.privacy_risk == risk)
+        })
+        .filter(|record| consent_scope.is_none_or(|scope| record.consent_scopes.contains(&scope)))
+        .filter(|record| {
+            record_matches_export_policy_abac(
+                record,
+                tenant,
+                tenant_policy.as_ref(),
+                TraceAllowedUse::Evaluation,
+            )
+        })
+    {
+        if let Err(error) = ensure_retention_metadata_within_server_policy(&record) {
+            return fail_export_job_with_internal_error(
+                state,
+                &job,
+                "raw envelope export job failure",
+                error,
+            )
+            .await;
+        }
+        if record.is_export_eligible() {
+            candidate_records.push(record);
+        }
+    }
+    for record in candidate_records.into_iter().take(limit) {
+        let body_read = match read_envelope_for_replay_export(
+            state,
+            tenant,
+            &record,
+            "raw_envelope_corpus_export",
+            Some(&purpose),
+        )
+        .await
+        {
+            Ok(body_read) => body_read,
+            Err(error) => {
+                return fail_export_job_with_internal_error(
+                    state,
+                    &job,
+                    "raw envelope export job failure",
+                    error,
+                )
+                .await;
+            }
+        };
+        item_mirrors.push(RawEnvelopeExportItemMirror {
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            consent_scopes: body_read.envelope.consent.scopes.clone(),
+            source_status_at_export: record.status,
+            source_hash_at_export: fallback_replay_source_hash(&record, &body_read.envelope),
+            object_ref_id: body_read.object_ref_id,
+        });
+        items.push(TraceRawEnvelopeDatasetItem::from_record(
+            &record,
+            &body_read.envelope,
+        ));
+    }
+    let source_submission_ids = items
+        .iter()
+        .map(|item| item.submission_id)
+        .collect::<Vec<_>>();
+    let source_submission_ids_hash =
+        source_submission_ids_hash("raw_envelope_corpus", &source_submission_ids);
+
+    let export_id = Uuid::new_v4();
+    let audit_event = TraceCommonsAuditEvent::dataset_export(
+        tenant,
+        export_id,
+        items.len(),
+        source_submission_ids_hash.clone(),
+    );
+    let audit_event_id = audit_event.event_id;
+    let manifest = raw_envelope_export_manifest_from_items(
+        &tenant.tenant_id,
+        export_id,
+        audit_event_id,
+        purpose,
+        TraceReplayExportFilters {
+            limit,
+            consent_scope,
+            status: query.status,
+            privacy_risk: query.privacy_risk,
+        },
+        &item_mirrors,
+        source_submission_ids_hash,
+    );
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_raw_envelope_export_manifest_to_db(
+            state,
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            &manifest,
+            &item_mirrors,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                export_id = %manifest.export_id,
+                "Trace Commons DB dual-write export manifest mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "raw envelope export manifest", mirror_result)
+            .map_err(internal_error)?;
+        write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
+    } else {
+        write_export_manifest(&state.root, &tenant.tenant_id, &manifest).map_err(internal_error)?;
+        let mirror_result = mirror_raw_envelope_export_manifest_to_db(
+            state,
+            StorageTraceObjectArtifactKind::ExportArtifact,
+            &manifest,
+            &item_mirrors,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                export_id = %manifest.export_id,
+                "Trace Commons DB dual-write export manifest mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "raw envelope export manifest", mirror_result)
+            .map_err(internal_error)?;
+    }
+    let audit_result = append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        audit_event.clone(),
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some(manifest.purpose.clone()),
+            item_count: items.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await;
+    if let Err(error) = audit_result {
+        if state.require_db_mirror_writes {
+            let manifest_path =
+                export_artifact_dir(&state.root, &tenant.tenant_id, manifest.export_id)
+                    .join("manifest.json");
+            remove_file_if_exists(&manifest_path).map_err(internal_error)?;
+            rollback_db_export_manifest_publication(state, &tenant.tenant_id, manifest.export_id)
+                .await
+                .map_err(internal_error)?;
+            remove_audit_event_by_id(&state.root, &tenant.tenant_id, audit_event.event_id)
+                .map_err(internal_error)?;
+        }
+        return Err(internal_error(error));
+    }
+    enforce_export_job_mirror_result(
+        state,
+        "raw envelope export job completion",
+        mirror_export_job_finished_to_db(state, &job, export_id, items.len()).await,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(TraceRawEnvelopeDatasetExport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        export_id,
+        audit_event_id,
+        created_at: Utc::now(),
+        item_count: items.len(),
+        manifest,
+        items,
+    }))
+}
+
 async fn replay_export_manifests_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -38309,6 +38621,7 @@ struct TraceExportJobClaimAndRunResponse {
     benchmark_artifact: Option<TraceBenchmarkConversionArtifact>,
     ranker_candidate_export: Option<TraceRankerTrainingCandidateExport>,
     ranker_pair_export: Option<TraceRankerTrainingPairExport>,
+    raw_envelope_export: Option<TraceRawEnvelopeDatasetExport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38469,6 +38782,7 @@ async fn worker_export_job_claim_and_run_handler(
             benchmark_artifact: None,
             ranker_candidate_export: None,
             ranker_pair_export: None,
+            raw_envelope_export: None,
         }));
     };
 
@@ -38492,6 +38806,7 @@ async fn worker_export_job_claim_and_run_handler(
         benchmark_artifact: execution.benchmark_artifact,
         ranker_candidate_export: execution.ranker_candidate_export,
         ranker_pair_export: execution.ranker_pair_export,
+        raw_envelope_export: execution.raw_envelope_export,
     }))
 }
 
@@ -39334,6 +39649,7 @@ async fn count_failed_export_jobs(
 
 struct ClaimedExportJobExecution {
     replay_export: Option<TraceReplayDatasetExport>,
+    raw_envelope_export: Option<TraceRawEnvelopeDatasetExport>,
     benchmark_artifact: Option<TraceBenchmarkConversionArtifact>,
     ranker_candidate_export: Option<TraceRankerTrainingCandidateExport>,
     ranker_pair_export: Option<TraceRankerTrainingPairExport>,
@@ -39362,6 +39678,7 @@ async fn execute_claimed_export_job(
             .await?;
             Ok(ClaimedExportJobExecution {
                 replay_export: Some(export),
+                raw_envelope_export: None,
                 benchmark_artifact: None,
                 ranker_candidate_export: None,
                 ranker_pair_export: None,
@@ -39384,6 +39701,7 @@ async fn execute_claimed_export_job(
             .await?;
             Ok(ClaimedExportJobExecution {
                 replay_export: None,
+                raw_envelope_export: None,
                 benchmark_artifact: Some(artifact),
                 ranker_candidate_export: None,
                 ranker_pair_export: None,
@@ -39412,6 +39730,7 @@ async fn execute_claimed_export_job(
             .await?;
             Ok(ClaimedExportJobExecution {
                 replay_export: None,
+                raw_envelope_export: None,
                 benchmark_artifact: None,
                 ranker_candidate_export: Some(export),
                 ranker_pair_export: None,
@@ -39440,15 +39759,34 @@ async fn execute_claimed_export_job(
             .await?;
             Ok(ClaimedExportJobExecution {
                 replay_export: None,
+                raw_envelope_export: None,
                 benchmark_artifact: None,
                 ranker_candidate_export: None,
                 ranker_pair_export: Some(export),
             })
         }
-        TraceExportDatasetKind::RawEnvelopeCorpus => Err(api_error(
-            StatusCode::NOT_IMPLEMENTED,
-            "raw envelope corpus export execution is not yet implemented",
-        )),
+        TraceExportDatasetKind::RawEnvelopeCorpus => {
+            let query = replay_export_query_from_claimed_job(&job)?;
+            let (consent_scope, tenant_policy, purpose) =
+                prepare_raw_envelope_export_execution(state, tenant, &query).await?;
+            let Json(export) = run_dataset_raw_envelope_export_job(
+                state,
+                tenant,
+                query,
+                job,
+                consent_scope,
+                tenant_policy,
+                purpose,
+            )
+            .await?;
+            Ok(ClaimedExportJobExecution {
+                replay_export: None,
+                raw_envelope_export: Some(export),
+                benchmark_artifact: None,
+                ranker_candidate_export: None,
+                ranker_pair_export: None,
+            })
+        }
     }
 }
 
@@ -65738,8 +66076,6 @@ struct TraceReplayDatasetExport {
     items: Vec<TraceReplayDatasetItem>,
 }
 
-// Task 3 constructs this via the raw-envelope export route.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct TraceRawEnvelopeDatasetExport {
     tenant_id: String,
@@ -66202,10 +66538,9 @@ impl TraceReplayDatasetItem {
     }
 }
 
-// Task 3 constructs these via the raw-envelope export route; unlike
-// TraceReplayDatasetItem, this type deliberately retains the full envelope
-// rather than a metadata subset.
-#[allow(dead_code)]
+// Unlike TraceReplayDatasetItem, this type deliberately retains the full
+// envelope rather than a metadata subset; the raw-envelope export route
+// constructs these on purpose for a third-party corpus handoff.
 #[derive(Debug, Clone, Serialize)]
 struct TraceRawEnvelopeDatasetItem {
     submission_id: Uuid,
@@ -66215,7 +66550,6 @@ struct TraceRawEnvelopeDatasetItem {
     envelope: TraceContributionEnvelope,
 }
 
-#[allow(dead_code)]
 impl TraceRawEnvelopeDatasetItem {
     fn from_record(
         record: &TraceCommonsSubmissionRecord,
@@ -66229,6 +66563,87 @@ impl TraceRawEnvelopeDatasetItem {
             envelope: envelope.clone(),
         }
     }
+}
+
+// Mirror bookkeeping for a raw-envelope export item. TraceRawEnvelopeDatasetItem
+// deliberately does not carry these fields (they are not part of the exported
+// payload), so the export job tracks them alongside the items it builds.
+struct RawEnvelopeExportItemMirror {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    consent_scopes: Vec<ConsentScope>,
+    source_status_at_export: TraceCorpusStatus,
+    source_hash_at_export: String,
+    object_ref_id: Option<Uuid>,
+}
+
+fn raw_envelope_export_manifest_from_items(
+    tenant_id: &str,
+    export_id: Uuid,
+    audit_event_id: Uuid,
+    purpose: String,
+    filters: TraceReplayExportFilters,
+    items: &[RawEnvelopeExportItemMirror],
+    source_submission_ids_hash: String,
+) -> TraceReplayExportManifest {
+    TraceReplayExportManifest {
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        export_id,
+        purpose,
+        filters,
+        source_submission_ids: items.iter().map(|item| item.submission_id).collect(),
+        source_submission_ids_hash,
+        consent_scopes: items
+            .iter()
+            .flat_map(|item| item.consent_scopes.clone())
+            .collect(),
+        generated_at: Utc::now(),
+        audit_event_id,
+    }
+}
+
+async fn mirror_raw_envelope_export_manifest_to_db(
+    state: &AppState,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    manifest: &TraceReplayExportManifest,
+    items: &[RawEnvelopeExportItemMirror],
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let items = items
+        .iter()
+        .map(|item| StorageTraceExportManifestItemWrite {
+            tenant_id: manifest.tenant_id.clone(),
+            export_manifest_id: manifest.export_id,
+            submission_id: item.submission_id,
+            trace_id: item.trace_id,
+            derived_id: None,
+            object_ref_id: item.object_ref_id,
+            vector_entry_id: None,
+            source_status_at_export: storage_corpus_status(item.source_status_at_export),
+            source_hash_at_export: item.source_hash_at_export.clone(),
+        })
+        .collect::<Vec<_>>();
+    db.upsert_trace_export_manifest_mirror(StorageTraceExportManifestMirrorWrite {
+        manifest: StorageTraceExportManifestWrite {
+            tenant_id: manifest.tenant_id.clone(),
+            export_manifest_id: manifest.export_id,
+            artifact_kind,
+            purpose_code: Some(manifest.purpose.clone()),
+            audit_event_id: Some(manifest.audit_event_id),
+            source_submission_ids: manifest.source_submission_ids.clone(),
+            source_submission_ids_hash: manifest.source_submission_ids_hash.clone(),
+            item_count: manifest.source_submission_ids.len().min(u32::MAX as usize) as u32,
+            generated_at: manifest.generated_at,
+        },
+        object_refs: Vec::new(),
+        items,
+    })
+    .await
+    .context("failed to atomically mirror trace raw envelope export manifest metadata")?;
+    Ok(())
 }
 
 fn fallback_replay_source_hash(
