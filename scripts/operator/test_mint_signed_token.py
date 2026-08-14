@@ -66,6 +66,7 @@ def test_signature_verifies_against_public_key() -> None:
             issuer="https://issuer.example",
             audience="trace-commons-ingest",
             ttl_seconds=900,
+            principal_ref="operator-test",
         )
         header_b64, payload_b64, signature_b64 = token.split(".")
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
@@ -108,6 +109,7 @@ def test_header_carries_eddsa_and_kid() -> None:
             issuer=None,
             audience=None,
             ttl_seconds=60,
+            principal_ref="operator-test",
         )
         header = json.loads(b64url_decode(token.split(".")[0]))
         assert header["alg"] == "EdDSA"
@@ -128,10 +130,12 @@ def test_payload_carries_required_claims() -> None:
             ttl_seconds=900,
             now=1_700_000_000,
             jti="fixed-jti",
+            principal_ref="near-benchmark-handoff-operator",
         )
         payload = json.loads(b64url_decode(token.split(".")[1]))
         assert payload["tenant_id"] == "tenant-zaki-pilot"
         assert payload["role"] == "export_worker"
+        assert payload["principal_ref"] == "near-benchmark-handoff-operator"
         assert payload["iss"] == "https://issuer.tracecommons.ai"
         assert payload["aud"] == "trace-commons-ingest"
         assert payload["jti"] == "fixed-jti"
@@ -152,6 +156,7 @@ def test_jti_is_unique_per_mint() -> None:
                 issuer=None,
                 audience=None,
                 ttl_seconds=60,
+                principal_ref="operator-test",
             )
             jtis.add(json.loads(b64url_decode(token.split(".")[1]))["jti"])
         assert len(jtis) == 3, "jti must be unique per mint; replay protection depends on it"
@@ -168,6 +173,7 @@ def test_no_padding_in_segments() -> None:
             issuer=None,
             audience=None,
             ttl_seconds=60,
+            principal_ref="operator-test",
         )
         assert "=" not in token, "JWS segments must be unpadded base64url"
 
@@ -182,11 +188,50 @@ def test_missing_key_is_reported_not_crashed() -> None:
             issuer=None,
             audience=None,
             ttl_seconds=60,
+            principal_ref="operator-test",
         )
     except mint_signed_token.MintError as error:
         assert "signing key not found" in str(error)
     else:
         raise AssertionError("expected MintError for a missing key")
+
+
+def test_rejects_missing_principal_and_sub() -> None:
+    """The server returns 403 without one of these, so refuse to mint a dud."""
+    with tempfile.TemporaryDirectory() as tmp:
+        private_key, _ = generate_keypair(Path(tmp))
+        try:
+            mint_signed_token.mint(
+                key_path=private_key,
+                kid="kid-abc",
+                tenant="tenant-test",
+                role="export_worker",
+                issuer=None,
+                audience=None,
+                ttl_seconds=60,
+            )
+        except mint_signed_token.MintError as error:
+            assert "principal_ref or sub" in str(error)
+        else:
+            raise AssertionError("expected MintError when neither claim is supplied")
+
+
+def test_sub_satisfies_the_actor_requirement() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        private_key, _ = generate_keypair(Path(tmp))
+        token = mint_signed_token.mint(
+            key_path=private_key,
+            kid="kid-abc",
+            tenant="tenant-test",
+            role="export_worker",
+            issuer=None,
+            audience=None,
+            ttl_seconds=60,
+            subject="operator@example",
+        )
+        payload = json.loads(b64url_decode(token.split(".")[1]))
+        assert payload["sub"] == "operator@example"
+        assert "principal_ref" not in payload
 
 
 def test_rejects_non_positive_ttl() -> None:

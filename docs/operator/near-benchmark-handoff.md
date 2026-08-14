@@ -81,10 +81,17 @@ EXPORT_TOKEN="$(sudo python3 scripts/operator/mint-signed-token.py \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["keys"][0]["kid"])')" \
   --tenant tenant-zaki-pilot \
   --role export_worker \
+  --principal-ref near-benchmark-handoff-operator \
   --issuer https://issuer.tracecommons.ai \
   --audience trace-commons-ingest \
-  --ttl-seconds 900)"
+  --ttl-seconds 1800)"
 ```
+
+`--principal-ref` is required: the server rejects a signed tenant token carrying
+neither `principal_ref` nor `sub` with
+`403 signed tenant token requires principal_ref or sub`. The value is hashed
+with the tenant to derive the stored actor principal, so it is the audit
+attribution for this export — use something that identifies the operation.
 
 Read the `kid` from the live keyset rather than pasting a literal, so the token
 follows key rotation instead of silently failing after it.

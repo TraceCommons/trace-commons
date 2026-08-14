@@ -68,6 +68,8 @@ def build_payload(
     ttl_seconds: int,
     now: int,
     jti: str,
+    principal_ref: str | None = None,
+    subject: str | None = None,
 ) -> dict:
     payload = {
         "tenant_id": tenant,
@@ -80,6 +82,10 @@ def build_payload(
         payload["iss"] = issuer
     if audience:
         payload["aud"] = audience
+    if principal_ref:
+        payload["principal_ref"] = principal_ref
+    if subject:
+        payload["sub"] = subject
     return payload
 
 
@@ -125,13 +131,22 @@ def mint(
     ttl_seconds: int,
     now: int | None = None,
     jti: str | None = None,
+    principal_ref: str | None = None,
+    subject: str | None = None,
 ) -> str:
     if ttl_seconds <= 0:
         raise MintError("ttl-seconds must be positive")
+    if not (principal_ref or subject):
+        raise MintError(
+            "a principal_ref or sub claim is required; the server rejects a signed "
+            "tenant token without one, and the audit trail derives the actor from it"
+        )
     now = int(time.time()) if now is None else now
     jti = jti or str(uuid.uuid4())
     header = build_header(kid)
-    payload = build_payload(tenant, role, issuer, audience, ttl_seconds, now, jti)
+    payload = build_payload(
+        tenant, role, issuer, audience, ttl_seconds, now, jti, principal_ref, subject
+    )
     signing_input = ".".join(
         (
             b64url(json.dumps(header, separators=(",", ":")).encode()),
@@ -155,6 +170,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--issuer", help="iss claim")
     parser.add_argument("--audience", help="aud claim")
     parser.add_argument(
+        "--principal-ref",
+        help="principal_ref claim identifying the acting operator; "
+        "the server hashes it with the tenant to derive the stored principal",
+    )
+    parser.add_argument("--sub", help="sub claim, an alternative to --principal-ref")
+    parser.add_argument(
         "--ttl-seconds",
         type=int,
         default=900,
@@ -174,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             issuer=args.issuer,
             audience=args.audience,
             ttl_seconds=args.ttl_seconds,
+            principal_ref=args.principal_ref,
+            subject=args.sub,
         )
     except MintError as error:
         print(f"mint-signed-token: {error}", file=sys.stderr)
