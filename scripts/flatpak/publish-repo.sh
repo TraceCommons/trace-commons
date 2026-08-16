@@ -39,10 +39,18 @@ fi
 
 VERIFY_REPO="$(mktemp -d)"
 trap 'rm -rf "$VERIFY_REPO"' EXIT
-ostree --repo="$VERIFY_REPO" init --mode=bare-user-only
-ostree --repo="$VERIFY_REPO" remote add --no-gpg-verify --if-not-exists verify-source "file://$REPO"
+# --mode=archive, not bare-user-only: a bare-user-only repo cannot store xattrs
+# or setuid bits, so legitimate app content would abort the pull and get blamed
+# on the signature.
+ostree --repo="$VERIFY_REPO" init --mode=archive
+# The remote is added ONCE, with verification on from the start, and the key is
+# imported afterwards. An earlier version added it twice -- once with
+# --no-gpg-verify, then again with --force to turn verification on -- and
+# imported the key in between, which depended on --force preserving the
+# keyring. Do not reintroduce that ordering; it is undocumented behaviour to
+# rely on and it is not needed.
+ostree --repo="$VERIFY_REPO" remote add --set=gpg-verify-summary=true verify-source "file://$REPO"
 ostree --repo="$VERIFY_REPO" remote gpg-import verify-source -k "$PUBKEY" >/dev/null
-ostree --repo="$VERIFY_REPO" remote add --force --set=gpg-verify-summary=true verify-source "file://$REPO"
 
 REFS="$(ostree --repo="$REPO" refs | grep '^app/' || true)"
 if [ -z "$REFS" ]; then
@@ -50,8 +58,15 @@ if [ -z "$REFS" ]; then
   exit 1
 fi
 while IFS= read -r ref; do
-  if ! ostree --repo="$VERIFY_REPO" pull verify-source "$ref" >/dev/null 2>&1; then
-    echo "refusing to publish: summary signature for $REPO did not verify against $PUBKEY (ref $ref)" >&2
+  # Capture and PRINT the real error. An earlier version sent both streams to
+  # /dev/null and reported every failure as "the summary signature did not
+  # verify", which is a lie whenever the cause was anything else -- a missing
+  # key, an unsupported repo mode, a transport problem -- and it cost a full
+  # debug cycle on the first real release to discover that.
+  if ! pull_err="$(ostree --repo="$VERIFY_REPO" pull verify-source "$ref" 2>&1)"; then
+    echo "refusing to publish: could not verify $REPO against $PUBKEY (ref $ref)" >&2
+    echo "ostree pull said:" >&2
+    printf '%s\n' "$pull_err" | sed 's/^/  /' >&2
     exit 1
   fi
 done <<<"$REFS"
