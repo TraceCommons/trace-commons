@@ -22,7 +22,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  # contents: write lives only on the publish job below, not here. The build
+  # job imports the .p12, holds the ASC notary key and carries the Trusted
+  # Signing OIDC session -- the job with signing authority is not the job
+  # that needs to cut a release, so it does not need repo-write. Matches
+  # release-apps.yml, which makes the same call for the same reason.
+  contents: read
   id-token: write
   attestations: write
 
@@ -34,7 +39,15 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # macos-13 is a retired GitHub-hosted runner image. A job targeting
+          # a label that no longer exists does not fail -- it queues forever,
+          # confirmed empirically: this leg sat queued while macos-14,
+          # windows-latest and ubuntu-24.04 all completed, and actionlint has
+          # been flagging the label as unknown. Build x86_64 as a cross build
+          # on macos-14 instead: Xcode ships both SDKs, and the toolchain
+          # action below already installs whatever target is requested. Do
+          # not "restore" macos-13 -- it will silently hang the whole run.
+          - os: macos-14
             target: x86_64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -52,9 +65,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       # Pinned, not the runner image's preinstalled Rust. These crates declare
-      # rust-version = 1.92, the macos-13 image is frozen, and windows-latest is
-      # newly added here -- an image lagging that floor, or two release legs
-      # building on different toolchains, is a real-runner-only outcome.
+      # rust-version = 1.92, and windows-latest is newly added here -- an
+      # image lagging that floor, or two release legs building on different
+      # toolchains, is a real-runner-only outcome.
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           toolchain: "1.92"
@@ -330,9 +343,20 @@ jobs:
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    # A dispatch, not only a tag push, can satisfy startsWith(github.ref,
+    # 'refs/tags/') alone: GitHub's workflow_dispatch ref selector accepts a
+    # tag, so dispatching with ref contributor-v0.1.0 would otherwise run
+    # this job and publish a real release, contradicting this file's own
+    # header comment and docs/release-runbook.md, both of which say a
+    # dispatch never publishes. Require the push event too, matching
+    # release-apps.yml's publish gate.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Job-level only: the workflow-level block stays contents: read, and only
+    # this job needs write access to cut a release.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -380,6 +404,15 @@ jobs:
           cd tap
           git switch -c "bump-formula-$V"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
+          # The positional substitution below assumes the arm64 block comes
+          # first, the x86_64 second. Assert that rather than assuming it --
+          # if the formula were ever reordered, positional substitution
+          # would silently swap the hashes onto the wrong architecture.
+          if ! awk '/on_arm/{a=NR} /on_intel/{i=NR} END{exit !(a && i && a < i)}' \
+            Formula/trace-commons-contributor.rb; then
+            echo "expected on_arm to precede on_intel in Formula/trace-commons-contributor.rb" >&2
+            exit 1
+          fi
           # Two sha256 lines in one file, so they cannot both be replaced by a
           # blind substitution: the arm64 block comes first, the x86_64
           # second. awk replaces them by position rather than a heredoc'd
@@ -387,6 +420,14 @@ jobs:
           # `run:` block inherits that indentation on every line, which is a
           # syntax error for an indentation-sensitive language; awk has no
           # such sensitivity.
+          #
+          # This positional match only fires on the two-line
+          # `sha256 "..."` form. If the formula ever used the single-line
+          # `sha256 arm: "...", x86_64: "..."` form instead, this regex would
+          # never match, no substitution would happen, and `git commit -am`
+          # would still succeed (the version sed alone changed a line) --
+          # bumping the version while silently keeping last release's
+          # hashes. The assertion after the substitution catches that.
           awk -v arm="$ARM" -v x86="$X86" '
             /sha256 "/ {
               n++
@@ -396,6 +437,11 @@ jobs:
             { print }
           ' Formula/trace-commons-contributor.rb > Formula/trace-commons-contributor.rb.tmp
           mv Formula/trace-commons-contributor.rb.tmp Formula/trace-commons-contributor.rb
+          if ! grep -qF "$ARM" Formula/trace-commons-contributor.rb || \
+             ! grep -qF "$X86" Formula/trace-commons-contributor.rb; then
+            echo "formula bump did not apply both computed hashes; refusing to open a PR with a stale or partial checksum" >&2
+            exit 1
+          fi
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
           git commit -am "trace-commons-contributor $V"

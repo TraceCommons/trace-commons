@@ -16,9 +16,19 @@ flatpak build-update-repo "$REPO" \
   --generate-static-deltas \
   --prune
 
-# Refuse to hand back an unsigned repo: `ostree show` must report a signature.
+# Refuse to hand back an unsigned repo. A plain `ostree show "$ref" | grep -qi
+# signature` is not a real test: it is a case-insensitive substring match,
+# and `ostree show`'s own no-signature and untrusted-key error paths BOTH
+# contain the word "signature" ("no signatures found",
+# "Can't check signature: public key not found") -- confirmed against a real
+# unsigned commit, which matches that grep despite carrying no signature at
+# all. Instead check for the presence of the detached ostree.gpgsigs
+# metadata key that `build-sign` actually writes: it exits non-zero with
+# "No detached metadata for commit ..." when unsigned, and prints the
+# signature bytes with exit 0 when signed -- confirmed against both a
+# signed and an unsigned commit with this libostree version.
 ostree --repo="$REPO" refs | grep '^app/' | while read -r ref; do
-  if ! ostree --repo="$REPO" show "$ref" | grep -qi 'signature'; then
+  if ! ostree --repo="$REPO" show --print-detached-metadata-key=ostree.gpgsigs "$ref" >/dev/null 2>&1; then
     echo "refusing to publish: $ref carries no signature" >&2
     exit 1
   fi
