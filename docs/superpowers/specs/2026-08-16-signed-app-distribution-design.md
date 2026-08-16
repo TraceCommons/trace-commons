@@ -90,6 +90,40 @@ Each of these would break a release build today.
 | Windows | Azure Trusted Signing profile `argos` via GitHub OIDC federated credential, role `Artifact Signing Certificate Profile Signer` | None. Only the non-secret `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
 | Linux | New GPG key for the OSTree repo, held in GCP Secret Manager, read through GitHub-to-GCP workload identity federation | None. Federated; no key material in GitHub |
 
+### Hardening standard, adopted from `sovright/argos`
+
+`sovright/argos` already runs audited release signing against the **same** Azure
+Trusted Signing account (`argossigning`/`argos`) and the same Apple team. Rather
+than maintain a second, softer pattern, this work converges on its practices.
+Six rules, binding on every workflow:
+
+1. **Every action pinned by commit SHA**, using argos's pins verbatim so both
+   repositories bump together.
+2. **No build cache in any release job.** A cache is a write-target a
+   lower-privilege job can poison, and these jobs hold signing authority. The
+   cold-build cost is the price.
+3. **Non-secret Azure config in `vars.`, not `secrets.`**, scoped to the
+   `release` environment. Storing identifiers as secrets hides them from review
+   for no benefit, and variables let a test profile be swapped per environment.
+4. **Windows signing drives Microsoft's Trusted Signing dlib through
+   `signtool`, not the marketplace action**, with the NuGet package verified by
+   SHA-256 before extraction and failing closed on mismatch. A tampered download
+   in a job holding signing authority could sign anything with a public-trust
+   certificate. Pinned at `1.0.95`, SHA-256
+   `3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F`,
+   independently verified by downloading and hashing the package rather than
+   copying the value.
+5. **Every signed artifact gets SLSA provenance** via
+   `actions/attest-build-provenance`, with the attestation step *after* signing
+   so it covers the signed bytes.
+6. **Any job holding signing authority declares `environment: release`** — which
+   is load-bearing for auth, not merely policy: the federated credential's
+   subject is `repo:TraceCommons/trace-commons-server:environment:release`, so a
+   job without it fails OIDC.
+
+The one place this work stays ahead of argos: argos notarizes with an Apple ID
+and an app-specific password, while this uses an App Store Connect API key.
+
 macOS is the only platform where a long-lived signing key sits in GitHub
 secrets. That is inherent to `codesign`, which has no keyless equivalent. The
 throwaway-keychain handling already in `make-release-dmg.sh` — create, import,
