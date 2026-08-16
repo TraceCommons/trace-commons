@@ -36,8 +36,15 @@ app-id: ai.tracecommons.Contributor
 runtime: org.gnome.Platform
 runtime-version: '46'
 sdk: org.gnome.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
+# No sdk-extensions entry for rust-stable here anymore. The first real
+# release run (app-v0.1.0, run 31959830328) proved org.gnome.Sdk//46
+# resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
+# the newer //24.08 branch only reaches 1.89.0, still 3 minors short of this
+# crate's rust-version = "1.92" floor. The build is network-sandboxed, so
+# rustup cannot fetch a newer toolchain at build time either. The
+# trace-commons-shell module below bundles its own pinned 1.92.0 toolchain
+# as a source instead, so the build no longer depends on the SDK
+# extension's version at all.
 command: trace-commons-shell
 
 finish-args:
@@ -66,10 +73,30 @@ modules:
   - name: trace-commons-shell
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      # Bundled toolchain's bin dir, replacing the SDK extension's rust bin
+      # dir -- see the sdk-extensions comment above for why that's gone.
+      # This path is build-time only: it lives under the module's own build
+      # directory (flatpak-builder's convention is /run/build/<module-name>),
+      # never under /app, so none of it ends up in the shipped app image.
+      append-path: /run/build/trace-commons-shell/rust-toolchain-install/bin
       env:
         CARGO_HOME: /run/build/trace-commons-shell/cargo
     build-commands:
+      # Install the pinned rust 1.92.0 toolchain (fetched as a source below)
+      # into a prefix under the build directory -- deliberately NOT /app.
+      # The app image must not ship a Rust compiler; that would add hundreds
+      # of megabytes to what a contributor downloads for a GTK shell binary
+      # that needs none of it at runtime. `dest: rust-toolchain` on the
+      # archive sources below extracts the tarball's contents (including
+      # install.sh) directly into rust-toolchain/, not into a nested
+      # rust-1.92.0-<arch>/ subdirectory -- verified against a real
+      # flatpak-builder run; an earlier version of this command assumed a
+      # nested dir and failed with "No such file or directory".
+      # --without=rust-docs keeps the install itself small and fast;
+      # nothing here touches /app regardless.
+      - |
+        set -euo pipefail
+        rust-toolchain/install.sh --prefix="$PWD/rust-toolchain-install" --without=rust-docs
       # --offline requires a vendored source tree; see cargo-sources.json
       # below and the report for the exact command that generates it. This
       # manifest does not fabricate that file -- a plausible-looking but
@@ -94,6 +121,27 @@ modules:
           - target
           - .git
           - .flatpak-builder
+      # Pinned rust 1.92.0, matching this crate's rust-version floor exactly
+      # -- not newer -- so the build proves the crate honours its own
+      # minimum instead of quietly depending on something later. Two
+      # arch-scoped sources, each fetched only on its own arch via
+      # `only-arches`, so an x86_64 build never pulls the aarch64 tarball
+      # and vice versa. Extracted under `dest: rust-toolchain`, a
+      # subdirectory of the build dir, so it never collides with the `dir`
+      # source above (which maps to the build dir root); flatpak-builder
+      # extracts the tarball's contents straight into that directory
+      # (install.sh lands at rust-toolchain/install.sh), not into a nested
+      # rust-1.92.0-<arch>/ directory.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz
+        sha256: d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c
+        dest: rust-toolchain
+      - type: archive
+        only-arches: [aarch64]
+        url: https://static.rust-lang.org/dist/rust-1.92.0-aarch64-unknown-linux-gnu.tar.xz
+        sha256: 3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822
+        dest: rust-toolchain
       # Generated, not written by hand: run
       #   pip install aiohttp toml
       #   python3 flatpak-cargo-generator.py \
