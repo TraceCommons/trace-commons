@@ -85,6 +85,11 @@ fn swift_manifest_takes_the_library_path_from_the_environment() {
     // The env var is read once and reused; a literal debug path left in a
     // linkerSettings block would silently win for that target. Check within
     // .unsafeFlags blocks to avoid false positives from comments or later content.
+    let unsafe_flags_count = manifest.matches(".unsafeFlags([").count();
+    assert!(
+        unsafe_flags_count >= 2,
+        "unsafeFlags spelling changed; the hardcoded-path scan is now vacuous"
+    );
     let hardcoded_in_linker_settings = manifest.split(".unsafeFlags([").skip(1).any(|section| {
         // Each section runs from .unsafeFlags([ to the next ]) that closes it
         section
@@ -110,5 +115,10 @@ fn bundle_script_exports_the_library_path_and_can_skip_adhoc_signing() {
         script.contains("TC_SKIP_ADHOC_SIGN:-"),
         "the release path must be able to skip the ad-hoc signature rather \
          than have make-release-dmg.sh re-sign over it"
+    );
+    assert!(
+        script.contains("TC_SKIP_ADHOC_SIGN:-0}\" != \"1\""),
+        "the guard must skip codesigning when TC_SKIP_ADHOC_SIGN is set to 1; \
+         inverting the condition would ad-hoc-sign every release build"
     );
 }

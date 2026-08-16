@@ -5,9 +5,9 @@ import Foundation
 // The macOS contributor shell, plus the milestone demo that proves the
 // trace-commons-contributor-ffi C ABI is callable from Swift. Both link the
 // Rust dylib from make-app-bundle.sh's TC_FFI_LIB_DIR, which defaults to
-// ../target/debug/libtrace_commons_contributor_ffi.dylib for development
-// (cargo build -p trace-commons-contributor-ffi must be run first, from the
-// repo root).
+// ../target/debug for development (cargo build -p trace-commons-contributor-ffi
+// must be run first, from the repo root; the dylib is found via -ltrace_commons_contributor_ffi).
+
 
 // Which cargo profile's dylib to link against. make-app-bundle.sh exports
 // this as <repo>/target/<config>; the default keeps a bare `swift build`
