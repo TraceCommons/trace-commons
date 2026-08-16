@@ -133,7 +133,7 @@ fn release_dmg_notarizes_with_an_api_key_not_a_password() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // API key credentials must be required.
+    // API key credentials must be required and actually used.
     for required in [
         "MACOS_NOTARY_ASC_KEY_P8_BASE64",
         "MACOS_NOTARY_ASC_KEY_ID",
@@ -144,6 +144,20 @@ fn release_dmg_notarizes_with_an_api_key_not_a_password() {
             "make-release-dmg.sh must require {required} in executable code"
         );
     }
+
+    // The API key must actually be passed to notarytool, not just required.
+    assert!(
+        code.contains("--key \"$WORK/notary.p8\""),
+        "notarytool must be called with --key pointing to the decoded API key file"
+    );
+    assert!(
+        code.contains("--key-id"),
+        "notarytool must be called with --key-id"
+    );
+    assert!(
+        code.contains("--issuer"),
+        "notarytool must be called with --issuer"
+    );
 
     // Old Apple ID + password credentials are completely gone from code.
     for gone in ["MACOS_NOTARY_APPLE_ID", "MACOS_NOTARY_PASSWORD"] {

@@ -21,6 +21,11 @@
 # tampered build, and training people through it is training them past the
 # real thing. Developer ID plus notarization is the requirement.
 #
+# # Arguments
+#
+#   $1  SHORT_VERSION  the tag version (e.g. "0.1.2"), required
+#   $2  BUILD_VERSION  the build number (e.g. "42"), required
+#
 # # Credentials
 #
 # Every value below comes from the environment. There are no defaults, and
@@ -79,8 +84,8 @@ for var in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
   require_env "$var"
 done
 
-SHORT_VERSION="${1:?refusing to build a release without a version. Pass the tag version explicitly; see release-apps.yml.}"
-BUILD_VERSION="${2:?refusing to build a release without a build number.}"
+SHORT_VERSION="${1:?refusing to build a release without a version -- the caller must pass the tag version explicitly as the first argument.}"
+BUILD_VERSION="${2:?refusing to build a release without a build number -- the caller must pass the build number as the second argument.}"
 
 echo "--- building the release bundle"
 TC_SKIP_ADHOC_SIGN=1 ./scripts/make-app-bundle.sh \
@@ -124,7 +129,14 @@ echo "--- importing the signing certificate into a throwaway keychain"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 900 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+# Remove any stale file, decode with restricted creation mode, and set mode
+# again as belt-and-braces. rm defeats leftover-mode and symlink cases;
+# umask guards creation; chmod is what readers grep for and what actually
+# enforces the mode if a file somehow existed. The cert holds the Developer ID
+# private key for the whole run, so this is the larger exposure of the two.
+rm -f "$WORK/cert.p12"
 ( umask 077; echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12" )
+chmod 600 "$WORK/cert.p12"
 security import "$WORK/cert.p12" -k "$KEYCHAIN" \
   -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: \
@@ -167,7 +179,13 @@ echo "--- notarizing (this waits for Apple's verdict)"
 # (`set -x`) in this script -- with tracing on, the line below would trace the
 # entire base64 private key. Run release builds on an isolated ephemeral
 # runner.
+# Remove any stale file, decode with restricted creation mode, and set mode
+# again as belt-and-braces. rm defeats leftover-mode and symlink cases;
+# umask guards creation; chmod is what readers grep for and what actually
+# enforces the mode if a file somehow existed.
+rm -f "$WORK/notary.p8"
 ( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
+chmod 600 "$WORK/notary.p8"
 xcrun notarytool submit "$DMG" \
   --key "$WORK/notary.p8" \
   --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
