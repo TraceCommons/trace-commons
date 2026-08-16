@@ -399,10 +399,16 @@ jobs:
       # run on a developer's macOS machine against the .dylib -- this job is
       # what proves the same binding holds on Windows, where the daemon's
       # transport is a named pipe rather than a unix socket.
+      #
+      # Both dotnet steps run from windows/ so that windows/global.json applies.
+      # MSBuild selects the NEWEST installed SDK regardless of what setup-dotnet
+      # put there, and GitHub's Windows image ships .NET 10, whose layout
+      # Windows App SDK 1.6 cannot build against.
       - name: Run interop tests against the real cdylib
+        working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: dotnet test windows/tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Release
+        run: dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Release
 
       # Building the WinUI project is the only verification the XAML and the
       # Windows App SDK wiring get: neither can be compiled anywhere but
@@ -410,6 +416,7 @@ jobs:
       # still be broken here. Warnings are errors in both projects, matching
       # the RUSTFLAGS="-D warnings" discipline the Rust jobs apply.
       - name: Build the WinUI app
+        working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: dotnet build windows/src/TraceCommons.App/TraceCommons.App.csproj --configuration Release -p:Platform=x64
+        run: dotnet build src/TraceCommons.App/TraceCommons.App.csproj --configuration Release -p:Platform=x64
