@@ -208,6 +208,33 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
+/// dtolnay/rust-toolchain is pinned to a commit SHA of its master branch
+/// (not a `@stable`/`@1.92`-style ref), so it cannot infer the toolchain
+/// from the ref name and `toolchain:` becomes a required input. Plain
+/// string counting, not a YAML parser: every `dtolnay/rust-toolchain`
+/// usage must be matched by a `toolchain: "` input somewhere in the file.
+#[test]
+fn every_rust_toolchain_usage_pins_a_toolchain_input() {
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        let workflow = read(path);
+        let uses_count = workflow.matches("dtolnay/rust-toolchain@").count();
+        let toolchain_count = workflow.matches("toolchain: \"").count();
+        assert!(
+            uses_count > 0,
+            "{path}: expected at least one dtolnay/rust-toolchain usage"
+        );
+        assert_eq!(
+            uses_count, toolchain_count,
+            "{path}: every dtolnay/rust-toolchain usage must carry a \
+             `toolchain:` input -- pinned to a commit SHA, the action \
+             cannot infer the toolchain from the ref name"
+        );
+    }
+}
+
 /// Both workflows sign Windows binaries with the same duplicated dlib block,
 /// so both must be pinned. Reading only one leaves the other free to drop the
 /// timestamp -- and an untimestamped Trusted Signing signature keeps validating

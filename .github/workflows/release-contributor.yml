@@ -57,6 +57,7 @@ jobs:
       # building on different toolchains, is a real-runner-only outcome.
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
+          toolchain: "1.92"
           targets: ${{ matrix.target }}
 
       # By binary name, not by package: `-p trace-commons-contributor` also
