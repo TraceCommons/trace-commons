@@ -23,11 +23,15 @@ on:
       version:
         description: Version to stamp when running without a tag
         type: string
-        default: 0.0.0-dispatch
+        default: 0.0.0
+
+concurrency:
+  group: release-apps-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
   id-token: write
+  attestations: write
 
 jobs:
   version:
@@ -38,21 +42,30 @@ jobs:
       short: ${{ steps.v.outputs.short }}
       build: ${{ steps.v.outputs.build }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-      # CFBundleVersion must increase monotonically across releases;
-      # the commit count is monotonic and needs no external state.
+      # CFBundleVersion must increase monotonically across releases.
+      # GitHub's run_number is not tied to any git state and increments with
+      # every workflow run in the repo, so it persists across branches and
+      # tag pushes without external state. The short version is semantic.
       - id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            SHORT="${GITHUB_REF_NAME#app-v}"
+          if [ "$EVENT_NAME" = "push" ]; then
+            SHORT="${REF_NAME#app-v}"
           else
-            SHORT="${{ inputs.version }}"
+            SHORT="$INPUT_VERSION"
+          fi
+          if ! printf '%s' "$SHORT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "refusing to release: '$SHORT' is not a three-part numeric version." >&2
+            echo "Tags must look like app-v1.2.3; a dispatch must pass the same shape." >&2
+            exit 1
           fi
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build=$RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS signed DMG
@@ -81,6 +94,8 @@ jobs:
       # named like a release is worse than no artifact.
       - name: Build, sign, notarize and staple
         env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -88,15 +103,15 @@ jobs:
           MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
           MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
         run: |
-          ./macos/scripts/make-release-dmg.sh \
-            "${{ needs.version.outputs.short }}" \
-            "${{ needs.version.outputs.build }}"
+          ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
 
       - name: Rename and checksum
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="TraceCommons-${{ needs.version.outputs.short }}.dmg"
+          OUT="TraceCommons-${SHORT_VERSION}.dmg"
           cp macos/.build/TraceCommons.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
@@ -108,7 +123,9 @@ jobs:
       # contributor actually downloads.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
-          subject-path: dist/*.dmg
+          subject-path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
