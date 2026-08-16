@@ -25,6 +25,9 @@ if [ ! -f "$DYLIB" ]; then
   exit 1
 fi
 
+# Package.swift reads this; without it a release build links target/debug.
+export TC_FFI_LIB_DIR="$REPO_ROOT/target/$CONFIG"
+
 swift build --configuration "$CONFIG"
 
 rm -rf "$APP"
@@ -43,7 +46,13 @@ OLD_ID="$(otool -D "$DYLIB" | tail -1)"
 install_name_tool -change "$OLD_ID" "@rpath/$DYLIB_NAME" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
 
-codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$DYLIB_NAME" >/dev/null 2>&1 || true
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
+# An ad-hoc signature is what makes a DEVELOPMENT bundle launchable. The
+# release path signs with a Developer ID immediately afterwards, so doing it
+# here first is wasted work that also makes the release path read as if it
+# might ship an ad-hoc signature.
+if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
+  codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$DYLIB_NAME" >/dev/null 2>&1 || true
+  codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
+fi
 
 echo "built $APP"
