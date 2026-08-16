@@ -143,7 +143,7 @@ modules:
         sha256: 3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822
         dest: rust-toolchain
       # Generated, not written by hand: run
-      #   pip install aiohttp toml
+      #   pip install aiohttp tomlkit
       #   python3 flatpak-cargo-generator.py \
       #     crates/trace-commons-contributor-gtk/Cargo.lock \
       #     -o crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json
