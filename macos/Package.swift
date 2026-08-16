@@ -4,7 +4,8 @@ import Foundation
 
 // The macOS contributor shell, plus the milestone demo that proves the
 // trace-commons-contributor-ffi C ABI is callable from Swift. Both link the
-// Rust dylib built at ../target/debug/libtrace_commons_contributor_ffi.dylib
+// Rust dylib from make-app-bundle.sh's TC_FFI_LIB_DIR, which defaults to
+// ../target/debug/libtrace_commons_contributor_ffi.dylib for development
 // (cargo build -p trace-commons-contributor-ffi must be run first, from the
 // repo root).
 
@@ -15,7 +16,7 @@ import Foundation
 // which meant `swift build -c release` linked against target/debug -- and
 // failed outright on a CI checkout that never built debug.
 let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
-    ?? "../target/debug"
+    .flatMap { $0.isEmpty ? nil : $0 } ?? "../target/debug"
 
 let package = Package(
     name: "TraceCommons",

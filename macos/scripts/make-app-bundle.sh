@@ -21,7 +21,9 @@ DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
 DYLIB="$REPO_ROOT/target/$CONFIG/$DYLIB_NAME"
 
 if [ ! -f "$DYLIB" ]; then
-  echo "missing $DYLIB -- run: cargo build -p trace-commons-contributor-ffi" >&2
+  BUILD_CMD="cargo build -p trace-commons-contributor-ffi"
+  [ "$CONFIG" = "release" ] && BUILD_CMD="$BUILD_CMD --release"
+  echo "missing $DYLIB -- run: $BUILD_CMD" >&2
   exit 1
 fi
 

@@ -77,17 +77,21 @@ fn bundle_script_passes_its_version_through_to_the_plist() {
 fn swift_manifest_takes_the_library_path_from_the_environment() {
     let manifest = read("macos/Package.swift");
     assert!(
-        manifest.contains("TC_FFI_LIB_DIR"),
+        manifest.contains("environment[\"TC_FFI_LIB_DIR\"]"),
         "Package.swift must read the FFI library search path from \
          TC_FFI_LIB_DIR. Hardcoding ../target/debug makes a release build \
          link against a directory that does not exist in CI."
     );
     // The env var is read once and reused; a literal debug path left in a
-    // linkerSettings block would silently win for that target.
-    let hardcoded_in_linker_settings = manifest
-        .split("linkerSettings")
-        .skip(1)
-        .any(|section| section.contains("../target/debug"));
+    // linkerSettings block would silently win for that target. Check within
+    // .unsafeFlags blocks to avoid false positives from comments or later content.
+    let hardcoded_in_linker_settings = manifest.split(".unsafeFlags([").skip(1).any(|section| {
+        // Each section runs from .unsafeFlags([ to the next ]) that closes it
+        section
+            .split("])")
+            .next()
+            .map_or(false, |flags| flags.contains("../target/debug"))
+    });
     assert!(
         !hardcoded_in_linker_settings,
         "a linkerSettings block still hardcodes ../target/debug"
@@ -98,12 +102,12 @@ fn swift_manifest_takes_the_library_path_from_the_environment() {
 fn bundle_script_exports_the_library_path_and_can_skip_adhoc_signing() {
     let script = read("macos/scripts/make-app-bundle.sh");
     assert!(
-        script.contains("TC_FFI_LIB_DIR"),
+        script.contains("export TC_FFI_LIB_DIR="),
         "make-app-bundle.sh must export TC_FFI_LIB_DIR so swift build links \
          against target/$CONFIG"
     );
     assert!(
-        script.contains("TC_SKIP_ADHOC_SIGN"),
+        script.contains("TC_SKIP_ADHOC_SIGN:-"),
         "the release path must be able to skip the ad-hoc signature rather \
          than have make-release-dmg.sh re-sign over it"
     );
