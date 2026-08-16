@@ -571,31 +571,37 @@ fn contributor_release_notes_do_not_teach_past_gatekeeper() {
     );
 }
 
-/// The macos job runs only on macos-14 (arm64) with no lipo/universal step
-/// anywhere under macos/, so the DMG it produces is Apple-silicon-only. The
-/// artifact name must say so, both because the cask bump step reads the
-/// checksum sidecar from this exact filename and because an Intel user
-/// should be able to tell from the filename alone that it will not run --
-/// the cask's `depends_on arch: :arm64` (in the tap repo) refuses the
-/// install, but a stray direct download would not be caught by Homebrew.
+/// make-app-bundle.sh must build the FFI dylib for both Apple silicon and
+/// Intel, lipo them into one dylib, and tell `swift build` to produce a
+/// universal executable -- otherwise the app bundle silently only runs on
+/// whichever architecture built it, which would still sign, notarize and
+/// pass Gatekeeper before failing to launch for the other half of users.
+/// Since the DMG this produces is now universal, its filename (read by the
+/// cask-bump step's checksum lookup) must not claim a single architecture.
 #[test]
-fn macos_dmg_artifact_name_declares_its_architecture() {
+fn macos_app_bundle_builds_and_lipos_both_architectures() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    assert!(
+        script.contains("aarch64-apple-darwin") && script.contains("x86_64-apple-darwin"),
+        "make-app-bundle.sh must build the FFI dylib for both \
+         aarch64-apple-darwin and x86_64-apple-darwin"
+    );
+    assert!(
+        script.contains("lipo -create"),
+        "the two architecture-specific dylibs must be lipo'd into one \
+         universal dylib before swift build links against them"
+    );
+    assert!(
+        script.contains("--arch arm64") && script.contains("--arch x86_64"),
+        "swift build must be passed --arch arm64 --arch x86_64 so the app \
+         executable is universal, not just the dylib it links"
+    );
+
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
-        workflow.contains("TraceCommons-${SHORT_VERSION}-arm64.dmg"),
-        "the macOS DMG output filename must name its architecture (arm64) \
-         since this job cannot produce a universal binary"
-    );
-    assert!(
-        workflow.contains("TraceCommons-\"$V\"-arm64.dmg.sha256"),
-        "the cask-bump step's checksum lookup must track the arm64-tagged \
-         filename the macos job actually produces"
-    );
-    let runbook = read("docs/release-runbook.md");
-    assert!(
-        runbook.contains("arm64") && runbook.to_lowercase().contains("intel"),
-        "the runbook must document the arm64-only limitation so a reader \
-         knows an Intel Mac install will not work"
+        workflow.contains("TraceCommons-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),
+        "the DMG is universal now, so its filename must not carry an \
+         architecture suffix"
     );
 }
 
