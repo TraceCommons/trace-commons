@@ -16,7 +16,7 @@ The macOS app and CLI are distributed via a Homebrew tap:
 `brew tap TraceCommons/tap`.
 
 - `Casks/trace-commons.rb` installs the notarized `TraceCommons.app` from the
-  DMG published as `TraceCommons-<version>-arm64.dmg` on releases of
+  DMG published as `TraceCommons-<version>.dmg` on releases of
   `TraceCommons/trace-commons-server` tagged `app-v<version>`.
 - `Formula/trace-commons-contributor.rb` installs the signed CLI from the
   zips published as `trace-commons-contributor-<target>.zip` on releases
@@ -25,21 +25,18 @@ The macOS app and CLI are distributed via a Homebrew tap:
 - Minimum macOS is Sonoma (`depends_on macos: ">= :sonoma"`), matching the
   app's `LSMinimumSystemVersion` of `14.0`.
 
-### Known limitation: the app DMG is Apple silicon only
+### The app DMG is a universal binary
 
-The `macos` release job in `.github/workflows/release-apps.yml` runs only on
-`macos-14` (arm64), and there is no `lipo`/universal step anywhere under
-`macos/`. `TraceCommons-<version>-arm64.dmg` is therefore an arm64-only
-binary, and the cask carries `depends_on arch: :arm64` so `brew install
---cask trace-commons` refuses cleanly on an Intel Mac instead of installing
-an app that fails to launch. The real fix — `lipo` the FFI dylib together
-with a `swift build --arch arm64 --arch x86_64` universal app build — is not
-implemented. Anyone doing that work should update the artifact name, the
-cask's `url` and `depends_on arch:`, and this note together, all in one
-change, so none of the three can drift out of sync with the others.
+`macos/scripts/make-app-bundle.sh` builds the FFI dylib for both
+`aarch64-apple-darwin` and `x86_64-apple-darwin`, `lipo`s them into one
+dylib, and passes `swift build --arch arm64 --arch x86_64` so the app
+executable is universal too; it verifies both with `lipo -archs` and fails
+loudly if either is thin. `TraceCommons-<version>.dmg` therefore runs on both
+Apple silicon and Intel Macs, and the cask carries no `depends_on arch:`.
 
-The CLI (`Formula/trace-commons-contributor.rb`) is unaffected: it already
-ships separate `aarch64-apple-darwin` and `x86_64-apple-darwin` builds.
+The CLI (`Formula/trace-commons-contributor.rb`) ships separate
+`aarch64-apple-darwin` and `x86_64-apple-darwin` builds instead of a
+universal one; that is unrelated to the app DMG and unaffected by this.
 - The cask's `uninstall quit:` stanza targets bundle identifier
   `ai.tracecommons.shell`, because the app registers itself as a login item
   via `SMAppService`; removing a running bundle without quitting it first
@@ -141,7 +138,7 @@ Expect friction in roughly this order:
   refusing to publish, but worth confirming): the guard added in this task
   should prevent `gh release create` from running with nothing to attach.
   Confirm this in practice, not just by reading the condition.
-- **The macOS checksum sidecar path.** `dist/macos-dmg/TraceCommons-$V-arm64.dmg.sha256`
+- **The macOS checksum sidecar path.** `dist/macos-dmg/TraceCommons-$V.dmg.sha256`
   assumes the exact filename the macOS job produces. Any future rename of
   that job's output (`Rename and checksum` step) silently breaks this glob
   with no test coverage catching it — `release_pipeline.rs` checks text

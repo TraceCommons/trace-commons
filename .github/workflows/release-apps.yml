@@ -98,12 +98,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           toolchain: "1.92"
+          # make-app-bundle.sh (invoked below via make-release-dmg.sh) builds
+          # the FFI dylib for both targets itself and lipos them together, so
+          # both need to be installed here.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority. The cold-build cost is the price of that.
-
-      - name: Build the FFI dylib
-        run: cargo build --release -p trace-commons-contributor-ffi
 
       # make-release-dmg.sh refuses outright when any credential is missing,
       # rather than falling back to an ad-hoc signature. An unsigned artifact
@@ -121,20 +122,16 @@ jobs:
         run: |
           ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
 
-      # This job runs only on macos-14 (Apple silicon) and there is no
-      # lipo/universal step anywhere under macos/, so the DMG is arm64-only.
-      # The artifact name says so, so an Intel Mac's `brew install --cask`
-      # (gated separately by `depends_on arch: :arm64` in the tap) does not
-      # look like it might work when it will fail to launch. A universal
-      # build -- lipo the dylib, `swift build --arch arm64 --arch x86_64`
-      # -- is the real fix and is deliberately not attempted here.
+      # make-app-bundle.sh lipos the FFI dylib and passes
+      # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
+      # the artifact name no longer carries an arch suffix.
       - name: Rename and checksum
         env:
           SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="TraceCommons-${SHORT_VERSION}-arm64.dmg"
+          OUT="TraceCommons-${SHORT_VERSION}.dmg"
           cp macos/.build/TraceCommons.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
@@ -506,8 +503,7 @@ jobs:
             NOTES="$NOTES
 
           macOS: signed with Iqlusion Inc's Developer ID and notarized by
-          Apple. Apple silicon (arm64) only -- an Intel build is not yet
-          produced; see docs/release-runbook.md. You can also
+          Apple. Universal build (Apple silicon and Intel). You can also
           \`brew tap TraceCommons/tap && brew install --cask trace-commons\`."
           fi
           if [ "$WINDOWS_RESULT" = success ]; then
@@ -546,7 +542,8 @@ jobs:
         run: |
           set -euo pipefail
           V="$SHORT_VERSION"
-          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V"-arm64.dmg.sha256)"
+          # No -arm64 suffix: the DMG is universal now.
+          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
           # Clone with the token IN the remote URL. `gh repo clone` leaves a
           # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
           # raw `git push` -- which failed on the first real release with
