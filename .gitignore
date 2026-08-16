@@ -23,3 +23,8 @@ scripts/operator/*.csv
 
 # Local pre-PR review artifacts
 .review/
+
+# Generated per release by scripts/winget/generate-manifests.sh and submitted to
+# microsoft/winget-pkgs, not carried here -- the InstallerSha256 is only valid
+# for one specific published artifact.
+manifests/

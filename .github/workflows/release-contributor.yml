@@ -330,6 +330,46 @@ jobs:
             "$hash  $($_.Name)" | Out-File "$($_.FullName).sha256" -Encoding ascii -NoNewline
           }
 
+      # A zip alongside the bare .exe, purely so winget can install this.
+      #
+      # winget's portable install type can only name the installed command for a
+      # nested installer inside an archive: PortableCommandAlias is defined only
+      # within NestedInstallerFiles (verified against the 1.12.0 installer
+      # schema). Pointed at the bare .exe, `winget install` would give people a
+      # command called trace-commons-contributor-x86_64-pc-windows-msvc. So the
+      # zip carries the same signed binary under its plain name, and the
+      # manifest declares zip + NestedInstallerType: portable.
+      #
+      # After signing, so the archive holds signed bytes rather than the build
+      # output, and before the attestation so provenance covers it too.
+      - name: Package a zip winget can consume
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = Join-Path $env:RUNNER_TEMP 'winget-stage'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          $signed = "dist/trace-commons-contributor-$env:TARGET.exe"
+          Copy-Item $signed (Join-Path $stage 'trace-commons-contributor.exe')
+
+          # The archive must contain the SIGNED binary. Verify rather than
+          # assume the copy came from the right step.
+          $inner = Join-Path $stage 'trace-commons-contributor.exe'
+          $sig = Get-AuthenticodeSignature $inner
+          if ($sig.Status -ne 'Valid') {
+            throw "the binary staged for the zip is not validly signed: $($sig.Status)"
+          }
+
+          $zip = "dist/trace-commons-contributor-$env:TARGET.zip"
+          Compress-Archive -Path $inner -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $zip -Leaf)" | Out-File "$zip.sha256" -Encoding ascii -NoNewline
+          Write-Host "packaged $zip ($hash)"
+
       # After signing, so the provenance covers the signed bytes rather than
       # the unsigned build output.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
