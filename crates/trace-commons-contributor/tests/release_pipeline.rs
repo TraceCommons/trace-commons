@@ -430,19 +430,40 @@ fn contributor_release_notes_do_not_teach_past_gatekeeper() {
 #[test]
 fn contributor_release_notes_do_not_promise_an_unpublished_flatpak() {
     let workflow = read(".github/workflows/release-contributor.yml");
-    // The linux-flatpak job (in release-apps.yml) builds a LOCAL repo with no
-    // --gpg-sign and uploads it as a CI artifact only -- there is no publish
-    // step anywhere in this repo. Pointing contributors at this URL and
-    // calling its OSTree repo GPG-signed is exactly the false claim this task
-    // was created to remove, just relocated instead of fixed.
+    // The linux-flatpak job (in release-apps.yml) publishes the signed OSTree
+    // repo, but only on a tag push of app-v* -- a wholly separate workflow
+    // and trigger from this file's contributor-v* releases. Pointing this
+    // workflow's release notes at that bucket would promise Linux
+    // contributors a channel this workflow itself never fills.
     assert!(
         !workflow.contains("tracecommons-flatpak"),
-        "the release notes must not point Linux contributors at a flatpak repo \
-         that nothing in this repository publishes"
+        "the release-contributor notes must not point at the flatpak bucket; \
+         that channel is published by release-apps.yml on a different tag"
     );
     assert!(
         workflow.contains("Verify it against the published"),
         "the Linux binary ships unsigned; the notes must point at the \
          checksum, not at a signed distribution channel that does not exist"
+    );
+}
+
+#[test]
+fn flatpak_repo_is_gpg_signed_before_publication() {
+    let script = read("scripts/flatpak/build-and-sign.sh");
+    assert!(
+        script.contains("build-sign") && script.contains("build-update-repo"),
+        "both the commit and the repo summary must be signed; a signed commit \
+         under an unsigned summary still lets a repo be rolled back or \
+         truncated by whoever serves it"
+    );
+    assert!(
+        script.contains("--gpg-sign"),
+        "the OSTree repo must be signed with our key"
+    );
+    let publish = read("scripts/flatpak/publish-repo.sh");
+    assert!(
+        publish.contains("GPGKey="),
+        "the .flatpakref must embed the public key, or the contributor's \
+         first install has nothing to verify against"
     );
 }

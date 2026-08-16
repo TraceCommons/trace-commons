@@ -320,11 +320,11 @@ jobs:
       inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
     # Signing authority, so it declares the environment like the other two:
-    # this job will import the OSTree repo's GPG private key from Secret
-    # Manager (Task 9), so it is gated as signing authority from the outset.
-    # Its GCP auth is repository-scoped rather than environment-scoped, so
-    # unlike the Windows job this is protection rather than a hard auth
-    # requirement -- but a job holding a signing key is gated either way.
+    # this job imports the OSTree repo's GPG private key from Secret Manager
+    # (Task 9) to sign the built repo before publication. Its GCP auth is
+    # repository-scoped rather than environment-scoped, so unlike the
+    # Windows job this is protection rather than a hard auth requirement --
+    # but a job holding a signing key is gated either way.
     environment: release
     # This manifest had never been built when the job was written. The
     # generous timeout is because a from-scratch flatpak build compiles the
@@ -393,6 +393,49 @@ jobs:
           set -euo pipefail
           ostree --repo=flatpak-repo refs | tee refs.txt
           grep -q 'app/ai.tracecommons.Contributor/' refs.txt
+
+      # GCP_WIF_PROVIDER and GCP_FLATPAK_PUBLISHER_SA are repository secrets
+      # provisioned outside this workflow (Task 9, steps 1-3). Until they
+      # exist this step fails closed -- an empty workload_identity_provider
+      # is a hard auth failure, not a silent no-op -- which is the correct
+      # behavior for a job about to import a signing key.
+      - name: Authenticate to GCP (workload identity federation; no key on the runner)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Import the signing key from Secret Manager
+        env:
+          GCP_PROJECT: tracecommons-pilot-2026
+          SECRET_NAME: flatpak-signing-key
+          KEY_UID: ops@tracecommons.ai
+        run: |
+          set -euo pipefail
+          gcloud secrets versions access latest --secret="$SECRET_NAME" \
+            --project "$GCP_PROJECT" | gpg --batch --import
+          KEYID="$(gpg --list-keys --with-colons "$KEY_UID" \
+            | awk -F: '/^fpr:/{print $10; exit}')"
+          echo "GPG_KEYID=$KEYID" >> "$GITHUB_ENV"
+          gpg --export "$KEYID" > flatpak-signing-pub.gpg
+
+      # GPG_KEYID reaches this step as a real OS environment variable via
+      # GITHUB_ENV above, not through `${{ }}` interpolation -- this job
+      # holds a GPG private key, so nothing sensitive is allowed to cross
+      # into a `run:` body through template expansion.
+      - name: Sign the repo
+        run: ./scripts/flatpak/build-and-sign.sh flatpak-repo "$GPG_KEYID"
+
+      # Tag pushes only. A dispatch run still builds and signs above, so the
+      # path is provable, but publication never runs on a dispatch -- it
+      # must not move what contributors' clients would actually pull.
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          BUCKET: tracecommons-flatpak
+        run: ./scripts/flatpak/publish-repo.sh flatpak-repo flatpak-signing-pub.gpg "$BUCKET"
 
       - name: Name the artifact for this version
         id: name
