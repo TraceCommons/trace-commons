@@ -75,7 +75,16 @@ modules:
       # manifest does not fabricate that file -- a plausible-looking but
       # wrong one is worse than an honest gap, since it would silently
       # pin the wrong checksums.
-      - cargo --offline build --release --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      # crates/trace-commons-contributor-gtk/Cargo.toml declares its own
+      # `[workspace]` -- it is deliberately excluded from the root
+      # workspace because it links GTK and does not build on macOS. Without
+      # --target-dir, cargo infers the target dir from that crate's own
+      # workspace root and writes to
+      # crates/trace-commons-contributor-gtk/target/release/, not
+      # target/release/ at the source tree root that the install command
+      # below reads from. Pinning --target-dir here keeps the output
+      # location fixed even if the workspace layout changes again.
+      - cargo --offline build --release --target-dir target --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
       - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
     sources:

@@ -275,3 +275,31 @@ fn flatpak_manifest_has_its_vendored_sources_enabled() {
         "a blanket home grant defeats the point of shipping this confined"
     );
 }
+
+#[test]
+fn cargo_sources_json_looks_like_a_real_generated_source_list() {
+    // Plain std::fs plus a manual scan, deliberately: a JSON dependency for
+    // one test is not worth it, and this is only meant to catch the file
+    // being truncated, replaced with `{}`, or hand-edited into something
+    // without checksums -- not to catch drift against Cargo.lock.
+    let sources = read("crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json");
+    let trimmed = sources.trim();
+    assert!(
+        trimmed.starts_with('[') && trimmed.ends_with(']'),
+        "cargo-sources.json must be a JSON array, as flatpak-cargo-generator.py \
+         produces; got something else entirely"
+    );
+    let url_count = sources.matches("\"url\"").count();
+    let sha256_count = sources.matches("\"sha256\"").count();
+    assert!(
+        url_count > 0,
+        "cargo-sources.json is empty or missing url entries; \
+         it looks truncated or hand-edited"
+    );
+    assert_eq!(
+        url_count, sha256_count,
+        "every source entry must carry a sha256 alongside its url; a \
+         hand-edited or corrupted file could drop checksums silently, \
+         which is exactly what this manifest's own comment warns against"
+    );
+}
