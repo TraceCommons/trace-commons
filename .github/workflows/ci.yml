@@ -363,3 +363,53 @@ jobs:
         run: cargo build --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
+
+  windows-contributor-app:
+    name: windows contributor app
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-app-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-app-
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The WinUI shell is C# over the same C ABI the macOS app uses, so the
+      # cdylib has to exist before anything managed builds. The app project
+      # fails its own build if the DLL is missing rather than deferring that to
+      # a runtime "core not found", so this step is a hard prerequisite.
+      - name: Build the contributor FFI cdylib
+        run: cargo build -p trace-commons-contributor-ffi --release
+
+      # The interop layer targets plain net8.0 and its tests drive a REAL
+      # daemon through the real cdylib: pointer ownership, UTF-8 marshalling,
+      # delegate rooting, and the unsubscribe barrier. These are the tests that
+      # would catch a binding defect, and they are also the ones that already
+      # run on a developer's macOS machine against the .dylib -- this job is
+      # what proves the same binding holds on Windows, where the daemon's
+      # transport is a named pipe rather than a unix socket.
+      - name: Run interop tests against the real cdylib
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: dotnet test windows/tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Release
+
+      # Building the WinUI project is the only verification the XAML and the
+      # Windows App SDK wiring get: neither can be compiled anywhere but
+      # Windows, so a change that builds cleanly on a contributor's Mac can
+      # still be broken here. Warnings are errors in both projects, matching
+      # the RUSTFLAGS="-D warnings" discipline the Rust jobs apply.
+      - name: Build the WinUI app
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: dotnet build windows/src/TraceCommons.App/TraceCommons.App.csproj --configuration Release -p:Platform=x64

@@ -1,0 +1,4 @@
+# .NET build output. The Rust cdylib is copied into these directories at build
+# time, so they are large as well as generated.
+bin/
+obj/

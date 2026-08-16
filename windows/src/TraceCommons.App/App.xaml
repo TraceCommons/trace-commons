@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="TraceCommons.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!--
+                    The stock WinUI theme resources. Deliberately unstyled for
+                    this slice: matching the macOS app's design system is real
+                    work, and a half-applied theme reads worse than the
+                    platform default. The theme also follows the system
+                    light/dark setting for free, which is what a contributor
+                    expects of a native app.
+                -->
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
