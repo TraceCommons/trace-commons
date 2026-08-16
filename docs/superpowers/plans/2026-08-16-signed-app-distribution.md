@@ -20,10 +20,17 @@ Spec: `docs/superpowers/specs/2026-08-16-signed-app-distribution-design.md`
 - **Hardening standard, adopted from `sovright/argos`.** That repo already runs audited release signing against the *same* Azure account (`argossigning`/`argos`) and the same Apple team, so this plan converges on its practices rather than maintaining a second, softer pattern. Every workflow task is bound by all six rules:
 
   1. **Pin every action by commit SHA**, with the version in a trailing comment. Use argos's pins verbatim so both repos bump together:
-     - `actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4`
-     - `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4`
-     - `actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4`
-     - `actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4`
+     - `actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6`
+     - `actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7`
+     - `actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8`
+     - `actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4` (v4 is the newest major; unchanged)
+
+     Every pin above was checked on 2026-08-16 by fetching `action.yml` at that
+     exact SHA and reading `runs.using`. Do the same when bumping: "newest
+     major" does NOT imply Node 24 — `download-artifact` v6 is still `node20`
+     while v7 and v8 are `node24`, and `upload-artifact` v5 is `node20` while v6
+     and v7 are `node24`. Assuming the mapping would have pinned two actions
+     straight back onto the runtime this rule exists to escape.
      - `dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27`
      - `azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2`
      - `softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2`
@@ -894,7 +901,7 @@ jobs:
     environment: release
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
@@ -954,7 +961,7 @@ jobs:
             dist/*.dmg
             dist/*.dmg.sha256
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos-dmg
           path: dist/
@@ -1175,7 +1182,7 @@ Append to `.github/workflows/release-apps.yml`:
     environment: release
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           targets: x86_64-pc-windows-msvc
@@ -1351,7 +1358,7 @@ Append to `.github/workflows/release-apps.yml`:
           "$hash  $(Split-Path -Leaf $zip)" |
             Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-zip
           path: dist/
@@ -1503,18 +1510,28 @@ Append to `.github/workflows/release-apps.yml`:
     # whole GTK crate against the GNOME SDK with no cargo cache.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install flatpak and the GNOME SDK
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          # ostree is a SEPARATE package: flatpak and flatpak-builder depend
+          # only on libostree-1-1, so the verification step below would fail
+          # with "ostree: command not found" after a full successful build.
+          sudo apt-get install -y flatpak flatpak-builder ostree
           sudo flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
+          # 23.08, NOT 24.08. org.gnome.Sdk//46 is built on the freedesktop
+          # 23.08 base, so flatpak-builder resolves the manifest's
+          # sdk-extensions at //23.08. Installing //24.08 succeeds standalone
+          # and then leaves nothing mounted at /usr/lib/sdk/rust-stable/bin, so
+          # the build dies at the first cargo with "command not found" AFTER the
+          # runtime download. GNOME 47/48 are the 24.08-based ones -- move both
+          # runtime and SDK together if ever bumping, never mix.
           sudo flatpak install -y --noninteractive flathub \
             org.gnome.Platform//46 org.gnome.Sdk//46 \
-            org.freedesktop.Sdk.Extension.rust-stable//24.08
+            org.freedesktop.Sdk.Extension.rust-stable//23.08
 
       - name: Build the flatpak into a local repo
         run: |
@@ -1530,7 +1547,7 @@ Append to `.github/workflows/release-apps.yml`:
           ostree --repo=flatpak-repo refs | tee refs.txt
           grep -q 'app/ai.tracecommons.Contributor/' refs.txt
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: flatpak-repo
           path: flatpak-repo/
@@ -2289,7 +2306,7 @@ Expected: FAIL on both files.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           pattern: "{macos-dmg,windows-zip}"
