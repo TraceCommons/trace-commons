@@ -11,6 +11,10 @@ cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
 REPO_ROOT="$(cd .. && pwd)"
 CONFIG="${1:-debug}"
+# A dev bundle gets an obviously-not-a-release version. The release path
+# passes the tag's version explicitly; see release-apps.yml.
+SHORT_VERSION="${2:-0.0.0-dev}"
+BUILD_VERSION="${3:-1}"
 BIN_DIR="$PACKAGE_DIR/.build/$CONFIG"
 APP="$PACKAGE_DIR/.build/TraceCommons.app"
 DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
@@ -26,26 +30,8 @@ swift build --configuration "$CONFIG"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key><string>Trace Commons</string>
-    <key>CFBundleDisplayName</key><string>Trace Commons</string>
-    <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
-    <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSHumanReadableCopyright</key><string>Trace Commons</string>
-    <!-- Menu-bar item, no Dock icon: the shape macOS users expect from a
-         background utility. -->
-    <key>LSUIElement</key><true/>
-</dict>
-</plist>
-PLIST
+./scripts/info-plist.sh "$SHORT_VERSION" "$BUILD_VERSION" \
+  > "$APP/Contents/Info.plist"
 
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$DYLIB" "$APP/Contents/Frameworks/$DYLIB_NAME"
