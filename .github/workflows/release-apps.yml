@@ -21,15 +21,16 @@ on:
         default: all
         options: [all, macos, windows, linux]
       version:
-        description: Version to stamp when running without a tag
+        description: Version to stamp when running without a tag (e.g. 1.2.3)
         type: string
-        default: 0.0.0
+        required: true
 
 concurrency:
   group: release-apps-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
+  contents: read
   id-token: write
   attestations: write
 
@@ -43,15 +44,19 @@ jobs:
       build: ${{ steps.v.outputs.build }}
     steps:
       # CFBundleVersion must increase monotonically across releases.
-      # GitHub's run_number is not tied to any git state and increments with
-      # every workflow run in the repo, so it persists across branches and
-      # tag pushes without external state. The short version is semantic.
+      # GitHub's run_number is monotonic per workflow and increments with every
+      # run, persisting across branches and tag pushes without external state.
+      # run_attempt increments on re-runs while run_number stays the same.
+      # Arithmetic composition ensures strict monotonicity: * 100 shifts the
+      # run_number to the hundreds place, making it dominant over run_attempt.
+      # Short version is semantic (e.g., 1.2.3).
       - id: v
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
           RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "push" ]; then
@@ -65,7 +70,7 @@ jobs:
             exit 1
           fi
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "build=$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS signed DMG
