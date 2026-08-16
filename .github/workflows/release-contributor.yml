@@ -360,3 +360,44 @@ jobs:
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
             dist/*/*
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
+      # TraceCommons/homebrew-tap with contents and pull-request write.
+      # github.token cannot reach another repository, which is why this
+      # secret exists. This opens a pull request rather than pushing: a
+      # direct push would auto-publish a bad release to everyone who has
+      # already tapped us, with no gate between a failed verification and
+      # someone's `brew upgrade`.
+      - name: Open a formula bump
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#contributor-v}"
+          ARM="$(awk '{print $1}' dist/aarch64-apple-darwin/trace-commons-contributor-aarch64-apple-darwin.zip.sha256)"
+          X86="$(awk '{print $1}' dist/x86_64-apple-darwin/trace-commons-contributor-x86_64-apple-darwin.zip.sha256)"
+          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          cd tap
+          git switch -c "bump-formula-$V"
+          sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
+          # Two sha256 lines in one file, so they cannot both be replaced by a
+          # blind substitution: the arm64 block comes first, the x86_64
+          # second. awk replaces them by position rather than a heredoc'd
+          # script, since a Python heredoc embedded in this indented YAML
+          # `run:` block inherits that indentation on every line, which is a
+          # syntax error for an indentation-sensitive language; awk has no
+          # such sensitivity.
+          awk -v arm="$ARM" -v x86="$X86" '
+            /sha256 "/ {
+              n++
+              if (n == 1) sub(/sha256 "[^"]*"/, "sha256 \"" arm "\"")
+              else if (n == 2) sub(/sha256 "[^"]*"/, "sha256 \"" x86 "\"")
+            }
+            { print }
+          ' Formula/trace-commons-contributor.rb > Formula/trace-commons-contributor.rb.tmp
+          mv Formula/trace-commons-contributor.rb.tmp Formula/trace-commons-contributor.rb
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git commit -am "trace-commons-contributor $V"
+          git push -u origin "bump-formula-$V"
+          gh pr create --fill --repo TraceCommons/homebrew-tap

@@ -449,3 +449,74 @@ jobs:
         with:
           name: ${{ steps.name.outputs.artifact }}
           path: flatpak-repo/
+
+  publish:
+    name: publish release
+    needs: [version, macos, windows, linux-flatpak]
+    # Publish whatever succeeded: the three build jobs are independent
+    # precisely so a Linux failure does not withhold a verified macOS DMG.
+    # But always() alone would let this job run even when EVERY platform
+    # failed, with nothing to attach and no reason to touch the tap -- so the
+    # gate also requires at least one of them to have actually succeeded.
+    if: >-
+      ${{ always() && github.event_name == 'push' &&
+          (needs.macos.result == 'success' || needs.windows.result == 'success' ||
+           needs.linux-flatpak.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Job-level only: the workflow-level block stays contents: read, and only
+    # this job needs write access to cut a release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: "{macos-dmg,windows-zip}"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Trace Commons contributor apps.
+
+          macOS: signed with Iqlusion Inc's Developer ID and notarized by
+          Apple. Windows: Authenticode-signed via Azure Trusted Signing and
+          RFC3161 timestamped. Linux: install the GPG-signed flatpak with
+          \`flatpak install --from https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref\`
+
+          On macOS you can also \`brew tap TraceCommons/tap && brew install --cask trace-commons\`.
+
+          Nothing leaves your machine until you approve an upload." \
+            dist/*/*
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
+      # TraceCommons/homebrew-tap with contents and pull-request write.
+      # github.token cannot reach another repository, which is why this
+      # secret exists. This opens a pull request rather than pushing: a
+      # direct push would auto-publish a bad release to everyone who has
+      # already tapped us, with no gate between a failed verification and
+      # someone's `brew upgrade`.
+      - name: Open a cask bump
+        if: needs.macos.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          set -euo pipefail
+          V="$SHORT_VERSION"
+          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
+          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          cd tap
+          git switch -c "bump-cask-$V"
+          sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb
+          sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git commit -am "trace-commons $V"
+          git push -u origin "bump-cask-$V"
+          gh pr create --fill --repo TraceCommons/homebrew-tap

@@ -57,3 +57,82 @@ published artifact (`shasum -a 256 <file>`) and replace the placeholders in
 `Casks/trace-commons.rb` and `Formula/trace-commons-contributor.rb`, along
 with the `version` fields. After the first release, Task 12's version-bump
 automation takes over updating these values on subsequent releases.
+
+## Publishing and the tap bump (Task 12)
+
+Both `release-apps.yml` and `release-contributor.yml` end in a `publish`
+job (gated to `github.event_name == 'push'` — a `workflow_dispatch` run
+never publishes) that:
+
+1. Downloads the platform artifacts and creates a GitHub Release with
+   `gh release create`, tagged from the pushed tag.
+2. Opens a pull request against `TraceCommons/homebrew-tap` bumping the
+   cask's (or formula's) `version` and `sha256` — never pushes directly.
+   A direct push would auto-publish a bad release to everyone who has
+   already tapped us, with no gate between a failed verification and
+   someone's `brew upgrade`.
+
+This second step authenticates with the `HOMEBREW_TAP_TOKEN` repository
+secret — a fine-grained PAT scoped to `TraceCommons/homebrew-tap` with
+`contents` and `pull-request` write. `github.token` cannot reach another
+repository, which is why this secret exists. It must be rotated like any
+other credential in this pipeline; rotating it does not require touching
+the workflow files, only the secret's value.
+
+In `release-apps.yml`, the `publish` job carries `if: always() && ...` so
+a Linux flatpak failure does not withhold a verified macOS DMG — but
+`always()` alone would also let the job run when *every* platform failed,
+with nothing to publish. The condition additionally requires
+`needs.macos.result == 'success' || needs.windows.result == 'success' ||
+needs.linux-flatpak.result == 'success'` to close that gap, and the cask
+bump step only runs when `needs.macos.result == 'success'` (there is no
+DMG checksum to read otherwise).
+
+The formula's `sha256` substitution is positional, not value-based: the
+Homebrew formula's `on_arm` block appears before `on_intel`, so a blind
+global substitution would set both entries to the same hash. The bump
+step uses `awk` to replace the first `sha256 "..."` occurrence with the
+`aarch64-apple-darwin` checksum and the second with `x86_64-apple-darwin`
+— getting this backwards produces a checksum mismatch that reads to users
+as tampering, not as a build error. This works whether the existing value
+is the `REPLACE_ON_FIRST_RELEASE_...` placeholder or a real hash from a
+prior release.
+
+### What to expect to fail on the first real tagged release
+
+This automation has never run against real credentials or a real tag.
+Expect friction in roughly this order:
+
+- **`HOMEBREW_TAP_TOKEN` scope or expiry.** Fine-grained PATs expire; if
+  this one lapsed since Task 11 provisioned it, `gh repo clone` or
+  `gh pr create` in the bump steps will fail with an auth error, not a
+  silent no-op.
+- **`gh repo clone ... -- --depth 1` and `git push -u origin`.** Never
+  exercised end-to-end. If the PAT's `contents` scope is read-only instead
+  of read-write, the `git push` step fails after the commit succeeds
+  locally — leaving a half-done local branch in the ephemeral runner
+  workspace, which is harmless, but worth recognizing in the log rather
+  than assuming a truncated run means nothing happened.
+- **A second `gh pr create` on a re-run.** Both bump steps use a
+  version-derived branch name (`bump-cask-$V`, `bump-formula-$V`) with no
+  cleanup of a previous attempt's branch. Re-running the same tag (a retry
+  after a transient failure) will fail at `git switch -c` or `gh pr create`
+  because the branch/PR already exists. There is no idempotent retry path
+  yet — a failed bump currently needs a human to delete the stale branch on
+  the tap before re-running.
+- **Empty `dist/*/*` glob.** If every platform legitimately failed (not
+  possible on the first real run without the `always()` guard already
+  refusing to publish, but worth confirming): the guard added in this task
+  should prevent `gh release create` from running with nothing to attach.
+  Confirm this in practice, not just by reading the condition.
+- **The macOS checksum sidecar path.** `dist/macos-dmg/TraceCommons-$V.dmg.sha256`
+  assumes the exact filename the macOS job produces. Any future rename of
+  that job's output (`Rename and checksum` step) silently breaks this glob
+  with no test coverage catching it — `release_pipeline.rs` checks text
+  invariants, not that the two jobs agree on a filename.
+- **The formula's checksum sidecar paths**, same risk, doubled: both
+  `aarch64-apple-darwin` and `x86_64-apple-darwin` artifact names must stay
+  in lockstep with the matrix in `release-contributor.yml`.
+- **Task 11's Step 8 install gate** (`brew tap` / `brew install --cask` /
+  `brew install` against the real, merged tap) has not been run against a
+  real release yet and still needs to happen once the first tap PR merges.

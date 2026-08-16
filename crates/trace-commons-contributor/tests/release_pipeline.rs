@@ -472,6 +472,27 @@ fn flatpak_repo_is_gpg_signed_before_publication() {
 /// rather than the file: the runbook must state the exclusion, and the
 /// reason, so nobody "tidies up" a zap stanza that looks incomplete.
 #[test]
+fn tap_bumps_go_through_a_pull_request() {
+    for file in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        let workflow = read(file);
+        assert!(
+            workflow.contains("homebrew-tap"),
+            "{file} must bump the tap"
+        );
+        // A direct push would auto-publish a bad release to everyone who has
+        // tapped us, with no gate between a failed verification and a user's
+        // `brew upgrade`.
+        assert!(
+            workflow.contains("gh pr create"),
+            "{file} must open a pull request against the tap, not push to it"
+        );
+    }
+}
+
+#[test]
 fn runbook_states_why_zap_spares_the_device_key() {
     let runbook = read("docs/release-runbook.md");
     assert!(
