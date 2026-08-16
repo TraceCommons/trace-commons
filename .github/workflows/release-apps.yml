@@ -78,7 +78,12 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'macos'
-    runs-on: macos-14
+    # macos-15, not macos-14: the 14 image ships Swift 5.10 while
+    # macos/Package.swift declares swift-tools-version:6.0 and TCBridge uses
+    # .swiftLanguageMode(.v6). The first real release failed with "package
+    # 'macos' is using Swift tools version 6.0.0 but the installed version is
+    # 5.10.0".
+    runs-on: macos-15
     # This job holds a Developer ID private key. The environment scopes those
     # secrets to release runs and gives the signing path a place to hang
     # required reviewers, matching how the Windows job is gated.
@@ -542,7 +547,12 @@ jobs:
           set -euo pipefail
           V="$SHORT_VERSION"
           SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V"-arm64.dmg.sha256)"
-          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          # Clone with the token IN the remote URL. `gh repo clone` leaves a
+          # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
+          # raw `git push` -- which failed on the first real release with
+          # "could not read Username for https://github.com".
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
           git switch -c "bump-cask-$V"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb

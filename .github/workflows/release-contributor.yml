@@ -400,7 +400,12 @@ jobs:
           V="${GITHUB_REF_NAME#contributor-v}"
           ARM="$(awk '{print $1}' dist/aarch64-apple-darwin/trace-commons-contributor-aarch64-apple-darwin.zip.sha256)"
           X86="$(awk '{print $1}' dist/x86_64-apple-darwin/trace-commons-contributor-x86_64-apple-darwin.zip.sha256)"
-          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          # Clone with the token IN the remote URL. `gh repo clone` leaves a
+          # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
+          # raw `git push` -- which failed on the first real release with
+          # "could not read Username for https://github.com".
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
           git switch -c "bump-formula-$V"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
