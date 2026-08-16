@@ -203,7 +203,41 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     );
     // Independent jobs, not matrix legs: the packaging steps share nothing,
     // and one platform failing must not block the others.
-    for job in ["  macos:"] {
+    for job in ["  macos:", "  windows:"] {
         assert!(workflow.contains(job), "missing job {job}");
     }
+}
+
+#[test]
+fn windows_signing_is_timestamped() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
+    // client can be verified by content before it runs in a job that holds
+    // signing authority.
+    assert!(
+        workflow.contains("Azure.CodeSigning.Dlib.dll"),
+        "Windows signing drives Microsoft's Trusted Signing dlib via signtool"
+    );
+    assert!(
+        !workflow.contains("azure/trusted-signing-action"),
+        "the marketplace action was deliberately replaced by the SHA-verified \
+         dlib; reintroducing it drops the content check"
+    );
+    assert!(
+        workflow.contains("TRUSTED_SIGNING_CLIENT_SHA256")
+            && workflow.contains("Refusing to expand a potentially tampered"),
+        "the signing client must be verified by SHA-256 and fail closed before \
+         extraction"
+    );
+    // Trusted Signing certificates are valid for roughly three days. Without
+    // an RFC3161 countersignature the signature stops validating days after
+    // release -- a failure no same-day test would catch.
+    assert!(
+        workflow.contains("timestamp-rfc3161"),
+        "an untimestamped Trusted Signing signature expires within days"
+    );
+    assert!(
+        workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
+        "the signature must be verified in the job, not assumed"
+    );
 }
