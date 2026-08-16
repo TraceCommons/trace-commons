@@ -78,7 +78,12 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'macos'
-    runs-on: macos-14
+    # macos-15, not macos-14: the 14 image ships Swift 5.10 while
+    # macos/Package.swift declares swift-tools-version:6.0 and TCBridge uses
+    # .swiftLanguageMode(.v6). The first real release failed with "package
+    # 'macos' is using Swift tools version 6.0.0 but the installed version is
+    # 5.10.0".
+    runs-on: macos-15
     # This job holds a Developer ID private key. The environment scopes those
     # secrets to release runs and gives the signing path a place to hang
     # required reviewers, matching how the Windows job is gated.
@@ -93,12 +98,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           toolchain: "1.92"
+          # make-app-bundle.sh (invoked below via make-release-dmg.sh) builds
+          # the FFI dylib for both targets itself and lipos them together, so
+          # both need to be installed here.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority. The cold-build cost is the price of that.
-
-      - name: Build the FFI dylib
-        run: cargo build --release -p trace-commons-contributor-ffi
 
       # make-release-dmg.sh refuses outright when any credential is missing,
       # rather than falling back to an ad-hoc signature. An unsigned artifact
@@ -116,20 +122,16 @@ jobs:
         run: |
           ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
 
-      # This job runs only on macos-14 (Apple silicon) and there is no
-      # lipo/universal step anywhere under macos/, so the DMG is arm64-only.
-      # The artifact name says so, so an Intel Mac's `brew install --cask`
-      # (gated separately by `depends_on arch: :arm64` in the tap) does not
-      # look like it might work when it will fail to launch. A universal
-      # build -- lipo the dylib, `swift build --arch arm64 --arch x86_64`
-      # -- is the real fix and is deliberately not attempted here.
+      # make-app-bundle.sh lipos the FFI dylib and passes
+      # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
+      # the artifact name no longer carries an arch suffix.
       - name: Rename and checksum
         env:
           SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="TraceCommons-${SHORT_VERSION}-arm64.dmg"
+          OUT="TraceCommons-${SHORT_VERSION}.dmg"
           cp macos/.build/TraceCommons.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
@@ -350,40 +352,39 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder ostree
           sudo flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
-          # 23.08, NOT 24.08. org.gnome.Sdk//46 is built on the freedesktop
-          # 23.08 base, so flatpak-builder resolves the manifest's
-          # sdk-extensions at //23.08. Installing //24.08 succeeds standalone
-          # and then leaves nothing mounted at /usr/lib/sdk/rust-stable/bin, so
-          # the build dies at the first cargo with "command not found" AFTER the
-          # runtime download. GNOME 47/48 are the 24.08-based ones -- move both
-          # runtime and SDK together if ever bumping, never mix.
+          # No org.freedesktop.Sdk.Extension.rust-stable here anymore. The
+          # first real release run (app-v0.1.0, run 31959830328) proved the
+          # extension's rustc is 11 minor versions behind the crate's
+          # rust-version = "1.92" floor, and the build is network-sandboxed
+          # so rustup cannot rescue it at build time. The manifest now
+          # bundles a pinned rust 1.92.0 toolchain as a source instead (see
+          # ai.tracecommons.Contributor.yml), so this job no longer needs
+          # the extension at all.
           sudo flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//46 org.gnome.Sdk//46 \
-            org.freedesktop.Sdk.Extension.rust-stable//23.08
+            org.gnome.Platform//46 org.gnome.Sdk//46
 
-      - name: Check the SDK's rust against the crate's requirement
+      - name: Check the manifest's pinned rust against the crate's requirement
         run: |
           set -euo pipefail
           REQUIRED="$(grep -m1 '^rust-version' crates/trace-commons-contributor-gtk/Cargo.toml | cut -d'"' -f2)"
-          # $PATH below is meant to expand inside the nested `sh -c`, not
-          # this outer script; single quotes are correct.
-          # shellcheck disable=SC2016
-          SDK_RUST="$(flatpak run --devel --command=sh org.gnome.Sdk//46 -c \
-            'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH; rustc --version' 2>/dev/null || true)"
+          MANIFEST="crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml"
+          # The manifest pins one tarball version for both arches (see the
+          # `only-arches` sources); grab the first `rust-<version>-` url and
+          # trust the rest match, the way the sha256-count check in
+          # release_pipeline.rs already assumes.
+          PINNED="$(grep -m1 -oE 'rust-[0-9]+\.[0-9]+\.[0-9]+-' "$MANIFEST" | head -1 | sed -E 's/^rust-//; s/-$//')"
           echo "crate requires rust-version = $REQUIRED"
-          echo "SDK extension provides: ${SDK_RUST:-<could not query>}"
-          if [ -z "$SDK_RUST" ]; then
-            echo "WARNING: could not query the SDK's rustc; continuing to the build," >&2
-            echo "which will fail informatively if the toolchain is too old." >&2
-            exit 0
+          echo "manifest pins rust $PINNED"
+          if [ -z "$PINNED" ]; then
+            echo "REFUSING: could not find a pinned rust toolchain version in $MANIFEST." >&2
+            exit 1
           fi
-          HAVE="$(printf '%s' "$SDK_RUST" | awk '{print $2}')"
-          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$HAVE" | sort -V | head -1)"
+          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$PINNED" | sort -V | head -1)"
           if [ "$LOWEST" != "$REQUIRED" ]; then
-            echo "REFUSING: the SDK extension provides rust $HAVE but the crate requires $REQUIRED." >&2
+            echo "REFUSING: the manifest pins rust $PINNED but the crate requires $REQUIRED." >&2
             echo "The flatpak build is network-sandboxed, so rustup cannot fix this at build time." >&2
-            echo "Options: lower rust-version/edition in the GTK crate, or add an explicit rust" >&2
-            echo "toolchain source to the manifest instead of relying on the SDK extension." >&2
+            echo "Bump the pinned tarball (url + sha256, both arches) in $MANIFEST to a version" >&2
+            echo ">= $REQUIRED before releasing." >&2
             exit 1
           fi
 
@@ -502,8 +503,7 @@ jobs:
             NOTES="$NOTES
 
           macOS: signed with Iqlusion Inc's Developer ID and notarized by
-          Apple. Apple silicon (arm64) only -- an Intel build is not yet
-          produced; see docs/release-runbook.md. You can also
+          Apple. Universal build (Apple silicon and Intel). You can also
           \`brew tap TraceCommons/tap && brew install --cask trace-commons\`."
           fi
           if [ "$WINDOWS_RESULT" = success ]; then
@@ -542,8 +542,14 @@ jobs:
         run: |
           set -euo pipefail
           V="$SHORT_VERSION"
-          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V"-arm64.dmg.sha256)"
-          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          # No -arm64 suffix: the DMG is universal now.
+          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
+          # Clone with the token IN the remote URL. `gh repo clone` leaves a
+          # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
+          # raw `git push` -- which failed on the first real release with
+          # "could not read Username for https://github.com".
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
           git switch -c "bump-cask-$V"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb

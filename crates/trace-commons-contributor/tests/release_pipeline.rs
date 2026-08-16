@@ -571,31 +571,37 @@ fn contributor_release_notes_do_not_teach_past_gatekeeper() {
     );
 }
 
-/// The macos job runs only on macos-14 (arm64) with no lipo/universal step
-/// anywhere under macos/, so the DMG it produces is Apple-silicon-only. The
-/// artifact name must say so, both because the cask bump step reads the
-/// checksum sidecar from this exact filename and because an Intel user
-/// should be able to tell from the filename alone that it will not run --
-/// the cask's `depends_on arch: :arm64` (in the tap repo) refuses the
-/// install, but a stray direct download would not be caught by Homebrew.
+/// make-app-bundle.sh must build the FFI dylib for both Apple silicon and
+/// Intel, lipo them into one dylib, and tell `swift build` to produce a
+/// universal executable -- otherwise the app bundle silently only runs on
+/// whichever architecture built it, which would still sign, notarize and
+/// pass Gatekeeper before failing to launch for the other half of users.
+/// Since the DMG this produces is now universal, its filename (read by the
+/// cask-bump step's checksum lookup) must not claim a single architecture.
 #[test]
-fn macos_dmg_artifact_name_declares_its_architecture() {
+fn macos_app_bundle_builds_and_lipos_both_architectures() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    assert!(
+        script.contains("aarch64-apple-darwin") && script.contains("x86_64-apple-darwin"),
+        "make-app-bundle.sh must build the FFI dylib for both \
+         aarch64-apple-darwin and x86_64-apple-darwin"
+    );
+    assert!(
+        script.contains("lipo -create"),
+        "the two architecture-specific dylibs must be lipo'd into one \
+         universal dylib before swift build links against them"
+    );
+    assert!(
+        script.contains("--arch arm64") && script.contains("--arch x86_64"),
+        "swift build must be passed --arch arm64 --arch x86_64 so the app \
+         executable is universal, not just the dylib it links"
+    );
+
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
-        workflow.contains("TraceCommons-${SHORT_VERSION}-arm64.dmg"),
-        "the macOS DMG output filename must name its architecture (arm64) \
-         since this job cannot produce a universal binary"
-    );
-    assert!(
-        workflow.contains("TraceCommons-\"$V\"-arm64.dmg.sha256"),
-        "the cask-bump step's checksum lookup must track the arm64-tagged \
-         filename the macos job actually produces"
-    );
-    let runbook = read("docs/release-runbook.md");
-    assert!(
-        runbook.contains("arm64") && runbook.to_lowercase().contains("intel"),
-        "the runbook must document the arm64-only limitation so a reader \
-         knows an Intel Mac install will not work"
+        workflow.contains("TraceCommons-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),
+        "the DMG is universal now, so its filename must not carry an \
+         architecture suffix"
     );
 }
 
@@ -846,5 +852,110 @@ fn contributor_workflow_scopes_contents_write_to_publish_only() {
         publish_job.contains("contents: write"),
         "the publish job must grant itself contents: write at the job \
          level, since the workflow level no longer does"
+    );
+}
+
+/// The first real release (app-v0.1.0, run 31959830328) failed the flatpak
+/// build because org.freedesktop.Sdk.Extension.rust-stable ships a rustc far
+/// short of this crate's rust-version floor, and the build is
+/// network-sandboxed so rustup cannot rescue it. The fix was to bundle a
+/// pinned rust toolchain as a manifest source instead of depending on the
+/// SDK extension's version at all.
+#[test]
+fn flatpak_manifest_bundles_a_pinned_rust_toolchain_per_arch() {
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    for (arch, url, sha256) in [
+        (
+            "x86_64",
+            "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
+            "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
+        ),
+        (
+            "aarch64",
+            "https://static.rust-lang.org/dist/rust-1.92.0-aarch64-unknown-linux-gnu.tar.xz",
+            "3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822",
+        ),
+    ] {
+        assert!(
+            manifest.contains(url),
+            "manifest must pin a rust 1.92.0 tarball for {arch}: {url}"
+        );
+        assert!(
+            manifest.contains(sha256),
+            "manifest must pin the sha256 for the {arch} rust tarball"
+        );
+        // Each tarball source must be scoped to its own arch, or an x86_64
+        // build would also fetch the aarch64 tarball (and vice versa).
+        let url_pos = manifest
+            .find(url)
+            .unwrap_or_else(|| panic!("{arch} url must be present"));
+        let source_start = manifest[..url_pos]
+            .rfind("- type: archive")
+            .unwrap_or_else(|| {
+                panic!("{arch} tarball must be declared as a `type: archive` source")
+            });
+        let source = &manifest[source_start..url_pos];
+        assert!(
+            source.contains(&format!("only-arches: [{arch}]")),
+            "the {arch} rust tarball source must be scoped with \
+             only-arches: [{arch}], or the other arch's build would fetch \
+             it too"
+        );
+    }
+}
+
+#[test]
+fn flatpak_manifest_no_longer_references_the_rust_stable_sdk_extension() {
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    assert!(
+        !manifest.contains("org.freedesktop.Sdk.Extension.rust-stable"),
+        "the manifest must not reference the rust-stable SDK extension \
+         anymore -- the build now uses its own bundled, pinned toolchain, \
+         which was the whole point of bundling it"
+    );
+    assert!(
+        !manifest.contains("/usr/lib/sdk/rust-stable/bin"),
+        "the manifest must not append the SDK extension's rust bin dir to \
+         PATH anymore; the bundled toolchain's own bin dir replaces it"
+    );
+}
+
+#[test]
+fn flatpak_manifest_pinned_toolchain_meets_the_crates_rust_version_floor() {
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    let cargo_toml = read("crates/trace-commons-contributor-gtk/Cargo.toml");
+    let required = cargo_toml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("rust-version = \""))
+        .and_then(|s| s.strip_suffix('"'))
+        .expect("crates/trace-commons-contributor-gtk/Cargo.toml must declare rust-version");
+    let pinned = manifest
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("url: https://static.rust-lang.org/dist/rust-")
+        })
+        .and_then(|rest| rest.split('-').next())
+        .expect("manifest must pin a rust toolchain url of the form rust-<version>-<arch>-...");
+    let mut required_parts = required.split('.').map(|p| p.parse::<u32>().unwrap());
+    let mut pinned_parts = pinned.split('.').map(|p| p.parse::<u32>().unwrap());
+    let required_tuple = (
+        required_parts.next().unwrap_or(0),
+        required_parts.next().unwrap_or(0),
+        required_parts.next().unwrap_or(0),
+    );
+    let pinned_tuple = (
+        pinned_parts.next().unwrap_or(0),
+        pinned_parts.next().unwrap_or(0),
+        pinned_parts.next().unwrap_or(0),
+    );
+    assert!(
+        pinned_tuple >= required_tuple,
+        "the manifest pins rust {pinned} but crates/trace-commons-contributor-gtk/Cargo.toml \
+         requires rust-version = \"{required}\"; bump the pinned tarball \
+         (url + sha256, both arches) before releasing"
     );
 }
