@@ -1112,9 +1112,22 @@ These are identifiers, not key material — no signing key ever reaches GitHub o
 Append to `crates/trace-commons-contributor/tests/release_pipeline.rs`:
 
 ```rust
+/// Both workflows sign Windows binaries with the same duplicated dlib block,
+/// so both must be pinned. Reading only one leaves the other free to drop the
+/// timestamp -- and an untimestamped Trusted Signing signature keeps validating
+/// for about three days, so no same-day run would catch it.
 #[test]
 fn windows_signing_is_timestamped() {
-    let workflow = read(".github/workflows/release-apps.yml");
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        assert_windows_signing_is_hardened(path);
+    }
+}
+
+fn assert_windows_signing_is_hardened(path: &str) {
+    let workflow = read(path);
     // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
     // client can be verified by content before it runs in a job that holds
     // signing authority.
@@ -1151,8 +1164,12 @@ fn windows_signing_is_timestamped() {
         "the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
-        workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
-        "the signature must be verified in the job, not assumed"
+        workflow.contains("signtool"),
+        "{path}: the signature must be verified in the job, not assumed"
+    );
+    assert!(
+        workflow.contains("Refusing to expand a potentially tampered"),
+        "{path}: the signing client must be verified by SHA-256 and fail closed"
     );
 }
 ```
@@ -1850,9 +1867,18 @@ fn contributor_release_notes_do_not_teach_past_gatekeeper() {
     );
     // notarytool accepts a disk image, a package, or a zip -- never a bare
     // Mach-O. The zip is what gets submitted.
+    // `contains("zip")` alone cannot fail: the substring appears in comments,
+    // in "$OUT.zip", and in pkgZip. Pin the actual archiving call.
     assert!(
-        workflow.contains("ditto") || workflow.contains("zip"),
-        "a bare binary cannot be submitted for notarization; zip it first"
+        workflow.contains("ditto -c -k"),
+        "a bare Mach-O cannot be submitted for notarization -- notarytool takes \
+         a disk image, a package, or a zip, so the binary must be archived first"
+    );
+    assert!(
+        workflow.contains("notary.json") && workflow.contains("Accepted"),
+        "notarization status must be parsed and asserted: notarytool --wait can \
+         exit 0 on a rejected submission, and this path has no staple or \
+         spctl assessment to catch it downstream"
     );
     assert!(
         workflow.contains("x86_64-pc-windows-msvc"),
@@ -1916,14 +1942,32 @@ After the `Package` step, add:
             --sign "$MACOS_SIGNING_IDENTITY" "dist/$OUT"
           codesign --verify --strict --verbose=2 "dist/$OUT"
 
-          ditto -c -k --keepParent "dist/$OUT" "$RUNNER_TEMP/$OUT.zip"
+          # No --keepParent: it embeds the dist/ directory in the archive
+          # (plus an AppleDouble ._ sidecar), so a contributor unzipping the
+          # published file gets a folder rather than the binary. Notarization is
+          # indifferent either way; the person downloading it is not.
+          ditto -c -k --sequesterRsrc "dist/$OUT" "$RUNNER_TEMP/$OUT.zip"
           echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           chmod 600 "$RUNNER_TEMP/notary.p8"
+          # --wait reports the verdict in its OUTPUT; its exit status is not
+          # documented to be non-zero for an Invalid submission, and several
+          # notarytool versions exit 0 once the submission merely completes. The
+          # DMG path is covered downstream by `stapler staple` and
+          # `spctl --assess`, both of which fail on a rejected build -- this path
+          # has neither, so a rejection would otherwise flow into `publish` and
+          # ship a signed-but-unnotarized binary on a green run. Parse the status.
           xcrun notarytool submit "$RUNNER_TEMP/$OUT.zip" \
             --key "$RUNNER_TEMP/notary.p8" \
             --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
             --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
-            --wait
+            --wait --output-format json | tee "$RUNNER_TEMP/notary.json"
+          python3 - "$RUNNER_TEMP/notary.json" <<'NOTARY'
+import json, sys
+status = json.load(open(sys.argv[1])).get("status")
+print(f"notarization status: {status}")
+if status != "Accepted":
+    sys.exit(f"refusing to publish: notarization returned {status!r}, not 'Accepted'")
+NOTARY
           cp "$RUNNER_TEMP/$OUT.zip" "dist/$OUT.zip"
           # The Package step checksummed the UNSIGNED binary. codesign
           # rewrote those bytes, so both checksums are recomputed here --
@@ -2071,9 +2115,8 @@ Replace the `--notes` body with:
           beside it -- that checks integrity, while the signature is what
           establishes who built it.
 
-          The Linux binary is not signed. Use the checksum, or install the
-          flatpak, whose OSTree repo is GPG-signed:
-          https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref
+          The Linux binary is not signed. Verify it against the published
+          checksum.
 
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
