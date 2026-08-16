@@ -347,3 +347,32 @@ fn cargo_sources_json_looks_like_a_real_generated_source_list() {
         );
     }
 }
+
+#[test]
+fn contributor_release_notes_do_not_teach_past_gatekeeper() {
+    let workflow = read(".github/workflows/release-contributor.yml");
+    for stale in [
+        "not code-signed or notarized",
+        "Signing needs an Apple Developer identity and is not set up yet",
+    ] {
+        assert!(
+            !workflow.contains(stale),
+            "the release notes still say {stale:?}, which trains \
+             contributors past the warning that should stop a tampered build"
+        );
+    }
+    assert!(
+        workflow.contains("notarytool"),
+        "the macOS CLI binaries must be notarized"
+    );
+    // notarytool accepts a disk image, a package, or a zip -- never a bare
+    // Mach-O. The zip is what gets submitted.
+    assert!(
+        workflow.contains("ditto") || workflow.contains("zip"),
+        "a bare binary cannot be submitted for notarization; zip it first"
+    );
+    assert!(
+        workflow.contains("x86_64-pc-windows-msvc"),
+        "Windows must be in the release matrix"
+    );
+}
