@@ -452,6 +452,15 @@ jobs:
           BUCKET: tracecommons-flatpak
         run: ./scripts/flatpak/publish-repo.sh flatpak-repo flatpak-signing-pub.gpg "$BUCKET"
 
+      # The signature gate is a CHECK, not a publication, so it runs on every
+      # build -- including a workflow_dispatch, which skips the publish step
+      # above. Without this, a broken signature could only be discovered by
+      # cutting a real tag, which is how the first two attempts were spent.
+      # Nothing is uploaded here; --verify-only stops before the transfer.
+      - name: Verify the signed repo (no upload)
+        if: github.event_name != 'push'
+        run: ./scripts/flatpak/publish-repo.sh --verify-only flatpak-repo flatpak-signing-pub.gpg
+
       - name: Name the artifact for this version
         id: name
         env:

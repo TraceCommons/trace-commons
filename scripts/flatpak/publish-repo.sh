@@ -8,9 +8,20 @@
 # against a compromised mirror, not against a compromised origin.
 set -euo pipefail
 
-REPO="${1:?usage: publish-repo.sh <repo-dir> <pubkey-file> <bucket>}"
-PUBKEY="${2:?usage: publish-repo.sh <repo-dir> <pubkey-file> <bucket>}"
-BUCKET="${3:?usage: publish-repo.sh <repo-dir> <pubkey-file> <bucket>}"
+# --verify-only runs the signature gate and stops before uploading anything.
+# The gate is a CHECK, not a publication: it should run on every build so a
+# broken signature is caught by a dispatch rather than discovered on a tag.
+# Only the upload is release-only.
+VERIFY_ONLY=0
+if [ "${1:-}" = "--verify-only" ]; then VERIFY_ONLY=1; shift; fi
+
+REPO="${1:?usage: publish-repo.sh [--verify-only] <repo-dir> <pubkey-file> <bucket>}"
+PUBKEY="${2:?usage: publish-repo.sh [--verify-only] <repo-dir> <pubkey-file> <bucket>}"
+BUCKET="${3:-unused-when-verify-only}"
+if [ "$VERIFY_ONLY" = 0 ] && [ "$BUCKET" = "unused-when-verify-only" ]; then
+  echo "usage: publish-repo.sh [--verify-only] <repo-dir> <pubkey-file> <bucket>" >&2
+  exit 2
+fi
 
 # Refuse to publish an unsigned repo. build-and-sign.sh already checks each
 # commit's signature, but that script and this one run as separate CI steps
@@ -72,6 +83,12 @@ while IFS= read -r ref; do
 done <<<"$REFS"
 rm -rf "$VERIFY_REPO"
 trap - EXIT
+echo "PASS: every app/ ref in $REPO verifies against $PUBKEY"
+
+if [ "$VERIFY_ONLY" = 1 ]; then
+  echo "--verify-only: stopping before upload, nothing was published"
+  exit 0
+fi
 
 BASE="https://storage.googleapis.com/$BUCKET"
 
