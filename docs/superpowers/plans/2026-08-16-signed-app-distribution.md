@@ -511,38 +511,56 @@ Append to `crates/trace-commons-contributor/tests/release_pipeline.rs`:
 fn release_dmg_notarizes_with_an_api_key_not_a_password() {
     let script = read("macos/scripts/make-release-dmg.sh");
 
+    // Assert against CODE, not comments. Matching the whole file would police
+    // prose: the negative checks below would forbid the header from ever
+    // naming the old tool, costing a reader the ability to grep this file for
+    // why the key path exists -- and the positive checks would be satisfied by
+    // a header that documents a variable the script never actually passes.
+    let code = script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     for required in [
         "MACOS_NOTARY_ASC_KEY_P8_BASE64",
         "MACOS_NOTARY_ASC_KEY_ID",
         "MACOS_NOTARY_ASC_ISSUER_ID",
     ] {
         assert!(
-            script.contains(required),
-            "make-release-dmg.sh must require {required}"
+            code.contains(required),
+            "make-release-dmg.sh must actually use {required}, not merely \
+             mention it in a comment"
         );
     }
 
     // An app-specific password in argv is visible to any local process for the
     // duration of the call. The API key is passed as a file path instead.
-    for gone in ["MACOS_NOTARY_APPLE_ID", "MACOS_NOTARY_PASSWORD"] {
+    // Anchored with the `$` sigil so a future MACOS_NOTARY_PASSWORD_FILE, or
+    // prose in the header explaining the history, does not trip these.
+    for gone in ["$MACOS_NOTARY_APPLE_ID", "$MACOS_NOTARY_PASSWORD\"", "store-credentials"] {
         assert!(
-            !script.contains(gone),
-            "{gone} is still referenced; the Apple ID + app-specific password \
-             path was replaced by the ASC API key"
+            !code.contains(gone),
+            "{gone} is still used; the Apple ID + app-specific password path \
+             was replaced by the ASC API key, and store-credentials was the \
+             source of the ps-visible password window"
         );
     }
     assert!(
-        !script.contains("store-credentials"),
-        "notarytool store-credentials is no longer needed and was the source \
-         of the ps-visible password window"
-    );
-    assert!(
-        script.contains("--options runtime"),
+        code.contains("--options runtime"),
         "hardened runtime is required for notarization"
     );
     assert!(
-        script.contains("stapler staple"),
+        code.contains("stapler staple"),
         "an unstapled DMG fails for a user who is offline"
+    );
+    // The release path must not silently default its version: a DMG stamped
+    // 0.0.0-dev would pass every signing and Gatekeeper gate and then confuse
+    // every version comparison downstream.
+    assert!(
+        code.contains("${1:?") && code.contains("${2:?"),
+        "make-release-dmg.sh must REFUSE without an explicit version and build \
+         number rather than defaulting"
     );
 }
 ```
@@ -579,12 +597,15 @@ done
 
 - [ ] **Step 4: Pass the version through and skip the ad-hoc signature**
 
-Replace `CONFIG=release` and the bundle build call. Add near the top:
+Replace `CONFIG=release` and the bundle build call. Add near the top — note these are **required**, not defaulted:
 
 ```bash
-SHORT_VERSION="${1:-0.0.0-dev}"
-BUILD_VERSION="${2:-1}"
+SHORT_VERSION="${1:?refusing to build a release without a version. Pass the
+tag's version explicitly; see release-apps.yml.}"
+BUILD_VERSION="${2:?refusing to build a release without a build number.}"
 ```
+
+No default here, deliberately. This script's header promises "There are no defaults, and the script refuses rather than falling back," and a silent `0.0.0-dev` would defeat that in the worst way: if a later edit to `release-apps.yml` drops or mistypes the positional arguments, the script would sign, notarize, staple and Gatekeeper-verify a DMG stamped `0.0.0-dev`. Every gate would pass and the artifact would publish — and Homebrew's version comparison would then treat the shipped release as older than everything. The dev-friendly default belongs in `make-app-bundle.sh`, where it already lives.
 
 and change the build line to:
 
@@ -605,9 +626,33 @@ Write the key to the scratch directory alongside the certificate import, then re
 
 ```bash
 echo "--- notarizing (this waits for Apple's verdict)"
-# The key is written to the private scratch dir and passed by path. Unlike an
-# app-specific password there is nothing secret in argv here.
-echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8"
+# The key is written to the private scratch dir and passed by path, so unlike
+# an app-specific password it never appears in this call's argv.
+#
+# That does NOT mean argv exposure is solved for this script: `security import
+# -P "$MACOS_CERTIFICATE_PASSWORD"` above still passes a secret as an argument,
+# and neither tool accepts one on stdin. So the standing rules still hold, and
+# one of them now matters MORE than before: never enable shell tracing
+# (`set -x`) in this script -- with tracing on, the line below would trace the
+# entire base64 private key. Run release builds on an isolated ephemeral
+# runner.
+#
+# Three defences, all needed, none sufficient alone:
+#
+#   rm -f    -- `umask` applies only at file CREATION. A redirect onto an
+#               EXISTING file truncates it and keeps its old mode, so a
+#               notary.p8 left behind by a cancelled run would receive the key
+#               at whatever mode it already had. That is reachable: the EXIT
+#               trap does not fire on SIGKILL or job cancellation, and
+#               RUNNER_TEMP persists across steps -- across jobs on a
+#               self-hosted runner. It also stops `>` silently following a
+#               pre-existing symlink at that path.
+#   umask    -- closes the window between creation and chmod, since `>` would
+#               otherwise create at 0666 & ~umask (0644 by default) and
+#               RUNNER_TEMP is not reliably private.
+#   chmod    -- belt and braces, and the thing a reader greps for.
+rm -f "$WORK/notary.p8"
+( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
 chmod 600 "$WORK/notary.p8"
 xcrun notarytool submit "$DMG" \
   --key "$WORK/notary.p8" \
@@ -623,11 +668,19 @@ Replace it with:
 ```
 # # Status
 #
-# The credential path has been exercised (see docs/release-runbook.md), but
-# treat notarization as verified only for versions that have passed the
-# clean-machine gate: open the stapled DMG on a Mac that did not build it,
-# with the network off, and confirm it launches without a Gatekeeper prompt.
+# STILL NEVER EXECUTED as of this change. This commit alters which credentials
+# the script demands; it does not run it. No Developer ID key was available
+# when it landed, so nothing here has signed or notarized anything, and a
+# script that has never run is not evidence.
+#
+# What would change that, in order: a real run producing a signed, notarized,
+# stapled DMG, and then the clean-machine gate -- open that DMG on a Mac that
+# did not build it, with the network off, and confirm it launches with no
+# Gatekeeper prompt. Only versions that have passed BOTH may be described as
+# verified.
 ```
+
+Do **not** write "the credential path has been exercised" or reference `docs/release-runbook.md` here. An earlier draft of this plan prescribed exactly that, and it was wrong on both counts: the runbook does not exist until Task 5, and no credential existed when this task ran. Replacing a true "never executed" with a false claim of verification is the precise failure this project's rules exist to prevent — a release engineer who reads it skips the exploratory dry run and meets first-run failures (wrong issuer id, a key lacking the Developer role) during a tagged release instead. Task 5 step 9 updates this block once a run has actually happened.
 
 - [ ] **Step 7: Run the tests and shellcheck**
 
@@ -750,6 +803,10 @@ jobs:
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'macos'
     runs-on: macos-14
+    # This job holds a Developer ID private key. The environment scopes those
+    # secrets to release runs and gives the signing path a place to hang
+    # required reviewers, matching how the Windows job is gated.
+    environment: release
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -783,7 +840,17 @@ jobs:
           mkdir -p dist
           OUT="TraceCommons-${{ needs.version.outputs.short }}.dmg"
           cp macos/.build/TraceCommons.dmg "dist/$OUT"
+          # The DMG is signed, notarized and stapled by this point, so this
+          # checksum already covers the final bytes -- unlike the Windows and
+          # CLI paths, where signing happens after packaging and the checksum
+          # must be recomputed.
           ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
+
+      # After signing and stapling, so the provenance covers the bytes a
+      # contributor actually downloads.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: dist/*.dmg
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1268,6 +1335,12 @@ Append to `.github/workflows/release-apps.yml`:
       github.event_name == 'push' ||
       inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
+    # Signing authority, so it declares the environment like the other two:
+    # this job imports the OSTree repo's GPG private key from Secret Manager.
+    # Its GCP auth is repository-scoped rather than environment-scoped, so
+    # unlike the Windows job this is protection rather than a hard auth
+    # requirement -- but a job holding a signing key is gated either way.
+    environment: release
     # This manifest had never been built when the job was written. The
     # generous timeout is because a from-scratch flatpak build compiles the
     # whole GTK crate against the GNOME SDK with no cargo cache.
