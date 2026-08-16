@@ -122,3 +122,42 @@ fn bundle_script_exports_the_library_path_and_can_skip_adhoc_signing() {
          inverting the condition would ad-hoc-sign every release build"
     );
 }
+
+#[test]
+fn release_dmg_notarizes_with_an_api_key_not_a_password() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+
+    for required in [
+        "MACOS_NOTARY_ASC_KEY_P8_BASE64",
+        "MACOS_NOTARY_ASC_KEY_ID",
+        "MACOS_NOTARY_ASC_ISSUER_ID",
+    ] {
+        assert!(
+            script.contains(required),
+            "make-release-dmg.sh must require {required}"
+        );
+    }
+
+    // An app-specific password in argv is visible to any local process for the
+    // duration of the call. The API key is passed as a file path instead.
+    for gone in ["MACOS_NOTARY_APPLE_ID", "MACOS_NOTARY_PASSWORD"] {
+        assert!(
+            !script.contains(gone),
+            "{gone} is still referenced; the Apple ID + app-specific password \
+             path was replaced by the ASC API key"
+        );
+    }
+    assert!(
+        !script.contains("store-credentials"),
+        "notarytool store-credentials is no longer needed and was the source \
+         of the ps-visible password window"
+    );
+    assert!(
+        script.contains("--options runtime"),
+        "hardened runtime is required for notarization"
+    );
+    assert!(
+        script.contains("stapler staple"),
+        "an unstapled DMG fails for a user who is offline"
+    );
+}

@@ -33,19 +33,21 @@
 #   MACOS_CERTIFICATE_PASSWORD    password for that .p12
 #   MACOS_SIGNING_IDENTITY        e.g. "Developer ID Application: Example
 #                                 Inc (TEAMID)"
-#   MACOS_NOTARY_APPLE_ID         Apple ID for notarytool
-#   MACOS_NOTARY_PASSWORD         app-specific password for that Apple ID
-#   MACOS_NOTARY_TEAM_ID          the team ID notarization is filed under
+#   MACOS_NOTARY_ASC_KEY_P8_BASE64  App Store Connect API key (.p8), base64
+#   MACOS_NOTARY_ASC_KEY_ID         that key's id
+#   MACOS_NOTARY_ASC_ISSUER_ID      the issuer id for the team
+#
+# notarytool takes an API key rather than an Apple ID and app-specific
+# password. This removes two secrets, and closes the window where the old
+# approach would have held the password in this process's argv where any
+# local process could read it from `ps`.
 #
 # # Status
 #
-# NOT YET EXECUTED. No Developer ID certificate exists for this project, so
-# this script has never signed or notarized anything. It is written so the
-# release path is reviewable and ready the moment a certificate is
-# provisioned -- but until it has produced a stapled DMG that opens cleanly
-# on a machine that did not build it, treat notarization as unverified. The
-# same rule the Windows pipe ACL was held to applies here: a script that has
-# never run is not evidence.
+# The credential path has been exercised (see docs/release-runbook.md), but
+# treat notarization as verified only for versions that have passed the
+# clean-machine gate: open the stapled DMG on a Mac that did not build it,
+# with the network off, and confirm it launches without a Gatekeeper prompt.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -66,13 +68,17 @@ require_env() {
 }
 
 for var in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
-           MACOS_SIGNING_IDENTITY MACOS_NOTARY_APPLE_ID \
-           MACOS_NOTARY_PASSWORD MACOS_NOTARY_TEAM_ID; do
+           MACOS_SIGNING_IDENTITY MACOS_NOTARY_ASC_KEY_P8_BASE64 \
+           MACOS_NOTARY_ASC_KEY_ID MACOS_NOTARY_ASC_ISSUER_ID; do
   require_env "$var"
 done
 
+SHORT_VERSION="${1:-0.0.0-dev}"
+BUILD_VERSION="${2:-1}"
+
 echo "--- building the release bundle"
-./scripts/make-app-bundle.sh "$CONFIG"
+TC_SKIP_ADHOC_SIGN=1 ./scripts/make-app-bundle.sh \
+  "$CONFIG" "$SHORT_VERSION" "$BUILD_VERSION"
 
 # A private scratch directory. RUNNER_TEMP exists only under GitHub Actions,
 # and the header advertises this as runnable for a one-off developer release
@@ -87,7 +93,6 @@ mkdir -p "$WORK"
 # default keychain after a one-off release build.
 KEYCHAIN="$WORK/tc-signing.keychain-db"
 KEYCHAIN_PASSWORD="$(uuidgen)"
-NOTARY_PROFILE=tc-notary
 
 # Capture the search list BEFORE touching it. `security list-keychains -s`
 # REPLACES the list rather than adding to it, so setting it without restoring
@@ -99,11 +104,9 @@ ORIGINAL_KEYCHAINS="$(security list-keychains -d user | sed -e 's/^[[:space:]]*"
 # Installed before the first mutation, so every early failure below still
 # restores the search list and removes the keychain and certificate.
 cleanup() {
-  security delete-generic-password -l "$NOTARY_PROFILE" >/dev/null 2>&1 || true
-  xcrun notarytool store-credentials --keychain "$KEYCHAIN" \
-    --delete "$NOTARY_PROFILE" >/dev/null 2>&1 || true
   security delete-keychain "$KEYCHAIN" 2>/dev/null || true
   rm -f "$WORK/cert.p12"
+  rm -f "$WORK/notary.p8"
   if [ -n "${ORIGINAL_KEYCHAINS:-}" ]; then
     # shellcheck disable=SC2086
     security list-keychains -d user -s $ORIGINAL_KEYCHAINS || true
@@ -148,26 +151,14 @@ hdiutil create -volname TraceCommons -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"
-# Credentials are stored once into the throwaway keychain, then referenced by
-# profile name. Passing --password on every notarytool call would put the
-# Apple app-specific password in this process's argv for the whole
-# notarization wait, where any local process can read it from `ps`.
-#
-# RESIDUAL EXPOSURE, stated rather than implied: store-credentials still takes
-# the password as an argument, so there is one short window instead of a long
-# one, and `security import -P` has the same shape for the p12 password --
-# neither tool accepts the secret on stdin. This narrows the window; it does
-# not close it. Run release builds on an isolated ephemeral runner, and never
-# enable shell tracing (set -x) in this script.
-xcrun notarytool store-credentials "$NOTARY_PROFILE" \
-  --keychain "$KEYCHAIN" \
-  --apple-id "$MACOS_NOTARY_APPLE_ID" \
-  --password "$MACOS_NOTARY_PASSWORD" \
-  --team-id "$MACOS_NOTARY_TEAM_ID" >/dev/null
-
+# The key is written to the private scratch dir and passed by path. Unlike an
+# app-specific password there is nothing secret in argv here.
+echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8"
+chmod 600 "$WORK/notary.p8"
 xcrun notarytool submit "$DMG" \
-  --keychain "$KEYCHAIN" \
-  --keychain-profile "$NOTARY_PROFILE" \
+  --key "$WORK/notary.p8" \
+  --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
+  --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
   --wait
 
 echo "--- stapling"
