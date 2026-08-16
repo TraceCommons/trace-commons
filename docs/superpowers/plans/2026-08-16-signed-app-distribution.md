@@ -990,7 +990,7 @@ git push -u origin signed-app-distribution-spec
 ```bash
 gh workflow run release-apps.yml --repo TraceCommons/trace-commons-server \
   --ref signed-app-distribution-spec \
-  -f platform=macos -f version=0.0.0-signing-proof
+  -f platform=macos -f version=0.0.0
 gh run watch --repo TraceCommons/trace-commons-server
 ```
 
@@ -1129,9 +1129,19 @@ fn windows_signing_is_timestamped() {
     // Trusted Signing certificates are valid for roughly three days. Without
     // an RFC3161 countersignature the signature stops validating days after
     // release -- a failure no same-day test would catch.
+    // Assert on the FLAGS, not on a word that could sit in a comment. The
+    // marketplace action took a `timestamp-rfc3161` input; signtool takes /tr
+    // and /td, so a test matching the old input name guards nothing and tempts
+    // whoever sees it fail into inserting the token into prose.
     assert!(
-        workflow.contains("timestamp-rfc3161"),
-        "an untimestamped Trusted Signing signature expires within days"
+        workflow.contains("/tr http://timestamp.acs.microsoft.com"),
+        "every sign invocation needs an RFC3161 timestamp server: Trusted \
+         Signing certificates carry ~3-day validity, so the countersignature \
+         is the only reason a signature outlives them"
+    );
+    assert!(
+        workflow.contains("/td SHA256"),
+        "the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
         workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
@@ -1173,14 +1183,30 @@ Append to `.github/workflows/release-apps.yml`:
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority. The cold-build cost is the price of that.
 
-      - name: Build the CLI and daemon
-        run: cargo build --release -p trace-commons-contributor --target x86_64-pc-windows-msvc
+      # By NAME, not by package. `-p trace-commons-contributor` also builds
+      # win-pipe-acl-probe, whose own doc comment says it is a test tool and not
+      # a contributor-facing command. A `*.exe` glob downstream would then hand
+      # it a public-trust Authenticode signature, attest it, and ship it in the
+      # release archive -- widening what that certificate has vouched for, for
+      # no benefit, and putting a binary in contributors' hands that nobody
+      # should run. There is no separate daemon binary; the CLI is the whole
+      # Windows deliverable today.
+      - name: Build the CLI
+        run: cargo build --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
 
-      - name: Stage the binaries for signing
+      - name: Stage the binary for signing
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path signed | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/*.exe signed/
+          Copy-Item target/x86_64-pc-windows-msvc/release/trace-commons-contributor.exe signed/
+          # Assert the exact expected set, so neither a new binary appearing in
+          # the package nor a copy that silently matched nothing can reach the
+          # signing step. "Signed nothing" must be a failure, not a green job.
+          $staged = @(Get-ChildItem signed\*.exe)
+          if ($staged.Count -ne 1) {
+            throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
+          }
 
       - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
         with:
@@ -1241,8 +1267,18 @@ Append to `.github/workflows/release-apps.yml`:
             CertificateProfileName = $env:TS_PROFILE
           } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
 
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
-                       Sort-Object FullName -Descending |
+          # -ErrorAction SilentlyContinue so the friendly throw below is
+          # actually reachable: under $ErrorActionPreference = "Stop", a missing
+          # Windows Kits directory (image change, SDK relocation) raises a
+          # terminating ItemNotFoundException here and the operator sees a path
+          # error instead of the message written for them.
+          #
+          # Sorted as a [version], not as a string: a lexicographic sort over
+          # SDK directory names happens to pick correctly today but breaks the
+          # moment a 10.0.9xxxx-style entry appears beside a 10.0.2xxxx one.
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+                         -ErrorAction SilentlyContinue |
+                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
                        Select-Object -First 1 -ExpandProperty FullName)
           if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
 
@@ -1283,18 +1319,37 @@ Append to `.github/workflows/release-apps.yml`:
 
       # After signing, so the provenance covers the signed bytes rather than the
       # unsigned build output.
+      # Deliberately narrower than the macOS job, which attests its DMG and the
+      # DMG's checksum. Here the Authenticode signature travels inside the .exe
+      # itself, so provenance on the exe covers what a contributor executes; the
+      # zip is only a transport. If that reasoning ever stops holding -- an
+      # installer that is itself the executed artifact, say -- attest the
+      # package too.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: signed/*.exe
 
       - name: Package
         shell: pwsh
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
-          $v = "${{ needs.version.outputs.short }}"
-          Compress-Archive -Path signed\*.exe -DestinationPath "dist\trace-commons-windows-x86_64-$v.zip"
-          Get-FileHash "dist\trace-commons-windows-x86_64-$v.zip" -Algorithm SHA256 |
-            ForEach-Object { $_.Hash } |
-            Out-File "dist\trace-commons-windows-x86_64-$v.zip.sha256" -Encoding ascii
+          $ErrorActionPreference = "Stop"
+          # Compress-Archive does NOT create a missing parent for
+          # -DestinationPath; it throws DirectoryNotFoundException. Omitting
+          # this fails after the cold build, after signing, and after a
+          # certificate has already been issued and consumed.
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $v = $env:SHORT_VERSION
+          $zip = "dist\trace-commons-windows-x86_64-$v.zip"
+          Compress-Archive -Path signed\*.exe -DestinationPath $zip
+          # Same sidecar format as the macOS path -- "<lowercase hash>  <name>",
+          # which `sha256sum -c` accepts. A bare uppercase hash with no filename
+          # cannot be verified that way, and this repo already ships a consumer
+          # that uses `sha256sum -c` (deploy/pilot-gcp/pull-and-install.sh).
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $zip)" |
+            Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1319,7 +1374,7 @@ git commit -m "Sign the Windows binaries with Azure Trusted Signing"
 git push
 gh workflow run release-apps.yml --repo TraceCommons/trace-commons-server \
   --ref signed-app-distribution-spec \
-  -f platform=windows -f version=0.0.0-signing-proof
+  -f platform=windows -f version=0.0.0
 gh run watch --repo TraceCommons/trace-commons-server
 ```
 
@@ -1499,7 +1554,7 @@ git add crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json \
 git commit -m "Build the flatpak in CI for the first time"
 git push
 gh workflow run release-apps.yml --repo TraceCommons/trace-commons-server \
-  --ref signed-app-distribution-spec -f platform=linux -f version=0.0.0-build-proof
+  --ref signed-app-distribution-spec -f platform=linux -f version=0.0.0
 gh run watch --repo TraceCommons/trace-commons-server
 ```
 
@@ -1722,7 +1777,7 @@ git add scripts/flatpak .github/workflows/release-apps.yml \
 git commit -m "Sign and publish the flatpak repo"
 git push
 gh workflow run release-apps.yml --repo TraceCommons/trace-commons-server \
-  --ref signed-app-distribution-spec -f platform=linux -f version=0.0.0-sign-proof
+  --ref signed-app-distribution-spec -f platform=linux -f version=0.0.0
 gh run watch --repo TraceCommons/trace-commons-server
 ```
 
@@ -1931,8 +1986,18 @@ Add `environment: release` to the `build` job (the federated credential's subjec
             CertificateProfileName = $env:TS_PROFILE
           } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
 
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
-                       Sort-Object FullName -Descending |
+          # -ErrorAction SilentlyContinue so the friendly throw below is
+          # actually reachable: under $ErrorActionPreference = "Stop", a missing
+          # Windows Kits directory (image change, SDK relocation) raises a
+          # terminating ItemNotFoundException here and the operator sees a path
+          # error instead of the message written for them.
+          #
+          # Sorted as a [version], not as a string: a lexicographic sort over
+          # SDK directory names happens to pick correctly today but breaks the
+          # moment a 10.0.9xxxx-style entry appears beside a 10.0.2xxxx one.
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+                         -ErrorAction SilentlyContinue |
+                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
                        Select-Object -First 1 -ExpandProperty FullName)
           if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
 
