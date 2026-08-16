@@ -10,12 +10,26 @@ on:
   push:
     tags:
       - "contributor-v*"
-  # Buildable on demand without cutting a tag, so the matrix can be proven
-  # before it is trusted with a release.
+  # Buildable on demand without cutting a tag, so the Linux leg can be proven
+  # before it is trusted with a release. The macOS and Windows legs sign
+  # unconditionally and the job declares environment: release, so a dispatch
+  # on those legs still needs real credentials or required-reviewer approval
+  # -- it is not a free dry run for the signing path.
   workflow_dispatch:
 
+concurrency:
+  group: release-contributor-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  # contents: write lives only on the publish job below, not here. The build
+  # job imports the .p12, holds the ASC notary key and carries the Trusted
+  # Signing OIDC session -- the job with signing authority is not the job
+  # that needs to cut a release, so it does not need repo-write. Matches
+  # release-apps.yml, which makes the same call for the same reason.
+  contents: read
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -25,43 +39,326 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # macos-13 is a retired GitHub-hosted runner image. A job targeting
+          # a label that no longer exists does not fail -- it queues forever,
+          # confirmed empirically: this leg sat queued while macos-14,
+          # windows-latest and ubuntu-24.04 all completed, and actionlint has
+          # been flagging the label as unknown. Build x86_64 as a cross build
+          # on macos-14 instead: Xcode ships both SDKs, and the toolchain
+          # action below already installs whatever target is requested. Do
+          # not "restore" macos-13 -- it will silently hang the whole run.
+          - os: macos-14
             target: x86_64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # The macOS and Windows legs hold signing authority. Windows in
+    # particular needs this to authenticate at all: the federated
+    # credential's subject is repo:...:environment:release, so its absence
+    # fails OIDC. Gating the whole matrix job under one job keeps the Linux
+    # leg here too, which is a scoping cost, not a correctness problem.
+    environment: release
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install toolchain
-        run: rustup target add ${{ matrix.target }}
+      # Pinned, not the runner image's preinstalled Rust. These crates declare
+      # rust-version = 1.92, and windows-latest is newly added here -- an
+      # image lagging that floor, or two release legs building on different
+      # toolchains, is a real-runner-only outcome.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.92"
+          targets: ${{ matrix.target }}
 
+      # By binary name, not by package: `-p trace-commons-contributor` also
+      # builds win-pipe-acl-probe, which its own doc comment calls a test
+      # tool. Building it here would hand it a public-trust signature and
+      # ship it to contributors.
       - name: Build
-        run: cargo build --release -p trace-commons-contributor --target ${{ matrix.target }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --bin trace-commons-contributor --target "$TARGET"
 
       # The checksum is published beside the binary so a contributor can
       # verify what they downloaded. It is not a signature and does not
-      # establish provenance on its own - see the release notes.
-      - name: Package
+      # establish provenance on its own - see the release notes. For macOS
+      # this gets recomputed after signing below, since codesign rewrites
+      # the bytes; for Linux this is the final checksum, since the Linux
+      # binary ships unsigned.
+      - name: Package (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          BIN=target/${{ matrix.target }}/release/trace-commons-contributor
-          OUT=trace-commons-contributor-${{ matrix.target }}
+          BIN="target/$TARGET/release/trace-commons-contributor"
+          OUT="trace-commons-contributor-$TARGET"
           mkdir -p dist
           cp "$BIN" "dist/$OUT"
           ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
 
-      - uses: actions/upload-artifact@v4
+      # No checksum here: the exe gets signed next, and the checksum in
+      # "Sign, verify and re-checksum (Windows)" below covers the bytes a
+      # contributor actually downloads.
+      - name: Stage the binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $out = "dist/trace-commons-contributor-$env:TARGET.exe"
+          Copy-Item "target/$env:TARGET/release/trace-commons-contributor.exe" $out
+          $staged = @(Get-ChildItem dist/*.exe)
+          if ($staged.Count -ne 1) {
+            throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
+          }
+
+      # notarytool takes a disk image, a package, or a zip -- never a bare
+      # Mach-O. So the binary is signed, zipped, and the ZIP submitted. There
+      # is nothing to staple (stapling needs a bundle, package, or image),
+      # which is fine for a shell-invoked binary: Gatekeeper resolves the
+      # ticket online, and a CLI is not subject to the quarantine-launch path
+      # a .app is.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          OUT="trace-commons-contributor-$TARGET"
+          WORK="$RUNNER_TEMP"
+          KEYCHAIN="$WORK/tc-cli.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          cleanup() {
+            security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+            rm -f "$WORK/cert.p12"
+            rm -f "$WORK/notary.p8"
+            rm -f "$WORK/notary.json"
+            if [ -n "${ORIGINAL_KEYCHAINS:-}" ]; then
+              # shellcheck disable=SC2086
+              security list-keychains -d user -s $ORIGINAL_KEYCHAINS || true
+            fi
+          }
+          trap cleanup EXIT
+
+          # Capture the search list BEFORE touching it. `security
+          # list-keychains -s` REPLACES the list rather than adding to it.
+          ORIGINAL_KEYCHAINS="$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          # Remove any stale file, decode with restricted creation mode, and
+          # set mode again as belt-and-braces. rm defeats leftover-mode and
+          # symlink cases; umask guards creation; chmod is what readers grep
+          # for and what actually enforces the mode if a file somehow
+          # existed -- the cleanup trap does not fire on SIGKILL, and
+          # RUNNER_TEMP can outlive a cancelled job on a self-hosted runner.
+          rm -f "$WORK/cert.p12"
+          ( umask 077; echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12" )
+          chmod 600 "$WORK/cert.p12"
+          security import "$WORK/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Append rather than replace, and restore in the trap.
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$KEYCHAIN" $ORIGINAL_KEYCHAINS
+
+          codesign --force --timestamp --options runtime \
+            --sign "$MACOS_SIGNING_IDENTITY" "dist/$OUT"
+          codesign --verify --strict --verbose=2 "dist/$OUT"
+
+          ditto -c -k --sequesterRsrc "dist/$OUT" "$WORK/$OUT.zip"
+
+          rm -f "$WORK/notary.p8"
+          ( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
+          chmod 600 "$WORK/notary.p8"
+          # --wait reports the verdict in its OUTPUT; its exit status is not
+          # documented to be non-zero for an Invalid submission, and several
+          # notarytool versions exit 0 once the submission merely completes. The
+          # DMG path is covered downstream by `stapler staple` and
+          # `spctl --assess`; this path has neither, so parse the status.
+          xcrun notarytool submit "$WORK/$OUT.zip" \
+            --key "$WORK/notary.p8" \
+            --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
+            --wait --output-format json | tee "$WORK/notary.json"
+          python3 -c '
+          import json, sys
+          status = json.load(open(sys.argv[1])).get("status")
+          print("notarization status: %s" % status)
+          if status != "Accepted":
+              sys.exit("refusing to publish: notarization returned %r, not %r" % (status, "Accepted"))
+          ' "$WORK/notary.json"
+          cp "$WORK/$OUT.zip" "dist/$OUT.zip"
+
+          # The Package step checksummed the UNSIGNED binary. codesign
+          # rewrote those bytes, so both checksums are recomputed here --
+          # otherwise every contributor who verifies the download sees a
+          # mismatch and correctly concludes something is wrong.
+          ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
+          ( cd dist && shasum -a 256 "$OUT.zip" > "$OUT.zip.sha256" )
+
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        if: runner.os == 'Windows'
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
+      # The same SHA-verified dlib setup as release-apps.yml's windows job,
+      # repeated rather than factored into a composite action: a composite
+      # action is one more dependency running inside a job that holds signing
+      # authority, and minimising exactly that is the point of the hash check.
+      # If this changes it must change in BOTH workflows -- the test pins the
+      # hash constant in each.
+      #
+      # No signing key reaches this runner. Trusted Signing issues a
+      # short-lived certificate against the OIDC token above, and the dlib
+      # authenticates through DefaultAzureCredential picking up that session.
+      - name: Set up Trusted Signing (SHA-verified dlib + signtool)
+        id: ts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TS_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          # Independently verified 2026-08-16 by downloading and hashing the
+          # package. On a version bump, re-derive this from a trusted machine.
+          TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nugetVersion = "1.0.95"
+          $pkgZip = Join-Path $env:RUNNER_TEMP "mtsc.zip"
+          $pkgDir = Join-Path $env:RUNNER_TEMP "mtsc"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/$nugetVersion" `
+            -OutFile $pkgZip
+
+          $expected = $env:TRUSTED_SIGNING_CLIENT_SHA256
+          $actual = (Get-FileHash -Path $pkgZip -Algorithm SHA256).Hash
+          Write-Host "Microsoft.Trusted.Signing.Client $nugetVersion SHA-256: $actual"
+          if ([string]::IsNullOrWhiteSpace($expected)) {
+            throw "TRUSTED_SIGNING_CLIENT_SHA256 is not set (observed: $actual). Refusing to extract an unverified signing package."
+          }
+          if ($actual -ne $expected.Trim().ToUpperInvariant()) {
+            throw "Hash mismatch for Microsoft.Trusted.Signing.Client $nugetVersion. Expected $($expected.Trim().ToUpperInvariant()), got $actual. Refusing to expand a potentially tampered signing package."
+          }
+
+          Expand-Archive -Path $pkgZip -DestinationPath $pkgDir -Force
+          $dlib = Join-Path $pkgDir "bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (-not (Test-Path $dlib)) {
+            $dlib = (Get-ChildItem -Path $pkgDir -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
+                     Select-Object -First 1 -ExpandProperty FullName)
+          }
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll not found in package" }
+
+          $metadata = Join-Path $env:RUNNER_TEMP "ts-metadata.json"
+          [ordered]@{
+            Endpoint               = $env:TS_ENDPOINT
+            CodeSigningAccountName = $env:TS_ACCOUNT
+            CertificateProfileName = $env:TS_PROFILE
+          } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
+
+          # -ErrorAction SilentlyContinue so the friendly throw below is
+          # actually reachable: under $ErrorActionPreference = "Stop", a missing
+          # Windows Kits directory (image change, SDK relocation) raises a
+          # terminating ItemNotFoundException here and the operator sees a path
+          # error instead of the message written for them.
+          #
+          # Sorted as a [version], not as a string: a lexicographic sort over
+          # SDK directory names happens to pick correctly today but breaks the
+          # moment a 10.0.9xxxx-style entry appears beside a 10.0.2xxxx one.
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+                         -ErrorAction SilentlyContinue |
+                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+                       Select-Object -First 1 -ExpandProperty FullName)
+          if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
+
+          "dlib=$dlib"         >> $env:GITHUB_OUTPUT
+          "metadata=$metadata" >> $env:GITHUB_OUTPUT
+          "signtool=$signtool" >> $env:GITHUB_OUTPUT
+
+      # /tr with /td is the RFC3161 countersignature, and it is mandatory:
+      # Trusted Signing certificates carry roughly three-day validity, so the
+      # timestamp is the only reason a signature outlives them.
+      - name: Sign, verify and re-checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
+              /tr http://timestamp.acs.microsoft.com /td SHA256 `
+              /dlib "$env:TS_DLIB" `
+              /dmdf "$env:TS_METADATA" `
+              $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $($_.Name)" }
+
+            # The real check: what a verifier says, not what signing reported.
+            & "$env:TS_SIGNTOOL" verify /pa /v $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $($_.Name)" }
+
+            # The checksum from the Package step covers the UNSIGNED binary.
+            # Signing rewrote those bytes, so it must be recomputed or every
+            # contributor who checks it will see a mismatch. Written as
+            # "<lowercase hash>  <filename>" so `sha256sum -c` accepts it,
+            # matching the macOS sidecar format.
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Out-File "$($_.FullName).sha256" -Encoding ascii -NoNewline
+          }
+
+      # After signing, so the provenance covers the signed bytes rather than
+      # the unsigned build output.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: dist/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.target }}
           path: dist/
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    # A dispatch, not only a tag push, can satisfy startsWith(github.ref,
+    # 'refs/tags/') alone: GitHub's workflow_dispatch ref selector accepts a
+    # tag, so dispatching with ref contributor-v0.1.0 would otherwise run
+    # this job and publish a real release, contradicting this file's own
+    # header comment and docs/release-runbook.md, both of which say a
+    # dispatch never publishes. Require the push event too, matching
+    # release-apps.yml's publish gate.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Job-level only: the workflow-level block stays contents: read, and only
+    # this job needs write access to cut a release.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
 
@@ -75,12 +372,78 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --notes "Contributor CLI binaries.
 
-          Verify your download against the published \`.sha256\` beside it.
+          The macOS binaries are signed with Iqlusion Inc's Developer ID and
+          notarized by Apple; the Windows binaries are Authenticode-signed and
+          timestamped. Verify any download against the published \`.sha256\`
+          beside it -- that checks integrity, while the signature is what
+          establishes who built it.
 
-          These binaries are **not code-signed or notarized**. macOS Gatekeeper
-          will quarantine them; clearing that requires an explicit user action.
-          Signing needs an Apple Developer identity and is not set up yet.
+          The Linux binary is not signed. Verify it against the published
+          checksum.
 
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
             dist/*/*
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
+      # TraceCommons/homebrew-tap with contents and pull-request write.
+      # github.token cannot reach another repository, which is why this
+      # secret exists. This opens a pull request rather than pushing: a
+      # direct push would auto-publish a bad release to everyone who has
+      # already tapped us, with no gate between a failed verification and
+      # someone's `brew upgrade`.
+      - name: Open a formula bump
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#contributor-v}"
+          ARM="$(awk '{print $1}' dist/aarch64-apple-darwin/trace-commons-contributor-aarch64-apple-darwin.zip.sha256)"
+          X86="$(awk '{print $1}' dist/x86_64-apple-darwin/trace-commons-contributor-x86_64-apple-darwin.zip.sha256)"
+          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          cd tap
+          git switch -c "bump-formula-$V"
+          sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
+          # The positional substitution below assumes the arm64 block comes
+          # first, the x86_64 second. Assert that rather than assuming it --
+          # if the formula were ever reordered, positional substitution
+          # would silently swap the hashes onto the wrong architecture.
+          if ! awk '/on_arm/{a=NR} /on_intel/{i=NR} END{exit !(a && i && a < i)}' \
+            Formula/trace-commons-contributor.rb; then
+            echo "expected on_arm to precede on_intel in Formula/trace-commons-contributor.rb" >&2
+            exit 1
+          fi
+          # Two sha256 lines in one file, so they cannot both be replaced by a
+          # blind substitution: the arm64 block comes first, the x86_64
+          # second. awk replaces them by position rather than a heredoc'd
+          # script, since a Python heredoc embedded in this indented YAML
+          # `run:` block inherits that indentation on every line, which is a
+          # syntax error for an indentation-sensitive language; awk has no
+          # such sensitivity.
+          #
+          # This positional match only fires on the two-line
+          # `sha256 "..."` form. If the formula ever used the single-line
+          # `sha256 arm: "...", x86_64: "..."` form instead, this regex would
+          # never match, no substitution would happen, and `git commit -am`
+          # would still succeed (the version sed alone changed a line) --
+          # bumping the version while silently keeping last release's
+          # hashes. The assertion after the substitution catches that.
+          awk -v arm="$ARM" -v x86="$X86" '
+            /sha256 "/ {
+              n++
+              if (n == 1) sub(/sha256 "[^"]*"/, "sha256 \"" arm "\"")
+              else if (n == 2) sub(/sha256 "[^"]*"/, "sha256 \"" x86 "\"")
+            }
+            { print }
+          ' Formula/trace-commons-contributor.rb > Formula/trace-commons-contributor.rb.tmp
+          mv Formula/trace-commons-contributor.rb.tmp Formula/trace-commons-contributor.rb
+          if ! grep -qF "$ARM" Formula/trace-commons-contributor.rb || \
+             ! grep -qF "$X86" Formula/trace-commons-contributor.rb; then
+            echo "formula bump did not apply both computed hashes; refusing to open a PR with a stale or partial checksum" >&2
+            exit 1
+          fi
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git commit -am "trace-commons-contributor $V"
+          git push -u origin "bump-formula-$V"
+          gh pr create --fill --repo TraceCommons/homebrew-tap

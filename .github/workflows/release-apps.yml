@@ -1,0 +1,565 @@
+# Signed releases of the contributor apps. Tag-driven: push a tag like
+# `app-v0.2.0`.
+#
+# Three independent jobs rather than a matrix. The packaging steps share
+# essentially nothing -- SwiftPM plus notarytool, cargo plus Azure Trusted
+# Signing, flatpak-builder plus OSTree -- so matrix legs would be a stack of
+# `if:` guards. Independent jobs also mean one platform failing does not block
+# the others, which matters most for Linux: its flatpak manifest is the least
+# proven part of this pipeline.
+name: release-apps
+
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which platform to build
+        type: choice
+        default: all
+        options: [all, macos, windows, linux]
+      version:
+        description: Version to stamp when running without a tag (e.g. 1.2.3)
+        type: string
+        required: true
+
+concurrency:
+  group: release-apps-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  version:
+    name: resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      short: ${{ steps.v.outputs.short }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      # CFBundleVersion must increase monotonically across releases.
+      # GitHub's run_number is monotonic per workflow and increments with every
+      # run, persisting across branches and tag pushes without external state.
+      # run_attempt increments on re-runs while run_number stays the same.
+      # Arithmetic composition ensures strict monotonicity: * 100 shifts the
+      # run_number to the hundreds place, making it dominant over run_attempt.
+      # Short version is semantic (e.g., 1.2.3).
+      - id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            SHORT="${REF_NAME#app-v}"
+          else
+            SHORT="$INPUT_VERSION"
+          fi
+          if ! printf '%s' "$SHORT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "refusing to release: '$SHORT' is not a three-part numeric version." >&2
+            echo "Tags must look like app-v1.2.3; a dispatch must pass the same shape." >&2
+            exit 1
+          fi
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS signed DMG
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'macos'
+    runs-on: macos-14
+    # This job holds a Developer ID private key. The environment scopes those
+    # secrets to release runs and gives the signing path a place to hang
+    # required reviewers, matching how the Windows job is gated.
+    environment: release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      # Pinned by commit SHA, so dtolnay/rust-toolchain cannot infer the
+      # toolchain from a ref name (@stable, @1.92) the way it does when
+      # pinned to a branch or tag -- `toolchain` becomes a required input.
+      # The version tracks the workspace's rust-version (Cargo.toml).
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.92"
+      # No build cache in a release job, deliberately. A cache is a
+      # write-target a lower-privilege job can poison, and this job holds
+      # signing authority. The cold-build cost is the price of that.
+
+      - name: Build the FFI dylib
+        run: cargo build --release -p trace-commons-contributor-ffi
+
+      # make-release-dmg.sh refuses outright when any credential is missing,
+      # rather than falling back to an ad-hoc signature. An unsigned artifact
+      # named like a release is worse than no artifact.
+      - name: Build, sign, notarize and staple
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+        run: |
+          ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
+
+      # This job runs only on macos-14 (Apple silicon) and there is no
+      # lipo/universal step anywhere under macos/, so the DMG is arm64-only.
+      # The artifact name says so, so an Intel Mac's `brew install --cask`
+      # (gated separately by `depends_on arch: :arm64` in the tap) does not
+      # look like it might work when it will fail to launch. A universal
+      # build -- lipo the dylib, `swift build --arch arm64 --arch x86_64`
+      # -- is the real fix and is deliberately not attempted here.
+      - name: Rename and checksum
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          OUT="TraceCommons-${SHORT_VERSION}-arm64.dmg"
+          cp macos/.build/TraceCommons.dmg "dist/$OUT"
+          # The DMG is signed, notarized and stapled by this point, so this
+          # checksum already covers the final bytes -- unlike the Windows and
+          # CLI paths, where signing happens after packaging and the checksum
+          # must be recomputed.
+          ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
+
+      # After signing and stapling, so the provenance covers the bytes a
+      # contributor actually downloads.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-dmg
+          path: dist/
+
+  windows:
+    name: Windows signed binaries
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-latest
+    # The federated credential's subject is
+    # repo:...:environment:release, so this job must declare the environment
+    # or the OIDC token will not match and signing fails at auth.
+    environment: release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.92"
+          targets: x86_64-pc-windows-msvc
+      # No build cache in a release job, deliberately. A cache is a
+      # write-target a lower-privilege job can poison, and this job holds
+      # signing authority. The cold-build cost is the price of that.
+
+      - name: Build the CLI
+        run: cargo build --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
+
+      - name: Stage the binary for signing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path signed | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/trace-commons-contributor.exe signed/
+          $staged = @(Get-ChildItem signed\*.exe)
+          if ($staged.Count -ne 1) {
+            throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
+          }
+
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
+      # No signing key reaches this runner: Trusted Signing issues a
+      # short-lived certificate against the OIDC token above, and the dlib
+      # authenticates through DefaultAzureCredential picking up that session.
+      #
+      # Microsoft's client is fetched rather than vendored, so it is verified by
+      # content before anything is extracted or executed. This job holds signing
+      # authority; a tampered download here would sign whatever an attacker
+      # liked with a public-trust certificate.
+      - name: Set up Trusted Signing (SHA-verified dlib + signtool)
+        id: ts
+        shell: pwsh
+        env:
+          TS_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          # Independently verified 2026-08-16 by downloading the package and
+          # hashing it. When bumping $nugetVersion, re-derive this from a
+          # trusted machine -- do not copy a hash from anywhere.
+          TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nugetVersion = "1.0.95"
+          $pkgZip = Join-Path $env:RUNNER_TEMP "mtsc.zip"
+          $pkgDir = Join-Path $env:RUNNER_TEMP "mtsc"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/$nugetVersion" `
+            -OutFile $pkgZip
+
+          $expected = $env:TRUSTED_SIGNING_CLIENT_SHA256
+          $actual = (Get-FileHash -Path $pkgZip -Algorithm SHA256).Hash
+          Write-Host "Microsoft.Trusted.Signing.Client $nugetVersion SHA-256: $actual"
+          if ([string]::IsNullOrWhiteSpace($expected)) {
+            throw "TRUSTED_SIGNING_CLIENT_SHA256 is not set (observed: $actual). Refusing to extract an unverified signing package."
+          }
+          if ($actual -ne $expected.Trim().ToUpperInvariant()) {
+            throw "Hash mismatch for Microsoft.Trusted.Signing.Client $nugetVersion. Expected $($expected.Trim().ToUpperInvariant()), got $actual. Refusing to expand a potentially tampered signing package."
+          }
+
+          Expand-Archive -Path $pkgZip -DestinationPath $pkgDir -Force
+          $dlib = Join-Path $pkgDir "bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (-not (Test-Path $dlib)) {
+            $dlib = (Get-ChildItem -Path $pkgDir -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
+                     Select-Object -First 1 -ExpandProperty FullName)
+          }
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll not found in package" }
+
+          $metadata = Join-Path $env:RUNNER_TEMP "ts-metadata.json"
+          [ordered]@{
+            Endpoint               = $env:TS_ENDPOINT
+            CodeSigningAccountName = $env:TS_ACCOUNT
+            CertificateProfileName = $env:TS_PROFILE
+          } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
+
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+                         -ErrorAction SilentlyContinue |
+                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+                       Select-Object -First 1 -ExpandProperty FullName)
+          if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
+
+          "dlib=$dlib"         >> $env:GITHUB_OUTPUT
+          "metadata=$metadata" >> $env:GITHUB_OUTPUT
+          "signtool=$signtool" >> $env:GITHUB_OUTPUT
+
+      # /tr plus /td is the RFC3161 countersignature. It is not optional here:
+      # Trusted Signing certificates carry roughly three-day validity, and the
+      # timestamp is the only reason a signature outlives them. An untimestamped
+      # binary starts failing validation days after release -- a failure no
+      # same-day test would catch.
+      - name: Sign
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem signed\*.exe | ForEach-Object {
+            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
+              /tr http://timestamp.acs.microsoft.com /td SHA256 `
+              /dlib "$env:TS_DLIB" `
+              /dmdf "$env:TS_METADATA" `
+              $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $($_.Name)" }
+          }
+
+      # The real check: what a verifier says, not what the signing step
+      # reported. /pa uses the Authenticode policy an end user's machine uses.
+      # The real check: what a verifier says, not what the signing step
+      # reported. /pa uses the Authenticode policy an end user's machine uses.
+      - name: Verify the signatures
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem signed\*.exe | ForEach-Object {
+            & "$env:TS_SIGNTOOL" verify /pa /v $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $($_.Name)" }
+          }
+
+      # After signing, so the provenance covers the signed bytes rather than the
+      # unsigned build output. The Authenticode signature travels inside the .exe,
+      # so provenance on the exe covers what a contributor executes; the zip is
+      # only transport.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: signed/*.exe
+
+      - name: Package
+        shell: pwsh
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $v = $env:SHORT_VERSION
+          $zip = "dist\trace-commons-windows-x86_64-$v.zip"
+          Compress-Archive -Path signed\*.exe -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $zip)" |
+            Out-File "$zip.sha256" -Encoding ascii -NoNewline
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-zip
+          path: dist/
+
+  linux-flatpak:
+    name: Linux flatpak
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-latest
+    # Signing authority, so it declares the environment like the other two:
+    # this job imports the OSTree repo's GPG private key from Secret Manager
+    # (Task 9) to sign the built repo before publication. Its GCP auth is
+    # repository-scoped rather than environment-scoped, so unlike the
+    # Windows job this is protection rather than a hard auth requirement --
+    # but a job holding a signing key is gated either way.
+    environment: release
+    # This manifest had never been built when the job was written. The
+    # generous timeout is because a from-scratch flatpak build compiles the
+    # whole GTK crate against the GNOME SDK with no cargo cache.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install flatpak and the GNOME SDK
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # ostree is a SEPARATE package: flatpak and flatpak-builder depend
+          # only on libostree-1-1, so the verification step below would fail
+          # with "ostree: command not found" after a full successful build.
+          sudo apt-get install -y flatpak flatpak-builder ostree
+          sudo flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          # 23.08, NOT 24.08. org.gnome.Sdk//46 is built on the freedesktop
+          # 23.08 base, so flatpak-builder resolves the manifest's
+          # sdk-extensions at //23.08. Installing //24.08 succeeds standalone
+          # and then leaves nothing mounted at /usr/lib/sdk/rust-stable/bin, so
+          # the build dies at the first cargo with "command not found" AFTER the
+          # runtime download. GNOME 47/48 are the 24.08-based ones -- move both
+          # runtime and SDK together if ever bumping, never mix.
+          sudo flatpak install -y --noninteractive flathub \
+            org.gnome.Platform//46 org.gnome.Sdk//46 \
+            org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+      - name: Check the SDK's rust against the crate's requirement
+        run: |
+          set -euo pipefail
+          REQUIRED="$(grep -m1 '^rust-version' crates/trace-commons-contributor-gtk/Cargo.toml | cut -d'"' -f2)"
+          # $PATH below is meant to expand inside the nested `sh -c`, not
+          # this outer script; single quotes are correct.
+          # shellcheck disable=SC2016
+          SDK_RUST="$(flatpak run --devel --command=sh org.gnome.Sdk//46 -c \
+            'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH; rustc --version' 2>/dev/null || true)"
+          echo "crate requires rust-version = $REQUIRED"
+          echo "SDK extension provides: ${SDK_RUST:-<could not query>}"
+          if [ -z "$SDK_RUST" ]; then
+            echo "WARNING: could not query the SDK's rustc; continuing to the build," >&2
+            echo "which will fail informatively if the toolchain is too old." >&2
+            exit 0
+          fi
+          HAVE="$(printf '%s' "$SDK_RUST" | awk '{print $2}')"
+          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$HAVE" | sort -V | head -1)"
+          if [ "$LOWEST" != "$REQUIRED" ]; then
+            echo "REFUSING: the SDK extension provides rust $HAVE but the crate requires $REQUIRED." >&2
+            echo "The flatpak build is network-sandboxed, so rustup cannot fix this at build time." >&2
+            echo "Options: lower rust-version/edition in the GTK crate, or add an explicit rust" >&2
+            echo "toolchain source to the manifest instead of relying on the SDK extension." >&2
+            exit 1
+          fi
+
+      - name: Build the flatpak into a local repo
+        run: |
+          set -euo pipefail
+          sudo flatpak-builder --disable-rofiles-fuse --force-clean \
+            --repo=flatpak-repo build-dir \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml
+          sudo chown -R "$USER" flatpak-repo
+
+      - name: Confirm the app is actually in the repo
+        run: |
+          set -euo pipefail
+          ostree --repo=flatpak-repo refs | tee refs.txt
+          grep -q 'app/ai.tracecommons.Contributor/' refs.txt
+
+      # GCP_WIF_PROVIDER and GCP_FLATPAK_PUBLISHER_SA are repository secrets
+      # provisioned outside this workflow (Task 9, steps 1-3). Until they
+      # exist this step fails closed -- an empty workload_identity_provider
+      # is a hard auth failure, not a silent no-op -- which is the correct
+      # behavior for a job about to import a signing key.
+      - name: Authenticate to GCP (workload identity federation; no key on the runner)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Import the signing key from Secret Manager
+        env:
+          GCP_PROJECT: tracecommons-pilot-2026
+          SECRET_NAME: flatpak-signing-key
+          KEY_UID: ops@tracecommons.ai
+        run: |
+          set -euo pipefail
+          gcloud secrets versions access latest --secret="$SECRET_NAME" \
+            --project "$GCP_PROJECT" | gpg --batch --import
+          KEYID="$(gpg --list-keys --with-colons "$KEY_UID" \
+            | awk -F: '/^fpr:/{print $10; exit}')"
+          echo "GPG_KEYID=$KEYID" >> "$GITHUB_ENV"
+          gpg --export "$KEYID" > flatpak-signing-pub.gpg
+
+      # GPG_KEYID reaches this step as a real OS environment variable via
+      # GITHUB_ENV above, not through `${{ }}` interpolation -- this job
+      # holds a GPG private key, so nothing sensitive is allowed to cross
+      # into a `run:` body through template expansion.
+      - name: Sign the repo
+        run: ./scripts/flatpak/build-and-sign.sh flatpak-repo "$GPG_KEYID"
+
+      # Tag pushes only. A dispatch run still builds and signs above, so the
+      # path is provable, but publication never runs on a dispatch -- it
+      # must not move what contributors' clients would actually pull.
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          BUCKET: tracecommons-flatpak
+        run: ./scripts/flatpak/publish-repo.sh flatpak-repo flatpak-signing-pub.gpg "$BUCKET"
+
+      - name: Name the artifact for this version
+        id: name
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          set -euo pipefail
+          echo "artifact=flatpak-repo-${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: flatpak-repo/
+
+  publish:
+    name: publish release
+    needs: [version, macos, windows, linux-flatpak]
+    # Publish whatever succeeded: the three build jobs are independent
+    # precisely so a Linux failure does not withhold a verified macOS DMG.
+    # But always() alone would let this job run even when EVERY platform
+    # failed, with nothing to attach and no reason to touch the tap -- so the
+    # gate also requires at least one of them to have actually succeeded.
+    if: >-
+      ${{ always() && github.event_name == 'push' &&
+          (needs.macos.result == 'success' || needs.windows.result == 'success' ||
+           needs.linux-flatpak.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Job-level only: the workflow-level block stays contents: read, and only
+    # this job needs write access to cut a release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: "{macos-dmg,windows-zip}"
+
+      # The build jobs are independent so that one platform failing does not
+      # withhold the others (see the job comment above), which means this
+      # step can run with only a subset of them green. Notes that
+      # unconditionally describe all three platforms would then tell, e.g.,
+      # Linux contributors to install from a bucket URL that either 404s or
+      # -- worse -- silently serves the previous release's repo, so they
+      # install an old build believing it is the new tag. Each paragraph is
+      # therefore built only when that platform's job actually succeeded.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          LINUX_RESULT: ${{ needs.linux-flatpak.result }}
+        run: |
+          set -euo pipefail
+          NOTES="Trace Commons contributor apps."
+          if [ "$MACOS_RESULT" = success ]; then
+            NOTES="$NOTES
+
+          macOS: signed with Iqlusion Inc's Developer ID and notarized by
+          Apple. Apple silicon (arm64) only -- an Intel build is not yet
+          produced; see docs/release-runbook.md. You can also
+          \`brew tap TraceCommons/tap && brew install --cask trace-commons\`."
+          fi
+          if [ "$WINDOWS_RESULT" = success ]; then
+            NOTES="$NOTES
+
+          Windows: Authenticode-signed via Azure Trusted Signing and RFC3161
+          timestamped."
+          fi
+          if [ "$LINUX_RESULT" = success ]; then
+            NOTES="$NOTES
+
+          Linux: install the GPG-signed flatpak with
+          \`flatpak install --from https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref\`"
+          fi
+          NOTES="$NOTES
+
+          Nothing leaves your machine until you approve an upload."
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "$NOTES" \
+            dist/*/*
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
+      # TraceCommons/homebrew-tap with contents and pull-request write.
+      # github.token cannot reach another repository, which is why this
+      # secret exists. This opens a pull request rather than pushing: a
+      # direct push would auto-publish a bad release to everyone who has
+      # already tapped us, with no gate between a failed verification and
+      # someone's `brew upgrade`.
+      - name: Open a cask bump
+        if: needs.macos.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          set -euo pipefail
+          V="$SHORT_VERSION"
+          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V"-arm64.dmg.sha256)"
+          gh repo clone TraceCommons/homebrew-tap tap -- --depth 1
+          cd tap
+          git switch -c "bump-cask-$V"
+          sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb
+          # Assert exactly one sha256 line before substituting: harmless
+          # today with a single hash, but a positional sed like the
+          # formula's awk would be needed the moment the cask grows an
+          # arch-conditional pair, and a silent no-op substitution would
+          # leave a stale hash paired with a bumped version.
+          SHA256_LINES="$(grep -c '^  sha256 "' Casks/trace-commons.rb)"
+          if [ "$SHA256_LINES" != 1 ]; then
+            echo "expected exactly one sha256 line in Casks/trace-commons.rb, found $SHA256_LINES" >&2
+            exit 1
+          fi
+          sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git commit -am "trace-commons $V"
+          git push -u origin "bump-cask-$V"
+          gh pr create --fill --repo TraceCommons/homebrew-tap
