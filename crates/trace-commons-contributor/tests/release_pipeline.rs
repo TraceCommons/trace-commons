@@ -233,8 +233,14 @@ fn windows_signing_is_timestamped() {
     // an RFC3161 countersignature the signature stops validating days after
     // release -- a failure no same-day test would catch.
     assert!(
-        workflow.contains("timestamp-rfc3161"),
-        "an untimestamped Trusted Signing signature expires within days"
+        workflow.contains("/tr http://timestamp.acs.microsoft.com"),
+        "every sign invocation needs an RFC3161 timestamp server: Trusted \
+         Signing certificates carry ~3-day validity, so the countersignature \
+         is the only reason a signature outlives them"
+    );
+    assert!(
+        workflow.contains("/td SHA256"),
+        "the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
         workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),

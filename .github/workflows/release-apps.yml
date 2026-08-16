@@ -158,14 +158,19 @@ jobs:
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority. The cold-build cost is the price of that.
 
-      - name: Build the CLI and daemon
-        run: cargo build --release -p trace-commons-contributor --target x86_64-pc-windows-msvc
+      - name: Build the CLI
+        run: cargo build --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
 
-      - name: Stage the binaries for signing
+      - name: Stage the binary for signing
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path signed | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/*.exe signed/
+          Copy-Item target/x86_64-pc-windows-msvc/release/trace-commons-contributor.exe signed/
+          $staged = @(Get-ChildItem signed\*.exe)
+          if ($staged.Count -ne 1) {
+            throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
+          }
 
       - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
         with:
@@ -226,8 +231,9 @@ jobs:
             CertificateProfileName = $env:TS_PROFILE
           } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
 
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
-                       Sort-Object FullName -Descending |
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+                         -ErrorAction SilentlyContinue |
+                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
                        Select-Object -First 1 -ExpandProperty FullName)
           if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
 
@@ -235,7 +241,7 @@ jobs:
           "metadata=$metadata" >> $env:GITHUB_OUTPUT
           "signtool=$signtool" >> $env:GITHUB_OUTPUT
 
-      # /tr plus /td is the RFC3161 timestamp-rfc3161 countersignature. It is not optional here:
+      # /tr plus /td is the RFC3161 countersignature. It is not optional here:
       # Trusted Signing certificates carry roughly three-day validity, and the
       # timestamp is the only reason a signature outlives them. An untimestamped
       # binary starts failing validation days after release -- a failure no
@@ -273,7 +279,9 @@ jobs:
           }
 
       # After signing, so the provenance covers the signed bytes rather than the
-      # unsigned build output.
+      # unsigned build output. The Authenticode signature travels inside the .exe,
+      # so provenance on the exe covers what a contributor executes; the zip is
+      # only transport.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: signed/*.exe
@@ -283,11 +291,14 @@ jobs:
         env:
           SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
-          $v = "$env:SHORT_VERSION"
-          Compress-Archive -Path signed\*.exe -DestinationPath "dist\trace-commons-windows-x86_64-$v.zip"
-          Get-FileHash "dist\trace-commons-windows-x86_64-$v.zip" -Algorithm SHA256 |
-            ForEach-Object { $_.Hash } |
-            Out-File "dist\trace-commons-windows-x86_64-$v.zip.sha256" -Encoding ascii
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $v = $env:SHORT_VERSION
+          $zip = "dist\trace-commons-windows-x86_64-$v.zip"
+          Compress-Archive -Path signed\*.exe -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $zip)" |
+            Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
