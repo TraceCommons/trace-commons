@@ -869,12 +869,18 @@ echo "$APP_ID"
 ```bash
 az role assignment create \
   --assignee "$APP_ID" \
-  --role "Trusted Signing Certificate Profile Signer" \
+  --role "Artifact Signing Certificate Profile Signer" \
   --scope "/subscriptions/cd8568f1-be90-45d3-8bdf-65b2c3f09ad2/resourceGroups/argos-signing/providers/Microsoft.CodeSigning/codeSigningAccounts/argossigning/certificateProfiles/argos"
 az role assignment list --assignee "$APP_ID" -o table
 ```
 
 Scoped to the profile, not the subscription: this principal should be able to sign with `argos` and do nothing else in the subscription.
+
+The role is **`Artifact Signing`**, not `Trusted Signing` — Microsoft renamed the product, and the old name fails with `Role '...' doesn't exist.` Verified against `az role definition list` in this tenant on 2026-08-16. If a future CLI renames it again, find the current name with:
+
+```bash
+az role definition list --query "[?contains(roleName,'Signing')].roleName" -o tsv
+```
 
 - [ ] **Step 4: Create the GitHub environment**
 

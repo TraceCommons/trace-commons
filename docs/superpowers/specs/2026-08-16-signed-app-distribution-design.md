@@ -87,7 +87,7 @@ Each of these would break a release build today.
 | Platform | Mechanism | Secrets in CI |
 | --- | --- | --- |
 | macOS | Freshly minted Developer ID App G2, exported `.p12` | `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY`, plus an App Store Connect API key (`.p8`, key id, issuer id) for notarytool |
-| Windows | Azure Trusted Signing profile `argos` via GitHub OIDC federated credential, role `Trusted Signing Certificate Profile Signer` | None. Only the non-secret `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+| Windows | Azure Trusted Signing profile `argos` via GitHub OIDC federated credential, role `Artifact Signing Certificate Profile Signer` | None. Only the non-secret `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
 | Linux | New GPG key for the OSTree repo, held in GCP Secret Manager, read through GitHub-to-GCP workload identity federation | None. Federated; no key material in GitHub |
 
 macOS is the only platform where a long-lived signing key sits in GitHub
