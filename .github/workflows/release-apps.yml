@@ -83,7 +83,14 @@ jobs:
     # .swiftLanguageMode(.v6). The first real release failed with "package
     # 'macos' is using Swift tools version 6.0.0 but the installed version is
     # 5.10.0".
-    runs-on: macos-15
+    # macos-26, not macos-15. The universal build (`swift build --arch arm64
+    # --arch x86_64`) collides on output files under the macos-15 image's
+    # toolchain -- "duplicate output file '... Swift Compilation Finished'" for
+    # the arm64 and x86_64 SwiftDriver tasks, surfaced as a misleading
+    # "Swift language versions ... supported: []" error. It builds cleanly on
+    # Xcode 26 / Swift 6.3, which is also what this app is developed against
+    # locally, so CI and the developer toolchain now match.
+    runs-on: macos-26
     # This job holds a Developer ID private key. The environment scopes those
     # secrets to release runs and gives the signing path a place to hang
     # required reviewers, matching how the Windows job is gated.
@@ -444,6 +451,15 @@ jobs:
         env:
           BUCKET: tracecommons-flatpak
         run: ./scripts/flatpak/publish-repo.sh flatpak-repo flatpak-signing-pub.gpg "$BUCKET"
+
+      # The signature gate is a CHECK, not a publication, so it runs on every
+      # build -- including a workflow_dispatch, which skips the publish step
+      # above. Without this, a broken signature could only be discovered by
+      # cutting a real tag, which is how the first two attempts were spent.
+      # Nothing is uploaded here; --verify-only stops before the transfer.
+      - name: Verify the signed repo (no upload)
+        if: github.event_name != 'push'
+        run: ./scripts/flatpak/publish-repo.sh --verify-only flatpak-repo flatpak-signing-pub.gpg
 
       - name: Name the artifact for this version
         id: name
