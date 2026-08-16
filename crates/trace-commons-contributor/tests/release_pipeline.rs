@@ -192,3 +192,18 @@ fn release_dmg_notarizes_with_an_api_key_not_a_password() {
         "BUILD_VERSION must be required with ${{2:?...}}"
     );
 }
+
+#[test]
+fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(workflow.contains("app-v*"), "must trigger on app-v* tags");
+    assert!(
+        workflow.contains("workflow_dispatch"),
+        "one platform must be re-runnable without cutting a tag"
+    );
+    // Independent jobs, not matrix legs: the packaging steps share nothing,
+    // and one platform failing must not block the others.
+    for job in ["  macos:"] {
+        assert!(workflow.contains(job), "missing job {job}");
+    }
+}

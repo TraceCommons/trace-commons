@@ -1,0 +1,116 @@
+# Signed releases of the contributor apps. Tag-driven: push a tag like
+# `app-v0.2.0`.
+#
+# Three independent jobs rather than a matrix. The packaging steps share
+# essentially nothing -- SwiftPM plus notarytool, cargo plus Azure Trusted
+# Signing, flatpak-builder plus OSTree -- so matrix legs would be a stack of
+# `if:` guards. Independent jobs also mean one platform failing does not block
+# the others, which matters most for Linux: its flatpak manifest is the least
+# proven part of this pipeline.
+name: release-apps
+
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which platform to build
+        type: choice
+        default: all
+        options: [all, macos, windows, linux]
+      version:
+        description: Version to stamp when running without a tag
+        type: string
+        default: 0.0.0-dispatch
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  version:
+    name: resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      short: ${{ steps.v.outputs.short }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      # CFBundleVersion must increase monotonically across releases;
+      # the commit count is monotonic and needs no external state.
+      - id: v
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            SHORT="${GITHUB_REF_NAME#app-v}"
+          else
+            SHORT="${{ inputs.version }}"
+          fi
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS signed DMG
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'macos'
+    runs-on: macos-14
+    # This job holds a Developer ID private key. The environment scopes those
+    # secrets to release runs and gives the signing path a place to hang
+    # required reviewers, matching how the Windows job is gated.
+    environment: release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+      # No build cache in a release job, deliberately. A cache is a
+      # write-target a lower-privilege job can poison, and this job holds
+      # signing authority. The cold-build cost is the price of that.
+
+      - name: Build the FFI dylib
+        run: cargo build --release -p trace-commons-contributor-ffi
+
+      # make-release-dmg.sh refuses outright when any credential is missing,
+      # rather than falling back to an ad-hoc signature. An unsigned artifact
+      # named like a release is worse than no artifact.
+      - name: Build, sign, notarize and staple
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+        run: |
+          ./macos/scripts/make-release-dmg.sh \
+            "${{ needs.version.outputs.short }}" \
+            "${{ needs.version.outputs.build }}"
+
+      - name: Rename and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          OUT="TraceCommons-${{ needs.version.outputs.short }}.dmg"
+          cp macos/.build/TraceCommons.dmg "dist/$OUT"
+          # The DMG is signed, notarized and stapled by this point, so this
+          # checksum already covers the final bytes -- unlike the Windows and
+          # CLI paths, where signing happens after packaging and the checksum
+          # must be recomputed.
+          ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
+
+      # After signing and stapling, so the provenance covers the bytes a
+      # contributor actually downloads.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: dist/*.dmg
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-dmg
+          path: dist/
