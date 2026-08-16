@@ -208,25 +208,38 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
+/// Both workflows sign Windows binaries with the same duplicated dlib block,
+/// so both must be pinned. Reading only one leaves the other free to drop the
+/// timestamp -- and an untimestamped Trusted Signing signature keeps validating
+/// for about three days, so no same-day run would catch it.
 #[test]
 fn windows_signing_is_timestamped() {
-    let workflow = read(".github/workflows/release-apps.yml");
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        assert_windows_signing_is_hardened(path);
+    }
+}
+
+fn assert_windows_signing_is_hardened(path: &str) {
+    let workflow = read(path);
     // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
     // client can be verified by content before it runs in a job that holds
     // signing authority.
     assert!(
         workflow.contains("Azure.CodeSigning.Dlib.dll"),
-        "Windows signing drives Microsoft's Trusted Signing dlib via signtool"
+        "{path}: Windows signing drives Microsoft's Trusted Signing dlib via signtool"
     );
     assert!(
         !workflow.contains("azure/trusted-signing-action"),
-        "the marketplace action was deliberately replaced by the SHA-verified \
+        "{path}: the marketplace action was deliberately replaced by the SHA-verified \
          dlib; reintroducing it drops the content check"
     );
     assert!(
         workflow.contains("TRUSTED_SIGNING_CLIENT_SHA256")
             && workflow.contains("Refusing to expand a potentially tampered"),
-        "the signing client must be verified by SHA-256 and fail closed before \
+        "{path}: the signing client must be verified by SHA-256 and fail closed before \
          extraction"
     );
     // Trusted Signing certificates are valid for roughly three days. Without
@@ -234,17 +247,17 @@ fn windows_signing_is_timestamped() {
     // release -- a failure no same-day test would catch.
     assert!(
         workflow.contains("/tr http://timestamp.acs.microsoft.com"),
-        "every sign invocation needs an RFC3161 timestamp server: Trusted \
+        "{path}: every sign invocation needs an RFC3161 timestamp server: Trusted \
          Signing certificates carry ~3-day validity, so the countersignature \
          is the only reason a signature outlives them"
     );
     assert!(
         workflow.contains("/td SHA256"),
-        "the timestamp digest algorithm must be pinned alongside /tr"
+        "{path}: the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
         workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
-        "the signature must be verified in the job, not assumed"
+        "{path}: the signature must be verified in the job, not assumed"
     );
 }
 
@@ -366,13 +379,43 @@ fn contributor_release_notes_do_not_teach_past_gatekeeper() {
         "the macOS CLI binaries must be notarized"
     );
     // notarytool accepts a disk image, a package, or a zip -- never a bare
-    // Mach-O. The zip is what gets submitted.
+    // Mach-O. `ditto -c -k` is what actually produces that zip; checking for
+    // the bare substring "zip" would also match "$OUT.zip", "pkgZip", and
+    // assorted comments, so it can never fail.
     assert!(
-        workflow.contains("ditto") || workflow.contains("zip"),
+        workflow.contains("ditto -c -k"),
         "a bare binary cannot be submitted for notarization; zip it first"
     );
     assert!(
         workflow.contains("x86_64-pc-windows-msvc"),
         "Windows must be in the release matrix"
+    );
+    // notarytool's --wait exit status is not documented to be non-zero for a
+    // rejected submission, so the workflow must parse the verdict itself
+    // rather than trusting the exit code.
+    assert!(
+        workflow.contains("notary.json") && workflow.contains("Accepted"),
+        "notarization must parse the submitted verdict and refuse to publish \
+         anything other than 'Accepted'"
+    );
+}
+
+#[test]
+fn contributor_release_notes_do_not_promise_an_unpublished_flatpak() {
+    let workflow = read(".github/workflows/release-contributor.yml");
+    // The linux-flatpak job (in release-apps.yml) builds a LOCAL repo with no
+    // --gpg-sign and uploads it as a CI artifact only -- there is no publish
+    // step anywhere in this repo. Pointing contributors at this URL and
+    // calling its OSTree repo GPG-signed is exactly the false claim this task
+    // was created to remove, just relocated instead of fixed.
+    assert!(
+        !workflow.contains("tracecommons-flatpak"),
+        "the release notes must not point Linux contributors at a flatpak repo \
+         that nothing in this repository publishes"
+    );
+    assert!(
+        workflow.contains("Verify it against the published"),
+        "the Linux binary ships unsigned; the notes must point at the \
+         checksum, not at a signed distribution channel that does not exist"
     );
 }

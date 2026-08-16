@@ -10,8 +10,11 @@ on:
   push:
     tags:
       - "contributor-v*"
-  # Buildable on demand without cutting a tag, so the matrix can be proven
-  # before it is trusted with a release.
+  # Buildable on demand without cutting a tag, so the Linux leg can be proven
+  # before it is trusted with a release. The macOS and Windows legs sign
+  # unconditionally and the job declares environment: release, so a dispatch
+  # on those legs still needs real credentials or required-reviewer approval
+  # -- it is not a free dry run for the signing path.
   workflow_dispatch:
 
 concurrency:
@@ -48,11 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install toolchain
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: rustup target add "$TARGET"
+      # Pinned, not the runner image's preinstalled Rust. These crates declare
+      # rust-version = 1.92, the macos-13 image is frozen, and windows-latest is
+      # newly added here -- an image lagging that floor, or two release legs
+      # building on different toolchains, is a real-runner-only outcome.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          targets: ${{ matrix.target }}
 
       # By binary name, not by package: `-p trace-commons-contributor` also
       # builds win-pipe-acl-probe, which its own doc comment calls a test
@@ -129,6 +134,7 @@ jobs:
             security delete-keychain "$KEYCHAIN" 2>/dev/null || true
             rm -f "$WORK/cert.p12"
             rm -f "$WORK/notary.p8"
+            rm -f "$WORK/notary.json"
             if [ -n "${ORIGINAL_KEYCHAINS:-}" ]; then
               # shellcheck disable=SC2086
               security list-keychains -d user -s $ORIGINAL_KEYCHAINS || true
@@ -165,16 +171,28 @@ jobs:
             --sign "$MACOS_SIGNING_IDENTITY" "dist/$OUT"
           codesign --verify --strict --verbose=2 "dist/$OUT"
 
-          ditto -c -k --keepParent "dist/$OUT" "$WORK/$OUT.zip"
+          ditto -c -k --sequesterRsrc "dist/$OUT" "$WORK/$OUT.zip"
 
           rm -f "$WORK/notary.p8"
           ( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
           chmod 600 "$WORK/notary.p8"
+          # --wait reports the verdict in its OUTPUT; its exit status is not
+          # documented to be non-zero for an Invalid submission, and several
+          # notarytool versions exit 0 once the submission merely completes. The
+          # DMG path is covered downstream by `stapler staple` and
+          # `spctl --assess`; this path has neither, so parse the status.
           xcrun notarytool submit "$WORK/$OUT.zip" \
             --key "$WORK/notary.p8" \
             --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
             --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
-            --wait
+            --wait --output-format json | tee "$WORK/notary.json"
+          python3 -c '
+          import json, sys
+          status = json.load(open(sys.argv[1])).get("status")
+          print("notarization status: %s" % status)
+          if status != "Accepted":
+              sys.exit("refusing to publish: notarization returned %r, not %r" % (status, "Accepted"))
+          ' "$WORK/notary.json"
           cp "$WORK/$OUT.zip" "dist/$OUT.zip"
 
           # The Package step checksummed the UNSIGNED binary. codesign
@@ -335,9 +353,8 @@ jobs:
           beside it -- that checks integrity, while the signature is what
           establishes who built it.
 
-          The Linux binary is not signed. Use the checksum, or install the
-          flatpak, whose OSTree repo is GPG-signed:
-          https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref
+          The Linux binary is not signed. Verify it against the published
+          checksum.
 
           Nothing leaves your machine until you run \`submit\`. Run
           \`submit --dry-run\` first to see exactly what would be sent." \
