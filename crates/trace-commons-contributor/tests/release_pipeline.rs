@@ -274,6 +274,12 @@ fn flatpak_manifest_has_its_vendored_sources_enabled() {
         !manifest.contains("--filesystem=home"),
         "a blanket home grant defeats the point of shipping this confined"
     );
+    assert_eq!(
+        manifest.matches("--filesystem=").count(),
+        2,
+        "the two read-only session roots must be the ONLY filesystem grants; \
+         a third would widen what a transcript-reading app can reach"
+    );
 }
 
 #[test]
@@ -281,7 +287,12 @@ fn cargo_sources_json_looks_like_a_real_generated_source_list() {
     // Plain std::fs plus a manual scan, deliberately: a JSON dependency for
     // one test is not worth it, and this is only meant to catch the file
     // being truncated, replaced with `{}`, or hand-edited into something
-    // without checksums -- not to catch drift against Cargo.lock.
+    // without checksums -- not to catch drift against Cargo.lock. This scan
+    // is coupled to the generator's current output shape: a `type: git`
+    // dependency (if the GTK crate ever gained one) emits a url + commit
+    // with no sha256, which would fail this url-count == sha256-count check
+    // on a perfectly correct file. If that day comes, compare against
+    // `"type": "archive"` occurrences instead.
     let sources = read("crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json");
     let trimmed = sources.trim();
     assert!(
@@ -302,4 +313,37 @@ fn cargo_sources_json_looks_like_a_real_generated_source_list() {
          hand-edited or corrupted file could drop checksums silently, \
          which is exactly what this manifest's own comment warns against"
     );
+
+    // Cheap half of the drift problem: catch a `cargo update` inside the
+    // GTK crate that was never followed by regenerating cargo-sources.json.
+    // This does not parse TOML (no new dependency) -- it walks Cargo.lock's
+    // `[[package]]` blocks by hand, which is stable enough for this format.
+    // It cannot catch every kind of drift (a source removed but a stale
+    // entry left behind, for instance), but a registry package in the
+    // lockfile with no matching vendor entry is exactly the failure that
+    // would otherwise surface 60 minutes into a release job, at the
+    // network-sandboxed `cargo --offline build` step.
+    let lockfile = read("crates/trace-commons-contributor-gtk/Cargo.lock");
+    for block in lockfile.split("[[package]]").skip(1) {
+        if !block.contains("source = \"registry+") {
+            continue; // path/git dependencies aren't vendored this way
+        }
+        let name = block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("name = \""))
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("package block with no name:\n{block}"));
+        let version = block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("version = \""))
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("package block with no version:\n{block}"));
+        let dest = format!("cargo/vendor/{name}-{version}\"");
+        assert!(
+            sources.contains(&dest),
+            "Cargo.lock has {name} {version} from a registry, but \
+             cargo-sources.json has no {dest} entry -- it is stale; \
+             regenerate it with flatpak-cargo-generator.py"
+        );
+    }
 }

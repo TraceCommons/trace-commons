@@ -85,7 +85,7 @@ jobs:
     environment: release
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
@@ -132,7 +132,7 @@ jobs:
             dist/*.dmg
             dist/*.dmg.sha256
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos-dmg
           path: dist/
@@ -150,7 +150,7 @@ jobs:
     environment: release
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
         with:
           targets: x86_64-pc-windows-msvc
@@ -300,7 +300,7 @@ jobs:
           "$hash  $(Split-Path -Leaf $zip)" |
             Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-zip
           path: dist/
@@ -313,7 +313,8 @@ jobs:
       inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
     # Signing authority, so it declares the environment like the other two:
-    # this job imports the OSTree repo's GPG private key from Secret Manager.
+    # this job will import the OSTree repo's GPG private key from Secret
+    # Manager (Task 9), so it is gated as signing authority from the outset.
     # Its GCP auth is repository-scoped rather than environment-scoped, so
     # unlike the Windows job this is protection rather than a hard auth
     # requirement -- but a job holding a signing key is gated either way.
@@ -323,18 +324,54 @@ jobs:
     # whole GTK crate against the GNOME SDK with no cargo cache.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install flatpak and the GNOME SDK
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          # ostree is a SEPARATE package: flatpak and flatpak-builder depend
+          # only on libostree-1-1, so the verification step below would fail
+          # with "ostree: command not found" after a full successful build.
+          sudo apt-get install -y flatpak flatpak-builder ostree
           sudo flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
+          # 23.08, NOT 24.08. org.gnome.Sdk//46 is built on the freedesktop
+          # 23.08 base, so flatpak-builder resolves the manifest's
+          # sdk-extensions at //23.08. Installing //24.08 succeeds standalone
+          # and then leaves nothing mounted at /usr/lib/sdk/rust-stable/bin, so
+          # the build dies at the first cargo with "command not found" AFTER the
+          # runtime download. GNOME 47/48 are the 24.08-based ones -- move both
+          # runtime and SDK together if ever bumping, never mix.
           sudo flatpak install -y --noninteractive flathub \
             org.gnome.Platform//46 org.gnome.Sdk//46 \
-            org.freedesktop.Sdk.Extension.rust-stable//24.08
+            org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+      - name: Check the SDK's rust against the crate's requirement
+        run: |
+          set -euo pipefail
+          REQUIRED="$(grep -m1 '^rust-version' crates/trace-commons-contributor-gtk/Cargo.toml | cut -d'"' -f2)"
+          # $PATH below is meant to expand inside the nested `sh -c`, not
+          # this outer script; single quotes are correct.
+          # shellcheck disable=SC2016
+          SDK_RUST="$(flatpak run --devel --command=sh org.gnome.Sdk//46 -c \
+            'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH; rustc --version' 2>/dev/null || true)"
+          echo "crate requires rust-version = $REQUIRED"
+          echo "SDK extension provides: ${SDK_RUST:-<could not query>}"
+          if [ -z "$SDK_RUST" ]; then
+            echo "WARNING: could not query the SDK's rustc; continuing to the build," >&2
+            echo "which will fail informatively if the toolchain is too old." >&2
+            exit 0
+          fi
+          HAVE="$(printf '%s' "$SDK_RUST" | awk '{print $2}')"
+          LOWEST="$(printf '%s\n%s\n' "$REQUIRED" "$HAVE" | sort -V | head -1)"
+          if [ "$LOWEST" != "$REQUIRED" ]; then
+            echo "REFUSING: the SDK extension provides rust $HAVE but the crate requires $REQUIRED." >&2
+            echo "The flatpak build is network-sandboxed, so rustup cannot fix this at build time." >&2
+            echo "Options: lower rust-version/edition in the GTK crate, or add an explicit rust" >&2
+            echo "toolchain source to the manifest instead of relying on the SDK extension." >&2
+            exit 1
+          fi
 
       - name: Build the flatpak into a local repo
         run: |
@@ -350,7 +387,15 @@ jobs:
           ostree --repo=flatpak-repo refs | tee refs.txt
           grep -q 'app/ai.tracecommons.Contributor/' refs.txt
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Name the artifact for this version
+        id: name
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          set -euo pipefail
+          echo "artifact=flatpak-repo-${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: flatpak-repo
+          name: ${{ steps.name.outputs.artifact }}
           path: flatpak-repo/

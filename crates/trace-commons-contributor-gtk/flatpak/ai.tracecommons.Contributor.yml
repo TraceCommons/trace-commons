@@ -90,6 +90,10 @@ modules:
     sources:
       - type: dir
         path: ../../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
       # Generated, not written by hand: run
       #   pip install aiohttp toml
       #   python3 flatpak-cargo-generator.py \
