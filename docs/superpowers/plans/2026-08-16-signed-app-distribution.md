@@ -763,9 +763,13 @@ on:
         default: all
         options: [all, macos, windows, linux]
       version:
-        description: Version to stamp when running without a tag
+        description: Version to stamp when running without a tag (e.g. 1.2.3)
         type: string
-        default: 0.0.0
+        # No default, deliberately. A default that passes the version gate means
+        # an operator who clicks Run workflow without editing the field gets a
+        # fully signed, notarized DMG named indistinguishably from a genuine
+        # release of that version. Make them state it.
+        required: true
 
 # Two notarization submissions racing, or two runs both writing the
 # `macos-dmg` artifact, is not something to discover on a release. Not
@@ -778,11 +782,19 @@ concurrency:
 # attestations: write is REQUIRED by actions/attest-build-provenance, and its
 # absence fails late and expensively -- the attest step 403s only after the
 # full build/sign/notarize/staple, and since upload-artifact runs after it, the
-# signed DMG is discarded too. `contents: write` is deliberately NOT here: no
-# job in this workflow writes repository contents until the publish job exists,
-# and an unused write scope is reachable by every step of a job that holds a
-# signing key.
+# signed DMG is discarded too.
+#
+# `contents: read`, not write. Write is what a signing job must not have: no job
+# here writes repository contents until the publish job exists, and an unused
+# write scope is reachable from every step of a job holding a signing key. But
+# read must be stated explicitly rather than left implicit -- checkout of a
+# PUBLIC repo succeeds anonymously whatever the token scope, so omitting it
+# works today and breaks the day this repo goes private, or the day checkout
+# gains `submodules:` or `lfs:` (those hit the contents API, not just the git
+# endpoint). A failure coupled to repository visibility is not one to discover
+# during a release.
 permissions:
+  contents: read
   id-token: write
   attestations: write
 
@@ -807,10 +819,28 @@ jobs:
       # does the same. Measured in this repo on 2026-08-16: this branch 958,
       # origin/main 945, an unrelated stale branch 963.
       #
-      # github.run_number is monotonic per workflow and independent of history
-      # shape. CAVEAT worth knowing rather than rediscovering: deleting and
-      # recreating this workflow file resets it, so never do that without
-      # adding an offset here.
+      # github.run_number is monotonic per THIS WORKFLOW (not per repository --
+      # a second release workflow keeps its own counter, which does not perturb
+      # this one) and is independent of history shape.
+      #
+      # It is composed with run_attempt because a re-run REUSES run_number and
+      # increments run_attempt instead. Without this, tag app-v1.2.0 running as
+      # #57, failing in notarization, and being re-run would produce a second,
+      # byte-different DMG also claiming CFBundleVersion 57 -- indistinguishable
+      # from the first for any updater that keys on it. Ordering between
+      # releases would still hold; build IDENTITY would not.
+      #
+      # The composition is arithmetic, not string concatenation. Concatenating
+      # digits is not monotonic across a digit-count boundary: run 99 attempt 2
+      # gives "992" while run 100 attempt 1 gives "1001", which happens to hold,
+      # but run 9 attempt 9 gives "99" against run 10 attempt 1's "101" only by
+      # luck. run_number * 100 + run_attempt is strictly increasing in
+      # run_number and, within a run, in run_attempt.
+      #
+      # CAVEATS worth knowing rather than rediscovering: the counter resets if
+      # the workflow file is renamed, deleted and re-added, or changed enough
+      # that GitHub treats it as a new workflow -- never do any of those without
+      # adding an offset here. A repository transfer preserves it.
       - id: v
         env:
           # Every one of these crosses into the shell through env, never
@@ -823,6 +853,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
           RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           # Discriminate on the EVENT, not the ref type: a workflow_dispatch
@@ -848,7 +879,7 @@ jobs:
           fi
 
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "build=$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS signed DMG
