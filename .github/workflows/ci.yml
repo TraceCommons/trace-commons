@@ -302,6 +302,11 @@ jobs:
             throw "refused but left $($left.Count) file(s) behind: $($left.FullName -join ', ')"
           }
           Write-Host "refused correctly, and installed 0 files"
+          # The inner pwsh exited 1 -- correctly, that is what we asserted --
+          # and $LASTEXITCODE survives to the end of the step, where PowerShell
+          # hands it back as the step's own status. Without this the step fails
+          # precisely because the installer behaved.
+          exit 0
 
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
