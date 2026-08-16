@@ -126,38 +126,55 @@ fn bundle_script_exports_the_library_path_and_can_skip_adhoc_signing() {
 #[test]
 fn release_dmg_notarizes_with_an_api_key_not_a_password() {
     let script = read("macos/scripts/make-release-dmg.sh");
+    // Filter out comments to assert against code, not prose.
+    let code = script
+        .lines()
+        .filter(|line| line.trim_start().is_empty() || !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
 
+    // API key credentials must be required.
     for required in [
         "MACOS_NOTARY_ASC_KEY_P8_BASE64",
         "MACOS_NOTARY_ASC_KEY_ID",
         "MACOS_NOTARY_ASC_ISSUER_ID",
     ] {
         assert!(
-            script.contains(required),
-            "make-release-dmg.sh must require {required}"
+            code.contains(required),
+            "make-release-dmg.sh must require {required} in executable code"
         );
     }
 
-    // An app-specific password in argv is visible to any local process for the
-    // duration of the call. The API key is passed as a file path instead.
+    // Old Apple ID + password credentials are completely gone from code.
     for gone in ["MACOS_NOTARY_APPLE_ID", "MACOS_NOTARY_PASSWORD"] {
         assert!(
-            !script.contains(gone),
-            "{gone} is still referenced; the Apple ID + app-specific password \
+            !code.contains(gone),
+            "{gone} is still in executable code; the Apple ID + app-specific password \
              path was replaced by the ASC API key"
         );
     }
     assert!(
-        !script.contains("store-credentials"),
-        "notarytool store-credentials is no longer needed and was the source \
-         of the ps-visible password window"
+        !code.contains("store-credentials"),
+        "notarytool store-credentials is no longer in executable code"
     );
+
+    // Hardened runtime and stapling are still present in code.
     assert!(
-        script.contains("--options runtime"),
+        code.contains("--options runtime"),
         "hardened runtime is required for notarization"
     );
     assert!(
-        script.contains("stapler staple"),
+        code.contains("stapler staple"),
         "an unstapled DMG fails for a user who is offline"
+    );
+
+    // Version parameters must be required, not defaulted.
+    assert!(
+        code.contains("${1:?"),
+        "SHORT_VERSION must be required with ${{1:?...}}"
+    );
+    assert!(
+        code.contains("${2:?"),
+        "BUILD_VERSION must be required with ${{2:?...}}"
     );
 }

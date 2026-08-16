@@ -44,10 +44,16 @@
 #
 # # Status
 #
-# The credential path has been exercised (see docs/release-runbook.md), but
-# treat notarization as verified only for versions that have passed the
-# clean-machine gate: open the stapled DMG on a Mac that did not build it,
-# with the network off, and confirm it launches without a Gatekeeper prompt.
+# STILL NEVER EXECUTED as of this change. This commit alters which credentials
+# the script demands; it does not run it. No Developer ID key was available
+# when it landed, so nothing here has signed or notarized anything, and a
+# script that has never run is not evidence.
+#
+# What would change that, in order: a real run producing a signed, notarized,
+# stapled DMG, and then the clean-machine gate -- open that DMG on a Mac that
+# did not build it, with the network off, and confirm it launches with no
+# Gatekeeper prompt. Only versions that have passed BOTH may be described as
+# verified.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -73,8 +79,8 @@ for var in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
   require_env "$var"
 done
 
-SHORT_VERSION="${1:-0.0.0-dev}"
-BUILD_VERSION="${2:-1}"
+SHORT_VERSION="${1:?refusing to build a release without a version. Pass the tag version explicitly; see release-apps.yml.}"
+BUILD_VERSION="${2:?refusing to build a release without a build number.}"
 
 echo "--- building the release bundle"
 TC_SKIP_ADHOC_SIGN=1 ./scripts/make-app-bundle.sh \
@@ -118,7 +124,7 @@ echo "--- importing the signing certificate into a throwaway keychain"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 900 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12"
+( umask 077; echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$WORK/cert.p12" )
 security import "$WORK/cert.p12" -k "$KEYCHAIN" \
   -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: \
@@ -151,10 +157,17 @@ hdiutil create -volname TraceCommons -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"
-# The key is written to the private scratch dir and passed by path. Unlike an
-# app-specific password there is nothing secret in argv here.
-echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8"
-chmod 600 "$WORK/notary.p8"
+# The key is written to the private scratch dir and passed by path, so unlike
+# an app-specific password it never appears in this call's argv.
+#
+# That does NOT mean argv exposure is solved for this script: `security import
+# -P "$MACOS_CERTIFICATE_PASSWORD"` above still passes a secret as an argument,
+# and neither tool accepts one on stdin. So the standing rules still hold, and
+# one of them now matters MORE than before: never enable shell tracing
+# (`set -x`) in this script -- with tracing on, the line below would trace the
+# entire base64 private key. Run release builds on an isolated ephemeral
+# runner.
+( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
 xcrun notarytool submit "$DMG" \
   --key "$WORK/notary.p8" \
   --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
