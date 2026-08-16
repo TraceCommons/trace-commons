@@ -95,7 +95,7 @@ fn swift_manifest_takes_the_library_path_from_the_environment() {
         section
             .split("])")
             .next()
-            .map_or(false, |flags| flags.contains("../target/debug"))
+            .is_some_and(|flags| flags.contains("../target/debug"))
     });
     assert!(
         !hardcoded_in_linker_settings,
