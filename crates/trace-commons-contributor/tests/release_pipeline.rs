@@ -467,3 +467,20 @@ fn flatpak_repo_is_gpg_signed_before_publication() {
          first install has nothing to verify against"
     );
 }
+
+/// The cask lives in another repository, so this test pins the requirement
+/// rather than the file: the runbook must state the exclusion, and the
+/// reason, so nobody "tidies up" a zap stanza that looks incomplete.
+#[test]
+fn runbook_states_why_zap_spares_the_device_key() {
+    let runbook = read("docs/release-runbook.md");
+    assert!(
+        runbook.contains("contributor.json"),
+        "the runbook must name the file the cask's zap stanza spares"
+    );
+    assert!(
+        runbook.contains("not idempotent"),
+        "the runbook must say WHY: /v1/onboard is not idempotent, so deleting \
+         the device key burns an invite code that cannot be reissued"
+    );
+}
