@@ -230,22 +230,42 @@ fn release_notes_only_describe_platforms_that_actually_succeeded() {
              not assume every platform succeeded"
         );
     }
-    // The brew line specifically must not appear unconditioned on macOS,
-    // since the cask only ships a macOS artifact.
+    // The brew line must sit INSIDE a shell conditional on MACOS_RESULT, not
+    // merely after it. An earlier version of this test compared positions --
+    // MACOS_RESULT appearing before `brew install --cask` -- which could not
+    // fail: MACOS_RESULT is declared in the step's `env:` block, and a step's
+    // env always precedes its `run:` body, so the assertion held even with the
+    // brew line emitted unconditionally. Walk the run body instead and require
+    // the line to be lexically inside a macOS test.
     let publish_step_start = workflow
         .find("name: Publish")
         .expect("publish step must exist");
     let publish_step = &workflow[publish_step_start..];
-    let brew_pos = publish_step
-        .find("brew install --cask")
+    let publish_lines: Vec<&str> = publish_step.lines().collect();
+    let brew_line_idx = publish_lines
+        .iter()
+        .position(|line| line.contains("brew install --cask"))
         .expect("release notes must mention brew install");
-    let macos_result_pos = publish_step
-        .find("MACOS_RESULT")
-        .expect("MACOS_RESULT must be wired into the publish step's env");
+
+    let mut guarded = false;
+    for line in publish_lines[..brew_line_idx].iter().rev() {
+        let t = line.trim();
+        // A `fi` closes the nearest conditional before we reach an opening
+        // test, so the brew line is outside it.
+        if t == "fi" {
+            break;
+        }
+        if t.starts_with("if ") && t.contains("MACOS_RESULT") {
+            guarded = true;
+            break;
+        }
+    }
     assert!(
-        macos_result_pos < brew_pos,
-        "MACOS_RESULT must be available before the brew install line is \
-         emitted, so that line can be gated on macOS having succeeded"
+        guarded,
+        "the `brew install --cask` line must be emitted inside a shell \
+         conditional on MACOS_RESULT. The cask ships only a macOS artifact, so \
+         advertising it on a run whose macOS job failed points contributors at \
+         something that does not exist."
     );
 }
 
@@ -337,10 +357,26 @@ fn assert_windows_signing_is_hardened(path: &str) {
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .collect();
+    // Match the ACT of signing, not one spelling of it. An earlier version
+    // filtered on the literal `TS_SIGNTOOL" sign`, so a sign call written with
+    // any other variable or an absolute path counted as zero invocations and
+    // made the >= comparison below vacuously true -- the exact regression this
+    // assertion exists to catch.
     let sign_invocations = executable_lines
         .iter()
-        .filter(|line| line.contains("TS_SIGNTOOL\" sign"))
+        .filter(|line| {
+            let l = line.to_lowercase();
+            // " sign " with BOTH spaces: `-Filter signtool.exe` contains
+            // " signtool", whose prefix is " sign", so a looser test counts the
+            // tool-discovery line as an invocation.
+            l.contains("signtool") && l.contains(" sign ")
+        })
         .count();
+    assert!(
+        sign_invocations > 0,
+        "{path}: found no signtool sign invocation at all -- either the \
+         Windows signing step was removed or this detector no longer matches it"
+    );
     let tr_flags = executable_lines
         .iter()
         .filter(|line| line.contains("/tr "))
