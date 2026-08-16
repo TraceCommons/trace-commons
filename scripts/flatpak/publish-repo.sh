@@ -60,7 +60,13 @@ ostree --repo="$VERIFY_REPO" init --mode=archive
 # imported the key in between, which depended on --force preserving the
 # keyring. Do not reintroduce that ordering; it is undocumented behaviour to
 # rely on and it is not needed.
-ostree --repo="$VERIFY_REPO" remote add --set=gpg-verify-summary=true verify-source "file://$REPO"
+# file:// needs an ABSOLUTE path. `file://flatpak-repo` parses "flatpak-repo"
+# as a HOSTNAME with an empty path, and ostree then fails with
+# "opening repo: opendir((null)): Bad address" -- which the old swallowed-stderr
+# gate reported as "the summary signature did not verify", sending two release
+# cycles chasing a signature problem that did not exist.
+REPO_ABS="$(cd "$REPO" && pwd)"
+ostree --repo="$VERIFY_REPO" remote add --set=gpg-verify-summary=true verify-source "file://$REPO_ABS"
 ostree --repo="$VERIFY_REPO" remote gpg-import verify-source -k "$PUBKEY" >/dev/null
 
 REFS="$(ostree --repo="$REPO" refs | grep '^app/' || true)"
