@@ -1452,7 +1452,7 @@ The generator needs network access to resolve checksums and is not vendored here
 ```bash
 cd ~/code/trace-commons-server
 curl -fsSLO https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
-python3 -m venv /tmp/fcg && /tmp/fcg/bin/pip install aiohttp toml
+python3 -m venv /tmp/fcg && /tmp/fcg/bin/pip install aiohttp tomlkit
 /tmp/fcg/bin/python flatpak-cargo-generator.py \
   crates/trace-commons-contributor-gtk/Cargo.lock \
   -o crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json
@@ -1561,7 +1561,7 @@ gh run watch --repo TraceCommons/trace-commons-server
 Expected: unknown. This is discovery, not verification. Likely failure modes and what they mean:
 - The rust-stable extension version does not match the SDK — adjust the `//24.08` branch to the one the GNOME 46 SDK actually carries.
 - `cargo --offline` cannot find a crate — `cargo-sources.json` is stale against `Cargo.lock`; regenerate.
-- The build succeeds but the binary is missing — the `install -Dm755` path in `build-commands` does not match where cargo put it under the flatpak build root.
+- ~~The build succeeds but the binary is missing — the `install -Dm755` path in `build-commands` does not match where cargo put it.~~ **CONFIRMED and fixed before the first run.** `crates/trace-commons-contributor-gtk/Cargo.toml` declares its own `[workspace]` (line 8) and the root `Cargo.toml` excludes it (line 16), so that crate is its own workspace root and cargo writes to `crates/trace-commons-contributor-gtk/target/release/`, not `target/release/`. The manifest now passes `--target-dir target` explicitly, which pins the output location regardless of workspace layout rather than depending on cargo's root inference.
 
 Report what actually happened with output. If the manifest needs changes beyond the three above, stop and report rather than improvising a wider sandbox grant — widening `finish-args` to make a build pass would trade away the property the manifest exists to hold.
 
