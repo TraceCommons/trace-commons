@@ -93,6 +93,4 @@ modules:
       # above will fail at the network-sandboxed `cargo build` step, which
       # is the correct, honest failure rather than a silent full-network
       # build that defeats the point of a reproducible Flatpak.
-      - type: file
-        path: cargo-sources.json
-        only-arches: []  # disabled until cargo-sources.json exists; see above
+      - cargo-sources.json

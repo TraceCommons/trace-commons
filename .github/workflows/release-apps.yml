@@ -304,3 +304,53 @@ jobs:
         with:
           name: windows-zip
           path: dist/
+
+  linux-flatpak:
+    name: Linux flatpak
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-latest
+    # Signing authority, so it declares the environment like the other two:
+    # this job imports the OSTree repo's GPG private key from Secret Manager.
+    # Its GCP auth is repository-scoped rather than environment-scoped, so
+    # unlike the Windows job this is protection rather than a hard auth
+    # requirement -- but a job holding a signing key is gated either way.
+    environment: release
+    # This manifest had never been built when the job was written. The
+    # generous timeout is because a from-scratch flatpak build compiles the
+    # whole GTK crate against the GNOME SDK with no cargo cache.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install flatpak and the GNOME SDK
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y --noninteractive flathub \
+            org.gnome.Platform//46 org.gnome.Sdk//46 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - name: Build the flatpak into a local repo
+        run: |
+          set -euo pipefail
+          sudo flatpak-builder --disable-rofiles-fuse --force-clean \
+            --repo=flatpak-repo build-dir \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml
+          sudo chown -R "$USER" flatpak-repo
+
+      - name: Confirm the app is actually in the repo
+        run: |
+          set -euo pipefail
+          ostree --repo=flatpak-repo refs | tee refs.txt
+          grep -q 'app/ai.tracecommons.Contributor/' refs.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: flatpak-repo
+          path: flatpak-repo/

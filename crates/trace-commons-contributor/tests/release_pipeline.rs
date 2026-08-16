@@ -203,7 +203,7 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     );
     // Independent jobs, not matrix legs: the packaging steps share nothing,
     // and one platform failing must not block the others.
-    for job in ["  macos:", "  windows:"] {
+    for job in ["  macos:", "  windows:", "  linux-flatpak:"] {
         assert!(workflow.contains(job), "missing job {job}");
     }
 }
@@ -245,5 +245,33 @@ fn windows_signing_is_timestamped() {
     assert!(
         workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
         "the signature must be verified in the job, not assumed"
+    );
+}
+
+#[test]
+fn flatpak_manifest_has_its_vendored_sources_enabled() {
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    assert!(
+        !manifest.contains("only-arches: []"),
+        "the cargo-sources.json entry is still disabled, so the \
+         network-sandboxed cargo build cannot resolve any crate"
+    );
+    let sources =
+        repo_root().join("crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json");
+    assert!(
+        sources.exists(),
+        "cargo-sources.json must be generated and committed; \
+         `cargo --offline build` has no crates without it"
+    );
+    // The confinement argument only holds if the grants stay narrow.
+    assert!(
+        manifest.contains("--filesystem=~/.claude/projects:ro")
+            && manifest.contains("--filesystem=~/.codex/sessions:ro"),
+        "the two read-only session roots must remain the only filesystem grants"
+    );
+    assert!(
+        !manifest.contains("--filesystem=home"),
+        "a blanket home grant defeats the point of shipping this confined"
     );
 }
