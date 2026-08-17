@@ -585,3 +585,137 @@ jobs:
           git commit -am "trace-commons $V"
           git push -u origin "bump-cask-$V"
           gh pr create --fill --repo TraceCommons/homebrew-tap
+
+  publish-updates:
+    name: publish update manifests
+    needs: [version, macos, windows, linux-flatpak, publish]
+    # Runs only when the release itself was cut, and only if at least one
+    # platform is genuinely publishable. A manifest is what installed clients
+    # poll, so publishing one that names a platform whose build failed would
+    # point every client of that platform at a URL that does not exist.
+    if: >-
+      ${{ always() && github.event_name == 'push' &&
+          needs.publish.result == 'success' &&
+          (needs.macos.result == 'success' || needs.windows.result == 'success') }}
+    runs-on: macos-26
+    # macos-26, not ubuntu: Sparkle's sign_update is a macOS binary, and this
+    # job signs the appcast.
+    environment: release
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # macOS ships LibreSSL at /usr/bin/openssl, which implements neither
+      # `pkeyutl ... -rawin` nor `genpkey -algorithm ed25519` -- both of which
+      # generate-manifest.sh (invoked with a bare `openssl` below) and the
+      # verify step in this job require. Left unguarded, a runner whose PATH
+      # resolves to LibreSSL would fail this job at release time with a
+      # cryptic pkeyutl error, which is the worst possible moment to discover
+      # it. Resolve Homebrew's openssl@3 explicitly, confirm it really is
+      # OpenSSL (not LibreSSL under another name), and put it first on PATH
+      # for every later step in this job so the bare `openssl` calls below
+      # all pick up the same verified binary.
+      - name: Resolve a real OpenSSL (not LibreSSL)
+        run: |
+          set -euo pipefail
+          OPENSSL_DIR="$(brew --prefix openssl@3)/bin"
+          if [ ! -x "$OPENSSL_DIR/openssl" ]; then
+            echo "openssl@3 not found via Homebrew at $OPENSSL_DIR -- refusing to sign with whatever /usr/bin/openssl resolves to (LibreSSL on macOS runners)." >&2
+            exit 1
+          fi
+          VERSION_STRING="$("$OPENSSL_DIR/openssl" version)"
+          case "$VERSION_STRING" in
+            OpenSSL\ *) ;;
+            *)
+              echo "resolved binary at $OPENSSL_DIR/openssl is not OpenSSL: $VERSION_STRING" >&2
+              exit 1
+              ;;
+          esac
+          echo "using $VERSION_STRING at $OPENSSL_DIR/openssl"
+          echo "$OPENSSL_DIR" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: "{macos-dmg,windows-zip}"
+
+      - name: Authenticate to GCP (workload identity federation; no key on the runner)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # Both keys are fetched into RUNNER_TEMP and deleted by the runner when
+      # the job ends. Neither is ever echoed: a `set -x` in this step would
+      # print key material into a public log.
+      - name: Fetch the signing keys from Secret Manager
+        env:
+          GCP_PROJECT: tracecommons-pilot-2026
+        run: |
+          set -euo pipefail
+          gcloud secrets versions access latest \
+            --secret=update-manifest-signing-key --project "$GCP_PROJECT" \
+            > "$RUNNER_TEMP/update-signing.pem"
+          chmod 600 "$RUNNER_TEMP/update-signing.pem"
+
+      - name: Build the manifest from the platforms that actually succeeded
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          V="$SHORT_VERSION"
+          BASE="https://github.com/$REPO/releases/download/app-v$V"
+          ARGS=()
+
+          if [ "$MACOS_RESULT" = success ]; then
+            F="dist/macos-dmg/TraceCommons-$V.dmg"
+            SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
+            SIZE="$(wc -c < "$F" | tr -d ' ')"
+            ARGS+=(--platform "macos-universal=$BASE/TraceCommons-$V.dmg=$SHA=$SIZE")
+          fi
+
+          if [ "$WINDOWS_RESULT" = success ]; then
+            F="dist/windows-zip/trace-commons-windows-x86_64-$V.zip"
+            SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
+            SIZE="$(wc -c < "$F" | tr -d ' ')"
+            ARGS+=(--platform "windows-x86_64=$BASE/trace-commons-windows-x86_64-$V.zip=$SHA=$SIZE")
+          fi
+
+          ./scripts/updates/generate-manifest.sh \
+            --version "$V" \
+            --key "$RUNNER_TEMP/update-signing.pem" \
+            --out dist/updates \
+            "${ARGS[@]}"
+
+      - name: Verify the manifest we are about to publish
+        run: |
+          set -euo pipefail
+          # Publishing an unverifiable manifest breaks every installed client
+          # at once, and the failure would only surface on contributors'
+          # machines. Verify here, against the same public key clients pin.
+          openssl pkey -in "$RUNNER_TEMP/update-signing.pem" -pubout \
+            -out "$RUNNER_TEMP/update-signing.pub.pem"
+          openssl base64 -d -A -in dist/updates/latest.json.sig \
+            -out "$RUNNER_TEMP/latest.sig.bin"
+          openssl pkeyutl -verify -rawin \
+            -pubin -inkey "$RUNNER_TEMP/update-signing.pub.pem" \
+            -sigfile "$RUNNER_TEMP/latest.sig.bin" \
+            -in dist/updates/latest.json
+          cat dist/updates/latest.json
+
+      - name: Publish to the bucket
+        env:
+          BUCKET: tracecommons-flatpak
+        run: |
+          set -euo pipefail
+          # Cache-Control is short: this is the file that decides whether a
+          # contributor ever learns a security fix shipped. A long edge cache
+          # would silently extend that delay by hours.
+          gcloud storage cp --cache-control="public, max-age=300" \
+            dist/updates/latest.json dist/updates/latest.json.sig \
+            "gs://$BUCKET/updates/"
