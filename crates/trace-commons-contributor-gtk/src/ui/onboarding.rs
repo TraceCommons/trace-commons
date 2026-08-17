@@ -175,6 +175,27 @@ pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>
 
 thread_local! {
     static PRESENTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// An invite handed to this process on the command line, waiting for
+    /// the Connect screen to be built.
+    static PENDING_INVITE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The invite inside a `tracecommons://enroll?invite=…` deep link.
+///
+/// Re-exported from the contributor crate rather than parsed here, so the
+/// GTK shell and any other Rust shell agree on what a deep link is without
+/// a URL parser being vendored into each one.
+pub use trace_commons_contributor::commands::invite_from_deep_link;
+
+/// Hold an invite from the command line until onboarding is built.
+///
+/// Note what this does *not* do: it does not enrol. A link someone clicked
+/// in mail still lands on the Connect screen with the instance shown and
+/// the button un-pressed, because the decision this screen exists to ask
+/// for is which commons to join -- and a URL handler is not a person
+/// answering that.
+pub fn set_pending_invite(invite: String) {
+    PENDING_INVITE.with(|p| *p.borrow_mut() = Some(invite));
 }
 
 /// Build and show the onboarding window.
@@ -265,7 +286,17 @@ pub fn present(app: &Rc<App>) {
     content.append(&stack);
     window.set_content(Some(&content));
 
-    onboarding.go(Step::Welcome);
+    // An invite arrived by deep link: fill it in and open on Connect, where
+    // the instance is named and the button still has to be pressed. The
+    // welcome screen is skipped because someone who clicked an invite has
+    // already been told what this is by whoever sent it.
+    match PENDING_INVITE.with(|p| p.borrow_mut().take()) {
+        Some(invite) => {
+            onboarding.invite.set_text(&invite);
+            onboarding.go(Step::Connect);
+        }
+        None => onboarding.go(Step::Welcome),
+    }
     window.present();
 }
 
@@ -739,6 +770,20 @@ mod tests {
         let tenants = vec!["tenant-a".to_string()];
         assert!(tenants.iter().any(|t| t == "tenant-a"));
         assert!(!tenants.iter().any(|t| t == "tenant-b"));
+    }
+
+    /// A deep link fills the field and stops there. The parser itself is
+    /// tested beside the other invite parsing, in the contributor crate.
+    #[test]
+    fn a_deep_link_is_taken_exactly_once() {
+        set_pending_invite("https://issuer.example/onboard#CODE".to_string());
+        let taken = PENDING_INVITE.with(|p| p.borrow_mut().take());
+        assert_eq!(
+            taken.as_deref(),
+            Some("https://issuer.example/onboard#CODE")
+        );
+        // A second window must not silently reuse it.
+        assert_eq!(PENDING_INVITE.with(|p| p.borrow_mut().take()), None);
     }
 
     /// `logged_in` alone must never stand in for "onboarded". `enroll`
