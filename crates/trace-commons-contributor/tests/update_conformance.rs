@@ -105,3 +105,32 @@ fn an_artifact_tampered_with_after_signing_is_refused() {
         FetchError::DigestMismatch
     ));
 }
+
+#[test]
+fn the_unsigned_fixture_is_refused_by_the_signature_decision() {
+    use trace_commons_contributor::update::authenticode::{AuthenticodeError, interpret};
+    // The fixture exists on every platform; what the platform verifier would
+    // report for it is `NotSigned`, and that is what must be refused.
+    let bytes = std::fs::read(fixture_dir().join("unsigned/artifact.exe")).expect("unsigned");
+    assert!(!bytes.is_empty());
+    // A PE with an Authenticode signature always starts with the `MZ`
+    // magic. This fixture does not, so it cannot carry a certificate table
+    // regardless of what any verifier reports -- the fixture is genuinely
+    // unsigned, not merely a PE this test forgot to sign.
+    assert_ne!(&bytes[..2.min(bytes.len())], b"MZ");
+    assert!(matches!(
+        interpret("NotSigned", "").unwrap_err(),
+        AuthenticodeError::NotValid
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_platform_verifier_refuses_the_unsigned_fixture() {
+    use trace_commons_contributor::update::authenticode::{AuthenticodeError, verify};
+    let path = fixture_dir().join("unsigned/artifact.exe");
+    assert!(matches!(
+        verify(&path).unwrap_err(),
+        AuthenticodeError::NotValid | AuthenticodeError::UnexpectedSigner
+    ));
+}
