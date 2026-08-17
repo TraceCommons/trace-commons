@@ -255,6 +255,59 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
 
+  windows-install-script:
+    name: install.ps1 against the real release
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      # This installer's whole claim is that it refuses to install what it
+      # cannot verify, and that claim is not testable by reading it. Both paths
+      # run here against the actually published release: the success path, and
+      # the refusal path with the expected signer changed so verification must
+      # fail. Asserting the refusal leaves ZERO files behind is the point --
+      # an installer that reports failure after writing the binary has already
+      # lost.
+      - name: It installs the real, verified binary
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
+          ./scripts/install.ps1 -Dir $dir
+          $exe = Join-Path $dir 'trace-commons-contributor.exe'
+          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
+          $v = & $exe --version
+          Write-Host "reported: $v"
+          if ($v -notmatch 'trace-commons-contributor') { throw "unexpected --version output: $v" }
+
+      - name: It refuses, and installs nothing, when the signer is wrong
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-refuse'
+          $bad = Join-Path $env:RUNNER_TEMP 'install-wrong-signer.ps1'
+          # Same script, one expectation changed: demand a publisher we are not.
+          (Get-Content -Raw ./scripts/install.ps1).
+            Replace("'O=Iqlusion Inc'", "'O=Somebody Else Entirely'") |
+            Set-Content -Path $bad -Encoding UTF8
+
+          $out = & pwsh -File $bad -Dir $dir 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+
+          if ($code -eq 0) { throw 'the installer exited 0 with a signer it should have rejected' }
+          if ($out -notmatch 'unexpected signing identity') {
+            throw 'it failed, but not on the signature check -- so this proves nothing'
+          }
+          $left = @(Get-ChildItem -Path $dir -Recurse -File -ErrorAction SilentlyContinue)
+          if ($left.Count -ne 0) {
+            throw "refused but left $($left.Count) file(s) behind: $($left.FullName -join ', ')"
+          }
+          Write-Host "refused correctly, and installed 0 files"
+          # The inner pwsh exited 1 -- correctly, that is what we asserted --
+          # and $LASTEXITCODE survives to the end of the step, where PowerShell
+          # hands it back as the step's own status. Without this the step fails
+          # precisely because the installer behaved.
+          exit 0
+
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
     runs-on: ubuntu-latest
