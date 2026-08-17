@@ -1469,6 +1469,8 @@ mod tests {
                 mk(SessionEventKind::Reasoning),
                 mk(SessionEventKind::Assistant),
             ],
+            subagent_count: 0,
+            subagents_dropped: 0,
         };
         super::strip_reasoning(&mut t);
         let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();

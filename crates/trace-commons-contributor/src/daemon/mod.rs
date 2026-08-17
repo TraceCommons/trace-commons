@@ -717,15 +717,21 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     };
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
-    let (expired, pending_count, digest) = {
+    let (queue_changed, pending_count, digest) = {
         let mut queue = shared.queue.lock().expect("queue lock");
         let expired = queue.expire(now, ttl_days, blocked);
+        // Bookkeeping rows, not receipts: a superseded offer has a live
+        // successor in the same file, and with subagent grouping a busy
+        // conversation mints one per delegation. Compacted on the same pass
+        // that ages entries out, so the file the daemon re-parses at every
+        // start stays bounded without a second timer.
+        let compacted = queue.compact_superseded();
         let pending = queue.pending();
         let count = pending.len();
         let text = notify::digest_text(&pending);
-        (expired, count, text)
+        (expired + compacted, count, text)
     };
-    if expired > 0 {
+    if queue_changed > 0 {
         let queue = shared.queue.lock().expect("queue lock");
         let _ = queue.save(&shared.store);
     }

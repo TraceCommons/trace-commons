@@ -327,6 +327,18 @@ pub struct PreviewSummary {
     /// envelope carries, so an approval given afterwards is fingerprinted
     /// against the real config and a fresh preview is what it covers.
     pub enrolled: bool,
+    /// How many delegated subagent transcripts this envelope merges in, and
+    /// how many the source left out to keep the conversation under its raw
+    /// byte budget.
+    ///
+    /// The second number is the one that matters here. A group trimmed to
+    /// fit is a conversation the contributor is being shown *less* of than
+    /// exists on disk, and a preview that did not say so would describe a
+    /// complete conversation while covering a partial one. The trim is
+    /// decided in the adapter's `load`, so this describes both the bytes
+    /// previewed and the bytes an upload sends -- they are the same bytes.
+    pub subagent_count: u32,
+    pub subagents_dropped: u32,
 }
 
 /// Redact one session without uploading and describe exactly what would be
@@ -430,6 +442,8 @@ pub async fn build_preview(
             envelope_digest: digest,
             input_fingerprint: fingerprint,
             enrolled,
+            subagent_count: transcript.subagent_count,
+            subagents_dropped: transcript.subagents_dropped,
         },
         body,
         envelope,
@@ -682,6 +696,108 @@ mod tests {
         let src = ClaudeCodeSource::new(root);
         let r = src.discover().unwrap().remove(0);
         (dir, src, r)
+    }
+
+    /// A session with `members` delegated transcripts beside it, each
+    /// carrying `body` repeated to `member_bytes`.
+    fn grouped_session(
+        members: usize,
+        member_filler: usize,
+    ) -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let session = "11111111-1111-1111-1111-111111111111";
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{session}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                 \"content\":\"the human's own opening question\"}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"{session}\",\"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        let subagents = project.join(session).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        for i in 0..members {
+            let filler = "lorem ipsum ".repeat(member_filler);
+            std::fs::write(
+                subagents.join(format!("agent-{i:03}.jsonl")),
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                     \"content\":\"planted-in-subagent-{i} {filler}\"}},\
+                     \"cwd\":\"/Users/testuser/code/myproj\",\
+                     \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                     \"sessionId\":\"{session}\",\"uuid\":\"s{i}\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    #[tokio::test]
+    async fn a_previewed_group_shows_the_human_prompt_and_the_delegated_content() {
+        // Both halves of the bug this fixes. The opening prompt must be the
+        // contributor's own first message -- a subagent card used to render
+        // an instruction written by the parent agent in that slot -- and the
+        // body the contributor reads must actually contain the delegated
+        // work, because that is what the upload sends.
+        let (_d, src, r) = grouped_session(3, 1);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.subagent_count, 3);
+        assert_eq!(summary.subagents_dropped, 0);
+        assert!(
+            summary.opening_prompt.contains("the human's own opening"),
+            "got {:?}",
+            summary.opening_prompt
+        );
+        for i in 0..3 {
+            assert!(
+                body.contains(&format!("planted-in-subagent-{i}")),
+                "member {i} missing from the previewed body"
+            );
+        }
+        assert_eq!(
+            summary.event_count,
+            envelope.events.len(),
+            "the count shown must be the count sent"
+        );
+        // One turn per file plus a group header plus one marker per member.
+        assert_eq!(summary.event_count, 1 + 1 + 3 + 3);
+    }
+
+    #[tokio::test]
+    async fn a_114_member_group_still_fits_the_envelope_cap() {
+        // The plan's ratio (42 MB raw to a 2.8 MB envelope) is one
+        // observation, and `GROUP_RAW_BYTE_BUDGET` is set on the assumption
+        // that it holds with room to spare. This is the measurement rather
+        // than the assumption: the largest group on the probed machine had
+        // 114 members, and a group that overruns the cap is refused whole.
+        let (_d, src, r) = grouped_session(114, 200);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(summary.subagent_count, 114);
+        assert_eq!(summary.subagents_dropped, 0, "nothing should need dropping");
+        assert!(
+            summary.would_send_bytes < crate::envelope::MAX_ENVELOPE_BYTES,
+            "114 members produced {} bytes against a {} cap",
+            summary.would_send_bytes,
+            crate::envelope::MAX_ENVELOPE_BYTES
+        );
     }
 
     #[tokio::test]

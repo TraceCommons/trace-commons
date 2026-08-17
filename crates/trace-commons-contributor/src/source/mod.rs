@@ -22,7 +22,28 @@ pub struct SessionRef {
     pub project: Option<String>, // basename only, never a full path
     pub cwd: Option<String>, // true working dir if cheaply known at discovery; used for --project matching, NEVER serialized
     pub started_at: Option<DateTime<Utc>>,
+    /// The total bytes this ref will hash and load: one file for most
+    /// sources, a session file plus its subagent transcripts for
+    /// claude-code. The daemon's eligibility check keys size stability on
+    /// this, so it must describe everything `load` reads -- a ref whose
+    /// size covered only its primary file would report a group quiescent
+    /// while a sibling transcript was still growing.
     pub size_bytes: u64,
+    /// The most recent mtime across every file this ref covers, when the
+    /// source knows it cheaply. `None` means "no group; stat `path`", which
+    /// is what every single-file source reports.
+    ///
+    /// Same reason as `size_bytes`: quiescence is judged on the whole group
+    /// or it is judged on nothing. `path` stays the primary file so the
+    /// queue, the upload state, and `find_session` all keep addressing a
+    /// ref by one stable path, which is exactly why the parent's own mtime
+    /// cannot be the thing quiescence is measured against.
+    pub group_modified_at: Option<DateTime<Utc>>,
+    /// How many additional transcripts beyond the primary file this ref
+    /// covers. Zero for every single-file source. Surfaced on the queue
+    /// entry so a card covering a hundred delegated transcripts can say so
+    /// -- that is material to the consent decision, not decoration.
+    pub group_member_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +81,16 @@ pub struct SessionTranscript {
     pub started_at: Option<DateTime<Utc>>,
     pub session_hash: String, // "sha256:<hex>" of raw file bytes
     pub events: Vec<SessionEvent>,
+    /// How many delegated transcripts were merged into this one, and how
+    /// many were left out because the group exceeded the raw byte budget.
+    ///
+    /// These are load-time facts, not discovery-time ones: they describe
+    /// what `session_hash` actually covers. A dropped member means the
+    /// contributor is being shown a deliberately trimmed conversation, so
+    /// the count travels with the transcript onto the queue entry rather
+    /// than being decided again at send time.
+    pub subagent_count: u32,
+    pub subagents_dropped: u32,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across

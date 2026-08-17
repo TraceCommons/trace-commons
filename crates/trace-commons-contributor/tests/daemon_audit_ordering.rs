@@ -104,6 +104,8 @@ impl Harness {
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
         };
         let mut q = self.shared.queue.lock().unwrap();
         q.upsert(entry.clone(), 100).unwrap();

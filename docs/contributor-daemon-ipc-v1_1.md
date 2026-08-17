@@ -420,9 +420,36 @@ healthy.
   "residual_risk": "pattern-based",
   "envelope_digest": "sha256:…",
   "input_fingerprint": "sha256:…",
-  "enrolled": true
+  "enrolled": true,
+  "subagent_count": 3,
+  "subagents_dropped": 0
 }
 ```
+
+`subagent_count` and `subagents_dropped` also appear on every queue entry
+(`list_pending`, the `snapshot` event). Both are additive; the schema version
+stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
+exactly as before.
+
+A Claude Code conversation is not one file: each delegated subagent's turns
+are written beside the session under `<session-uuid>/subagents/`, and one
+conversation on a probed machine had 114 of them. The daemon offers the whole
+conversation as a single entry, so `subagent_count` is how many delegated
+transcripts that entry covers. A client should say so on the card -- what is
+being consented to is the whole conversation, and its extent is part of the
+description rather than decoration.
+
+`subagents_dropped` is non-zero only when the conversation exceeded the
+source's raw byte budget and the largest delegated transcripts were left out
+to keep the envelope under its cap. A client **must** surface a non-zero
+value: the difference between a trace the contributor knows was trimmed and
+one that silently arrives partial is the whole point of showing it. The drop
+is decided when the transcript is loaded, so the preview and the upload
+describe the same bytes.
+
+No ordinal is exposed -- there is no "1 of 3" -- because nothing in the
+transcript format supplies one. Ordering delegated transcripts against each
+other would be a claim this daemon cannot verify.
 
 `opening_prompt` is redacted trace content -- see "The preview exemption"
 above for why this one field is allowed to be, and what that permission does
