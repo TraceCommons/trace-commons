@@ -1,0 +1,17 @@
+# Update-conformance fixtures are byte-exact by construction: latest.json.sig
+# is an Ed25519 signature over the literal bytes of latest.json, and
+# artifact.bin / artifact.exe are checked against a sha256 digest pinned in a
+# signed manifest. Git on Windows defaults to core.autocrlf=true, which
+# rewrites LF to CRLF for any file it classifies as text on checkout. That
+# silently changes the bytes these fixtures are made of, so a signature that
+# was valid at commit time fails to verify after checkout -- not because the
+# fixture or the verifier is wrong, but because the file the test reads is no
+# longer the file that was signed. `-text` opts every fixture format in this
+# tree out of that translation on every platform, so the checked-out bytes
+# always match the committed bytes exactly.
+tests/fixtures/update-conformance/**/*.json -text
+tests/fixtures/update-conformance/**/*.sig  -text
+tests/fixtures/update-conformance/**/*.pem  -text
+tests/fixtures/update-conformance/**/*.hex  -text
+tests/fixtures/update-conformance/**/*.bin  -text
+tests/fixtures/update-conformance/**/*.exe  -text
