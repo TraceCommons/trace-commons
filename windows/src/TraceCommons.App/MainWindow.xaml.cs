@@ -35,7 +35,7 @@ public sealed partial class MainWindow : Window
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
-        ViewModel = new MainViewModel(_host);
+        ViewModel = new MainViewModel(_host, new AppUpdater(_host));
 
         Closed += OnClosed;
         Activated += OnFirstActivated;
@@ -53,11 +53,27 @@ public sealed partial class MainWindow : Window
     {
         Activated -= OnFirstActivated;
         await ViewModel.InitializeAsync();
+
+        // After the queue is on screen, not before. The update check is a
+        // network round trip through the deployment service and nothing
+        // about it should stand between a contributor and the sessions they
+        // opened the app to review.
+        await ViewModel.CheckForUpdateAsync();
     }
 
     private async void OnRefreshClick(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshAsync();
+    }
+
+    /// <summary>
+    /// Hands the update to Windows. Fire-and-forget in the same sense
+    /// OnClosed is: the click handler cannot be awaited, and on the success
+    /// path this process is terminated part-way through the call anyway.
+    /// </summary>
+    private async void OnApplyUpdateClick(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.ApplyUpdateAsync();
     }
 
     /// <summary>

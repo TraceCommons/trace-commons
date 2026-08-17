@@ -123,7 +123,7 @@
                 </Grid>
             </Border>
 
-            <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto,Auto">
+            <Grid Grid.Column="1" RowDefinitions="Auto,Auto,*,Auto,Auto">
 
                 <!--
                     Content header.
@@ -207,8 +207,34 @@
                     </Button>
                 </Grid>
 
+                <!--
+                    The update offer.
+
+                    An InfoBar rather than a dialog: an available update is
+                    not an interruption, and a contributor who came here to
+                    approve a session should be able to finish doing that.
+                    IsClosable is false because the banner is already
+                    conditional on a real offer (see
+                    UpdateProtocol.ShouldOfferUpdate), and a dismissed
+                    banner is an update that quietly never happens.
+                -->
+                <InfoBar Grid.Row="1"
+                         IsOpen="{x:Bind ViewModel.IsUpdateBannerVisible, Mode=OneWay}"
+                         IsClosable="False"
+                         Severity="Informational"
+                         Title="Update available"
+                         Message="{x:Bind ViewModel.UpdateStatusText, Mode=OneWay}">
+                    <InfoBar.ActionButton>
+                        <Button Content="Update and restart"
+                                Style="{StaticResource TcPrimaryButtonStyle}"
+                                Click="OnApplyUpdateClick"
+                                IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}"
+                                AutomationProperties.Name="Install the update and restart Trace Commons" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
+
                 <!-- The queue, one session card per waiting session. -->
-                <ListView Grid.Row="1"
+                <ListView Grid.Row="2"
                           ItemsSource="{x:Bind ViewModel.Pending, Mode=OneWay}"
                           ItemContainerStyle="{StaticResource TcQueueCardContainerStyle}"
                           SelectionMode="None"
@@ -358,7 +384,7 @@
                      thing, and this app's own wording ("Sessions appear here
                      after they settle") was the only one of the three that
                      did not also say nothing is sent unless you say so. -->
-                <StackPanel Grid.Row="1"
+                <StackPanel Grid.Row="2"
                             Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
                             VerticalAlignment="Center"
                             HorizontalAlignment="Center"
@@ -394,13 +420,13 @@
                     end of the scroll stack, so it is visible on an empty queue
                     and on a long one alike.
                 -->
-                <TextBlock Grid.Row="2"
+                <TextBlock Grid.Row="3"
                            Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap"
                            Padding="22,10,22,14" />
 
-                <ProgressBar Grid.Row="3"
+                <ProgressBar Grid.Row="4"
                              IsIndeterminate="True"
                              Foreground="{ThemeResource TcGreenFillBrush}"
                              Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
