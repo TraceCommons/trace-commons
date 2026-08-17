@@ -5,7 +5,9 @@
 //! has a real one -- would only ever be a shortcut into it. Nothing in this
 //! application tells a contributor to install a shell extension.
 
+pub mod community_brand;
 pub mod history;
+pub mod mark;
 pub mod preview;
 pub mod queue;
 pub mod settings;
@@ -19,12 +21,60 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::copy;
-use crate::model::{PreviewSummary, QueueEntry, Status};
+use crate::model::{HistoryRollup, PreviewSummary, QueueEntry, Status};
 use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
 
+/// The header bar's height, from §5.1's Linux column. Set as a size request
+/// rather than in CSS because `AdwHeaderBar` derives its height from the
+/// tallest thing packed into it, and the mark and the switcher are both
+/// shorter than the bar the design draws.
+const HEADER_HEIGHT: i32 = 46;
+
+/// The reading column, shared by every screen in this window so the header's
+/// switcher, the health banner and the queue's cards all sit on the same two
+/// vertical lines.
+const COLUMN_MAX: i32 = 840;
+const COLUMN_TIGHTEN: i32 = 680;
+
+/// The three screens, in the order the switcher shows them, with the icon
+/// each one carries. One list, so the stack pages and the switcher items
+/// cannot drift apart.
+///
+/// **Every icon name here must stay symbolic.** GTK recolours a symbolic
+/// icon from its node's `color`, which is what lets style.css mute an
+/// unselected item's icon and turn the selected one green without this code
+/// setting anything. A full-colour icon ignores `color` and renders as-is,
+/// so swapping one in would silently leave that item's icon un-recoloured
+/// while the other two kept working -- a difference that shows up in a
+/// screenshot months later and in no diff at all.
+const SCREENS: [(&str, &str, &str); 3] = [
+    ("queue", "Queue", "view-list-symbolic"),
+    ("history", "History", "document-open-recent-symbolic"),
+    ("settings", "Settings", "emblem-system-symbolic"),
+];
+
+/// The switcher's icon, §5.1 item 1. Set in pixels rather than by an icon
+/// size so it matches the label it sits beside at every text scale.
+const SWITCHER_ICON: i32 = 13;
+
 type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
+
+/// An approval that has been made but has not left the machine yet.
+///
+/// `hold_until` is the daemon's own instant, read from the `approve`
+/// response. Nothing here is computed from a duration this process picked --
+/// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
+pub struct PendingUndo {
+    pub entry_id: String,
+    pub project_label: String,
+    /// When this window offered the undo, which is what the bar's "held 41s"
+    /// counts up from. It counts *up* on purpose: the app cannot see the
+    /// watcher's sweep, so a countdown would be a promise it cannot keep.
+    pub approved_at: chrono::DateTime<chrono::Utc>,
+    pub hold_until: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct App {
     pub worker: Worker,
@@ -40,13 +90,33 @@ pub struct App {
     /// else: the daemon owns the precedence order and a client that
     /// reconstructed it would eventually disagree with the daemon about
     /// what is wrong.
-    health_banner: gtk::Box,
+    ///
+    /// This is the clamped column, not the banner box inside it: showing and
+    /// hiding the column is what also removes its top margin, so a window
+    /// with nothing wrong has no gap under the header.
+    health_banner: adw::Clamp,
     health_label: gtk::Label,
     health_button: gtk::Button,
+    /// The count on the switcher's Queue item. Hidden at zero rather than
+    /// drawn as a "0": an empty badge is a decoration, and the queue's own
+    /// empty state already says the true thing.
+    queue_badge: gtk::Label,
 
     callbacks: RefCell<HashMap<u64, Callback>>,
     pub entries: RefCell<Vec<QueueEntry>>,
     pub status: RefCell<Option<Status>>,
+    /// The week band's three figures. Read here rather than passed down from
+    /// `history` so the queue can draw the band without depending on which
+    /// screen the contributor happens to be looking at.
+    pub rollup: RefCell<HistoryRollup>,
+    /// The approval the undo bar is currently offering to take back, if any.
+    pub undo: RefCell<Option<PendingUndo>>,
+    /// The handle for the once-a-second tick that moves the undo bar's
+    /// elapsed figure, held so a second approval can stop the first one's
+    /// timer instead of leaving it running. Approving is a loop -- the sheet
+    /// approves and advances to the next entry -- so back-to-back approvals
+    /// inside one hold window are the normal path, not an edge case.
+    undo_tick: RefCell<Option<glib::SourceId>>,
     /// Preview summaries, keyed by entry id, so a row can show what would be
     /// sent without re-running the pipeline on every redraw.
     pub previews: RefCell<HashMap<String, PreviewSummary>>,
@@ -89,25 +159,34 @@ impl App {
         let history = history::HistoryView::new();
         let settings = settings::SettingsView::new();
 
-        stack
-            .add_titled(&queue.root, Some("queue"), "Queue")
-            .set_icon_name(Some("view-list-symbolic"));
-        stack
-            .add_titled(&history.root, Some("history"), "History")
-            .set_icon_name(Some("document-open-recent-symbolic"));
-        stack
-            .add_titled(&settings.root, Some("settings"), "Settings")
-            .set_icon_name(Some("emblem-system-symbolic"));
+        // Pages and switcher items are built from the same list, in the same
+        // order, so a screen cannot be renamed in one place and not the
+        // other.
+        let pages: [&gtk::Box; 3] = [&queue.root, &history.root, &settings.root];
+        for ((name, label, icon_name), page) in SCREENS.into_iter().zip(pages) {
+            stack
+                .add_titled(page, Some(name), label)
+                .set_icon_name(Some(icon_name));
+        }
 
-        let switcher = adw::ViewSwitcherTitle::builder()
-            .stack(&stack)
-            .title(copy::APP_NAME)
+        let queue_badge = gtk::Label::builder().visible(false).build();
+        queue_badge.add_css_class("tc-count-badge");
+        queue_badge.set_valign(gtk::Align::Center);
+
+        // The bar's own close button is left to `AdwHeaderBar`'s window
+        // controls rather than hand-built. The design draws a 24px round
+        // `x` on a faint wash, which is exactly what GNOME's own decoration
+        // already is -- and a hand-built one would lose the window menu, the
+        // keyboard path to it, and whatever button layout the contributor
+        // has chosen in their desktop settings.
+        let header = adw::HeaderBar::builder()
+            .title_widget(&view_switcher(&stack, &queue_badge))
             .build();
-        let header = adw::HeaderBar::builder().title_widget(&switcher).build();
         header.add_css_class("tc-header");
+        header.set_size_request(-1, HEADER_HEIGHT);
         // The mark, drawn from its own geometry rather than shipped as an
-        // asset. See `style::brand_mark`.
-        header.pack_start(&style::brand_mark());
+        // asset. 20px is the header-bar size the design spec names.
+        header.pack_start(&mark::framed(20));
 
         let health_label = gtk::Label::builder()
             .wrap(true)
@@ -127,20 +206,37 @@ impl App {
         let health_banner = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(style::space::M)
-            .visible(false)
-            .margin_top(style::space::M)
-            .margin_start(style::space::L)
-            .margin_end(style::space::L)
             .build();
         health_banner.append(&health_glyph);
         health_banner.append(&health_label);
         health_banner.append(&health_button);
         health_banner.add_css_class("tc-banner");
 
+        // The banner sits above the stack rather than inside the queue, so a
+        // contributor reading History or Settings still learns that
+        // contributions are held up. The design draws it on the queue
+        // because the queue is the only screen it drew; putting it here says
+        // the same thing on every screen and never says it twice.
+        //
+        // It is clamped to the same column as the screens below it, which is
+        // the only reason this is a clamp and not a bare margin: an
+        // unclamped banner runs the full width of a maximised window while
+        // the cards under it stop at 840, and the two stop looking like one
+        // document.
+        let banner_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&health_banner)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
-        content.append(&health_banner);
+        content.append(&banner_column);
         content.append(&stack);
         stack.set_vexpand(true);
 
@@ -156,12 +252,16 @@ impl App {
             queue,
             history,
             settings,
-            health_banner,
+            health_banner: banner_column,
             health_label,
             health_button,
+            queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
             status: RefCell::new(None),
+            rollup: RefCell::new(HistoryRollup::default()),
+            undo: RefCell::new(None),
+            undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
             recent_searches: RefCell::new(Vec::new()),
             prefetching: RefCell::new(Default::default()),
@@ -345,6 +445,16 @@ impl App {
             queue::render(app);
             app.prefetch_previews();
         });
+        // The queue's week band needs the same rollup History does. It is
+        // read here rather than handed over by `history::refresh` so the
+        // band is filled in whether or not History has ever been opened;
+        // `history_rollup` is a read of counters the daemon already holds.
+        self.call("history_rollup", serde_json::json!({}), |app, result| {
+            if let Ok(Ok(rollup)) = result.map(serde_json::from_value::<HistoryRollup>) {
+                *app.rollup.borrow_mut() = rollup;
+                queue::render(app);
+            }
+        });
         history::refresh(self);
         settings::refresh(self);
     }
@@ -435,6 +545,156 @@ impl App {
     pub fn toast(self: &Rc<Self>, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
     }
+
+    /// Put the number of decisions owed on the switcher's Queue item.
+    ///
+    /// Called by `queue::render` rather than computed here, so there is
+    /// exactly one place that decides which entries count as waiting.
+    pub fn set_queue_count(self: &Rc<Self>, waiting: usize) {
+        self.queue_badge.set_label(&waiting.to_string());
+        self.queue_badge.set_visible(waiting > 0);
+    }
+
+    /// Offer to take back an approval, on the queue rather than in a toast.
+    ///
+    /// Recovery belongs on the surface a contributor is already looking at:
+    /// a toast is gone in seconds and takes the only path back with it,
+    /// whereas the bar stays for the whole of the daemon's hold and says in
+    /// words what it can and cannot promise.
+    ///
+    /// `hold_until` is the daemon's instant from the `approve` response.
+    /// `None` means no undo may be offered, so none is -- the contributor is
+    /// told plainly instead.
+    pub fn offer_undo(
+        self: &Rc<Self>,
+        entry_id: &str,
+        project_label: &str,
+        hold_until: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let Some(hold_until) = hold_until else {
+            self.toast(copy::APPROVED_NO_UNDO);
+            return;
+        };
+        *self.undo.borrow_mut() = Some(PendingUndo {
+            entry_id: entry_id.to_string(),
+            project_label: project_label.to_string(),
+            approved_at: chrono::Utc::now(),
+            hold_until,
+        });
+        queue::render_undo(self);
+
+        // One tick per second, and it only moves the elapsed figure -- the
+        // bar is not rebuilt, so a contributor whose pointer is on `Undo`
+        // does not have it pulled out from under them.
+        //
+        // Any tick left over from a previous approval is stopped first. The
+        // old one would not have stopped itself: it breaks on the pending
+        // undo being absent or expired, and this call has just replaced it
+        // with a later one, so it would keep ticking alongside the new timer
+        // until the last hold ran out.
+        self.stop_undo_tick();
+        let app = Rc::clone(self);
+        let source = glib::timeout_add_seconds_local(1, move || {
+            let expired = app
+                .undo
+                .borrow()
+                .as_ref()
+                .is_none_or(|undo| chrono::Utc::now() >= undo.hold_until);
+            if expired {
+                app.undo.borrow_mut().take();
+                // Forget our own handle before breaking, so a later
+                // `stop_undo_tick` does not try to remove a source that has
+                // already finished.
+                app.undo_tick.borrow_mut().take();
+                queue::render_undo(&app);
+                return glib::ControlFlow::Break;
+            }
+            queue::render_undo(&app);
+            glib::ControlFlow::Continue
+        });
+        *self.undo_tick.borrow_mut() = Some(source);
+    }
+
+    /// Stop the undo bar's tick if one is running. Idempotent.
+    fn stop_undo_tick(&self) {
+        if let Some(source) = self.undo_tick.borrow_mut().take() {
+            source.remove();
+        }
+    }
+
+    /// Withdraw the undo bar without cancelling: the hold simply runs out.
+    pub fn dismiss_undo(self: &Rc<Self>) {
+        self.stop_undo_tick();
+        self.undo.borrow_mut().take();
+        queue::render_undo(self);
+    }
+}
+
+/// The segmented view switcher, §5.1's Linux column.
+///
+/// Hand-built rather than an `AdwViewSwitcher` because the design puts a
+/// count badge inside one item, and `AdwViewSwitcher` builds its own buttons
+/// from the stack pages' titles and icons with nowhere to put one.
+///
+/// The stack, not this widget, is the source of truth for which screen is
+/// showing: the tray and every notification action set the stack directly,
+/// so the items follow it rather than the other way round.
+fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
+    let track = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .valign(gtk::Align::Center)
+        .build();
+    track.add_css_class("tc-switcher");
+
+    let mut items: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
+    for (name, label, icon_name) in SCREENS {
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
+        // A real `GtkImage`, not a glyph: §6.6 turns the selected item's icon
+        // green while its label stays ink, and style.css matches that on the
+        // `image` node rather than on a class this code would have to
+        // remember to set.
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.set_pixel_size(SWITCHER_ICON);
+        content.append(&icon);
+        content.append(&gtk::Label::new(Some(label)));
+        if name == "queue" {
+            content.append(queue_badge);
+        }
+        let item = gtk::ToggleButton::builder().child(&content).build();
+        item.add_css_class("tc-tab");
+        // `flat` drops Adwaita's own button face, so the track underneath is
+        // what the unselected items sit on.
+        item.add_css_class("flat");
+        if let Some((_, first)) = items.first() {
+            item.set_group(Some(first));
+        }
+        let stack = stack.clone();
+        item.connect_toggled(move |item| {
+            if item.is_active() {
+                stack.set_visible_child_name(name);
+            }
+        });
+        track.append(&item);
+        items.push((name, item));
+    }
+
+    let followers = items.clone();
+    stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+        let Some(showing) = stack.visible_child_name() else {
+            return;
+        };
+        for (name, item) in &followers {
+            if *name == showing.as_str() {
+                item.set_active(true);
+            }
+        }
+    });
+    if let Some((_, first)) = items.first() {
+        first.set_active(true);
+    }
+
+    track
 }
 
 /// A heading and a paragraph, the shape most of this window is made of.

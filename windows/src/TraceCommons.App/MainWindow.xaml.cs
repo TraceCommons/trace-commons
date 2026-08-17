@@ -1,4 +1,5 @@
 using System;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using TraceCommons.App.ViewModels;
 
@@ -20,6 +21,16 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        // The mark and the app name live in the title bar, which means the
+        // window has to own that bar rather than let the system draw it. The
+        // caption buttons stay the system's: only their background is cleared,
+        // so the chrome colour runs behind them and they keep snap layouts,
+        // the window menu and their own accessibility behaviour.
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
+        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
 
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
         // every event hop targets.

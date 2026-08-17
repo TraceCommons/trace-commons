@@ -19,6 +19,11 @@ import TCBridge
 ///
 /// `Contribute` waits on the read gate below (`readGate`) and is bound to no
 /// keyboard shortcut at all.
+///
+/// The layout follows `design-import/DESIGN-SPEC.md` §5.2 (`1b` preview
+/// sheet) and §5.10 (`4a` transcript renderer), which are the same shell:
+/// header bar, tab strip, body, footer bar, with the header's second field
+/// and the body swapping when the transcript tab is active.
 struct PreviewSheet: View {
     /// Content already loaded elsewhere, so the sheet can be rendered
     /// without running its `task`. Used only by the screenshot hook, which
@@ -104,12 +109,12 @@ struct PreviewSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
+            SheetHairline()
             content
-            Divider()
+            SheetHairline()
             footer
         }
-        .frame(width: 820, height: 620)
+        .frame(width: SheetMetric.width, height: SheetMetric.height)
         .tcScreen()
         .task(id: entry.entryID) {
             guard preloaded == nil else { return }
@@ -123,42 +128,82 @@ struct PreviewSheet: View {
     /// The same identity line and the same labelled figures as a queue card,
     /// in the same order. Recognising the card you just clicked is one of
     /// the quieter things that makes a preview trustworthy.
+    ///
+    /// The second field is not fixed: §5.10 replaces the "nothing sent yet"
+    /// lock with what scrubbing actually found while the transcript is on
+    /// screen, because that is the number a person reads the body against.
     private var header: some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-                Text(entry.projectLabel).font(TC.Font_.cardTitle)
+                Text(entry.projectLabel)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
                 Text(entry.agentName)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.inkSecondary)
                 Spacer(minLength: TC.Space.m)
                 Text(Format.when(entry.discoveredAt))
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(.tertiary)
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.inkTertiary)
             }
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxl) {
                 if let summary {
-                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
                         TCFieldLabel("Would send")
-                        Text(Format.bytes(summary.wouldSendBytes))
-                            .font(TC.Font_.ledger)
-                            .monospacedDigit()
+                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
+                            Text(Format.bytes(summary.wouldSendBytes))
+                                .font(TC.Font_.ledger)
+                                .monospacedDigit()
+                                .foregroundStyle(TC.inkPrimary)
+                            if tab == .transcript {
+                                Text("(the session file on disk is \(Format.bytes(summary.rawSessionBytes)))")
+                                    .font(TC.Font_.caption)
+                                    .foregroundStyle(TC.inkSecondary)
+                            }
+                        }
                     }
                     .accessibilityElement(children: .combine)
                 }
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    TCFieldLabel("Status")
-                    TCTag(text: "nothing sent yet", tone: .clear, symbol: "lock")
+                if tab == .transcript, let summary {
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
+                        TCFieldLabel("Scrubbing found")
+                        Text(Self.scrubbingFound(summary))
+                            .font(TC.Font_.ledger)
+                            .foregroundStyle(
+                                summary.redactions.isEmpty
+                                    ? TC.Tone.attention.textColor
+                                    : TC.inkPrimary
+                            )
+                    }
+                    .accessibilityElement(children: .combine)
+                } else {
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
+                        TCFieldLabel("Status")
+                        TCTag(text: "nothing sent yet", tone: .clear, symbol: "lock")
+                    }
+                    .accessibilityElement(children: .combine)
                 }
-                .accessibilityElement(children: .combine)
                 Spacer(minLength: 0)
             }
             Text("Nothing has been sent. This is what would be.")
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
         }
-        .padding(TC.Space.l)
+        .padding(.horizontal, TC.Space.lg)
+        .padding(.vertical, TC.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(TC.surface)
+    }
+
+    /// "12 secrets · 4 file paths · 2 email addresses" -- category labels and
+    /// counts, in the daemon's own words, largest first. The contract
+    /// guarantees this map never carries matched text.
+    private static func scrubbingFound(_ summary: PreviewSummary) -> String {
+        guard !summary.redactions.isEmpty else { return "nothing matched" }
+        return summary.redactions
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
+            .joined(separator: " · ")
     }
 
     @ViewBuilder
@@ -206,7 +251,8 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(TC.Space.m)
+            .padding(.horizontal, TC.Space.lg)
+            .padding(.vertical, TC.Space.md)
         }
     }
 
@@ -218,29 +264,30 @@ struct PreviewSheet: View {
                 Button {
                     tab = item
                 } label: {
-                    HStack(spacing: TC.Space.xs) {
+                    HStack(spacing: TC.Space.xxs) {
                         Image(systemName: item.symbol)
                             .imageScale(.small)
                         Text(item.title)
+                            .font(TC.Font_.caption.weight(tab == item ? .bold : .regular))
                         if let note = badge(for: item, summary: summary) {
                             Text(note)
-                                .font(TC.Font_.ledger)
-                                .foregroundStyle(.secondary)
+                                .font(TC.Font_.monoBadge)
                         }
                     }
-                    .font(TC.Font_.footnote.weight(tab == item ? .bold : .regular))
-                    .foregroundStyle(tab == item ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(tab == item ? TC.inkPrimary : TC.inkSecondary)
                     .padding(.horizontal, TC.Space.m)
-                    .padding(.vertical, TC.Space.xs)
+                    .padding(.vertical, TC.Space.control)
                     .background {
-                        RoundedRectangle(cornerRadius: TC.Radius.inset)
+                        RoundedRectangle(cornerRadius: TC.Radius.control)
                             .fill(tab == item ? TC.surface : Color.clear)
                     }
                     .overlay {
-                        RoundedRectangle(cornerRadius: TC.Radius.inset)
+                        RoundedRectangle(cornerRadius: TC.Radius.control)
                             .strokeBorder(
-                                tab == item ? TC.green.opacity(0.55) : Color.clear,
-                                lineWidth: TC.Space.hairline
+                                tab == item
+                                    ? TC.green.opacity(TC.Border.activeTabAlpha)
+                                    : Color.clear,
+                                lineWidth: TC.Border.hairline
                             )
                     }
                 }
@@ -269,18 +316,25 @@ struct PreviewSheet: View {
     /// scrubbing caveat is repeated verbatim on purpose -- see
     /// `ScrubbingCaveat`.
     private var footer: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            // §5.10 drops this line from the transcript tab's footer. It is
+            // kept on every tab here: the sentence is the one that makes the
+            // read gate mean anything, and the tab a person is standing on
+            // when they reach for Contribute is not a reason to stop saying
+            // it.
             ScrubbingCaveatAtCommit()
             readGate
             HStack(spacing: TC.Space.s) {
+                // Outlined like "Close", never filled: it must not read as a
+                // second way to approve.
                 Button("Not this one") {
                     model.dismiss(entry)
                     dismiss()
                 }
-                // Untinted: it must not read as a second way to approve.
-                .tint(.primary)
+                .buttonStyle(SheetSecondaryButtonStyle())
                 Spacer(minLength: TC.Space.m)
                 Button("Close") { dismiss() }
+                    .buttonStyle(SheetSecondaryButtonStyle())
                 // The ONLY approve control in the product. It is behind the
                 // preview by design, it is behind the read gate above by
                 // design, and it has NO keyboard shortcut: this used to be
@@ -301,7 +355,8 @@ struct PreviewSheet: View {
                 .help(gateHelp)
             }
         }
-        .padding(TC.Space.l)
+        .padding(.horizontal, TC.Space.lg)
+        .padding(.vertical, TC.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(TC.surface)
     }
@@ -359,11 +414,11 @@ struct PreviewSheet: View {
             if !canContribute {
                 Text("""
                 Contribute stays off until both are done. Looking at the first \
-                screen is what this checks -- it cannot check that you read \
-                all of it, and it does not claim to.
+                screen is what this checks — it cannot check that you read all \
+                of it, and it does not claim to.
                 """)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.tertiary)
+                .font(TC.Font_.captionSmall)
+                .foregroundStyle(TC.inkTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -373,17 +428,23 @@ struct PreviewSheet: View {
         HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
             // The shape changes, not just the colour, so the state survives
             // greyscale and colour-blindness.
-            Image(systemName: done ? "checkmark.square.fill" : "square")
-                .font(.system(size: 14))
-                .foregroundStyle(done ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+            TCReadGateCheckbox(checked: done)
             Text(text)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .font(TC.Font_.caption)
+                .foregroundStyle(done ? TC.inkSecondary : TC.inkPrimary)
                 .fixedSize(horizontal: false, vertical: true)
                 .multilineTextAlignment(.leading)
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
+        // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
+        // VoiceOver -- so without this the row announces its sentence and
+        // nothing about whether the condition is met. That is the state the
+        // whole gate is about, on the one control that sends a trace, so the
+        // row is combined into a single element and given the answer as its
+        // value.
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(done ? "Done" : "Not done yet")
     }
 
     private func load() async {
@@ -410,6 +471,109 @@ struct PreviewSheet: View {
         preview?.close()
         preview = nil
     }
+}
+
+// MARK: - Sheet parts
+//
+// These are private to this file on purpose. The sheet is the only surface
+// that draws an outlined sheet button at this size. The read-gate box that
+// used to live here was the same drawing three screens had each written out,
+// and it is now `TCReadGateCheckbox` in the design system.
+
+/// The one size the spec states that the shared scale has no step for: the
+/// sheet canvas (§4.6). The 5pt control padding and the 13pt read-gate box
+/// that used to live here are now `TC.Space.control` and `TC.Control.checkbox`.
+private enum SheetMetric {
+    static let width: CGFloat = 760
+    static let height: CGFloat = 620
+}
+
+/// True while the screenshot hook is rasterizing the shipping views.
+///
+/// `ImageRenderer` runs on the CPU with no window-server session, and two of
+/// its limitations land squarely on this tab and are already documented
+/// elsewhere in the shell: an NSView-backed `TextField` comes out as a solid
+/// yellow bar with a "no entry" glyph (see `OnboardingConnectView`), and a
+/// `ScrollView` comes out blank (see `ConsentScopesView`). Both are artifacts
+/// of the renderer and neither is visible in the running app.
+///
+/// They still matter, because the captures are how this sheet is reviewed,
+/// and a capture that shows a gold block where the search field is and an
+/// empty space where the matched excerpt is says the opposite of what the
+/// running app says -- the second one especially, since a match count with
+/// no visible match is the one thing this tab must never do. So under the
+/// hook, and only under the hook, the field is drawn rather than editable
+/// and the scrolling regions lay out inline. Nothing about the shipping
+/// behaviour changes: `TRACE_COMMONS_SCREENSHOT_DIR` is unset in a real run.
+private enum CaptureMode {
+    static let isRendering = DebugScreenshot.directory != nil
+}
+
+/// A scrolling region that lays its content out inline while the screenshot
+/// hook is running, because `ImageRenderer` rasterizes a `ScrollView` as
+/// blank. See `CaptureMode`.
+private struct CaptureSafeScroll<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        if CaptureMode.isRendering {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
+        } else {
+            ScrollView { content() }
+        }
+    }
+}
+
+/// The sheet's own hairline. `Divider()` picks up the system separator
+/// colour, which is a different grey from the one every card edge in this
+/// app is drawn in.
+private struct SheetHairline: View {
+    var body: some View {
+        Rectangle()
+            .fill(TC.line)
+            .frame(height: TC.Border.hairline)
+    }
+}
+
+/// The outlined button of §6.1: a card face, a hairline, and the label in
+/// ink. Used for every control in the sheet that is not Contribute.
+private struct SheetSecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(TC.Font_.labelControl)
+            .foregroundStyle(TC.inkPrimary)
+            .padding(.horizontal, TC.Space.m)
+            .padding(.vertical, TC.Space.control)
+            .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.control))
+            .overlay {
+                RoundedRectangle(cornerRadius: TC.Radius.control)
+                    .strokeBorder(TC.line, lineWidth: TC.Border.hairline)
+            }
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .contentShape(Rectangle())
+    }
+}
+
+/// Wraps every occurrence of `term` in the gold highlight wash. SwiftUI can
+/// carry a background colour on a run of an `AttributedString` but not the
+/// 2pt radius and 2pt side padding the spec draws around it, so the wash is
+/// flush against the glyphs.
+private func highlighting(_ text: String, term: String) -> AttributedString {
+    var attributed = AttributedString(text)
+    guard !term.isEmpty else { return attributed }
+    var searchRange = attributed.startIndex..<attributed.endIndex
+    while let found = attributed[searchRange].range(of: term, options: .caseInsensitive) {
+        attributed[found].backgroundColor = TC.goldHighlight
+        attributed[found].foregroundColor = TC.inkPrimary
+        searchRange = found.upperBound..<attributed.endIndex
+    }
+    return attributed
 }
 
 // MARK: - Tabs
@@ -440,37 +604,48 @@ struct SearchTab: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
             Text("Search this trace for anything you need to be sure isn't in it.")
-                .font(.callout)
-            TextField("Client name, hostname, anything", text: $needle)
-                .textFieldStyle(.roundedBorder)
-                .focused($focused)
-                .onSubmit(run)
-                .onChange(of: needle) { _, _ in run() }
+                .font(TC.Font_.body)
+                .foregroundStyle(TC.inkPrimary)
+
+            HStack(spacing: TC.Space.s) {
+                searchField
+                Button("Search", action: run)
+                    .buttonStyle(SheetSecondaryButtonStyle())
+            }
 
             if !recents.isEmpty {
-                HStack(spacing: 6) {
-                    Text("Recent:").font(.caption).foregroundStyle(.secondary)
+                // The contributor's own previous questions, one click away.
+                HStack(spacing: TC.Space.s) {
+                    Text("Recent:")
+                        .font(TC.Font_.caption)
+                        .foregroundStyle(TC.inkSecondary)
                     ForEach(recents, id: \.self) { term in
                         Button(term) { needle = term }
-                            .buttonStyle(.link)
-                            .font(.caption)
+                            .buttonStyle(.plain)
+                            .font(TC.Font_.caption)
+                            .foregroundStyle(TC.greenText)
                     }
                 }
             }
 
             resultSummary
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+            CaptureSafeScroll {
+                VStack(alignment: .leading, spacing: TC.Space.sm) {
                     ForEach(Array(contexts.enumerated()), id: \.offset) { _, snippet in
-                        Text(snippet)
-                            .font(.system(.callout, design: .monospaced))
+                        Text(highlighting(snippet, term: needle))
+                            .font(TC.Font_.monoCode)
+                            .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
                             .textSelection(.enabled)
-                            .padding(8)
+                            .padding(.horizontal, TC.Space.sm)
+                            .padding(.vertical, TC.Space.s)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+                            .background(
+                                TC.surfaceScrim,
+                                in: RoundedRectangle(cornerRadius: TC.Radius.control)
+                            )
                     }
                 }
             }
@@ -478,26 +653,59 @@ struct SearchTab: View {
         .onAppear { focused = true }
     }
 
+    /// The spec's field: card face, hairline, radius 6, `5 x 10`.
+    ///
+    /// Under the screenshot hook it is drawn rather than editable -- see
+    /// `CaptureMode`. The box, the type and the text are identical either
+    /// way; what the capture loses is the caret and the ability to type,
+    /// neither of which a still image was ever going to show.
+    @ViewBuilder
+    private var searchField: some View {
+        Group {
+            if CaptureMode.isRendering {
+                Text(needle.isEmpty ? "Client name, hostname, anything" : needle)
+                    .font(TC.Font_.body)
+                    .foregroundStyle(needle.isEmpty ? TC.inkTertiary : TC.inkPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField("Client name, hostname, anything", text: $needle)
+                    .textFieldStyle(.plain)
+                    .font(TC.Font_.body)
+                    .foregroundStyle(TC.inkPrimary)
+                    .focused($focused)
+                    .onSubmit(run)
+                    .onChange(of: needle) { _, _ in run() }
+            }
+        }
+        .padding(.horizontal, TC.Space.sm)
+        .padding(.vertical, TC.Space.control)
+        .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.control))
+        .overlay {
+            RoundedRectangle(cornerRadius: TC.Radius.control)
+                .strokeBorder(TC.line, lineWidth: TC.Border.hairline)
+        }
+    }
+
     @ViewBuilder
     private var resultSummary: some View {
         if !searched || needle.isEmpty {
             Text("Type to search. Nothing is sent while you look.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.body)
+                .foregroundStyle(TC.inkSecondary)
         } else if offsets == nil {
             Text("The search couldn't run on this trace.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.body)
+                .foregroundStyle(TC.inkSecondary)
         } else if offsets!.isEmpty {
             // The answer to the only question this tab exists for, in
             // the app's two loudest tones -- each with a glyph, because a
             // green word and an amber word are the same word in greyscale.
             Label("0 matches", systemImage: TC.Tone.clear.symbol)
-                .font(TC.Font_.sectionTitle)
+                .font(TC.Font_.headingAlert)
                 .foregroundStyle(TC.Tone.clear.textColor)
         } else {
             Label("^[\(offsets!.count) match](inflect: true)", systemImage: TC.Tone.attention.symbol)
-                .font(TC.Font_.sectionTitle)
+                .font(TC.Font_.headingAlert)
                 .foregroundStyle(TC.Tone.attention.textColor)
         }
     }
@@ -541,8 +749,8 @@ struct WhatsInItTab: View {
     let summary: PreviewSummary
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+        CaptureSafeScroll {
+            VStack(alignment: .leading, spacing: TC.Space.sm) {
                 LabeledContent("Agent", value: entry.agentName)
                 LabeledContent("Project", value: entry.projectLabel)
                 LabeledContent("Turns recorded", value: "\(summary.eventCount)")
@@ -553,54 +761,78 @@ struct WhatsInItTab: View {
                 envelope also carries schema, consent and privacy metadata the raw \
                 session file does not.
                 """)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
 
-                Divider()
-                Text("What scrubbing removed").font(.headline)
+                TCSectionHeader(title: "What scrubbing removed")
+                    .padding(.top, TC.Space.xs)
                 if summary.redactions.isEmpty {
-                    Text("""
-                    Nothing matched. On a session that touched credentials, that is \
-                    itself worth a second look.
-                    """)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    // The one card in this tab that is drawn to be found: a
+                    // session where no pattern fired is the session most
+                    // worth a second look, and it is the case a count of
+                    // removals cannot state.
+                    HStack(alignment: .top, spacing: TC.Space.m) {
+                        Image(systemName: TC.Tone.attention.symbol)
+                            .font(.system(size: 14))
+                            .foregroundStyle(TC.Tone.attention.color)
+                            .accessibilityHidden(true)
+                        Text("""
+                        Nothing matched. On a session that touched credentials, that is \
+                        itself worth a second look.
+                        """)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(TC.inkPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, TC.Space.md)
+                    .padding(.vertical, TC.Space.m)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .tcCard(emphasised: true)
+                    .accessibilityElement(children: .combine)
                 } else {
                     ForEach(summary.redactions.sorted(by: { $0.key < $1.key }), id: \.key) { kind, count in
                         Text("\(count) × \(kind.replacingOccurrences(of: "_", with: " "))")
-                            .font(.callout)
+                            .font(TC.Font_.body)
+                            .foregroundStyle(TC.inkPrimary)
                     }
                 }
 
                 if !summary.piiLabelsPresent.isEmpty {
-                    Divider()
-                    Text("Personal-information categories seen").font(.headline)
+                    TCSectionHeader(title: "Personal-information categories seen")
+                        .padding(.top, TC.Space.xs)
                     Text(summary.piiLabelsPresent.joined(separator: ", "))
-                        .font(.callout)
+                        .font(TC.Font_.body)
+                        .foregroundStyle(TC.inkPrimary)
                     Text("Categories only. The matched text is never reported here.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(TC.Font_.caption)
+                        .foregroundStyle(TC.inkSecondary)
                 }
 
-                Divider()
-                Text("Residual risk: \(summary.residualRisk.replacingOccurrences(of: "_", with: " "))")
-                    .font(.callout)
+                TCSectionHeader(title: "Residual risk")
+                    .padding(.top, TC.Space.xs)
+                Text(summary.residualRisk.replacingOccurrences(of: "_", with: " "))
+                    .font(TC.Font_.body)
+                    .foregroundStyle(TC.inkPrimary)
                 Text("""
                 Files touched and tools invoked are not in this contract's preview \
                 summary, so they are not shown rather than guessed at.
                 """)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
         }
     }
 }
 
-/// The redacted transcript exactly as it would be sent. Redactions stay
-/// visible as inline chips (`[SECRET]`, `[PATH]`) rather than deletions, so a
-/// contributor can see WHERE scrubbing fired -- which is the point.
+/// The redacted transcript exactly as it would be sent, set as flat
+/// monospace text and deliberately not as chat bubbles: these are the
+/// literal bytes an approval covers, not a conversation to be enjoyed.
+///
+/// Redactions stay visible as inline chips rather than deletions, so a
+/// contributor can see WHERE scrubbing fired -- which is the point. A hole
+/// tells you nothing; a chip tells you the pipeline was standing there.
 struct TranscriptTab: View {
     let transcript: String
     /// Called once the redacted body is actually on screen. This is what the
@@ -609,15 +841,76 @@ struct TranscriptTab: View {
     /// here reports what was read, and nothing here reports the content.
     var onFirstScreenShown: () -> Void = {}
 
+    /// Built once per body rather than per layout pass. Real pilot traces
+    /// run to 169 KB and the marker scan walks all of it.
+    @State private var rendered: AttributedString?
+
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
-            Text(transcript.isEmpty ? "(empty)" : transcript)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(6)
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            Text(TranscriptMarkers.chipped(Self.caption, font: TC.Font_.caption))
+                .font(TC.Font_.caption)
+                .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+                .foregroundStyle(TC.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            CaptureSafeScroll {
+                Text(rendered ?? AttributedString(transcript))
+                    .font(TC.Font_.monoTranscript)
+                    .lineSpacing(
+                        TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
+                    )
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, TC.Space.md)
+                    .padding(.vertical, TC.Space.m)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
+        }
+        .task(id: transcript) {
+            rendered = TranscriptMarkers.chipped(
+                transcript.isEmpty ? "(empty)" : transcript,
+                font: TC.Font_.monoTranscript
+            )
         }
         .onAppear(perform: onFirstScreenShown)
+    }
+
+    /// Spec copy, with the sample marker rendered as a live chip so the
+    /// sentence demonstrates the thing it describes.
+    private static let caption = """
+        These are the exact bytes an approval covers. Marks like <PRIVATE_SECRET_1> \
+        show where scrubbing fired — legible as chips, not holes.
+        """
+}
+
+/// Turns the redaction pipeline's `<PRIVATE_*>` and `[REDACTED*]` markers
+/// into chips: bold, on the measured chip pair rather than the gold ramp,
+/// so they read as objects placed in the text instead of damage done to it.
+private enum TranscriptMarkers {
+    /// Matches both marker families the pipeline emits, including the
+    /// `[REDACTED:aws_secret_key]` form that carries a category label.
+    private static let pattern = try? NSRegularExpression(
+        pattern: "<PRIVATE_[A-Za-z0-9_]+>|\\[REDACTED[^\\]]*\\]"
+    )
+
+    static func chipped(_ text: String, font: Font) -> AttributedString {
+        guard let pattern else { return AttributedString(text) }
+        let whole = NSRange(text.startIndex..<text.endIndex, in: text)
+        var out = AttributedString()
+        var cursor = text.startIndex
+        for match in pattern.matches(in: text, range: whole) {
+            guard let range = Range(match.range, in: text) else { continue }
+            out.append(AttributedString(String(text[cursor..<range.lowerBound])))
+            var chip = AttributedString(String(text[range]))
+            chip.font = font.weight(.bold)
+            chip.backgroundColor = TC.redactionChipBackground
+            chip.foregroundColor = TC.redactionChipForeground
+            out.append(chip)
+            cursor = range.upperBound
+        }
+        out.append(AttributedString(String(text[cursor...])))
+        return out
     }
 }
 
@@ -628,15 +921,18 @@ struct PermissionsTab: View {
     let options: [ConsentScope]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("What this upload asks for").font(.headline)
+        CaptureSafeScroll {
+            VStack(alignment: .leading, spacing: TC.Space.m) {
+                TCSectionHeader(title: "What this upload asks for")
                 ForEach(summary.consentScopes, id: \.self) { scope in
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
                         Text(ScopeCopy.title(for: scope, options: options))
-                            .font(.callout.weight(.semibold))
+                            .font(TC.Font_.cardTitle)
+                            .foregroundStyle(TC.inkPrimary)
                         if let description = options.first(where: { $0.name == scope })?.description {
-                            Text(description).font(.callout).foregroundStyle(.secondary)
+                            Text(description)
+                                .font(TC.Font_.caption)
+                                .foregroundStyle(TC.inkSecondary)
                         }
                     }
                 }
@@ -646,11 +942,10 @@ struct PermissionsTab: View {
                 between now and sending, this approval stops applying and you are \
                 asked again.
                 """)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
         }
     }
 }

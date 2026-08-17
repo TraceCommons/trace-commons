@@ -45,10 +45,17 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-consent-scopes.png",
                 size: CGSize(width: 660, height: 760)
             )
+            // 900 wide, not the 660 the other onboarding screens use. The
+            // welcome hero picks its type size from a `ViewThatFits` ladder,
+            // and only the top rung is wide enough to keep the globe beside
+            // the headline. At 660 the ladder correctly drops the globe --
+            // correct in the app, misleading in a review artifact, because
+            // the shipping window opens at 940 and always gets the globe.
+            // Capture the screen a contributor actually sees.
             render(
                 OnboardingWelcomeContent(),
                 to: directory + "/macos-shell-onboarding-welcome.png",
-                size: CGSize(width: 660, height: 520)
+                size: CGSize(width: 900, height: 560)
             )
             render(
                 OnboardingProjectsContent().environmentObject(model),
@@ -102,10 +109,16 @@ enum DebugScreenshot {
                 )
             }
             if let (entry, preloaded) = await model.loadCaptureSample(needle: "Northwind") {
+                // 760 x 620 is the sheet's own frame, not a chosen canvas:
+                // `PreviewSheet` sets that width from the design spec's
+                // §4.6 sheet measure. A larger canvas here does not enlarge
+                // the sheet, it just bands unused ground down the right-hand
+                // edge of the capture, which reads as a layout bug in a
+                // review. Keep the two numbers together.
                 render(
                     PreviewSheet(entry: entry, preloaded: preloaded).environmentObject(model),
                     to: directory + "/macos-shell-preview-sheet.png",
-                    size: CGSize(width: 820, height: 620)
+                    size: CGSize(width: 760, height: 620)
                 )
             }
             if ProcessInfo.processInfo.environment["TRACE_COMMONS_QUIT_AFTER_SHOT"] == "1" {

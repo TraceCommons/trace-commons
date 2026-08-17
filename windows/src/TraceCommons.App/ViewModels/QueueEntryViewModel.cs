@@ -35,7 +35,26 @@ public sealed class QueueEntryViewModel
         : !string.IsNullOrWhiteSpace(_entry.ProjectId) ? _entry.ProjectId!
         : "Unknown project";
 
-    public string Source => string.IsNullOrWhiteSpace(_entry.Source) ? "—" : _entry.Source!;
+    /// <summary>
+    /// The agent that produced the session, in the words a contributor uses
+    /// for it rather than the raw source token.
+    ///
+    /// The macOS and Linux clients both map these, and a card that reads
+    /// "claude-code" where the other two read "Claude Code" is three clients
+    /// naming the same thing three ways. An unrecognised token is tidied
+    /// rather than replaced: the daemon may name an agent this build has
+    /// never heard of, and printing it is more useful than hiding it.
+    /// </summary>
+    public string Source => _entry.Source switch
+    {
+        null or "" => "—",
+        "claude-code" or "claude_code" => "Claude Code",
+        "codex" => "Codex",
+        "trajectory" or "letta_trajectory" => "Letta trajectory",
+        string other when string.IsNullOrWhiteSpace(other) => "—",
+        string other => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(
+            other.Replace('_', ' ').Replace('-', ' ')),
+    };
 
     public string State => string.IsNullOrWhiteSpace(_entry.State) ? "—" : _entry.State!;
 
