@@ -160,7 +160,11 @@ impl Sheet {
         let title = adw::WindowTitle::new("", "");
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.add_css_class("tc-header");
-        header.pack_start(&style::brand_mark());
+        // The Turn, at the same 20px the main window's header bar uses. This
+        // sheet is modal over that window, so both marks are on screen at
+        // once -- a superseded mark here would be visible beside the adopted
+        // one rather than merely stale.
+        header.pack_start(&super::mark::framed(20));
 
         // The sheet header: who and when, then the manifest strip, then the
         // one sentence that has to survive every other word on the screen.
@@ -852,9 +856,7 @@ impl Sheet {
             // so a keystroke-by-keystroke search does not fill the list.
         }
 
-        let hay = body.to_lowercase();
-        let pin = needle.to_lowercase();
-        let hits: Vec<usize> = hay.match_indices(&pin).map(|(i, _)| i).collect();
+        let hits = search_hits(body, needle);
         // "0 matches" is the answer a contributor under an NDA came here
         // for, so it is the one that gets the good-standing tone. A hit is
         // not a failure -- it is something to weigh -- so it gets gold, not
@@ -890,8 +892,8 @@ impl Sheet {
             hits.len(),
             if hits.len() == 1 { "match" } else { "matches" }
         ));
-        for start in hits.iter().take(50) {
-            let excerpt = context_around(body, *start, needle.len());
+        for (start, end) in hits.iter().take(50) {
+            let excerpt = context_around(body, *start, *end);
             let label = gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -1157,7 +1159,45 @@ impl Excerpt {
 /// still indexes the returned string: a snippet whose highlight had drifted
 /// by the number of line breaks in it would mark the wrong words, which on
 /// this screen is worse than marking none.
-fn context_around(body: &str, byte_start: usize, needle_len: usize) -> Excerpt {
+/// Every case-insensitive hit for `needle` in `body`, as `(start, end)` byte
+/// ranges into `body` ITSELF.
+///
+/// The obvious implementation -- `body.to_lowercase().match_indices(needle)`
+/// -- is wrong, because case folding is not byte-length preserving. U+0130 is
+/// two bytes and folds to three; U+212A is three and folds to one. Every
+/// offset after such a character is off by the difference, so slicing `body`
+/// with it marks the wrong run ("eedle" rather than "needle" after a single
+/// U+0130) and can land mid-codepoint and panic.
+///
+/// So the fold is built alongside a map from each folded byte back to the
+/// body byte it came from. The map carries one entry per folded byte plus a
+/// terminator, so both ends of a hit translate, and every value it holds is a
+/// char boundary in `body` because it only ever records `char_indices`.
+fn search_hits(body: &str, needle: &str) -> Vec<(usize, usize)> {
+    let mut folded = String::with_capacity(body.len());
+    let mut map: Vec<usize> = Vec::with_capacity(body.len() + 1);
+    for (offset, ch) in body.char_indices() {
+        for lowered in ch.to_lowercase() {
+            folded.push(lowered);
+            map.resize(folded.len(), offset);
+        }
+    }
+    map.push(body.len());
+
+    let pin = needle.to_lowercase();
+    if pin.is_empty() {
+        return Vec::new();
+    }
+    folded
+        .match_indices(&pin)
+        .map(|(i, m)| (map[i], map[i + m.len()]))
+        .collect()
+}
+
+/// `byte_start` and `byte_end` are offsets into `body` itself, not into a
+/// case-folded copy of it -- see `search_hits`. Both must be char boundaries;
+/// the caller gets them from that map, which only ever records boundaries.
+fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
     let start = body[..byte_start]
         .char_indices()
         .rev()
@@ -1165,7 +1205,7 @@ fn context_around(body: &str, byte_start: usize, needle_len: usize) -> Excerpt {
         .last()
         .map(|(i, _)| i)
         .unwrap_or(byte_start);
-    let after = (byte_start + needle_len).min(body.len());
+    let after = byte_end.min(body.len());
     let end = body[after..]
         .char_indices()
         .take(60)
@@ -1193,8 +1233,45 @@ mod tests {
     fn context_never_splits_a_multibyte_character() {
         let body = "prefix ünïcödé haystack needle tail ünïcödé more";
         let start = body.find("needle").unwrap();
-        let excerpt = context_around(body, start, "needle".len());
+        let excerpt = context_around(body, start, start + "needle".len());
         assert!(excerpt.text.contains("needle"));
+    }
+
+    /// Case folding is not byte-length preserving, so a hit offset taken
+    /// from a lowercased copy of the body does not address the body. U+0130
+    /// is two bytes and folds to three, U+212A is three and folds to one, so
+    /// every offset after one of them is wrong by the difference -- which
+    /// marks the wrong run, and can land mid-codepoint and panic.
+    ///
+    /// This drives the real `search_hits`, so a regression in the mapping
+    /// fails here rather than in a contributor's window.
+    #[test]
+    fn a_hit_after_a_case_folding_character_still_marks_the_matched_term() {
+        for (body, needle) in [
+            ("\u{130}xx the client is Acme Corp here", "acme corp"),
+            ("\u{212A}elvin asked about Acme Corp today", "ACME CORP"),
+            ("\u{130}\u{130}\u{130} Acme Corp", "Acme Corp"),
+            ("\u{130} Acme Corp and Acme Corp again", "acme corp"),
+            ("no folding oddity, Acme Corp", "acme corp"),
+        ] {
+            let hits = super::search_hits(body, needle);
+            assert!(!hits.is_empty(), "no hit in {body:?}");
+            for (start, end) in hits {
+                assert_eq!(&body[start..end], "Acme Corp", "body {body:?}");
+                let excerpt = context_around(body, start, end);
+                assert_eq!(
+                    &excerpt.text[excerpt.hit.clone()],
+                    "Acme Corp",
+                    "body {body:?} needle {needle:?}"
+                );
+            }
+        }
+    }
+
+    /// An empty needle would otherwise report a hit at every byte boundary.
+    #[test]
+    fn an_empty_needle_matches_nothing() {
+        assert!(super::search_hits("Acme Corp", "").is_empty());
     }
 
     /// The highlight has to land on the matched term itself. A range that
@@ -1211,7 +1288,7 @@ mod tests {
             "trailing hit is Acme Corp",
         ] {
             let start = body.find("Acme Corp").unwrap();
-            let excerpt = context_around(body, start, "Acme Corp".len());
+            let excerpt = context_around(body, start, start + "Acme Corp".len());
             assert_eq!(&excerpt.text[excerpt.hit.clone()], "Acme Corp", "{body}");
         }
     }

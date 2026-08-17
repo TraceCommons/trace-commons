@@ -111,6 +111,12 @@ pub struct App {
     pub rollup: RefCell<HistoryRollup>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The handle for the once-a-second tick that moves the undo bar's
+    /// elapsed figure, held so a second approval can stop the first one's
+    /// timer instead of leaving it running. Approving is a loop -- the sheet
+    /// approves and advances to the next entry -- so back-to-back approvals
+    /// inside one hold window are the normal path, not an edge case.
+    undo_tick: RefCell<Option<glib::SourceId>>,
     /// Preview summaries, keyed by entry id, so a row can show what would be
     /// sent without re-running the pipeline on every redraw.
     pub previews: RefCell<HashMap<String, PreviewSummary>>,
@@ -255,6 +261,7 @@ impl App {
             status: RefCell::new(None),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
+            undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
             recent_searches: RefCell::new(Vec::new()),
             prefetching: RefCell::new(Default::default()),
@@ -579,8 +586,15 @@ impl App {
         // One tick per second, and it only moves the elapsed figure -- the
         // bar is not rebuilt, so a contributor whose pointer is on `Undo`
         // does not have it pulled out from under them.
+        //
+        // Any tick left over from a previous approval is stopped first. The
+        // old one would not have stopped itself: it breaks on the pending
+        // undo being absent or expired, and this call has just replaced it
+        // with a later one, so it would keep ticking alongside the new timer
+        // until the last hold ran out.
+        self.stop_undo_tick();
         let app = Rc::clone(self);
-        glib::timeout_add_seconds_local(1, move || {
+        let source = glib::timeout_add_seconds_local(1, move || {
             let expired = app
                 .undo
                 .borrow()
@@ -588,16 +602,29 @@ impl App {
                 .is_none_or(|undo| chrono::Utc::now() >= undo.hold_until);
             if expired {
                 app.undo.borrow_mut().take();
+                // Forget our own handle before breaking, so a later
+                // `stop_undo_tick` does not try to remove a source that has
+                // already finished.
+                app.undo_tick.borrow_mut().take();
                 queue::render_undo(&app);
                 return glib::ControlFlow::Break;
             }
             queue::render_undo(&app);
             glib::ControlFlow::Continue
         });
+        *self.undo_tick.borrow_mut() = Some(source);
+    }
+
+    /// Stop the undo bar's tick if one is running. Idempotent.
+    fn stop_undo_tick(&self) {
+        if let Some(source) = self.undo_tick.borrow_mut().take() {
+            source.remove();
+        }
     }
 
     /// Withdraw the undo bar without cancelling: the hold simply runs out.
     pub fn dismiss_undo(self: &Rc<Self>) {
+        self.stop_undo_tick();
         self.undo.borrow_mut().take();
         queue::render_undo(self);
     }

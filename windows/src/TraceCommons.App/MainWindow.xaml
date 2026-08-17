@@ -297,15 +297,24 @@
                                             Padding="16,10">
                                         <StackPanel Spacing="6">
                                             <StackPanel Orientation="Horizontal" Spacing="24">
+                                                <!-- Both eyebrows override the style's ink.tertiary
+                                                     foreground. They sit on the inset strip rather
+                                                     than on the card, where ink.tertiary measures
+                                                     4.36:1 light and 4.05:1 dark, under the 4.5:1
+                                                     floor; ink.secondary clears it at 5.48 and 5.94.
+                                                     This is the rule the theme dictionary states for
+                                                     small type on an inset surface. -->
                                                 <StackPanel Spacing="2">
                                                     <TextBlock Text="SESSION ON DISK"
-                                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                                               Style="{StaticResource TcEyebrowTextStyle}"
+                                                               Foreground="{ThemeResource TcInkSecondaryBrush}" />
                                                     <TextBlock Text="{x:Bind SizeText}"
                                                                Style="{StaticResource TcMonoFigureTextStyle}" />
                                                 </StackPanel>
                                                 <StackPanel Spacing="2">
                                                     <TextBlock Text="STATUS"
-                                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                                               Style="{StaticResource TcEyebrowTextStyle}"
+                                                               Foreground="{ThemeResource TcInkSecondaryBrush}" />
                                                     <TextBlock Text="{x:Bind State}"
                                                                Style="{StaticResource TcMonoFigureTextStyle}" />
                                                 </StackPanel>

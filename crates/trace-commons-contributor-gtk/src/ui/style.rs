@@ -404,25 +404,10 @@ fn load(provider: &gtk::CssProvider, dark: bool) {
     provider.load_from_data(&format!("{tokens}\n{}", include_str!("style.css")));
 }
 
-/// The TraceCommons mark, as pure geometry.
-///
-/// A direct transcription of `.brand-mark` in
-/// `community/public/styles.css`: a square on the surface colour with a
-/// hairline border, a green wedge cut from the top-left corner at 38% along
-/// the leading diagonal, and a blue field beyond 45% along the other. No
-/// asset file, no bundled image, and it stays crisp at any scale factor
-/// because it is two CSS gradients.
-pub fn brand_mark() -> gtk::Box {
-    let mark = gtk::Box::builder()
-        .width_request(22)
-        .height_request(22)
-        .valign(gtk::Align::Center)
-        .build();
-    mark.add_css_class("tc-brand-mark");
-    // Decoration. A screen reader has the window title for this.
-    mark.set_can_focus(false);
-    mark
-}
+// The gradient-square mark that used to live here is gone. It was a
+// transcription of `.brand-mark` in `community/public/styles.css`, and the
+// clients no longer wear it: The Turn is the mark now, drawn as real
+// geometry in `ui::mark`. The website keeps its own.
 
 /// A micro label over a figure: the site's `.eyebrow` / `th` / `.kpi
 /// .label` treatment. Uppercased here rather than in CSS so it does not

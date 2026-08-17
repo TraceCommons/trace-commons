@@ -78,11 +78,17 @@
             <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#99DCAA43" />
 
             <!-- Coral: "refused". Spec 7.2 records that no dark values were
-                 ever drawn, because History has no dark frame. The light hues
-                 are carried through unchanged rather than invented, and this
-                 is the one pair to revisit when a dark History is designed. -->
-            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D65D4F" />
-            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#B8483B" />
+                 ever drawn, because History has no dark frame. Carrying the
+                 LIGHT hues through unchanged was the first instinct here and
+                 it was wrong: #B8483B on the dark card measures 3.02:1, under
+                 the 4.5:1 floor every other ink in this file clears, and it
+                 disagreed with the other two clients, which both derived a
+                 lifted dark coral rather than reusing the light one.
+                 These are macOS's and Linux's values, so the three agree:
+                 #F79C8F measures 7.57:1 on the card and 7.47:1 on the ground,
+                 and the brand hue clears the 3:1 bar a border needs. -->
+            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#F2887A" />
+            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#F79C8F" />
 
             <!-- Redaction marker chip in the transcript renderer. -->
             <SolidColorBrush x:Key="TcRedactionChipBackgroundBrush" Color="#4A3C18" />

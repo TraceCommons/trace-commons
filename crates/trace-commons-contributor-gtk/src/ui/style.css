@@ -130,18 +130,10 @@
 }
 
 /* --- The mark ------------------------------------------------------
-   A transcription of `.brand-mark`:
-     linear-gradient(135deg, var(--green) 0 38%, transparent 38% 100%),
-     linear-gradient(45deg, transparent 0 45%, var(--blue) 45% 100%)
-   written with single-position stops, which every GTK 4 release parses. */
-
-.tc-brand-mark {
-  background-color: @tc_surface;
-  background-image:
-    linear-gradient(135deg, @tc_green 38%, transparent 38%),
-    linear-gradient(45deg, transparent 45%, @tc_blue 45%);
-  border: 1px solid @tc_line;
-}
+   Nothing here. The Turn is real geometry rather than a styled box, drawn
+   by `ui::mark` on a DrawingArea so it stays crisp at 14px and at 84px and
+   picks its inks from the tokens above. The gradient square this file used
+   to carry is superseded; the website keeps it. */
 
 /* --- Type scale ----------------------------------------------------
    Two rules carry the identity. Figures that describe what leaves the

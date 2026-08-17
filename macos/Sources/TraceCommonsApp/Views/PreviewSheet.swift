@@ -437,6 +437,14 @@ struct PreviewSheet: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
+        // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
+        // VoiceOver -- so without this the row announces its sentence and
+        // nothing about whether the condition is met. That is the state the
+        // whole gate is about, on the one control that sends a trace, so the
+        // row is combined into a single element and given the answer as its
+        // value.
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(done ? "Done" : "Not done yet")
     }
 
     private func load() async {

@@ -105,7 +105,6 @@ impl QueueView {
             .margin_start(space::XL)
             .margin_end(space::XL)
             .build();
-        column.append(&undo_bar);
         column.append(&heading);
         column.append(&list);
         column.append(&disclaimer);
@@ -132,8 +131,39 @@ impl QueueView {
             .build();
         empty.add_css_class("tc-empty");
 
+        // The undo bar sits in the page root, ABOVE the empty state and the
+        // scroller, rather than at the top of the scrolling column.
+        //
+        // It has to outlive the thing it is undoing. Approving the last
+        // waiting session empties the queue, and `render` hides the whole
+        // scroller when there is nothing pending -- so a bar parented inside
+        // it would be hidden by an ancestor at exactly the moment a person
+        // most wants it, with `set_visible(true)` on the bar itself having no
+        // effect. That is the common case, not an edge one: the sheet
+        // approves and advances, and the last advance empties the queue.
+        //
+        // Its own clamp keeps it on the same measure as the column below.
+        let undo_clamp = adw::Clamp::builder()
+            .maximum_size(super::COLUMN_MAX)
+            .tightening_threshold(super::COLUMN_TIGHTEN)
+            .margin_top(space::L)
+            .margin_start(space::XL)
+            .margin_end(space::XL)
+            .child(&undo_bar)
+            .build();
+
+        // The wrapper follows the bar rather than being toggled separately,
+        // so `render_undo` still has exactly one thing to set. Without this
+        // the clamp keeps its margins while the bar is hidden and leaves a
+        // band of dead space above the queue.
+        undo_bar
+            .bind_property("visible", &undo_clamp, "visible")
+            .sync_create()
+            .build();
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
+        root.append(&undo_clamp);
         root.append(&empty);
         root.append(&scroller);
 

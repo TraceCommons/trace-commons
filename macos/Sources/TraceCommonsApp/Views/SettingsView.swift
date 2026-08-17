@@ -243,6 +243,14 @@ struct SettingsView: View {
         .padding(TC.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard()
+        // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
+        // VoiceOver, so without this a scope announces its title and
+        // description with no indication of whether it is granted. The row
+        // becomes one element carrying that answer, which is the same shape
+        // `ConsentScopesView` gives its own rows.
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(checked ? "Granted" : "Not granted")
+        .accessibilityAddTraits(checked ? [.isSelected] : [])
     }
 
     // MARK: - Public profile (spec §5.6)
