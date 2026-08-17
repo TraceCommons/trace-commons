@@ -1129,3 +1129,34 @@ fn the_bundle_script_signs_sparkle_inside_out() {
          (Sparkle >= 2.6), or it loses the entitlement it needs"
     );
 }
+
+#[test]
+fn the_release_script_signs_every_sparkle_component_for_notarization() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+    for needle in [
+        "XPCServices/Installer.xpc",
+        "XPCServices/Downloader.xpc",
+        "Versions/B/Autoupdate",
+        "Versions/B/Updater.app",
+        "--preserve-metadata=entitlements",
+    ] {
+        assert!(
+            script.contains(needle),
+            "make-release-dmg.sh must sign {needle}. Notarization rejects the \
+             whole submission when any nested Mach-O lacks a Developer ID \
+             signature, a secure timestamp, or the hardened runtime."
+        );
+    }
+    // Everything nested must be signed before the app bundle that seals it.
+    let last_sparkle = script
+        .rfind("Sparkle.framework")
+        .expect("make-release-dmg.sh never mentions Sparkle.framework");
+    let outer_sign = script
+        .find("--sign \"$MACOS_SIGNING_IDENTITY\" \"$APP\"")
+        .expect("the outer app signing call changed shape");
+    assert!(
+        last_sparkle < outer_sign,
+        "Sparkle is signed after the app bundle; signing the outer bundle \
+         first is invalidated the moment anything inside it is touched"
+    );
+}

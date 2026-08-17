@@ -152,9 +152,42 @@ security set-key-partition-list -S apple-tool:,apple:,codesign: \
 security list-keychains -d user -s "$KEYCHAIN" $ORIGINAL_KEYCHAINS
 
 echo "--- signing"
-# The embedded dylib is signed before the bundle that contains it: codesign
-# seals nested code, so signing the outer bundle first would be invalidated
-# by touching the inner one afterwards.
+# Nested code is signed before the bundle that contains it: codesign seals
+# what is inside, so signing the outer bundle first would be invalidated by
+# touching anything inner afterwards.
+#
+# `--deep` is deliberately absent and must stay absent. It would re-sign
+# Sparkle's Downloader XPC service without the entitlement it ships with,
+# which is the single most common way a Sparkle integration breaks. Sparkle's
+# own documentation gives exactly this ordering.
+SPARKLE_FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
+if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+  echo "refusing to build a release: Sparkle.framework is not in the bundle." >&2
+  echo "make-app-bundle.sh embeds it; a bundle without it builds, signs and" >&2
+  echo "notarizes cleanly and then crashes on launch." >&2
+  exit 1
+fi
+
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" \
+  "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Installer.xpc"
+# Sparkle >= 2.6 ships Downloader.xpc with its own entitlements; re-signing
+# without preserving them removes the network access it needs.
+codesign --force --timestamp --options runtime --preserve-metadata=entitlements \
+  --sign "$MACOS_SIGNING_IDENTITY" \
+  "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Downloader.xpc"
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" \
+  "$SPARKLE_FRAMEWORK/Versions/B/Autoupdate"
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" \
+  "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" \
+  "$SPARKLE_FRAMEWORK"
+
+# The embedded dylib is signed before the bundle that contains it, for the
+# same reason.
 find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
   while IFS= read -r -d '' dylib; do
     codesign --force --timestamp --options runtime \
@@ -164,7 +197,8 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
 # Hardened runtime is required for notarization. There is deliberately no
 # entitlements file: this app needs no exception to the hardened runtime, and
 # adding entitlements it does not use would widen what a compromised process
-# could do for no benefit.
+# could do for no benefit. Sparkle's updater runs out of process precisely so
+# that the app does not need one.
 codesign --force --timestamp --options runtime \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
