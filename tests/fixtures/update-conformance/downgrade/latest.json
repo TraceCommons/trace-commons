@@ -1,0 +1,27 @@
+{
+  "platforms": {
+    "linux-x86_64-cli": {
+      "sha256": "fa4ee1c409d0910d0bd623732ae28f8aadcb667e8be75b0d5206922e805d11b3",
+      "size": 47,
+      "url": "https://example.invalid/linux-x86_64-cli"
+    },
+    "macos-aarch64-cli": {
+      "sha256": "fa4ee1c409d0910d0bd623732ae28f8aadcb667e8be75b0d5206922e805d11b3",
+      "size": 47,
+      "url": "https://example.invalid/macos-aarch64-cli"
+    },
+    "macos-x86_64-cli": {
+      "sha256": "fa4ee1c409d0910d0bd623732ae28f8aadcb667e8be75b0d5206922e805d11b3",
+      "size": 47,
+      "url": "https://example.invalid/macos-x86_64-cli"
+    },
+    "windows-x86_64-cli": {
+      "sha256": "fa4ee1c409d0910d0bd623732ae28f8aadcb667e8be75b0d5206922e805d11b3",
+      "size": 47,
+      "url": "https://example.invalid/windows-x86_64-cli"
+    }
+  },
+  "published_at": "2026-08-17T00:00:00Z",
+  "schema_version": "trace_commons.update_manifest.v1",
+  "version": "0.0.1"
+}
