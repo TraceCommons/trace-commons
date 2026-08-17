@@ -5259,8 +5259,13 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
         timeout: StdDuration::from_secs(timeout_seconds),
     };
-    let scorer =
-        NearAiPerplexityScorer::try_new(scorer_cfg).context("NearAiPerplexityScorerInitFailed")?;
+    // reqwest's blocking client owns an internal Tokio runtime and must not be
+    // constructed from this async startup task. Build it on the blocking pool,
+    // which is also where synchronous gate evaluation runs below.
+    let scorer = tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_cfg))
+        .await
+        .context("NearAiPerplexityScorerInitJoinFailed")?
+        .context("NearAiPerplexityScorerInitFailed")?;
 
     // fastembed-rs embedder — same configuration surface as the local-GPU
     // path. Runs locally on CPU; no GPU required.
@@ -48613,12 +48618,20 @@ async fn evaluate_and_record_gate(
     // make the gate service's KekContext disagree with the wrapped DEK's
     // context binding → KekContextMismatch on every real-deployment evaluation.
     let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
-    let decision = state.gate_service.evaluate_trace(
-        &tenant_ctx,
-        &ciphertext,
-        &wrapped_dek,
-        TraceArtifactKind::ContributionEnvelope,
-    )?;
+    // Both real scorer backends are synchronous. In particular, the NEAR AI
+    // scorer uses reqwest's blocking client, which must not run inside a Tokio
+    // async worker. Keep model inference and network waits on the blocking pool.
+    let gate_service = Arc::clone(&state.gate_service);
+    let decision = tokio::task::spawn_blocking(move || {
+        gate_service.evaluate_trace(
+            &tenant_ctx,
+            &ciphertext,
+            &wrapped_dek,
+            TraceArtifactKind::ContributionEnvelope,
+        )
+    })
+    .await
+    .context("TraceGateEvaluationJoinFailed")??;
 
     let decision_id = Uuid::new_v4();
     let row = StorageTraceGateDecisionRow {
