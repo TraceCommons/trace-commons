@@ -47,6 +47,22 @@ pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
 #[cfg(feature = "near-ai-privacy-filter")]
 pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
+/// Largest serialized contribution envelope the platform accepts, and the
+/// single source of truth for that number.
+///
+/// It lives here rather than in the client because both ends have to agree:
+/// the contributor refuses an oversized envelope before upload, ingest caps
+/// the request body, and account read-back caps what it will return. When
+/// those were three independent constants they drifted -- the client refused
+/// at 1.5 MB while ingest accepted 2 MiB -- so a client raise alone silently
+/// bought nothing. Everything downstream is now derived from this value with
+/// explicit headroom, and tests assert the ordering holds.
+///
+/// Sized for whole agent coding sessions: a 42 MB raw session redacts to
+/// roughly 2.8 MB of envelope, so this clears the observed worst case by a
+/// wide margin. Scoring cost does not scale with it -- the gate chunk cap
+/// bounds how much of a trace is ever scored.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 16_000_000;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
