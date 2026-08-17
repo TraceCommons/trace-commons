@@ -227,6 +227,25 @@ fn quiesce_running_daemon(store: &ConfigStore) -> bool {
     }
 }
 
+/// The platform's pre-swap signature check on a staged binary.
+///
+/// On Windows this is a real Authenticode verification, held to the same
+/// standard as `install.ps1` -- see `authenticode`'s module doc for why there
+/// is nothing to stand in its place off Windows. Kept as its own function,
+/// separate from `apply_staged`'s control flow, for the same reason
+/// `authenticode::interpret` is kept separate from the platform call it
+/// backs: so the decision of whether a staged binary may be applied is
+/// swappable in a test without touching the swap logic around it.
+#[cfg(windows)]
+fn verify_staged_signature(path: &Path) -> Result<(), UpdateError> {
+    authenticode::verify(path).map_err(|_| UpdateError::Authenticode)
+}
+
+#[cfg(not(windows))]
+fn verify_staged_signature(_path: &Path) -> Result<(), UpdateError> {
+    Ok(())
+}
+
 /// Apply a staged update to `target_exe`, if one is staged and still valid.
 ///
 /// Returns the version installed, or `None` when nothing was staged. Every
@@ -237,6 +256,20 @@ fn quiesce_running_daemon(store: &ConfigStore) -> bool {
 /// re-checked against the recorded digest in this function -- see
 /// `fetch::VerifiedArtifact::verified_from_stage`.
 pub fn apply_staged(target_exe: &Path) -> Result<Option<String>, UpdateError> {
+    apply_staged_with_verifier(target_exe, verify_staged_signature)
+}
+
+/// `apply_staged`, with the platform signature check passed in rather than
+/// called directly, so a test can substitute a stub verifier and exercise
+/// the refusal path (staged bytes rejected, nothing swapped, staging
+/// cleared) on any platform -- not only on a Windows box where the real
+/// Authenticode call can run. Production always calls this through
+/// `apply_staged`, which supplies the real `verify_staged_signature`; this
+/// function is not part of the crate's public API.
+fn apply_staged_with_verifier(
+    target_exe: &Path,
+    verify: impl Fn(&Path) -> Result<(), UpdateError>,
+) -> Result<Option<String>, UpdateError> {
     let record = match stage::read_record(target_exe) {
         Ok(Some(r)) => r,
         Ok(None) => return Ok(None),
@@ -283,12 +316,9 @@ pub fn apply_staged(target_exe: &Path) -> Result<Option<String>, UpdateError> {
         }
     }
 
-    #[cfg(windows)]
-    {
-        if authenticode::verify(&staged_path).is_err() {
-            let _ = stage::clear(target_exe);
-            return Err(UpdateError::Authenticode);
-        }
+    if let Err(e) = verify(&staged_path) {
+        let _ = stage::clear(target_exe);
+        return Err(e);
     }
 
     // Only reachable after the digest comparison above succeeded: this is
@@ -335,12 +365,36 @@ mod tests {
 
     #[test]
     fn a_staged_update_is_applied_and_then_forgotten() {
+        // The staged bytes here are not signed by anyone -- this test is
+        // about the staging/swap/cleanup plumbing, not the signature check,
+        // so it supplies a verifier that always accepts, the same way the
+        // real one does on every platform except Windows.
         let d = tempfile::tempdir().unwrap();
         let target = write_staged(d.path(), b"new binary", "9.9.9");
-        let applied = apply_staged(&target).unwrap().expect("applied");
+        let applied = apply_staged_with_verifier(&target, |_| Ok(()))
+            .unwrap()
+            .expect("applied");
         assert_eq!(applied, "9.9.9");
         assert_eq!(std::fs::read(&target).unwrap(), b"new binary");
         assert!(stage::read_record(&target).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unsigned_staged_binary_is_refused_and_cleared() {
+        // This is the gate itself, not a bypass of it: a verifier that
+        // refuses (standing in for a real Authenticode check on an unsigned
+        // binary) must stop the swap, leave the running binary untouched,
+        // and clear the poisoned staging area -- on every platform, not only
+        // where the real Windows verifier can run.
+        let d = tempfile::tempdir().unwrap();
+        let target = write_staged(d.path(), b"new binary", "9.9.9");
+        let result = apply_staged_with_verifier(&target, |_| Err(UpdateError::Authenticode));
+        assert!(matches!(result, Err(UpdateError::Authenticode)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(
+            stage::read_record(&target).unwrap().is_none(),
+            "a refused staged binary must not be retried forever"
+        );
     }
 
     #[test]
