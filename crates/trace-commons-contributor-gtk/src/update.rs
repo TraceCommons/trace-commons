@@ -285,6 +285,198 @@ pub fn parse_signal(name: &str, dict: &HashMap<String, OwnedValue>) -> Option<Po
     }
 }
 
+/// What the UI can ask the monitor thread to do. One variant today; an
+/// enum rather than a unit type because `Close` is the obvious next one.
+enum MonitorCommand {
+    /// Call `UpdateMonitor.Update`. Only ever sent after a contributor has
+    /// confirmed -- see `ui::update`.
+    Install,
+}
+
+/// A live update monitor: signals coming out, install requests going in.
+///
+/// The D-Bus side runs on its own threads and talks to the GTK main loop
+/// only through `async_channel`, exactly as `portal::spawn_request` does.
+/// A portal round trip can include however long a permission dialog sits on
+/// screen, and the window must never wait on that.
+pub struct UpdateMonitor {
+    /// Everything the portal said, plus a single `MonitorUnavailable` if it
+    /// never said anything because there was nothing to talk to.
+    pub signals: async_channel::Receiver<PortalSignal>,
+    commands: std::sync::mpsc::Sender<MonitorCommand>,
+}
+
+impl UpdateMonitor {
+    /// Ask the portal to install the offered update.
+    ///
+    /// Fire-and-forget: the answer arrives as `Progress` signals on
+    /// `signals`, never as a return value. A send failure means the monitor
+    /// thread is gone, which is already reported through the channel, so
+    /// there is nothing further to say here.
+    pub fn request_install(&self) {
+        let _ = self.commands.send(MonitorCommand::Install);
+    }
+}
+
+/// Create the monitor and start reading it.
+///
+/// Outside a flatpak this makes no D-Bus call at all: there is no portal to
+/// call, and `CreateUpdateMonitor` would answer `NotSupported`. The caller
+/// is expected to check [`detect_install_kind`] first and never reach here;
+/// the check is repeated anyway so a future caller cannot make this module
+/// talk to the flatpak portal from an unconfined process by accident.
+pub fn spawn_monitor() -> UpdateMonitor {
+    let (signal_tx, signal_rx) = async_channel::bounded(32);
+    let (command_tx, command_rx) = std::sync::mpsc::channel::<MonitorCommand>();
+
+    std::thread::spawn(move || {
+        if detect_install_kind() != InstallKind::Flatpak {
+            let _ = signal_tx.send_blocking(PortalSignal::MonitorUnavailable);
+            return;
+        }
+
+        let (connection, monitor_path) = match create_monitor() {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Fixed label only. No session bus, no flatpak portal, a
+                // portal older than version 2, and a portal that declined
+                // all reach here, and none of them should look like a
+                // crash -- never the D-Bus error text.
+                eprintln!("trace-commons-shell: flatpak update portal unavailable");
+                let _ = signal_tx.send_blocking(PortalSignal::MonitorUnavailable);
+                return;
+            }
+        };
+
+        // One reader thread per signal name: a blocking signal iterator
+        // owns its thread for as long as the monitor lives, and there are
+        // two signals to read from the same object.
+        for name in [SIGNAL_UPDATE_AVAILABLE, SIGNAL_PROGRESS] {
+            let connection = connection.clone();
+            let path = monitor_path.clone();
+            let tx = signal_tx.clone();
+            std::thread::spawn(move || read_signals(&connection, &path, name, &tx));
+        }
+
+        // Commands run on this thread, sharing the same connection. The
+        // loop ends when the UI side is dropped, which is process exit.
+        while command_rx.recv().is_ok() {
+            if call_update(&connection, &monitor_path).is_err() {
+                eprintln!("trace-commons-shell: flatpak update portal refused the install");
+                // Synthesised so the window leaves `Installing` instead of
+                // showing a progress bar that will never move again. It is
+                // shaped exactly like the portal's own terminal error so
+                // the state machine has one path, not two.
+                let _ = signal_tx.send_blocking(PortalSignal::Progress {
+                    n_ops: 0,
+                    op: 0,
+                    progress: 0,
+                    status: PROGRESS_STATUS_ERROR,
+                    error: None,
+                });
+            }
+        }
+    });
+
+    UpdateMonitor {
+        signals: signal_rx,
+        commands: command_tx,
+    }
+}
+
+/// Open the session bus, check the portal is new enough, and create the
+/// monitor object.
+fn create_monitor() -> anyhow::Result<(zbus::blocking::Connection, zbus::zvariant::OwnedObjectPath)>
+{
+    let connection = zbus::blocking::Connection::session()?;
+    let portal = zbus::blocking::Proxy::new(
+        &connection,
+        FLATPAK_PORTAL_BUS_NAME,
+        FLATPAK_PORTAL_OBJECT_PATH,
+        FLATPAK_PORTAL_INTERFACE,
+    )?;
+
+    // Read the version before calling. An older portal is on the bus and
+    // answers, so the alternative is discovering the gap as an
+    // UnknownMethod error, which is indistinguishable from the portal not
+    // being there at all.
+    let version: u32 = portal.get_property("version")?;
+    anyhow::ensure!(version >= MINIMUM_PORTAL_VERSION, "portal too old");
+
+    let handle_token = format!("tracecommons{}", std::process::id());
+    let mut options: HashMap<&str, Value> = HashMap::new();
+    options.insert("handle_token", Value::from(handle_token.as_str()));
+    let path: zbus::zvariant::OwnedObjectPath = portal.call("CreateUpdateMonitor", &(options,))?;
+
+    Ok((connection, path))
+}
+
+/// Read one signal name off the monitor object until the channel closes or
+/// the bus goes away. Runs on its own thread; the iterator blocks.
+fn read_signals(
+    connection: &zbus::blocking::Connection,
+    path: &zbus::zvariant::OwnedObjectPath,
+    name: &str,
+    tx: &async_channel::Sender<PortalSignal>,
+) {
+    let proxy = match zbus::blocking::Proxy::new(
+        connection,
+        FLATPAK_PORTAL_BUS_NAME,
+        path,
+        UPDATE_MONITOR_INTERFACE,
+    ) {
+        Ok(proxy) => proxy,
+        Err(_) => {
+            eprintln!("trace-commons-shell: flatpak update monitor unreadable");
+            return;
+        }
+    };
+    let stream = match proxy.receive_signal(name) {
+        Ok(stream) => stream,
+        Err(_) => {
+            eprintln!("trace-commons-shell: flatpak update monitor unreadable");
+            return;
+        }
+    };
+
+    for message in stream {
+        let body = message.body();
+        let Ok((dict,)) = body.deserialize::<(HashMap<String, OwnedValue>,)>() else {
+            // A payload this application cannot read is dropped, never
+            // guessed at.
+            continue;
+        };
+        let Some(signal) = parse_signal(name, &dict) else {
+            continue;
+        };
+        if tx.send_blocking(signal).is_err() {
+            return;
+        }
+    }
+}
+
+/// Call `UpdateMonitor.Update`. Returns as soon as the portal accepts the
+/// request; the work is reported through `Progress`.
+///
+/// `parent_window` is empty: this application has no way to produce an X11
+/// or Wayland window handle string for the portal, and the portal treats an
+/// empty handle as "parent it yourself", which is the correct behaviour
+/// rather than a degraded one.
+fn call_update(
+    connection: &zbus::blocking::Connection,
+    path: &zbus::zvariant::OwnedObjectPath,
+) -> anyhow::Result<()> {
+    let proxy = zbus::blocking::Proxy::new(
+        connection,
+        FLATPAK_PORTAL_BUS_NAME,
+        path,
+        UPDATE_MONITOR_INTERFACE,
+    )?;
+    let options: HashMap<&str, Value> = HashMap::new();
+    let _: () = proxy.call("Update", &("", options))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
