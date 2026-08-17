@@ -11,6 +11,8 @@ matching what `macos/` does and what the ABI was built for.
 | `src/TraceCommons.Interop/` | The C ABI binding. Targets plain `net8.0`. |
 | `src/TraceCommons.App/` | The WinUI 3 shell. Targets `net8.0-windows`. |
 | `tests/TraceCommons.Interop.Tests/` | Interop tests, including live ones against a real daemon. |
+| `scripts/` | The GCE Windows dev box: provisioning, remote exec, screenshot capture. |
+| `docs/dev-vm.md` | How to build, run, and see the app on that box. Read it before touching the WinUI half. |
 
 ### Why the interop layer is not a Windows project
 
