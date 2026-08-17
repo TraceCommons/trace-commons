@@ -26,6 +26,28 @@ pub enum InstallSource {
     /// registry record stale, so it would offer a phantom upgrade
     /// indefinitely and `winget upgrade --all` would fight us.
     WingetManaged,
+    /// Somewhere we do not recognize: Homebrew's prefix, a distribution
+    /// package in `/usr/bin`, a read-only Nix store path, or an
+    /// `install.sh --dir` location we cannot name. Defer.
+    ///
+    /// This is the DEFAULT, and the direction of the default is the whole
+    /// point. The spec's governing rule is "whoever installed the binary owns
+    /// replacing it", so the question is not "do we know a package manager
+    /// owns this?" but "do we know WE placed it?" -- and only the two paths
+    /// above answer yes. Treating unknown locations as ours would clobber a
+    /// Homebrew-installed CLI (this project publishes a Homebrew formula, so
+    /// that is a real install path, not a hypothetical), leaving brew's
+    /// version records stale in exactly the way the winget arm exists to
+    /// prevent.
+    ///
+    /// Recognizing only the default install locations means an
+    /// `install.sh --dir /opt/tc` copy is classified Unrecognized and defers
+    /// rather than self-updating. That is a false negative and it is the safe
+    /// direction: the contributor is told to re-run the installer, instead of
+    /// having a binary replaced somewhere we cannot reason about. A future
+    /// improvement is for the installers to drop a receipt file beside the
+    /// binary so custom directories can be recognized positively.
+    Unrecognized,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,18 +59,39 @@ pub enum SourceError {
     ExePathUnavailable,
 }
 
+/// The directory `install.ps1` installs into, relative to `%LOCALAPPDATA%`.
+const WINDOWS_SELF_MANAGED_MARKER: &str = r"\programs\tracecommons\";
+
+/// The directory `install.sh` installs into, relative to `$HOME`.
+const UNIX_SELF_MANAGED_SUFFIX: &str = "/.local/bin";
+
 /// Classify an executable path without touching the filesystem.
+///
+/// Note the shape: winget is checked first because its marker is the most
+/// specific, then the two locations we own, and anything left over is
+/// Unrecognized. The final arm is a deliberate refusal, not a fallback.
 pub fn classify(exe: &Path) -> InstallSource {
     // Normalize separators and case before matching. Windows paths are
     // case-insensitive, winget's own casing has varied across releases, and a
     // path may arrive with either separator depending on how the process was
     // launched.
-    let normalized = exe.to_string_lossy().replace('/', "\\").to_lowercase();
-    if normalized.contains(WINGET_PACKAGES_MARKER) {
-        InstallSource::WingetManaged
-    } else {
-        InstallSource::SelfManaged
+    let windows_style = exe.to_string_lossy().replace('/', "\\").to_lowercase();
+    if windows_style.contains(WINGET_PACKAGES_MARKER) {
+        return InstallSource::WingetManaged;
     }
+    if windows_style.contains(WINDOWS_SELF_MANAGED_MARKER) {
+        return InstallSource::SelfManaged;
+    }
+    if let Some(parent) = exe.parent() {
+        if parent
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with(UNIX_SELF_MANAGED_SUFFIX)
+        {
+            return InstallSource::SelfManaged;
+        }
+    }
+    InstallSource::Unrecognized
 }
 
 /// Classify the running executable, and return its path.
@@ -112,15 +155,39 @@ mod tests {
     #[test]
     fn a_project_directory_that_merely_mentions_winget_is_not_a_winget_install() {
         // The marker is the full segment run, not the word. A developer
-        // running a debug build out of a checkout named "winget-work" owns
-        // their own binary.
+        // running a debug build out of a checkout named "winget-work" has
+        // their own binary that they own, but this is not one of our two
+        // recognized install locations, so it is Unrecognized.
         let p = Path::new("/home/ada/src/winget-work/target/debug/trace-commons-contributor");
-        assert_eq!(classify(p), InstallSource::SelfManaged);
+        assert_eq!(classify(p), InstallSource::Unrecognized);
     }
 
     #[test]
     fn detect_reports_a_real_path_for_the_running_test_binary() {
         let (_source, exe) = detect().expect("current_exe is available under cargo test");
         assert!(exe.is_absolute(), "exe path must be absolute");
+    }
+
+    #[test]
+    fn a_homebrew_installed_path_is_unrecognized() {
+        // This project publishes a Homebrew formula. A self-update of a
+        // brew-installed copy would leave brew's version records stale.
+        let p = Path::new("/opt/homebrew/bin/trace-commons-contributor");
+        assert_eq!(classify(p), InstallSource::Unrecognized);
+    }
+
+    #[test]
+    fn a_distro_package_path_is_unrecognized() {
+        // Distribution packages in /usr/bin are not ours to replace.
+        let p = Path::new("/usr/bin/trace-commons-contributor");
+        assert_eq!(classify(p), InstallSource::Unrecognized);
+    }
+
+    #[test]
+    fn a_custom_install_sh_dir_is_unrecognized() {
+        // An install.sh --dir /opt/tc copy is Unrecognized and defers.
+        // This is a false negative, but it is the safe direction.
+        let p = Path::new("/opt/tc/trace-commons-contributor");
+        assert_eq!(classify(p), InstallSource::Unrecognized);
     }
 }
