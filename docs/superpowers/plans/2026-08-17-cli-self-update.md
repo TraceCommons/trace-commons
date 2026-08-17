@@ -43,7 +43,7 @@ pub fn is_newer(current: &str, offered: &str) -> Result<bool, VersionError>;
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `pub enum InstallSource { SelfManaged, WingetManaged }`
+  - `pub enum InstallSource { SelfManaged, WingetManaged, Unrecognized }`
   - `pub const WINGET_PACKAGES_MARKER: &str`
   - `pub const WINGET_UPGRADE_COMMAND: &str`
   - `pub fn classify(exe: &std::path::Path) -> InstallSource`
@@ -51,6 +51,27 @@ pub fn is_newer(current: &str, offered: &str) -> Result<bool, VersionError>;
   - `pub enum SourceError { ExePathUnavailable }`
 
 Winget is a hard defer: winget records portable-package versions in the registry, so a self-swap leaves that record stale and `winget upgrade --all` fights the binary forever. Detection is a pure path check with no network and no registry read, so it is testable on every platform.
+
+**The default direction is the point.** The spec's governing rule is "whoever
+installed the binary owns replacing it", so the question this module answers is
+"do we know WE placed it?" — not "do we know someone else did?". Only two
+locations answer yes: `%LOCALAPPDATA%\Programs\TraceCommons` (`install.ps1`) and
+`~/.local/bin` (`install.sh`). Everything else returns `Unrecognized` and
+defers.
+
+That third variant is not defensive padding. This project publishes a Homebrew
+formula for the CLI — see the "Open a formula bump" step in
+`.github/workflows/release-contributor.yml` — so a brew-installed copy at
+`/opt/homebrew/bin/trace-commons-contributor` is a real install path. Classified
+as ours, it would be clobbered by a self-update and leave brew's version records
+stale, which is precisely the defect the winget arm exists to prevent.
+Distribution packages in `/usr/bin` and read-only Nix store paths share it.
+
+The cost is a false negative: `install.sh --dir /opt/tc` also defers, even
+though we did place it. That is the safe direction — the contributor is told to
+re-run the installer rather than having a binary replaced somewhere we cannot
+reason about. A later improvement is for the installers to drop a receipt file
+beside the binary, so custom directories can be recognized positively.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -160,6 +181,28 @@ pub enum InstallSource {
     /// registry record stale, so it would offer a phantom upgrade
     /// indefinitely and `winget upgrade --all` would fight us.
     WingetManaged,
+    /// Somewhere we do not recognize: Homebrew's prefix, a distribution
+    /// package in `/usr/bin`, a read-only Nix store path, or an
+    /// `install.sh --dir` location we cannot name. Defer.
+    ///
+    /// This is the DEFAULT, and the direction of the default is the whole
+    /// point. The spec's governing rule is "whoever installed the binary owns
+    /// replacing it", so the question is not "do we know a package manager
+    /// owns this?" but "do we know WE placed it?" -- and only the two paths
+    /// above answer yes. Treating unknown locations as ours would clobber a
+    /// Homebrew-installed CLI (this project publishes a Homebrew formula, so
+    /// that is a real install path, not a hypothetical), leaving brew's
+    /// version records stale in exactly the way the winget arm exists to
+    /// prevent.
+    ///
+    /// Recognizing only the default install locations means an
+    /// `install.sh --dir /opt/tc` copy is classified Unrecognized and defers
+    /// rather than self-updating. That is a false negative and it is the safe
+    /// direction: the contributor is told to re-run the installer, instead of
+    /// having a binary replaced somewhere we cannot reason about. A future
+    /// improvement is for the installers to drop a receipt file beside the
+    /// binary so custom directories can be recognized positively.
+    Unrecognized,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,18 +214,39 @@ pub enum SourceError {
     ExePathUnavailable,
 }
 
+/// The directory `install.ps1` installs into, relative to `%LOCALAPPDATA%`.
+const WINDOWS_SELF_MANAGED_MARKER: &str = r"\programs\tracecommons\";
+
+/// The directory `install.sh` installs into, relative to `$HOME`.
+const UNIX_SELF_MANAGED_SUFFIX: &str = "/.local/bin";
+
 /// Classify an executable path without touching the filesystem.
+///
+/// Note the shape: winget is checked first because its marker is the most
+/// specific, then the two locations we own, and anything left over is
+/// Unrecognized. The final arm is a deliberate refusal, not a fallback.
 pub fn classify(exe: &Path) -> InstallSource {
     // Normalize separators and case before matching. Windows paths are
     // case-insensitive, winget's own casing has varied across releases, and a
     // path may arrive with either separator depending on how the process was
     // launched.
-    let normalized = exe.to_string_lossy().replace('/', "\\").to_lowercase();
-    if normalized.contains(WINGET_PACKAGES_MARKER) {
-        InstallSource::WingetManaged
-    } else {
-        InstallSource::SelfManaged
+    let windows_style = exe.to_string_lossy().replace('/', "\\").to_lowercase();
+    if windows_style.contains(WINGET_PACKAGES_MARKER) {
+        return InstallSource::WingetManaged;
     }
+    if windows_style.contains(WINDOWS_SELF_MANAGED_MARKER) {
+        return InstallSource::SelfManaged;
+    }
+    if let Some(parent) = exe.parent() {
+        if parent
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with(UNIX_SELF_MANAGED_SUFFIX)
+        {
+            return InstallSource::SelfManaged;
+        }
+    }
+    InstallSource::Unrecognized
 }
 
 /// Classify the running executable, and return its path.
