@@ -1030,7 +1030,11 @@ mod tests {
     fn policy_identifiers_are_distinct_from_the_legion_cohort() {
         // The V42 unique index is scoped by policy_label; sharing one would
         // make holding both NFTs yield one grant instead of two.
-        assert_ne!(POLICY_LABEL, crate::near_legion_claim::POLICY_LABEL);
+        // The Legion cohort is split one pool per rank, so this must differ
+        // from every one of them, not from a single label.
+        for legion in crate::near_legion_claim::all_policy_labels() {
+            assert_ne!(POLICY_LABEL, legion);
+        }
         assert_ne!(ISSUANCE_SOURCE, crate::near_legion_claim::ISSUANCE_SOURCE);
         assert_ne!(ISSUED_BY_LABEL, crate::near_legion_claim::ISSUED_BY_LABEL);
     }
@@ -1257,6 +1261,27 @@ mod router_tests {
             }
             let g = self.grants.lock().unwrap();
             Ok(g.iter().filter(|w| w.policy_label == policy_label).count() as u32)
+        }
+
+        async fn count_bound(&self, policy_label: &str) -> Result<u32> {
+            // No expiry semantics in the fake, so this matches count_live. The
+            // production difference lives in the SQL predicates.
+            self.count_live(policy_label).await
+        }
+
+        async fn credential_bound_in_any(
+            &self,
+            policy_labels: &[String],
+            credential_binding_hash: &str,
+        ) -> Result<bool> {
+            if self.fail_count {
+                return Err(anyhow!("count unavailable"));
+            }
+            let g = self.grants.lock().unwrap();
+            Ok(g.iter().any(|w| {
+                policy_labels.contains(&w.policy_label)
+                    && w.credential_binding_hash.as_deref() == Some(credential_binding_hash)
+            }))
         }
 
         async fn insert(
