@@ -279,6 +279,268 @@ jobs:
           name: windows-zip
           path: dist/
 
+  windows-app:
+    name: Windows signed MSIX
+    needs: version
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-latest
+    # Same reason as the `windows` job above: the federated credential's
+    # subject is repo:...:environment:release, so this job must declare the
+    # environment or the OIDC token will not match and signing fails at auth.
+    environment: release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.92"
+          targets: x86_64-pc-windows-msvc
+      # windows/global.json pins the SDK to 8.0.x. MSBuild otherwise selects
+      # the newest installed SDK regardless of what setup-dotnet put there,
+      # and the runner image ships .NET 10, whose layout Windows App SDK 1.6
+      # cannot build against.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      # MSBuild from Visual Studio, not `dotnet build`. A WinUI 3 project
+      # invokes tasks from Microsoft.Build.AppxPackage.dll and
+      # Microsoft.Build.Packaging.Pri.Tasks.dll, which are never part of the
+      # .NET SDK.
+      - uses: microsoft/setup-msbuild@v2
+      # No build cache in a release job, deliberately. A cache is a
+      # write-target a lower-privilege job can poison, and this job holds
+      # signing authority.
+
+      - name: Build the contributor FFI cdylib
+        run: cargo build -p trace-commons-contributor-ffi --release
+
+      # Compile first, package later. The publisher the package must carry is
+      # not known until a certificate has actually signed something, so the
+      # manifest cannot be finalized before this point.
+      - name: Build the app
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
+
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
+      - name: Set up Trusted Signing (SHA-verified dlib + signtool)
+        id: ts
+        shell: pwsh
+        env:
+          TS_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          # Independently verified 2026-08-16. When bumping the version,
+          # re-derive this from a trusted machine.
+          TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
+        run: |
+          ./scripts/windows/setup-trusted-signing.ps1 `
+            -Endpoint $env:TS_ENDPOINT `
+            -Account $env:TS_ACCOUNT `
+            -Profile $env:TS_PROFILE `
+            -ExpectedSha256 $env:TRUSTED_SIGNING_CLIENT_SHA256
+
+      # Identity/@Publisher must match the signing certificate's subject
+      # EXACTLY or signtool refuses the package. Rather than configure that
+      # subject and let it drift the day the profile is re-issued, sign a
+      # throwaway copy of the app's own executable and read back the subject
+      # Windows itself reports. The value cannot be wrong, because it is the
+      # value the real signature will carry.
+      - name: Discover the certificate subject
+        id: subject
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = @(Get-ChildItem -Recurse -Filter TraceCommons.exe `
+                     -Path windows\src\TraceCommons.App\bin\x64\Release)
+          if ($exe.Count -lt 1) { throw "TraceCommons.exe was not found in the build output" }
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\probe" | Out-Null
+          $probe = Join-Path "$env:RUNNER_TEMP\probe" "subject-probe.exe"
+          Copy-Item $exe[0].FullName $probe -Force
+          ./scripts/windows/sign-with-trusted-signing.ps1 `
+            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
+            -Metadata $env:TS_METADATA -Path @($probe)
+          $subject = (Get-AuthenticodeSignature $probe).SignerCertificate.Subject
+          if ([string]::IsNullOrWhiteSpace($subject)) {
+            throw "could not read the certificate subject back from the probe signature"
+          }
+          Write-Host "certificate subject: $subject"
+          "subject=$subject" >> $env:GITHUB_OUTPUT
+          Remove-Item $probe -Force
+
+      - name: Stamp the package identity
+        id: identity
+        shell: pwsh
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          CERT_SUBJECT: ${{ steps.subject.outputs.subject }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $quad = & windows\scripts\stamp-package-identity.ps1 `
+            -ManifestPath windows\src\TraceCommons.App\Package.appxmanifest `
+            -Version $env:SHORT_VERSION -Publisher $env:CERT_SUBJECT
+          "quad=$quad" >> $env:GITHUB_OUTPUT
+
+      - name: Package
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+
+      # Exactly one, asserted rather than assumed -- the same shape as the
+      # CLI job's staging check. A second .msix in the output directory means
+      # a stale build is about to be signed and published as this release.
+      - name: Locate the package
+        id: pkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $found = @(Get-ChildItem -Recurse -Filter *.msix -Path windows\dist\msix)
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
+          }
+          "path=$($found[0].FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($found[0].Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign and verify
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+          PKG: ${{ steps.pkg.outputs.path }}
+        run: |
+          ./scripts/windows/sign-with-trusted-signing.ps1 `
+            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
+            -Metadata $env:TS_METADATA -Path @($env:PKG)
+
+      # Installing is the only real validation of a manifest. A schema that
+      # parses and a package Windows will register are different claims, and
+      # this job holds the second one BEFORE anything is published.
+      - name: Install it on the runner
+        shell: pwsh
+        env:
+          PKG: ${{ steps.pkg.outputs.path }}
+          QUAD: ${{ steps.identity.outputs.quad }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-AppxPackage -Path $env:PKG
+          $installed = Get-AppxPackage -Name ai.tracecommons.Contributor
+          if (-not $installed) { throw "the package did not register" }
+          if ($installed.Version -ne $env:QUAD) {
+            throw "installed version $($installed.Version) does not match the stamped $env:QUAD"
+          }
+          Write-Host "registered $($installed.PackageFullName)"
+
+      # The virtualization check. Files a packaged desktop app creates under
+      # %LOCALAPPDATA% are redirected to a per-package private location
+      # unless write virtualization is disabled, and under redirection this
+      # app would keep a SECOND queue the contributor CLI cannot see. The
+      # manifest disables it; this proves the manifest worked, inside the
+      # real container, on a real installed package.
+      - name: Confirm the state directory is not virtualized
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = Get-AppxPackage -Name ai.tracecommons.Contributor
+          $dir = Join-Path $env:LOCALAPPDATA 'trace-commons'
+          $probe = Join-Path $dir 'msix-virtualization-probe.txt'
+          if (Test-Path $probe) { Remove-Item $probe -Force }
+          $inner = "New-Item -ItemType Directory -Force -Path '$dir' | Out-Null; Set-Content -Path '$probe' -Value ok"
+          Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName `
+            -AppId TraceCommons `
+            -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -Args "-NoProfile -NonInteractive -Command `"$inner`""
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path $probe) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Test-Path $probe)) {
+            throw "the packaged app's write to $dir did not land at the real path. Write virtualization is still on, which means this app would keep a second queue the contributor CLI cannot see."
+          }
+          Remove-Item $probe -Force
+          Remove-AppxPackage -Package $pkg.PackageFullName
+
+      - name: Generate the appinstaller feed
+        shell: pwsh
+        env:
+          QUAD: ${{ steps.identity.outputs.quad }}
+          CERT_SUBJECT: ${{ steps.subject.outputs.subject }}
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "${{ steps.pkg.outputs.path }}" "dist\$env:PKG_NAME" -Force
+          ./windows/scripts/make-appinstaller.ps1 `
+            -PackageName ai.tracecommons.Contributor `
+            -Publisher $env:CERT_SUBJECT `
+            -Version $env:QUAD `
+            -ProcessorArchitecture x64 `
+            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
+            -PackageFileName $env:PKG_NAME `
+            -OutputPath dist\TraceCommons.appinstaller
+          $hash = (Get-FileHash "dist\$env:PKG_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:PKG_NAME" | Out-File "dist\$env:PKG_NAME.sha256" -Encoding ascii -NoNewline
+
+      # After signing, so provenance covers the signed bytes rather than the
+      # unsigned build output.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: dist/*.msix
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-msix
+          path: dist/
+
+      # Publication is tag pushes only. A dispatch run still builds, signs,
+      # installs and verifies above, so the whole path is provable -- but it
+      # must never move what an installed client would actually pull.
+      - name: Authenticate to GCP (workload identity federation; no key on the runner)
+        if: github.event_name == 'push'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: github.event_name == 'push'
+
+      # The package goes up FIRST. The feed is what clients follow, so a feed
+      # that names a package not yet in the bucket is a window in which every
+      # update attempt 404s.
+      #
+      # Content types matter: the deployment service dispatches on them.
+      # Cache-Control matters more -- a cached .appinstaller is a release
+      # nobody receives, so the feed is explicitly uncacheable while the
+      # immutable, version-named package is cached hard.
+      - name: Publish
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          BUCKET: tracecommons-flatpak
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gcloud storage cp "dist\$env:PKG_NAME" "gs://$env:BUCKET/windows/$env:PKG_NAME" `
+            --content-type=application/msix --cache-control="public, max-age=31536000, immutable"
+          if ($LASTEXITCODE -ne 0) { throw "uploading the package failed" }
+          gcloud storage cp "dist\TraceCommons.appinstaller" "gs://$env:BUCKET/windows/TraceCommons.appinstaller" `
+            --content-type=application/appinstaller --cache-control="no-cache, max-age=0"
+          if ($LASTEXITCODE -ne 0) { throw "uploading the feed failed" }
+
   linux-flatpak:
     name: Linux flatpak
     needs: version
@@ -427,7 +689,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: [version, macos, windows, linux-flatpak]
+    needs: [version, macos, windows, windows-app, linux-flatpak]
     # Publish whatever succeeded: the three build jobs are independent
     # precisely so a Linux failure does not withhold a verified macOS DMG.
     # But always() alone would let this job run even when EVERY platform
@@ -436,6 +698,7 @@ jobs:
     if: >-
       ${{ always() && github.event_name == 'push' &&
           (needs.macos.result == 'success' || needs.windows.result == 'success' ||
+           needs.windows-app.result == 'success' ||
            needs.linux-flatpak.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -447,7 +710,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
-          pattern: "{macos-dmg,windows-zip}"
+          pattern: "{macos-dmg,windows-zip,windows-msix}"
 
       # The build jobs are independent so that one platform failing does not
       # withhold the others (see the job comment above), which means this
@@ -462,6 +725,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MACOS_RESULT: ${{ needs.macos.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
+          WINDOWS_APP_RESULT: ${{ needs.windows-app.result }}
           LINUX_RESULT: ${{ needs.linux-flatpak.result }}
         run: |
           set -euo pipefail
@@ -478,6 +742,13 @@ jobs:
 
           Windows: Authenticode-signed via Azure Trusted Signing and RFC3161
           timestamped."
+          fi
+          if [ "$WINDOWS_APP_RESULT" = success ]; then
+            NOTES="$NOTES
+
+          Windows app: install the signed MSIX from
+          https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller
+          Windows keeps it up to date from that same address afterwards."
           fi
           if [ "$LINUX_RESULT" = success ]; then
             NOTES="$NOTES

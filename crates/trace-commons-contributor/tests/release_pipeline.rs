@@ -1216,3 +1216,232 @@ fn the_release_workflow_publishes_the_appcast() {
         "the generated appcast must be uploaded to the bucket"
     );
 }
+
+/// Extracts the text of one top-level job block from a workflow file: from
+/// `\n  <name>:` up to (but not including) the next line matching `\n  <ident>:`
+/// at the same two-space indent, or end of file.
+fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let marker = format!("\n  {name}:");
+    let start = workflow
+        .find(&marker)
+        .unwrap_or_else(|| panic!("expected to find job {name}"));
+    let body_start = start + marker.len();
+    let rest = &workflow[body_start..];
+    let end = rest
+        .lines()
+        .scan(0usize, |pos, line| {
+            let this_pos = *pos;
+            *pos += line.len() + 1;
+            Some((this_pos, line))
+        })
+        .find(|(_, line)| {
+            !line.is_empty()
+                && line.starts_with("  ")
+                && !line.starts_with("    ")
+                && line.trim_end().ends_with(':')
+        })
+        .map(|(pos, _)| pos)
+        .unwrap_or(rest.len());
+    &workflow[start..body_start + end]
+}
+
+/// The MSIX build's own layout puts the package one directory deeper and
+/// under the MSBuild project's name, not the packaging identity -- so the
+/// filename discovered on disk is NOT assumed to be
+/// `ai.tracecommons.Contributor_<quad>_x64.msix`. If the job published under
+/// a name it invented (or a hardcoded one) while the feed's MainPackage@Uri
+/// named something else, every client would resolve the feed successfully
+/// and then 404 fetching the package -- a silent no-op with no error surface
+/// anywhere. The fix is architectural: exactly one source of truth for the
+/// filename (`steps.pkg.outputs.name`, itself discovered via a glob rather
+/// than assumed), threaded unchanged into the feed generator's
+/// `-PackageFileName` and the `gcloud storage cp` destination object name.
+/// This test pins that architecture in text so a future edit that
+/// reintroduces a second, divergent name is caught here instead of first
+/// being noticed by a contributor's update silently doing nothing.
+#[test]
+fn windows_msix_publish_name_matches_appinstaller_feed_name() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&workflow, "windows-app");
+
+    // The package name is discovered from disk, never spelled out as a
+    // literal `ai.tracecommons.Contributor_...msix` anywhere in the job.
+    assert!(
+        job.contains("Get-ChildItem -Recurse -Filter *.msix -Path windows\\dist\\msix"),
+        "the job must discover the built package's name by globbing the \
+         real output directory rather than assuming a filename"
+    );
+    assert!(
+        !job.contains("ai.tracecommons.Contributor_"),
+        "the job must never hardcode a package filename derived from the \
+         packaging identity -- MSBuild's Test-layout output is named after \
+         the project, not the identity, and the two can diverge"
+    );
+
+    // steps.pkg.outputs.name is the single source of truth: it must appear
+    // in a `PKG_NAME` env binding at least twice -- once for the step that
+    // builds the feed (which sets -PackageFileName from it) and once for the
+    // step that uploads the package to the bucket (which uses it as the
+    // destination object name). If either step invented its own name, this
+    // count would drop to a value that no longer entails they're the same
+    // string.
+    let pkg_name_bindings = job
+        .matches("PKG_NAME: ${{ steps.pkg.outputs.name }}")
+        .count();
+    assert!(
+        pkg_name_bindings >= 2,
+        "expected at least 2 steps to bind PKG_NAME from steps.pkg.outputs.name \
+         (found {pkg_name_bindings}) -- the feed-generation step and the \
+         publish step must both derive the object name from the same \
+         discovered value, or the feed's Uri and the uploaded object name \
+         can silently diverge"
+    );
+
+    // The feed generator must be invoked with -PackageFileName bound to
+    // that same env var, not a literal or a differently-derived value.
+    let feed_step_start = job
+        .find("Generate the appinstaller feed")
+        .expect("the feed-generation step must exist");
+    let feed_step = &job[feed_step_start..];
+    let make_appinstaller_end = feed_step
+        .find("make-appinstaller.ps1")
+        .expect("the feed step must call make-appinstaller.ps1")
+        + "make-appinstaller.ps1".len();
+    let call_block_end = feed_step[make_appinstaller_end..]
+        .find("-OutputPath")
+        .expect("the make-appinstaller.ps1 call must set -OutputPath")
+        + make_appinstaller_end
+        + "-OutputPath".len();
+    let call_block = &feed_step[..call_block_end];
+    assert!(
+        call_block.contains("-PackageFileName $env:PKG_NAME"),
+        "make-appinstaller.ps1 must be called with -PackageFileName bound to \
+         $env:PKG_NAME (steps.pkg.outputs.name), not a literal filename"
+    );
+
+    // The publish step must upload under that same PKG_NAME, to
+    // windows/$PKG_NAME in the bucket -- exactly what the feed just named.
+    let publish_step_start = job
+        .rfind("name: Publish")
+        .expect("the publish step must exist");
+    let publish_step = &job[publish_step_start..];
+    assert!(
+        publish_step.contains("gs://$env:BUCKET/windows/$env:PKG_NAME"),
+        "the publish step must upload the package to windows/$PKG_NAME in \
+         the bucket -- the exact filename the feed's MainPackage@Uri names. \
+         Uploading under any other name leaves the feed pointing at an \
+         object that does not exist."
+    );
+
+    // And the package must go up before the feed: a feed naming an object
+    // not yet present is a window where every update check 404s.
+    let pkg_upload_pos = publish_step
+        .find("gs://$env:BUCKET/windows/$env:PKG_NAME")
+        .unwrap();
+    let feed_upload_pos = publish_step
+        .find("gs://$env:BUCKET/windows/TraceCommons.appinstaller")
+        .expect("the publish step must also upload the feed");
+    assert!(
+        pkg_upload_pos < feed_upload_pos,
+        "the package must be uploaded before the feed, so there is never a \
+         window in which the feed names an object that is not there yet"
+    );
+}
+
+#[test]
+fn windows_msix_job_installs_and_verifies_before_publishing() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&workflow, "windows-app");
+
+    assert!(job.contains("environment: release"));
+    for needle in [
+        "Add-AppxPackage -Path $env:PKG",
+        "the package did not register",
+        "does not match the stamped",
+        "Confirm the state directory is not virtualized",
+        "Invoke-CommandInDesktopPackage",
+        "Write virtualization is still on",
+    ] {
+        assert!(
+            job.contains(needle),
+            "windows-app job is missing expected content: {needle}"
+        );
+    }
+
+    // Publication must only happen on a push (tag release), never on a
+    // workflow_dispatch -- but the build/sign/install/verify steps above
+    // must run unconditionally so the whole path is provable without ever
+    // moving what an installed client actually pulls.
+    let publish_gcp_auth = job
+        .find("Authenticate to GCP")
+        .expect("the publish path must authenticate to GCP");
+    let auth_step = &job[publish_gcp_auth..];
+    let if_line = auth_step
+        .lines()
+        .find(|l| l.trim_start().starts_with("if:"))
+        .expect("the GCP auth step must be gated");
+    assert!(
+        if_line.contains("github.event_name == 'push'"),
+        "publication must be gated to push events only, found: {if_line}"
+    );
+}
+
+#[test]
+fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(
+        workflow.contains("\n  windows-app:"),
+        "release-apps.yml must define the windows-app job"
+    );
+
+    let publish_job = extract_job(&workflow, "publish");
+
+    assert!(
+        publish_job.contains("needs: [version, macos, windows, windows-app, linux-flatpak]"),
+        "the publish job must depend on windows-app"
+    );
+    assert!(
+        publish_job.contains("needs.windows-app.result == 'success'"),
+        "the publish job's gate must treat windows-app as a platform whose \
+         success alone justifies running publish"
+    );
+    assert!(
+        publish_job.contains("windows-msix"),
+        "the publish job must download the windows-msix artifact"
+    );
+    assert!(
+        publish_job.contains("WINDOWS_APP_RESULT"),
+        "the publish job's release-notes step must branch on WINDOWS_APP_RESULT"
+    );
+    assert!(
+        publish_job.contains("TraceCommons.appinstaller"),
+        "the release notes must point contributors at the .appinstaller feed"
+    );
+}
+
+#[test]
+fn ci_packages_and_validates_the_windows_app_feed_identity() {
+    let ci = read(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("-p:GenerateAppxPackageOnBuild=true"),
+        "CI must build a real package (not just compile) so \
+         Package.appxmanifest, MakePri and the visual assets are exercised \
+         on every pull request"
+    );
+    assert!(
+        ci.contains("Confirm exactly one package was produced"),
+        "CI must assert exactly one .msix was produced, the same shape as \
+         the release job's own check"
+    );
+    assert!(
+        ci.contains("make-appinstaller.ps1"),
+        "CI must exercise the feed generator against the real manifest \
+         identity so a rename on either side fails on every PR, not just \
+         at release time"
+    );
+    assert!(
+        ci.contains("feed package name $($main.Name) does not match manifest identity"),
+        "CI must assert the feed's MainPackage name matches \
+         Package.appxmanifest's Identity/@Name"
+    );
+}

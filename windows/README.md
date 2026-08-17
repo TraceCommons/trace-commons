@@ -106,6 +106,29 @@ Package identity is `ai.tracecommons.Contributor`, application id
 `TraceCommons`. Both are permanent: changing either produces a different app
 that installs alongside the old one instead of updating it.
 
+### Distribution
+
+The release job publishes two objects to the public bucket:
+
+| Object | Content type | Cache-Control |
+| --- | --- | --- |
+| `windows/ai.tracecommons.Contributor_<version>_x64.msix` | `application/msix` | `public, max-age=31536000, immutable` |
+| `windows/TraceCommons.appinstaller` | `application/appinstaller` | `no-cache, max-age=0` |
+
+The package is uploaded before the feed, so there is never a window in which
+the feed names an object that is not there yet. The feed is uncacheable on
+purpose: a cached `.appinstaller` is a release nobody receives.
+
+Contributors install once from
+`https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller`.
+After that Windows checks the feed on app launch, at most once every 8 hours,
+and again every 8 hours in the background whether or not the app was opened.
+The app additionally surfaces a banner and an apply-now action, which drains
+any in-flight upload before handing the update to the deployment service.
+
+The app never replaces its own bytes. That is the same rule Homebrew, flatpak
+and winget enforce on the other three paths.
+
 ## What is not here yet
 
 This slice is the interop layer and the main window. Deliberately absent, and
