@@ -47,8 +47,44 @@ pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
 #[cfg(feature = "near-ai-privacy-filter")]
 pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// Largest serialized contribution envelope the platform accepts, and the
+/// single source of truth for that number.
+///
+/// It lives here rather than in the client because both ends have to agree:
+/// the contributor refuses an oversized envelope before upload, ingest caps
+/// the request body, and account read-back caps what it will return. When
+/// those were three independent constants they drifted -- the client refused
+/// at 1.5 MB while ingest accepted 2 MiB -- so a client raise alone silently
+/// bought nothing. Everything downstream is now derived from this value with
+/// explicit headroom, and tests assert the ordering holds.
+///
+/// Sized for whole agent coding sessions: a 42 MB raw session redacts to
+/// roughly 2.8 MB of envelope, so this clears the observed worst case by a
+/// wide margin. Scoring cost does not scale with it -- the gate chunk cap
+/// bounds how much of a trace is ever scored.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 16_000_000;
+/// Largest single field text an external privacy filter will accept.
+///
+/// Tied to the envelope cap, because any one event could in principle carry
+/// most of an envelope -- an agent pasting a whole file into one message is
+/// the ordinary case. A smaller per-field cap does not bound the work: the
+/// NEAR AI adapter classifies in fixed `CLASSIFY_CHUNK_BYTES` windows, so a
+/// given quantity of text costs the same whether it arrives as one field or
+/// a hundred, and the envelope cap already bounds the total. All a lower
+/// per-field cap bought was a failure mode -- the external-filter pass
+/// propagates with `?`, so one oversized event failed the whole submission.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = MAX_TRACE_ENVELOPE_BYTES;
+/// Sidecar stdout carries the REDACTED TEXT back, so it has to scale with
+/// the input cap or the refusal simply moves from the input guard to the
+/// output guard. Doubled because replacement placeholders can be longer
+/// than what they replace and JSON escaping expands control characters.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize =
+    2 * PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES;
+const _: () = assert!(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES >= MAX_TRACE_ENVELOPE_BYTES);
+const _: () = assert!(
+    PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES
+        >= PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
+);
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
 pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -5668,16 +5704,27 @@ mod tests {
         assert!(rep.blocked_secret_detected);
     }
 
+    /// Payload size for the contextual-entropy tripwires below.
+    ///
+    /// Deliberately its own number rather than the deployed input cap. These
+    /// guard against superlinear cost, and a megabyte exposes that just as
+    /// well as sixteen -- a quadratic pass at this size already blows the
+    /// bound by orders of magnitude. Sizing them off the cap instead meant a
+    /// cap change silently made each tripwire 16x slower and pushed them
+    /// against their wall-clock bounds for reasons unrelated to the property
+    /// under test.
+    const ENTROPY_TRIPWIRE_PAYLOAD_BYTES: usize = 1024 * 1024;
+
     #[test]
     fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
-        // Thousands of separate glued assignments, at the sidecar input limit.
+        // Thousands of separate glued assignments, at the tripwire size.
         // Each one contributes a range, and comparing every new range against
         // every accumulated range was quadratic: a megabyte produced tens of
         // thousands of ranges and on the order of a billion comparisons.
         let unit = "api_key=Zx9Qk2Lm7Pv4Rt8Wy1 ";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -5720,21 +5767,18 @@ mod tests {
         // Every `=` in the input starts another reading in
         // `contextual_entropy_secret_ranges`, and the regex class
         // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
-        // spanning nearly the whole input, so a payload at the sidecar's 1
-        // MiB input limit produces on the order of half a million readings.
+        // spanning nearly the whole input, so a megabyte of them produces on
+        // the order of half a million readings.
         // There is no cue word anywhere in "x=", so `is_cued_secret` must
         // reject every one of them on the cheap length/cue/allowlist checks
         // BEFORE computing entropy: computing entropy first, even a bounded
         // sample, on every one of half a million readings is the CPU
         // denial-of-service this test guards against. 1024 repetitions (the
         // test above) is far too small to show the difference; this uses the
-        // real accepted maximum.
+        // full tripwire payload.
         let unit = "x=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
-        assert_eq!(
-            payload.len(),
-            PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
-        );
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
+        assert_eq!(payload.len(), ENTROPY_TRIPWIRE_PAYLOAD_BYTES);
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -5771,7 +5815,7 @@ mod tests {
         // reusing one per-candidate entropy profile across every reading
         // instead of rebuilding it per `=`.
         let unit = "api_key=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -7303,6 +7347,61 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::Medium,
             "successful secret scrub must land Medium (quarantine-with-override), not High"
+        );
+    }
+
+    /// A single large event -- an agent pasting a whole file, say -- must
+    /// reach the sidecar rather than being refused for length before it is
+    /// ever spawned. The guard used to sit at 1 MiB while a whole envelope
+    /// could be many times that, so one big event failed the entire
+    /// submission (the external-filter pass propagates with `?`, so there is
+    /// no partial success to fall back on).
+    ///
+    /// The adapter points at a command that does not exist, so the call
+    /// cannot succeed; what this asserts is WHICH failure comes back. Past
+    /// the guard means the spawn was attempted.
+    #[tokio::test]
+    async fn sidecar_input_guard_admits_a_field_the_envelope_cap_allows() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let at_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES);
+        let error = adapter
+            .redact_text(&at_cap)
+            .await
+            .expect_err("no such command, so this cannot succeed");
+        let reason = format!("{error:?}");
+        assert!(
+            !reason.contains("input exceeded limit"),
+            "a field the envelope cap allows must reach the sidecar: {reason}"
+        );
+        assert!(
+            reason.contains("failed to spawn"),
+            "expected the spawn failure that proves the guard was passed: {reason}"
+        );
+    }
+
+    /// The other direction: above the cap it is still a clean, label-only
+    /// length refusal, not a spawn of a doomed subprocess.
+    #[tokio::test]
+    async fn sidecar_input_guard_still_refuses_above_the_cap() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let over_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES + 1);
+        let error = adapter
+            .redact_text(&over_cap)
+            .await
+            .expect_err("above the cap must refuse");
+        assert!(
+            format!("{error:?}").contains("input exceeded limit"),
+            "expected the length refusal: {error:?}"
         );
     }
 }

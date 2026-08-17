@@ -1061,9 +1061,17 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
 
+    /// Body limit every stub endpoint is mounted with. axum defaults to
+    /// 2 MiB, which is BELOW the envelope cap -- a stub left on the default
+    /// would 413 a legitimately-sized envelope and surface as a generic
+    /// `http-failure`, hiding whatever the test was actually asserting.
+    /// Mirrors real ingest: the envelope cap plus framing headroom.
+    const STUB_BODY_LIMIT_BYTES: usize = MAX_ENVELOPE_BYTES + 4 * 1024 * 1024;
+
     async fn spawn(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let router = router.layer(axum::extract::DefaultBodyLimit::max(STUB_BODY_LIMIT_BYTES));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
     }
@@ -1075,6 +1083,7 @@ mod tests {
     async fn spawn_as_localhost(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let router = router.layer(axum::extract::DefaultBodyLimit::max(STUB_BODY_LIMIT_BYTES));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://localhost:{port}")
     }

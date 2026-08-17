@@ -465,8 +465,11 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     // a handful of bytes above MAX_ENVELOPE_BYTES made the precondition break
     // on any change to serialized length, including a consent boolean
     // flipping between `true` and `false`.
-    let trajectory =
-        write_trajectory_with_source(fixture_dir.path(), &"x".repeat(1_499_000), "boundary-test");
+    let trajectory = write_trajectory_with_source(
+        fixture_dir.path(),
+        &"x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 8_000),
+        "boundary-test",
+    );
     let source = trace_commons_contributor::source::trajectory::TrajectorySource::new(trajectory);
     let session_ref = source.discover().unwrap().remove(0);
     let transcript = source.load(&session_ref).unwrap();
@@ -648,7 +651,10 @@ fn unenrolled_real_submit_still_requires_login() {
 #[test]
 fn refusal_reports_session_and_size_and_only_fails_real_submit() {
     let fixture_dir = tempfile::tempdir().unwrap();
-    let trajectory = write_trajectory(fixture_dir.path(), &"x".repeat(1_600_000));
+    // Sized off the cap, not a literal: a fixture pinned to a hardcoded byte
+    // count silently stops testing the refusal path the moment the cap moves.
+    let over_cap = trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 100_000;
+    let trajectory = write_trajectory(fixture_dir.path(), &"x".repeat(over_cap));
 
     let dry_config_dir = tempfile::tempdir().unwrap();
     let dry = run_submit(dry_config_dir.path(), &trajectory, false, true);
@@ -667,7 +673,13 @@ fn refusal_reports_session_and_size_and_only_fails_real_submit() {
         "stdout={dry_stdout}"
     );
     assert!(dry_stdout.contains("size="), "stdout={dry_stdout}");
-    assert!(dry_stdout.contains("limit=1500000"), "stdout={dry_stdout}");
+    assert!(
+        dry_stdout.contains(&format!(
+            "limit={}",
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )),
+        "stdout={dry_stdout}"
+    );
 
     let real_config_dir = tempfile::tempdir().unwrap();
     write_enrolled_config(real_config_dir.path());
