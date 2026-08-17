@@ -20,7 +20,9 @@ usage: generate-manifest.sh --version X.Y.Z --key <ed25519.pem> \
          [--out <dir>] \
          --platform <slug>=<url>=<sha256>=<size> [--platform ...]
 
-slugs: windows-x86_64 | macos-universal | linux-x86_64
+desktop slugs: windows-x86_64 | macos-universal | linux-x86_64
+cli slugs:     windows-x86_64-cli | linux-x86_64-cli
+               macos-aarch64-cli | macos-x86_64-cli
 EOF
   exit 2
 }
@@ -49,8 +51,14 @@ PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 platforms_json=""
 for spec in "${PLATFORM_ARGS[@]}"; do
   IFS='=' read -r slug url sha size <<<"$spec"
+  # Two families, deliberately distinct. The bare `<os>-<arch>` slugs carry
+  # the desktop artifacts (a .dmg, a .zip). The `-cli` slugs carry the single
+  # signed contributor binary, which is what the CLI self-updater downloads:
+  # it has no archive extractor and must not be pointed at the winget payload
+  # it defers to.
   case "$slug" in
     windows-x86_64|macos-universal|linux-x86_64) ;;
+    windows-x86_64-cli|linux-x86_64-cli|macos-aarch64-cli|macos-x86_64-cli) ;;
     *) die "unknown platform slug: $slug" ;;
   esac
   [ -n "$url" ]  || die "$slug: empty url"

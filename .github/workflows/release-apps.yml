@@ -686,6 +686,31 @@ jobs:
             ARGS+=(--platform "windows-x86_64=$BASE/trace-commons-windows-x86_64-$V.zip=$SHA=$SIZE")
           fi
 
+          # The CLI's own assets. These are published on the contributor-v*
+          # tag stream, not app-v*, and are downloaded here so their digests
+          # come from the bytes clients will actually receive rather than
+          # from a value copied by hand.
+          CLI_BASE="https://github.com/$REPO/releases/download/contributor-v$V"
+          for pair in \
+            "windows-x86_64-cli:trace-commons-contributor-x86_64-pc-windows-msvc.exe" \
+            "linux-x86_64-cli:trace-commons-contributor-x86_64-unknown-linux-gnu" \
+            "macos-aarch64-cli:trace-commons-contributor-aarch64-apple-darwin" \
+            "macos-x86_64-cli:trace-commons-contributor-x86_64-apple-darwin"
+          do
+            SLUG="${pair%%:*}"
+            NAME="${pair#*:}"
+            if curl -fsSL --proto '=https' --tlsv1.2 "$CLI_BASE/$NAME" -o "dist/$NAME"; then
+              SHA="$(shasum -a 256 "dist/$NAME" | awk '{print $1}')"
+              SIZE="$(wc -c < "dist/$NAME" | tr -d ' ')"
+              ARGS+=(--platform "$SLUG=$CLI_BASE/$NAME=$SHA=$SIZE")
+            fi
+            # A missing asset is skipped, not fatal: the CLI tag stream is
+            # independent of the app tag stream, so a release that cut only
+            # the desktop apps legitimately has none of these. An absent slug
+            # means "no update for you"; a present-but-wrong one would point
+            # every client of that platform at a 404.
+          done
+
           ./scripts/updates/generate-manifest.sh \
             --version "$V" \
             --key "$RUNNER_TEMP/update-signing.pem" \

@@ -43,3 +43,22 @@ workflow stamps into the bundle.
 `WINGET_PKGS_TOKEN` is a fine-grained PAT with contents and pull-request write
 on a fork of `microsoft/winget-pkgs`. `github.token` cannot reach another
 repository, which is why this secret exists.
+
+## Platform slugs
+
+Two families:
+
+| Slug | Artifact | Consumed by |
+|---|---|---|
+| `macos-universal` | `TraceCommons-<v>.dmg` | Sparkle (via the appcast, not this file) |
+| `windows-x86_64` | `trace-commons-windows-x86_64-<v>.zip` | winget |
+| `linux-x86_64` | flatpak repo | flatpak portal |
+| `windows-x86_64-cli` | `trace-commons-contributor-x86_64-pc-windows-msvc.exe` | the CLI self-updater |
+| `linux-x86_64-cli` | `trace-commons-contributor-x86_64-unknown-linux-gnu` | the CLI self-updater |
+| `macos-aarch64-cli` | `trace-commons-contributor-aarch64-apple-darwin` | the CLI self-updater |
+| `macos-x86_64-cli` | `trace-commons-contributor-x86_64-apple-darwin` | the CLI self-updater |
+
+The CLI slugs carry a bare binary, never an archive: the CLI has no archive
+extractor and no new dependency may be added to give it one. The desktop
+`windows-x86_64` zip is the winget payload, and the CLI defers to winget
+rather than consuming it.
