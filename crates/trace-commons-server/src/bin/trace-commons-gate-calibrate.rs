@@ -44,6 +44,9 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "trace-commons-gate-calibrate")]
 #[command(about = "Offline gate calibration + bake-off harness", long_about = None)]
+// The semver does not move when a deploy does, so --version carries the commit
+// the binary was built from as well.
+#[command(version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,

@@ -15,6 +15,18 @@ use trace_commons_contributor_gtk::backend::Backend;
 use trace_commons_contributor_gtk::model::{QueueEntry, Status, human_bytes, human_when};
 
 fn main() -> Result<()> {
+    // Checked before the positional state directory, which would otherwise
+    // swallow the flag. Same ad hoc idiom the rest of this binary uses.
+    if let Some(first) = std::env::args().nth(1)
+        && (first == "--version" || first == "-V")
+    {
+        println!(
+            "{}",
+            trace_commons_build_info::identity(env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     let dir = match std::env::args().nth(1) {
         Some(d) => std::path::PathBuf::from(d),
         None => trace_commons_contributor_gtk::state_dir()?,

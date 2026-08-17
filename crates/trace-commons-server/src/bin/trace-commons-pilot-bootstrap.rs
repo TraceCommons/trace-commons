@@ -15,7 +15,10 @@ use pilot_bootstrap::run_pilot_bootstrap;
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "trace-commons-pilot-bootstrap",
-    about = "Replay HuggingFace agent-traces datasets into a running trace-commons-ingest"
+    about = "Replay HuggingFace agent-traces datasets into a running trace-commons-ingest",
+    // The semver does not move when a deploy does, so --version carries the
+    // commit the binary was built from as well.
+    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 struct Cli {
     /// Source HF dataset id. Default: jedisct1/agent-traces-swival

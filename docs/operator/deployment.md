@@ -351,6 +351,56 @@ common first-deploy failures are listed in
 If any of the above is missing or stalls, see
 [`troubleshooting.md`](troubleshooting.md).
 
+## Identifying what is deployed
+
+Every binary carries the commit it was built from, and both services report it
+on `/health`. Ask the running service rather than the host's git checkout: the
+checkout on the pilot host is routinely weeks behind the binary that is
+actually running.
+
+```sh
+curl -s https://ingest.example.com/health | jq .
+```
+
+```json
+{
+  "status": "ok",
+  "schema_version": "trace_contribution.v1",
+  "build_commit": "6f160d43",
+  "build_time": "2026-08-17T18:42:11Z",
+  "build_version": "0.1.0"
+}
+```
+
+The issuer answers the same way, alongside the `checks` object it already
+reported — on its degraded response too, which is when the question is most
+often being asked:
+
+```sh
+curl -s https://issuer.tracecommons.ai/health | jq '{status, build_commit, build_time}'
+```
+
+The same identity is on the command line, for a binary that is on disk but not
+running:
+
+```sh
+./target/release/trace-commons-ingest --version
+# trace-commons-ingest 0.1.0 (commit 6f160d43, built 2026-08-17T18:42:11Z)
+```
+
+Read `build_commit`, not `build_version`. The crate version does not move when
+a deploy does — it stayed at `0.1.0` across every change that has ever shipped
+to the pilot — so it identifies nothing on its own. `build_commit` is the value
+to paste into `git show`.
+
+A `build_commit` of `unknown` means the build could not resolve a commit. The
+binary still runs, but it cannot be traced back to source. Cloud Build compiles
+from a source tarball with no `.git/` (see `.gcloudignore`), so it passes the
+commit in through the `TRACE_COMMONS_BUILD_COMMIT` environment variable;
+`cloudbuild.yaml` sets it from the same value it names the GCS object with. A
+local `cargo build` inside a git checkout picks the commit up from git instead.
+So `unknown` on a deployed binary points at the build step, not at the host.
+
 ## Next steps
 
 - Run the HF bootstrap calibration: [`calibration.md`](calibration.md).

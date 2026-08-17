@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
+trace-commons-build-info = { path = "../trace-commons-build-info" }
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
