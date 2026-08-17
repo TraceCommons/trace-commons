@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
-    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>TraceCommons.App</RootNamespace>
     <AssemblyName>TraceCommons</AssemblyName>
     <Nullable>enable</Nullable>
@@ -15,17 +15,48 @@
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
 
     <!--
-      Unpackaged (WindowsPackageType=None) rather than MSIX for this slice.
+      MSIX, via single-project packaging rather than a separate .wapproj.
 
-      MSIX is the right end state for shipping — it is how the macOS app's
-      bundle and the Linux shell's desktop entry are matched on Windows — but
-      it needs signing identity and a packaging project, neither of which
-      exists yet. Unpackaged builds and runs from CI with no certificate, so
-      the interop path can be proven on Windows before packaging work starts.
+      Package identity is not a preference here: every App Installer API the
+      update flow uses (Package.CheckUpdateAvailabilityAsync and
+      PackageManager.RequestAddPackageByAppInstallerFileAsync) refuses
+      without it, so an unpackaged build has no update path at all.
+
+      Single-project rather than a Windows Application Packaging Project
+      because its one real limitation is a single executable per package,
+      and this app ships exactly one. A .wapproj would add a fourth project
+      to the solution carrying a duplicate of the version, the manifest and
+      the platform matrix.
     -->
-    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+
+    <!--
+      Self-contained stays on under MSIX. It keeps the Windows App Runtime
+      out of the package's Dependencies, which keeps it out of the
+      .appinstaller feed: a framework reference there is one more artifact
+      the deployment service must reach, on a host we do not control.
+    -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
+
+    <!--
+      Packaging is OFF by default and turned on from the command line with
+      -p:GenerateAppxPackageOnBuild=true. A plain `msbuild` stays a fast
+      compile check; only the release job and the CI packaging step pay for
+      MakeAppx and MakePri.
+
+      Signing is OFF here on purpose. The package is signed afterwards by
+      signtool against Azure Trusted Signing, which holds no local key:
+      AppxPackageSigningEnabled would look for a .pfx that must never exist
+      in this repository.
+    -->
+    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <UapAppxPackageBuildMode>SideloadOnly</UapAppxPackageBuildMode>
+    <AppxPackageDir>$(MSBuildThisFileDirectory)..\..\dist\msix\</AppxPackageDir>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
 
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
@@ -33,6 +64,13 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="Images\**\*.png" />
   </ItemGroup>
 
   <ItemGroup>

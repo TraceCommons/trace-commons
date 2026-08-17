@@ -83,6 +83,29 @@ path length.
 `NativeRoundTripTests.ShortTempDir` keeps the path short for this reason.
 Windows is unaffected, since its transport is a named pipe.
 
+## Packaging
+
+The app ships as an MSIX built by single-project packaging, signed through the
+same Azure Trusted Signing account the contributor CLI uses, and distributed
+through a `.appinstaller` feed that Windows polls on its own schedule.
+
+```powershell
+# From windows/. Packaging is off by default; a plain msbuild is a compile
+# check. dist/msix/ is the output directory.
+msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore `
+  -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+```
+
+The package is deliberately unsigned at build time. `AppxPackageSigningEnabled`
+is `false` because Trusted Signing holds no local key and the signature is
+applied afterwards by `signtool` against a short-lived certificate issued to
+the release job's OIDC token. There is no `.pfx` in this repository and there
+must never be one.
+
+Package identity is `ai.tracecommons.Contributor`, application id
+`TraceCommons`. Both are permanent: changing either produces a different app
+that installs alongside the old one instead of updating it.
+
 ## What is not here yet
 
 This slice is the interop layer and the main window. Deliberately absent, and
@@ -93,8 +116,6 @@ each is its own piece of work:
 - The preview sheet. `TcPreview` is implemented and tested against its error
   path, but nothing in the UI opens one yet.
 - System tray presence and run-at-login.
-- MSIX packaging and signing. The app builds unpackaged so that CI can verify
-  it without a certificate.
 - The rest of the queue frame the design specifies: the health banner, the undo
   bar, the week band, and the per-row "Not this one" and "Look inside" actions.
   The design system is in place (`src/TraceCommons.App/Themes/DesignSystem.xaml`
