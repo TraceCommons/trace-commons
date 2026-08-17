@@ -68,8 +68,46 @@ pub const QUEUE_EMPTY_BODY: &str = "When a session finishes and goes quiet, it s
      Nothing is sent unless you say so.";
 pub const CHECKING: &str = "Checking what would be sent…";
 
+/// The standing concession, under the column rather than on every card.
+/// Distinct on purpose from [`residual_risk_line`], which says what
+/// scrubbing did to *one* session: this one says what scrubbing *is*.
+pub const STANDING_DISCLAIMER: &str = "Scrubbing is local and pattern-based. It is good and it is \
+     not perfect -- which is why you look before anything is sent.";
+
+/// The manifest pair labels, §5.1 item 6. "Removed by pattern" names the
+/// mechanism's *limit* in the label itself, which is the point: it is what
+/// pattern matching found, not what was in there.
+pub const WOULD_SEND: &str = "Would send";
+pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
+
+/// §6.2's attention chip, in both places it is earned: a session where
+/// scrubbing removed nothing, and a search that found nothing. Neither is a
+/// reassurance, which is why they share a wording that concedes rather than
+/// one that congratulates.
+pub const NOTHING_MATCHED: &str = "nothing matched";
+
+/// The eyebrow over the count of things that did go out this week.
+pub const CONTRIBUTED: &str = "Contributed";
+
+/// The week band's heading.
+pub const THIS_WEEK: &str = "This week";
+
+pub fn waiting_heading(waiting: usize) -> String {
+    match waiting {
+        1 => "1 session waiting for your decision".to_string(),
+        n => format!("{n} sessions waiting for your decision"),
+    }
+}
+
+pub fn no_longer_waiting(count: usize) -> String {
+    format!("Sessions no longer waiting ({count})")
+}
+
 // --- Preview -----------------------------------------------------------
 
+/// The tab, which names a place. [`SEARCH_SUBMIT`] is the button, which
+/// names an action; they are the same word today and are not the same
+/// string, because only one of them is a verb.
 pub const TAB_SEARCH: &str = "Search";
 pub const TAB_WHATS_IN_IT: &str = "What's in it";
 pub const TAB_WOULD_BE_SENT: &str = "Exactly what would be sent";
@@ -91,6 +129,40 @@ pub const PERMISSIONS_REQUESTED_NOTE: &str = "These are the permissions this dev
 pub const UNENROLLED_PREVIEW: &str = "This is an illustration. This device isn't connected yet, so this was built without your \
      identity and nothing here can be contributed.";
 
+/// The sheet's title, before the project label the call site appends.
+pub const SHEET_TITLE_PREFIX: &str = "Look inside";
+
+/// §6.2's locked chip, and the sentence beside it. Both say the same thing
+/// the whole sheet exists to say: this is a rehearsal.
+pub const NOTHING_SENT_YET: &str = "nothing sent yet";
+pub const NOTHING_SENT_REASSURANCE: &str = "Nothing has been sent. This is what would be.";
+
+/// The search button. See [`TAB_SEARCH`].
+pub const SEARCH_SUBMIT: &str = "Search";
+pub const RECENT_LABEL: &str = "Recent:";
+
+/// What an empty search result says. A search that found nothing is not
+/// evidence that nothing is there, and this is where that is said rather
+/// than implied.
+pub const NOTHING_MATCHED_BODY: &str = "A search only finds what is written the way you typed it. \
+     If it matters, try the other spellings you would worry about -- a hostname, an internal \
+     code name, an address.";
+
+pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval covers. Marks like \
+     <PRIVATE_SECRET_1> show where scrubbing fired -- legible as chips, not holes.";
+
+/// The read gate's two halves and its footnote. The footnote concedes what
+/// the gate cannot check, because a gate that overstated what it verified
+/// would be worse than no gate.
+pub const GATE_OPENED: &str = "You have opened \"Exactly what would be sent\".";
+pub const GATE_ACKNOWLEDGED: &str = "I have looked at what would be sent, and I understand \
+     scrubbing is pattern-based and may have missed something.";
+pub const GATE_FOOTNOTE: &str = "Contribute stays off until both are done. Looking at the first \
+     screen is what this checks -- it cannot check that you read all of it, and it does not \
+     claim to.";
+
+pub const CLOSE: &str = "Close";
+
 // --- Approving ---------------------------------------------------------
 
 pub const SENDING: &str = "Sending…";
@@ -98,9 +170,28 @@ pub const UNDO: &str = "Undo";
 /// Used when the daemon reports no hold, so no undo may be offered.
 pub const APPROVED_NO_UNDO: &str = "Approved. It goes out on the next pass.";
 
+pub fn undo_headline(project_label: &str) -> String {
+    format!("Approved {project_label}. Still on this machine.")
+}
+
+/// The undo bar's body. The Linux wording, which drops the shared spec's
+/// middle clause ("This app cannot see when that lands, so it does not
+/// pretend to count it down") because the bar has less room and the
+/// remaining sentence already makes the promise the clause was defending.
+pub const UNDO_BODY: &str = "The watcher sends approved sessions on its next sweep. Undo works \
+     until the sweep starts, and says so plainly if it is already too late.";
+
+/// The other half of the undo bar's pair. Not "Dismiss": what this button
+/// does is let the send happen, and it should say so.
+pub const LET_IT_SEND: &str = "Let it send";
+
 // --- Credit ------------------------------------------------------------
 
 pub const CREDIT_HEADING: &str = "About credit";
+/// §5.3's eyebrow over the credit card. [`CREDIT_HEADING`] reads "About
+/// credit", which titles a paragraph rather than labelling a figure; the
+/// section rule beneath it wants the shorter word.
+pub const CREDIT_SECTION: &str = "Credit";
 pub const CREDIT_BODY: &str = "Contributions earn credit points, scored on how novel and \
      information-rich a trace is. Today credit is a record, not a currency: there is no payout, \
      no token, no exchange rate, and no date. The intent is that credit eventually settles to \
@@ -111,14 +202,113 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 // --- History -----------------------------------------------------------
 
 pub const HISTORY_IN_THE_COMMONS: &str = "In the commons";
-pub const HISTORY_BEING_REVIEWED: &str = "Being reviewed for privacy";
 pub const HISTORY_WAITING_TO_BE_SCORED: &str = "Waiting to be scored";
+
+/// §5.3's section heading over the record rows.
+pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
+
+/// §5.3's chip on a withdrawn record. The record stays on the list and
+/// reads as withdrawn (§7.3); it is never dropped and never re-labelled as
+/// something that failed.
+pub const WITHDRAWN_BY_YOU: &str = "Withdrawn by you";
+
+/// §5.3's row-level explanation on a held record, used only when the server
+/// sent no explanation of its own. It says the same three things
+/// [`QUARANTINE_BODY`] says -- automated, not rejected, not shared -- at row
+/// length rather than at section length.
+pub const HELD_ROW_BODY: &str = "Automated checks saw something that might be personal and \
+     couldn't decide on their own. It has not been rejected, and it has not been shared with \
+     anyone but the reviewer.";
 pub const QUARANTINE_HEADING: &str = "Held for privacy review";
 pub const QUARANTINE_BODY: &str = "A person at Trace Commons reads these before they enter the \
      commons. It happens when automated checks see something that might be personal or sensitive \
      and can't decide on its own.\n\nThese have not been rejected, and they have not been shared \
      with anyone but the reviewer. They are sitting still.\n\nTypical wait: we don't have a \
      reliable number yet.";
+
+// --- Community ---------------------------------------------------------
+//
+// §5.5's panel in History and §5.6's block in Settings are the two public
+// surfaces. They share their words as well as their stylesheet: the link
+// out of both is the same link.
+
+pub const COMMUNITY_HEADING: &str = "Community";
+
+/// The way out to the public page, from either surface. The arrow is part
+/// of the wording, not decoration: it is what says the destination is not
+/// in this window.
+pub const VIEW_PUBLIC_PROFILE: &str = "View public profile \u{2197}";
+
+/// §7.3: analytics that are withheld are stated in words, never as an empty
+/// chart.
+pub const COMMUNITY_ANALYTICS_WITHHELD: &str = "Corpus analytics are withheld. The server \
+     publishes the roster on consent, but will not publish aggregates without an approved noise \
+     mechanism -- so nothing is charted here either.";
+
+/// The footnote below the panel, in native type: the section is a
+/// consequence of one setting, and says which one.
+pub const COMMUNITY_FOOTNOTE: &str = "Shown only while \"List my handle publicly\" is on. Turn it \
+     off in Settings and this section disappears with it.";
+
+// --- Settings: connection ------------------------------------------------
+
+pub const CONNECTION_HEADING: &str = "Connection";
+pub const CONNECTED: &str = "Connected";
+pub const NOT_CONNECTED: &str = "Not connected";
+pub const CHECK_CLAUDE_SET: &str = "Claude Code sessions folder set";
+pub const CHECK_CLAUDE_DEFAULT: &str = "Claude Code sessions read from the usual place";
+pub const CHECK_CODEX_SET: &str = "Codex sessions folder set";
+pub const CHECK_CODEX_DEFAULT: &str = "Codex sessions read from the usual place";
+pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
+pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
+
+// --- Settings: the public profile, §5.6 ----------------------------------
+
+pub const PUBLIC_HEADING: &str = "Your public profile";
+pub const LIST_HANDLE_PUBLICLY: &str = "List my handle publicly";
+pub const PUBLIC_FOOTNOTE: &str = "Attribution only -- being listed grants no data use at all. \
+     Leaving the roster removes you from future snapshots.";
+/// The date is the daemon's, formatted at the call site; only the sentence
+/// around it lives here.
+pub fn on_roster_since(date: &str) -> String {
+    format!("On the roster since {date}")
+}
+pub const HANDLE_LABEL: &str = "Handle";
+pub const BIO_LABEL: &str = "Bio -- 280 bytes, plaintext, no HTML";
+pub const SAVE_PROFILE: &str = "Save profile";
+pub const LEAVE_ROSTER: &str = "Leave the roster";
+
+// --- The go-public dialog, §5.7 ------------------------------------------
+
+pub const GO_PUBLIC_TITLE: &str = "Go public?";
+pub const GO_PUBLIC_HEADLINE: &str = "Put your handle on the public roster?";
+pub const PUBLISHED_HEADING: &str = "What gets published";
+pub const PUBLISHED_BODY: &str = "Your handle -- real handles only, no pseudonyms. Aggregate \
+     counts: accepted, novelty credit, accept rate. The date you went public. Your bio, if you \
+     write one.";
+pub const NEVER_HEADING: &str = "What never does";
+pub const NEVER_BODY: &str = "Your traces or anything in them. Per-trace data of any kind. \
+     Anything about sessions you didn't send.";
+pub const GO_PUBLIC_ACKNOWLEDGEMENT: &str = "I understand my handle and aggregate counts become \
+     public. Leaving the roster removes me from future snapshots.";
+pub const GO_PUBLIC_CONFIRM: &str = "Go public";
+pub const GO_PUBLIC_FOOTNOTE: &str = "Nothing is pre-checked, and Go public stays off until the \
+     acknowledgement is on. This changes attribution only -- it grants no data use.";
+/// Said when the confirm lands and there is nowhere for it to go. The
+/// contract has no public-profile method, so the true sentence is that this
+/// window cannot do it yet -- and that nothing changed.
+pub const ROSTER_UNREACHABLE: &str =
+    "This window can't put you on the roster yet. Nothing changed.";
+
+// --- Declining -----------------------------------------------------------
+
+/// The one way this product declines to do something now: "Not now", never
+/// "Cancel" and never "No". It is one constant rather than one per dialog
+/// because the word is a stance, not a label -- nothing here is ever
+/// refused, only not done yet, and three copies of the sentence are three
+/// chances for one of them to stop saying that. Used by the arming dialog
+/// (§5.1), the go-public dialog (§5.7) and the desktop notification.
+pub const NOT_NOW: &str = "Not now";
 
 // --- Arming ------------------------------------------------------------
 
@@ -128,7 +318,6 @@ pub fn arming_heading(project_label: &str) -> String {
 pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
      contributed without asking you. You won't review them first.\n\nYou can turn this off at any \
      time.";
-pub const ARMING_CANCEL: &str = "Not now";
 pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
 
 // --- Quitting ----------------------------------------------------------
@@ -152,7 +341,6 @@ pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
 // --- Notifications -----------------------------------------------------
 
 pub const NOTIFY_REVIEW: &str = "Review";
-pub const NOTIFY_NOT_NOW: &str = "Not now";
 pub const NOTIFY_NOTHING_SENT: &str = "Nothing is sent until you review them.";
 
 // --- Background portal ---------------------------------------------------

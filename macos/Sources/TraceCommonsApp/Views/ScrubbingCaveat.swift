@@ -36,7 +36,10 @@ import SwiftUI
 ///    product. A caveat that a person has scrolled past ten times is worth
 ///    less than a caveat sitting under their cursor at the instant it
 ///    matters, so it is repeated there deliberately, where repetition buys
-///    something.
+///    something. Verbatim is the whole mechanism: a person who has read the
+///    sentence under the list recognises it under the button, and a variant
+///    wording there would read as a second, weaker message rather than as
+///    the same promise being kept.
 ///
 /// ## Copy provenance
 ///
@@ -46,6 +49,14 @@ import SwiftUI
 /// concede exactly what the canonical sentence concedes -- pattern matching
 /// only knows its patterns -- without claiming anything the daemon has not
 /// actually reported.
+///
+/// `design-import/DESIGN-SPEC.md` §5.2 prints a different sentence in the
+/// preview sheet's footer: "Scrubbing is pattern-based and may have missed
+/// something. Look before you send." It concedes the same thing and adds an
+/// instruction. It is deliberately NOT adopted, because point 3 above is an
+/// argument about the sentence being identical in all three places, not
+/// merely present in all three. Recorded here so the divergence is a
+/// decision on the record rather than an oversight.
 enum ScrubbingCaveat {
     /// The spec's sentence. Verbatim, load-bearing, not to be reworded.
     static let canonical =
@@ -75,8 +86,8 @@ struct ScrubbingCaveatNote: View {
                 .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -94,8 +105,8 @@ struct ScrubbingCaveatAtCommit: View {
                 .foregroundStyle(TC.Tone.attention.color)
                 .accessibilityHidden(true)
             Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)

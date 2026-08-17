@@ -4,11 +4,17 @@ import SwiftUI
 /// The menu-bar item.
 ///
 /// The mark, not a tray glyph. A menu bar holds twenty icons drawn from the
-/// same SF Symbol set and a generic tray is not findable among them; the
-/// TraceCommons mark is, and it is the same mark the community site carries,
-/// which is the point. It is drawn monochrome so the system can tint it for
-/// a light or dark menu bar and invert it when the menu is open, the way a
-/// template image behaves.
+/// same SF Symbol set and a generic tray is not findable among them; The Turn
+/// is, and it is the same mark every other piece of this product's chrome
+/// carries, which is the point.
+///
+/// It is the mark's **template** variant, at the 15pt the design spec states
+/// for the macOS menu bar (`design-import/DESIGN-SPEC.md` sections 1.2 and
+/// 1.3): frameless, single ink, drawn in `.primary` so the system recolours
+/// it across the menu bar's light, dark and selected states the way a
+/// template image behaves. The frame is dropped because a hairline rectangle
+/// does not survive 15pt next to the system's own glyphs, and the brackets
+/// thicken from 7/64 to 8/64 to carry the mark without it.
 ///
 /// State precedence is unchanged from the shared design: decisions owed
 /// (numeric badge) -> unhealthy -> paused -> idle. The badge counts
@@ -20,11 +26,16 @@ struct MenuBarLabel: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 3) {
-            BrandMark(size: 15, monochrome: true)
+        HStack(spacing: TC.Space.xxs) {
+            BrandMark(size: 15, variant: .template)
                 .opacity(model.status.paused ? 0.5 : 1)
             if model.decisionsOwed > 0 {
-                Text("\(model.decisionsOwed)").monospacedDigit()
+                // The one countable figure in the chrome, so it is set in the
+                // same mono the manifest strips use rather than in the menu
+                // bar's default face.
+                Text("\(model.decisionsOwed)")
+                    .font(TC.Font_.ledger)
+                    .monospacedDigit()
             } else if model.health != nil {
                 Image(systemName: "exclamationmark.triangle")
                     .imageScale(.small)
@@ -64,6 +75,13 @@ struct MenuBarContent: View {
             // menu draws its own vibrancy, its own highlight and its own
             // type, and anything painted over that reads as a bug. The only
             // additions are leading glyphs, which menus have always had.
+            //
+            // This is the token layer's answer for this surface, not an
+            // omission: `MenuBarExtra`'s default `.menu` style hands these
+            // rows to AppKit, which resolves its own font and colours and
+            // discards a `.font(TC.Font_...)` or a `.foregroundStyle(TC...)`
+            // set here. Tokens are applied where they survive -- the status
+            // item in `MenuBarLabel` above, and every window this menu opens.
             Button {
                 openMain()
             } label: {

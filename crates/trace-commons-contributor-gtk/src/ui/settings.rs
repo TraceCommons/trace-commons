@@ -5,6 +5,17 @@
 //! capability reachable only through this window is a capability a headless
 //! contributor does not have. Nothing in this view is the only way to do
 //! anything.
+//!
+//! ## Two visual languages, on purpose
+//!
+//! Everything above the public-profile section is the native palette --
+//! hairlines, the warm ground, the `tc_*` tokens. The public-profile block
+//! and the go-public dialog are drawn in the community brand instead: a 2px
+//! black frame, Helvetica, uppercase display type, mint. That seam is the
+//! design (`DESIGN-SPEC.md` §5.6, §5.7, §7.3): the black frame is the exact
+//! boundary of what becomes public, so it is not smoothed into GNOME
+//! conventions. It is drawn from [`community_brand`], the one stylesheet
+//! History's Community panel shares.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,13 +23,47 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use super::App;
+use super::community_brand;
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{Project, Settings, Status};
 
+/// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
+/// Bytes, not characters: the field is a plaintext byte budget on the wire,
+/// so a multi-byte character costs what it actually costs.
+const BIO_BYTE_LIMIT: usize = 280;
+
+/// What §5.6 draws, as data.
+///
+/// Every value in the mockup -- the handle `manian`, the bio, `74/280`,
+/// `On the roster since May 12, 2026` -- is a fixture. Nothing here is
+/// hardcoded; the panel renders whatever this carries and does not render
+/// at all when there is nothing to render.
+///
+/// There is no daemon method that fills this in yet: the IPC contract has
+/// no public-profile call, and adding one is a feature change, not a
+/// design pass. `render_public` is the seam it will arrive through.
+#[derive(Debug, Clone)]
+pub struct PublicProfile {
+    pub handle: String,
+    pub bio: String,
+    pub on_roster_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where "View public profile" goes. §7.2 records the target as
+    /// unspecified, so no URL is invented here -- the affordance appears
+    /// only when something supplies one.
+    pub public_url: Option<String>,
+}
+
 pub struct SettingsView {
     pub root: gtk::Box,
     connection: gtk::Label,
+    /// Holds the one chip that says whether this machine is connected.
+    /// §5.4 draws it as a status pill, and §7.3 requires colour AND glyph
+    /// AND words, which is what `style::tag` is.
+    connection_chip: gtk::Box,
+    /// The three check rows of §5.4's Connection section. Filled from
+    /// `get_settings`, never from a guess.
+    connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
     knobs: gtk::Box,
@@ -31,6 +76,14 @@ pub struct SettingsView {
     /// `copy::PORTAL_STATUS_CHECKING` rather than a guess.
     background_state: RefCell<Option<crate::portal::BackendState>>,
     background_body: gtk::Label,
+    /// The public-profile section, rebuilt whole on each render because it
+    /// is two different surfaces -- the native opt-in toggle and the brand
+    /// panel -- rather than one surface in two states.
+    public: gtk::Box,
+    /// `None` means "not on the roster", which is also the state every
+    /// build ships in today: no daemon method fills this in. See
+    /// `PublicProfile`.
+    public_profile: RefCell<Option<PublicProfile>>,
     audit: gtk::Box,
 }
 
@@ -42,23 +95,39 @@ impl Default for SettingsView {
 
 impl SettingsView {
     pub fn new() -> Self {
+        community_brand::install();
+
+        // §4.1's Linux content padding is `16px 20px 22px`, and §5.4 puts
+        // the settings sections 18px apart. 18 is not a step in
+        // `style::space`; `XL` (20) is the nearest one above it.
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(space::L)
-            .margin_top(space::XL)
-            .margin_bottom(space::XL)
-            .margin_start(space::L)
-            .margin_end(space::L)
+            .spacing(space::XL)
+            .margin_top(space::L)
+            .margin_bottom(space::XXL)
+            .margin_start(space::XL)
+            .margin_end(space::XL)
             .build();
 
         // What is running, and the one control that changes it, in one
         // card. These two facts belong together: reading "a background
         // watcher is running" and then hunting for Pause somewhere else is
         // the state and its control being separated for no reason.
+        //
+        // §5.4 heads this section "Connection" and opens it with a chip
+        // and three check rows; the sentences underneath are this shell's
+        // and say what the chip cannot -- which process is watching, and
+        // what is still true while it is paused.
+        content.append(&style::section(copy::CONNECTION_HEADING));
         let state_card = style::card(gtk::Orientation::Vertical, space::M);
+        let connection_chip = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        connection_chip.set_halign(gtk::Align::Start);
+        state_card.append(&connection_chip);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
         connection.add_css_class("tc-body");
         state_card.append(&connection);
+        let connection_checks = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+        state_card.append(&connection_checks);
         let pause_button = gtk::Button::with_label("Pause");
         pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
@@ -104,13 +173,23 @@ impl SettingsView {
         autostart_card.append(&background_body);
         content.append(&autostart_card);
 
+        // §5.6. Kept visually separate from everything above it because it
+        // is the only thing on this screen that grants no data use at all
+        // -- and, once opted in, because it is drawn in a different visual
+        // language entirely. `render_public` fills it, section header
+        // included: on the roster the brand panel carries its own heading
+        // and a native eyebrow above it would say the same words twice.
+        let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        content.append(&public);
+
         content.append(&style::section("What has been changed on this machine"));
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         content.append(&audit);
 
+        // §5.4: "prose column, kept narrow on purpose" -- `max-width:520px`.
         let clamp = adw::Clamp::builder()
-            .maximum_size(840)
-            .tightening_threshold(680)
+            .maximum_size(520)
+            .tightening_threshold(440)
             .child(&content)
             .build();
         let scroller = gtk::ScrolledWindow::builder()
@@ -125,6 +204,8 @@ impl SettingsView {
         Self {
             root,
             connection,
+            connection_chip,
+            connection_checks,
             pause_button,
             projects,
             knobs,
@@ -133,6 +214,8 @@ impl SettingsView {
             autostart_switch,
             background_state: RefCell::new(None),
             background_body,
+            public,
+            public_profile: RefCell::new(None),
             audit,
         }
     }
@@ -155,6 +238,7 @@ pub fn wire(app: &Rc<App>) {
     });
 
     render_autostart(app);
+    render_public(app);
     let a = Rc::clone(app);
     app.settings
         .autostart_switch
@@ -301,6 +385,103 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     app.settings
         .pause_button
         .set_label(if status.paused { "Resume" } else { "Pause" });
+
+    // §5.4 draws only the connected chip. The other half of the same fact
+    // has to be visible too, and §7.3 will not let it be a colour on its
+    // own, so both states are a chip with a glyph and words.
+    let chip = &app.settings.connection_chip;
+    while let Some(child) = chip.first_child() {
+        chip.remove(&child);
+    }
+    chip.append(&if status.logged_in {
+        style::tag(copy::CONNECTED, Tone::Clear)
+    } else {
+        style::tag(copy::NOT_CONNECTED, Tone::Attention)
+    });
+}
+
+/// §5.4's three check rows. Every one of them is a configured-or-not fact
+/// from `get_settings`; not one of them can carry a path or a credential,
+/// because the contract keeps both off the wire.
+fn render_connection_checks(app: &Rc<App>, settings: &Settings) {
+    let view = &app.settings.connection_checks;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    view.append(&check_row(
+        if settings.claude_root_configured {
+            copy::CHECK_CLAUDE_SET
+        } else {
+            copy::CHECK_CLAUDE_DEFAULT
+        },
+        settings.claude_root_configured,
+        None,
+    ));
+    view.append(&check_row(
+        if settings.codex_root_configured {
+            copy::CHECK_CODEX_SET
+        } else {
+            copy::CHECK_CODEX_DEFAULT
+        },
+        settings.codex_root_configured,
+        None,
+    ));
+    // The scan's row keeps the sentence this shell already had under it.
+    // "Configured" is not the fact a contributor needs -- that message text
+    // leaves the machine is, and it is the kind of consequence this
+    // product states rather than implies.
+    view.append(&check_row(
+        if settings.near_ai_configured {
+            copy::CHECK_SCAN_SET
+        } else {
+            copy::CHECK_SCAN_UNSET
+        },
+        settings.near_ai_configured,
+        Some(if settings.near_ai_configured {
+            "Message text is scanned by a third party before anything is sent."
+        } else {
+            "Local scrubbing only."
+        }),
+    ));
+}
+
+/// One check row: a tone glyph, the fact in words, and optionally the
+/// consequence underneath. Not a control -- §6.9 calls these "not
+/// interactive" -- so it is a label, not a disabled checkbox.
+fn check_row(label: &str, satisfied: bool, note: Option<&str>) -> gtk::Box {
+    let tone = if satisfied {
+        Tone::Clear
+    } else {
+        Tone::Neutral
+    };
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let glyph = gtk::Label::new(Some(tone.glyph()));
+    glyph.add_css_class(tone.css());
+    glyph.set_valign(gtk::Align::Start);
+    row.append(&glyph);
+    let text = gtk::Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .build();
+    text.add_css_class("tc-body");
+    row.append(&text);
+    // Read as one statement rather than as a glyph and a stray sentence.
+    row.update_property(&[gtk::accessible::Property::Label(label)]);
+    column.append(&row);
+    if let Some(note) = note {
+        let note_label = gtk::Label::builder()
+            .label(note)
+            .xalign(0.0)
+            .wrap(true)
+            .margin_start(space::L)
+            .build();
+        note_label.add_css_class("tc-meta");
+        column.append(&note_label);
+    }
+    column
 }
 
 pub fn refresh(app: &Rc<App>) {
@@ -316,6 +497,7 @@ pub fn refresh(app: &Rc<App>) {
         let Ok(settings) = serde_json::from_value::<Settings>(value) else {
             return;
         };
+        render_connection_checks(app, &settings);
         render_knobs(app, &settings);
     });
     app.call(
@@ -477,10 +659,7 @@ fn confirm_arming(app: &Rc<App>, project: &Project, dropdown: gtk::DropDown) {
         Some(&copy::arming_heading(&project.project_label)),
         Some(copy::ARMING_BODY),
     );
-    dialog.add_responses(&[
-        ("cancel", copy::ARMING_CANCEL),
-        ("arm", copy::ARMING_CONFIRM),
-    ]);
+    dialog.add_responses(&[("cancel", copy::NOT_NOW), ("arm", copy::ARMING_CONFIRM)]);
     dialog.set_response_appearance("arm", adw::ResponseAppearance::Destructive);
     dialog.set_close_response("cancel");
 
@@ -540,31 +719,385 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
         ),
     ));
 
-    // Configured-or-not facts only. The credential and the two local paths
-    // never cross the socket, so there is nothing here that could render
-    // one by accident.
-    view.append(&super::titled_paragraph(
-        "Extra privacy scan",
-        if settings.near_ai_configured {
-            "Set up. Message text is scanned by a third party before anything is sent."
-        } else {
-            "Not set up. Local scrubbing only."
-        },
+    // The extra privacy scan and the two session folders used to be
+    // restated here as well. §5.4 puts all three in the Connection section
+    // as check rows, and they are configured-or-not facts about what this
+    // machine is wired to rather than knobs about how it behaves, so they
+    // moved rather than being duplicated. See `render_connection_checks`,
+    // which kept the scan's consequence sentence intact.
+}
+
+// --- The public surface, §5.6 and §5.7 ---------------------------------
+//
+// Two surfaces, not two states of one: off the roster, this is a native
+// toggle that grants nothing; on it, it is a panel drawn in the community
+// brand. The change of visual language IS the statement -- §7.3 makes the
+// black frame the exact boundary of what becomes public -- so the two are
+// built separately rather than restyled into each other.
+
+/// Hand the view a public profile, or the absence of one, and redraw.
+///
+/// This is the seam the daemon will arrive through. The IPC contract has no
+/// public-profile method today, so nothing calls this with `Some` yet and
+/// the section renders its off-the-roster state in every shipped build.
+pub fn set_public_profile(app: &Rc<App>, profile: Option<PublicProfile>) {
+    *app.settings.public_profile.borrow_mut() = profile;
+    render_public(app);
+}
+
+fn render_public(app: &Rc<App>) {
+    let view = &app.settings.public;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    // Cloned out of the cell before building, so a handler that redraws
+    // this section cannot run while the borrow is still live.
+    let profile = app.settings.public_profile.borrow().clone();
+    match profile {
+        Some(profile) => view.append(&public_profile_panel(app, &profile)),
+        None => {
+            view.append(&style::section(copy::PUBLIC_HEADING));
+            view.append(&public_opt_in_row(app));
+        }
+    }
+    let footnote = gtk::Label::builder()
+        .label(copy::PUBLIC_FOOTNOTE)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    // §5.6 sets this footnote in native type outside the panel: it is this
+    // window talking about the public surface, not part of it. Linux takes
+    // the tertiary ink.
+    footnote.add_css_class("tc-meta");
+    footnote.add_css_class("tc-tertiary");
+    view.append(&footnote);
+}
+
+/// Off the roster. The toggle §5.4 names, and nothing else -- turning it on
+/// opens the consent dialog rather than doing anything.
+fn public_opt_in_row(app: &Rc<App>) -> gtk::Box {
+    let card = style::card(gtk::Orientation::Vertical, space::M);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(copy::LIST_HANDLE_PUBLICLY)
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-body");
+    // Off. §7.3: nothing optional is pre-checked, and this is the most
+    // optional thing in the window.
+    let toggle = gtk::Switch::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .active(false)
+        .build();
+    toggle.update_property(&[gtk::accessible::Property::Label(copy::LIST_HANDLE_PUBLICLY)]);
+    row.append(&label);
+    row.append(&toggle);
+    card.append(&row);
+
+    let app = Rc::clone(app);
+    toggle.connect_state_set(move |toggle, wanted| {
+        // Only the on direction asks anything: the off direction is
+        // unreachable by hand, since the panel replaces this row once a
+        // profile exists, and the dialog itself puts the switch back.
+        if wanted {
+            offer_going_public(&app, toggle.clone());
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    card
+}
+
+/// On the roster: §5.6's brand panel.
+fn public_profile_panel(app: &Rc<App>, profile: &PublicProfile) -> gtk::Box {
+    // §5.6's panel gap is 14px; `space::M` (12) is the nearest step.
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+    panel.add_css_class("tc-brand-panel");
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let title = brand_display(copy::PUBLIC_HEADING);
+    title.set_hexpand(true);
+    header.append(&title);
+    let trailing = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    trailing.set_halign(gtk::Align::End);
+    if let Some(url) = &profile.public_url {
+        trailing.append(&brand_link(copy::VIEW_PUBLIC_PROFILE, url));
+    }
+    if let Some(since) = profile.on_roster_since {
+        let since_label = brand_label(&copy::on_roster_since(
+            &since
+                .with_timezone(&chrono::Local)
+                .format("%B %-d, %Y")
+                .to_string(),
+        ));
+        since_label.set_xalign(1.0);
+        trailing.append(&since_label);
+    }
+    header.append(&trailing);
+    panel.append(&header);
+
+    let handle_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    handle_group.append(&brand_label(copy::HANDLE_LABEL));
+    let handle = gtk::Entry::builder().text(profile.handle.as_str()).build();
+    handle.add_css_class("tc-brand-field");
+    handle.add_css_class("tc-brand-mono");
+    handle.update_property(&[gtk::accessible::Property::Label(copy::HANDLE_LABEL)]);
+    handle_group.append(&handle);
+    panel.append(&handle_group);
+
+    let bio_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    bio_group.append(&brand_label(copy::BIO_LABEL));
+    let bio_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    bio_frame.add_css_class("tc-brand-field");
+    let bio = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .accepts_tab(false)
+        .build();
+    bio.add_css_class("tc-brand-bio");
+    bio.buffer().set_text(&profile.bio);
+    bio.update_property(&[gtk::accessible::Property::Label(copy::BIO_LABEL)]);
+    bio_frame.append(&bio);
+    bio_group.append(&bio_frame);
+    let counter = brand_label(&bio_counter(&profile.bio));
+    counter.set_xalign(1.0);
+    bio_group.append(&counter);
+    // The counter tracks the buffer rather than the value the panel was
+    // built from. What happens at and above the limit is drawn nowhere in
+    // the spec, so this counts, says so, and refuses nothing.
+    let counter_handle = counter.clone();
+    bio.buffer().connect_changed(move |buffer| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        counter_handle.set_label(&bio_counter(text.as_str()));
+    });
+    panel.append(&bio_group);
+
+    // §5.6's button pair, at a 10px gap; `space::S` (8) is the nearest step.
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let save = brand_button(copy::SAVE_PROFILE, true);
+    let leave = brand_button(copy::LEAVE_ROSTER, false);
+    buttons.append(&save);
+    buttons.append(&leave);
+    panel.append(&buttons);
+
+    // Neither button has anywhere to go: the contract carries no
+    // public-profile method, and adding one is a feature change rather
+    // than a design pass. Both say so instead of appearing to work.
+    for button in [&save, &leave] {
+        let app = Rc::clone(app);
+        button.connect_clicked(move |_| app.toast(copy::ROSTER_UNREACHABLE));
+    }
+    panel
+}
+
+/// "74/280", from what is actually in the buffer.
+fn bio_counter(bio: &str) -> String {
+    format!("{}/{BIO_BYTE_LIMIT}", bio.len())
+}
+
+/// §5.7. Going public is a consent dialog, not a toggle flip.
+///
+/// It is an `adw::Window` rather than an `adw::MessageDialog` because its
+/// body is a brand surface: a message dialog would set the prose in the
+/// native palette, and the whole point of this screen is that the public
+/// surface does not look like the window around it.
+fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
+    let dialog = adw::Window::builder()
+        .transient_for(&app.window)
+        .modal(true)
+        // §4.6: the Linux dialog is drawn at 560px.
+        .default_width(560)
+        .resizable(false)
+        .build();
+
+    let header = adw::HeaderBar::builder()
+        .title_widget(&adw::WindowTitle::new(copy::GO_PUBLIC_TITLE, ""))
+        .build();
+
+    // §5.7: `padding:20px; gap:16px`, on a pure brand ground.
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::L)
+        .margin_top(space::XL)
+        .margin_bottom(space::XL)
+        .margin_start(space::XL)
+        .margin_end(space::XL)
+        .build();
+    body.add_css_class("tc-brand-surface");
+
+    let headline = gtk::Label::builder()
+        .label(copy::GO_PUBLIC_HEADLINE.to_uppercase())
+        .xalign(0.0)
+        .wrap(true)
+        .max_width_chars(16)
+        .build();
+    headline.add_css_class("tc-brand-dialog-title");
+    body.append(&headline);
+
+    // The two columns sit inside one frame split by a single hairline:
+    // what is published and what never is are the same object seen from
+    // both sides, not two separate claims.
+    let columns = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .homogeneous(true)
+        .build();
+    columns.add_css_class("tc-brand-box");
+    columns.append(&consent_column(
+        copy::PUBLISHED_HEADING,
+        copy::PUBLISHED_BODY,
+        true,
     ));
-    view.append(&super::titled_paragraph(
-        "Where sessions are read from",
-        &format!(
-            "Claude Code: {}   Codex: {}",
-            if settings.claude_root_configured {
-                "a folder you chose"
-            } else {
-                "the usual place"
-            },
-            if settings.codex_root_configured {
-                "a folder you chose"
-            } else {
-                "the usual place"
-            }
-        ),
+    columns.append(&consent_column(
+        copy::NEVER_HEADING,
+        copy::NEVER_BODY,
+        false,
     ));
+    body.append(&columns);
+
+    // The acknowledgement. Unchecked, and the only thing that unlocks the
+    // primary.
+    let ack_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    ack_row.add_css_class("tc-brand-notice");
+    let ack = gtk::CheckButton::builder().active(false).build();
+    ack.add_css_class("tc-brand-check");
+    ack.set_valign(gtk::Align::Start);
+    ack.update_property(&[gtk::accessible::Property::Label(
+        copy::GO_PUBLIC_ACKNOWLEDGEMENT,
+    )]);
+    let ack_label = gtk::Label::builder()
+        .label(copy::GO_PUBLIC_ACKNOWLEDGEMENT)
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .build();
+    ack_label.add_css_class("tc-brand-body");
+    ack_row.append(&ack);
+    ack_row.append(&ack_label);
+    body.append(&ack_row);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    buttons.set_halign(gtk::Align::End);
+    let not_now = brand_button(copy::NOT_NOW, false);
+    let confirm = brand_button(copy::GO_PUBLIC_CONFIRM, true);
+    // Disabled until the acknowledgement is on, which is the rule §5.7
+    // states in words at the foot of the same screen.
+    confirm.set_sensitive(false);
+    buttons.append(&not_now);
+    buttons.append(&confirm);
+    body.append(&buttons);
+
+    let footnote = gtk::Label::builder()
+        .label(copy::GO_PUBLIC_FOOTNOTE)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    footnote.add_css_class("tc-brand-footnote");
+    body.append(&footnote);
+
+    let confirm_handle = confirm.clone();
+    ack.connect_toggled(move |ack| confirm_handle.set_sensitive(ack.is_active()));
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("tc-brand-surface");
+    content.append(&header);
+    content.append(&body);
+    dialog.set_content(Some(&content));
+
+    // Every way out of this dialog leaves the switch off, the confirm
+    // included: there is nowhere for a confirmed opt-in to go yet, so the
+    // switch must not be left claiming a listing that does not exist.
+    dialog.connect_close_request(move |_| {
+        toggle.set_active(false);
+        gtk::glib::Propagation::Proceed
+    });
+    let window = dialog.clone();
+    not_now.connect_clicked(move |_| window.close());
+    let window = dialog.clone();
+    let app = Rc::clone(app);
+    confirm.connect_clicked(move |_| {
+        app.toast(copy::ROSTER_UNREACHABLE);
+        window.close();
+    });
+    dialog.present();
+}
+
+/// One half of §5.7's consent box. The leading column carries the 1px
+/// divider; the trailing one does not.
+fn consent_column(heading: &str, body: &str, divided: bool) -> gtk::Box {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+    column.add_css_class("tc-brand-cell");
+    if divided {
+        column.add_css_class("tc-brand-divided");
+    }
+    column.append(&brand_label(heading));
+    column.append(&brand_body(body));
+    column
+}
+
+/// `display.panel`: uppercased here, since GTK 4 CSS has no
+/// `text-transform`.
+fn brand_display(text: &str) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .label(text.to_uppercase())
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    label.add_css_class("tc-brand-display");
+    label
+}
+
+/// `label.mono`: the brand's micro-label, on `brand.muted`.
+fn brand_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .label(text.to_uppercase())
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    label.add_css_class("tc-brand-label");
+    label
+}
+
+/// `body.brand`: prose inside a brand panel.
+fn brand_body(text: &str) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .label(text)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    label.add_css_class("tc-brand-body");
+    label
+}
+
+/// §6.1's brand pair. `primary` is the mint fill; both carry the same
+/// frame and the same label type.
+fn brand_button(text: &str, primary: bool) -> gtk::Button {
+    let button = gtk::Button::with_label(&text.to_uppercase());
+    button.add_css_class("tc-brand-button");
+    if primary {
+        button.add_css_class("tc-brand-primary");
+    }
+    button
+}
+
+/// The brand text link. Underlined through Pango markup rather than CSS,
+/// and it hands the address to the desktop's browser -- the one place this
+/// window points outside itself. A launch that fails changes nothing, so
+/// there is nothing to report and nothing to undo.
+fn brand_link(text: &str, url: &str) -> gtk::Button {
+    let label = gtk::Label::new(None);
+    label.set_markup(&format!(
+        "<u>{}</u>",
+        gtk::glib::markup_escape_text(&text.to_uppercase())
+    ));
+    let button = gtk::Button::builder().child(&label).build();
+    button.add_css_class("tc-brand-link");
+    button.set_halign(gtk::Align::End);
+    button.update_property(&[gtk::accessible::Property::Label(text)]);
+    let url = url.to_string();
+    button.connect_clicked(move |_| {
+        let _ =
+            gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
+    });
+    button
 }

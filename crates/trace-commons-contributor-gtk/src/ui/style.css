@@ -6,6 +6,15 @@
  *
  * Sizes are in px. GTK scales them with the desktop's text-scaling factor,
  * so this still respects a person who has asked for larger text.
+ *
+ * The type scale, radii and border treatments below are the LINUX column of
+ * `design-import/DESIGN-SPEC.md` §3.2, §4.2 and §4.3 -- same sizes as the
+ * other platforms, weights one step heavier than macOS, eyebrow tracking
+ * widened to .8px, status chips bordered in the solid hue and padded
+ * `2px 10px`, attention borders solid rather than alpha, and the selected
+ * tab drawn as a raised pill instead of a bordered one.
+ *
+ * Radii, §4.2 Linux column: control 6px, card 8px, window 12px, pill 999px.
  */
 
 /* --- Ground -------------------------------------------------------- */
@@ -13,6 +22,7 @@
 .tc-root {
   background-color: @tc_bg;
   color: @tc_ink;
+  border-radius: 12px;
 }
 
 /* The header carries the ground rather than a raised bar, so the window
@@ -20,23 +30,110 @@
    the same thing. */
 .tc-header {
   background-color: @tc_bg;
-  border-bottom: 1px solid @tc_line;
+  /* The structural divider, not the card hairline: §2.1 keeps the two a
+     couple of units apart and gives content-header bottom edges to the
+     divider. */
+  border-bottom: 1px solid @tc_line_divider;
   box-shadow: none;
 }
 
-/* --- The mark ------------------------------------------------------
-   A transcription of `.brand-mark`:
-     linear-gradient(135deg, var(--green) 0 38%, transparent 38% 100%),
-     linear-gradient(45deg, transparent 0 45%, var(--blue) 45% 100%)
-   written with single-position stops, which every GTK 4 release parses. */
+/* --- Segmented controls / tab strips -------------------------------
+   §6.6 describes TWO of these, and they are not the same control:
 
-.tc-brand-mark {
-  background-color: @tc_surface;
-  background-image:
-    linear-gradient(135deg, @tc_green 38%, transparent 38%),
-    linear-gradient(45deg, transparent 45%, @tc_blue 45%);
-  border: 1px solid @tc_line;
+     .tc-switcher   the header view switcher -- track padding 3, items
+                    `4px 12px` at 12px, selected icon in green
+     .tc-tab-track  the preview sheet's tab bar -- track padding 4, items
+                    `5px 12px` at 11px
+
+   `.tc-tab` is the item in both, carrying everything they share; the two
+   tracks then correct the metrics that differ. Both tracks take the scrim
+   rather than the inset surface -- §2.1 gives `surface.inset` to the
+   segmented track generally, but §5.1 and §5.2 both give the Linux frames
+   `rgba(0,0,0,.06)` / `rgba(255,255,255,.08)` explicitly, and the
+   platform-specific value wins. */
+
+.tc-switcher {
+  background-color: @tc_scrim;
+  border-radius: 8px;
+  padding: 3px;
 }
+
+.tc-tab-track {
+  background-color: @tc_scrim;
+  border-radius: 8px;
+  padding: 4px;
+}
+
+/* An unselected item: no fill, no border, nothing but a quiet label.
+   These are the preview tab bar's metrics; the switcher overrides them
+   just below. */
+.tc-tab {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  min-height: 0;
+  font-size: 11px;
+  font-weight: 400;
+  color: @tc_muted;
+}
+
+.tc-switcher .tc-tab {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+/* The selected item. It is raised by the shadow, NOT by its radius: §5.1
+   and §6.6 both hold the Linux switcher's selected item at the 6px control
+   radius, and §4.3's word "pill" is loose next to that explicit geometry.
+   Weight and ink carry the selection as well as the shadow does, so it
+   survives a high-contrast theme that flattens the shadow away. */
+.tc-header viewswitcher button:checked,
+.tc-tab:checked {
+  background-color: @tc_surface;
+  border: none;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  color: @tc_ink;
+  font-weight: 700;
+}
+
+/* §6.6: the selected switcher item turns its icon green while its label
+   stays ink. Matched on the node name so the icon needs no class of its
+   own. */
+.tc-switcher .tc-tab:checked image {
+  color: @tc_green_text;
+}
+
+/* §6.3, switcher count (Linux): a filled badge, not plain text. The fill
+   and its label are the measured accent pair, so this is the one badge in
+   the window that carries type on a fill. */
+.tc-count-badge {
+  background-color: @tc_primary_fill;
+  color: @tc_primary_label;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* §6.3, tab count (preview sheet): plain mono inline after the label, with
+   no fill behind it -- the sheet's tabs are already carrying a badge-like
+   shape and a second one would fight it. */
+.tc-tab-count {
+  font-family: monospace;
+  font-size: 10px;
+  font-weight: 500;
+  color: @tc_muted;
+}
+
+/* --- The mark ------------------------------------------------------
+   Nothing here. The Turn is real geometry rather than a styled box, drawn
+   by `ui::mark` on a DrawingArea so it stays crisp at 14px and at 84px and
+   picks its inks from the tokens above. The gradient square this file used
+   to carry is superseded; the website keeps it. */
 
 /* --- Type scale ----------------------------------------------------
    Two rules carry the identity. Figures that describe what leaves the
@@ -44,52 +141,66 @@
    be found on any card without reading a word. And field labels are heavy,
    uppercase and tracked, which is the site's `.eyebrow` treatment. */
 
+/* The largest step in the window. Not a spec step of its own -- the spec's
+   tallest native type is `title.section` -- so it sits one notch above it. */
 .tc-display {
-  font-size: 21px;
+  font-size: 20px;
   font-weight: 800;
 }
 
+/* `title.section`: "3 sessions waiting for your decision". */
 .tc-screen-title {
   font-size: 17px;
   font-weight: 700;
 }
 
+/* `title.card`, Linux column: 14px / 700 rather than macOS 13px / 600. */
 .tc-card-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
 }
 
+/* `body`. GTK 4 has no line-height property, so the spec's 1.45 is left to
+   the font's own metrics. */
 .tc-body {
-  font-size: 14px;
-}
-
-.tc-meta {
   font-size: 13px;
-  color: @tc_muted;
 }
 
-.tc-eyebrow {
+/* `caption`: sub-headers, footnotes, agent names, timestamps. */
+.tc-meta {
   font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
   color: @tc_muted;
 }
 
+/* `eyebrow`: 10px / 800 uppercase. Linux widens the tracking to .8px --
+   written in px rather than em precisely because the spec states it in px
+   and it must not scale with the step it is applied to. */
+.tc-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  color: @tc_muted;
+}
+
+/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "held 41s". */
 .tc-ledger {
   font-family: monospace;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
 }
 
+/* `metric.value`. §3.2 gives Linux a 20-22px range and §5.1 item 9 pins the
+   stat-card value -- the only place this is used -- at 22px/700 mono. */
 .tc-figure {
   font-family: monospace;
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
 }
 
+/* `mono.code`: search excerpts. */
 .tc-mono {
   font-family: monospace;
-  font-size: 13px;
+  font-size: 11px;
 }
 
 /* --- Colour roles --------------------------------------------------
@@ -117,6 +228,18 @@
   color: @tc_muted;
 }
 
+/* The clock on a held row and the chip that goes with it. Same blue as the
+   mark's bracket; see the note in style.rs on #315FBA vs #315FBB. */
+.tc-icon-held {
+  color: @tc_blue_icon;
+}
+
+/* Third rank of ink: timestamps and footnotes that sit on the ground or on
+   a card, never inside the inset strip. See the contrast note in style.rs. */
+.tc-tertiary {
+  color: @tc_ink_tertiary;
+}
+
 /* --- Cards ---------------------------------------------------------
    A face, a hairline, and nothing else. Flat fills of the same value
    stacked down a window give the eye no edge to catch. */
@@ -129,7 +252,8 @@
 }
 
 /* Reserved for a card a person should weigh before deciding -- today, one
-   whose scrubbing matched nothing at all. */
+   whose scrubbing matched nothing at all. §4.3: attention borders are the
+   solid hue on Linux, where the other platforms use a 55% alpha. */
 .tc-card.tc-flagged {
   border-color: @tc_gold;
 }
@@ -145,11 +269,15 @@
 
 /* --- Pills --------------------------------------------------------- */
 
+/* `mono.chip`: 11px mono, Linux weight 700. §4.3 gives Linux the solid
+   status hue as the border -- the other platforms use a 45% alpha of it --
+   and the wider `2px 10px` padding. */
 .tc-tag {
   border: 1px solid @tc_line;
   border-radius: 999px;
   padding: 2px 10px;
-  font-size: 12px;
+  font-family: monospace;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -163,6 +291,7 @@
 
 .tc-tag.tc-held {
   border-color: @tc_blue;
+  color: @tc_blue_icon;
 }
 
 .tc-tag.tc-refused {
@@ -186,6 +315,40 @@
   border-color: @tc_green;
 }
 
+/* --- Excerpts and marked-up text -----------------------------------
+   A search result's code block sits on the scrim rather than on a fill of
+   its own, so it reads as a recess in the card instead of a second card. */
+
+.tc-code {
+  background-color: @tc_scrim;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+/* Where a search term was found inside an excerpt. */
+.tc-highlight {
+  background-color: @tc_gold_highlight;
+  border-radius: 2px;
+}
+
+/* Where scrubbing fired, in the transcript. Measured 12.34:1 light and
+   9.04:1 dark; see the tables in style.rs. */
+.tc-redaction {
+  background-color: @tc_redaction_bg;
+  color: @tc_redaction_fg;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* A selected row, in a list that has one. */
+.tc-selected,
+row:selected {
+  background-color: @tc_selected;
+}
+
 /* --- Rules --------------------------------------------------------- */
 
 .tc-rule {
@@ -199,19 +362,25 @@
    pair. This adds weight and metrics only -- it must never set a colour,
    or the pair stops being the thing that decides legibility. */
 
+/* `label.control.primary`, Linux column: 12px / 700. */
 .tc-primary {
+  font-size: 12px;
   font-weight: 700;
+  border-radius: 6px;
   padding-left: 16px;
   padding-right: 16px;
 }
 
-/* The secondary of a pair. Present, reachable, and not competing. */
+/* The secondary of a pair. Present, reachable, and not competing.
+   `label.control`, Linux column: 12px / 600. */
 .tc-quiet {
   background: none;
   background-color: transparent;
   box-shadow: none;
   border: 1px solid @tc_line;
+  border-radius: 6px;
   color: @tc_ink;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -225,8 +394,10 @@
    scrubbing actually did is read again each time because it says something
    different each time. */
 
+/* `caption.small`. The spec puts mac and Windows at 10.5px and holds Linux
+   at 11px, which is the floor this shell will set type at. */
 .tc-caveat {
-  font-size: 13px;
+  font-size: 11px;
   color: @tc_muted;
 }
 
@@ -238,6 +409,7 @@
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */
 
+/* Solid gold, per §4.3's Linux attention border. */
 .tc-banner {
   background-color: @tc_surface;
   border: 1px solid @tc_gold;
@@ -247,10 +419,15 @@
 
 /* --- The transcript ------------------------------------------------ */
 
+/* `mono.transcript`: 11px mono. The spec's 1.7 line-height is set by the
+   text view's own pixels-above/below, not from here -- GTK 4 CSS has no
+   line-height. */
 .tc-transcript {
   background-color: @tc_surface;
   color: @tc_ink;
-  font-size: 13px;
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 11px;
 }
 
 .tc-transcript text {

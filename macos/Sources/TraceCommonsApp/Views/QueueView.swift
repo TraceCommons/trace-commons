@@ -41,7 +41,7 @@ struct QueueContent: View {
     @Binding var previewing: QueueEntry?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.l) {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
             if let health = model.health {
                 HealthBanner(health: health)
             }
@@ -77,21 +77,23 @@ struct QueueContent: View {
                 WeekBand(week: rollup.week, quarantined: rollup.quarantined)
             }
         }
-        .padding(.horizontal, TC.Space.xl)
-        .padding(.vertical, TC.Space.l)
+        .padding(.horizontal, TC.Space.Content.horizontal)
+        .padding(.top, TC.Space.Content.top)
+        .padding(.bottom, TC.Space.Content.bottom)
         .tcColumn()
         .tcScreen()
     }
 
     private var waiting: some View {
-        VStack(alignment: .leading, spacing: TC.Space.m) {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
             // Left as a sentence, not compressed into a label-and-count
             // header. It is the one line on this screen written in the
             // product's voice and it says what the screen is FOR.
             Text("^[\(model.decisionsOwed) session](inflect: true) waiting for your decision")
-                .font(TC.Font_.screenTitle)
+                .font(TC.Font_.sectionTitle)
+                .foregroundStyle(TC.inkPrimary)
 
-            VStack(spacing: TC.Space.s) {
+            VStack(spacing: TC.Space.md) {
                 ForEach(model.awaitingDecision) { entry in
                     QueueRow(
                         entry: entry,
@@ -104,7 +106,9 @@ struct QueueContent: View {
             }
 
             // The mechanism's limits, stated once for the list rather than
-            // stamped on every card -- see `ScrubbingCaveat`.
+            // stamped on every card -- see `ScrubbingCaveat`, which also
+            // records why this sentence is NOT the design's longer standing
+            // disclaimer.
             ScrubbingCaveatNote()
                 .padding(.top, TC.Space.xxs)
         }
@@ -148,17 +152,18 @@ struct QueueRow: View {
         HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
             Text(entry.projectLabel)
                 .font(TC.Font_.cardTitle)
+                .foregroundStyle(TC.inkPrimary)
             Text(entry.agentName)
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.secondary)
+                .font(TC.Font_.meta)
+                .foregroundStyle(TC.inkSecondary)
             Spacer(minLength: TC.Space.m)
             Text(Format.when(entry.discoveredAt))
-                .font(TC.Font_.footnote)
-                .foregroundStyle(.tertiary)
+                .font(TC.Font_.meta)
+                .foregroundStyle(TC.inkTertiary)
         }
         .padding(.horizontal, TC.Space.l)
-        .padding(.top, TC.Space.m)
-        .padding(.bottom, TC.Space.xs)
+        .padding(.top, TC.Space.md)
+        .padding(.bottom, TC.Space.s)
     }
 
     /// The redacted opening prompt is what identifies a session to its
@@ -169,7 +174,8 @@ struct QueueRow: View {
             if let summary {
                 Text(summary.openingPrompt.isEmpty ? "(no opening prompt)" : summary.openingPrompt)
                     .font(TC.Font_.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(TC.inkPrimary)
+                    .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, TC.Font_.LineHeight.body))
                     .lineLimit(3)
                     .textSelection(.enabled)
             } else if let summaryError {
@@ -203,42 +209,76 @@ struct QueueRow: View {
         HStack(alignment: .bottom, spacing: TC.Space.l) {
             VStack(alignment: .leading, spacing: TC.Space.xs) {
                 if let summary {
-                    HStack(alignment: .top, spacing: TC.Space.xl) {
+                    HStack(alignment: .top, spacing: TC.Space.xxlSmall) {
                         cell("Would send") {
                             Text(Format.bytes(summary.wouldSendBytes))
                                 .font(TC.Font_.ledger)
                                 .monospacedDigit()
+                                .foregroundStyle(TC.inkPrimary)
                         }
                         cell("Removed by pattern") {
                             if redactionCount == 0 {
-                                TCTag(text: "nothing matched", tone: .attention)
+                                nothingMatchedChip
                             } else {
                                 Text(Self.removedSummary(summary.redactions))
                                     .font(TC.Font_.ledger)
+                                    .foregroundStyle(TC.inkPrimary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
-                    Text(ScrubbingCaveat.rowLine(redactionCount: redactionCount))
-                        .font(TC.Font_.footnote)
-                        .foregroundStyle(
-                            redactionCount == 0
-                                ? AnyShapeStyle(TC.Tone.attention.textColor)
-                                : AnyShapeStyle(.secondary)
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
+                    caption
                 }
             }
             Spacer(minLength: TC.Space.m)
             actions
         }
         .padding(.horizontal, TC.Space.l)
-        .padding(.vertical, TC.Space.m)
+        .padding(.vertical, TC.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(TC.surfaceInset)
         .overlay(alignment: .top) {
             Rectangle().fill(TC.line).frame(height: TC.Space.hairline)
         }
+    }
+
+    /// What scrubbing did to THIS session, and what that does not prove.
+    ///
+    /// The sentences are `ScrubbingCaveat`'s, not the design's: that type
+    /// records why the row line varies with what scrubbing actually did, and
+    /// the design's fixed caption is the constant it was written against.
+    /// What this pass takes from the design is the treatment -- a session
+    /// where nothing matched is the one worth slowing down on, so it is the
+    /// case that gets the gold rather than the strip's grey.
+    private var caption: some View {
+        Text(ScrubbingCaveat.rowLine(redactionCount: redactionCount))
+            .font(TC.Font_.footnote)
+            .foregroundStyle(ScrubbingCaveat.tone(redactionCount: redactionCount).textColor)
+            .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The gold chip that replaces the removed-by-pattern figure when nothing
+    /// matched. It carries the warning triangle without its dot -- the same
+    /// glyph the health banner uses, quieter, because this is a thing to weigh
+    /// rather than a thing to fix.
+    private var nothingMatchedChip: some View {
+        HStack(spacing: TC.Space.xxs) {
+            QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
+            Text("nothing matched")
+                .font(TC.Font_.monoChip)
+                .foregroundStyle(TC.goldText)
+        }
+        .padding(.horizontal, TC.Space.s)
+        .padding(.vertical, 3)
+        .overlay {
+            Capsule().strokeBorder(
+                TC.gold.opacity(TC.Border.chipAlpha),
+                lineWidth: TC.Border.hairline
+            )
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Nothing matched a pattern.")
     }
 
     private func cell<Value: View>(
@@ -308,26 +348,29 @@ struct WeekBand: View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
             TCSectionHeader(title: "This week")
             HStack(alignment: .top, spacing: TC.Space.m) {
-                figure("Contributed", week.submitted, .clear, TC.Tone.clear.symbol)
-                figure("Held for privacy review", quarantined, .held, TC.Tone.held.symbol)
-                figure("In the commons", week.accepted, .neutral, "building.columns")
+                figure("Contributed", week.submitted, TC.greenText, .checkCircle)
+                figure("Held for privacy review", quarantined, TC.blueIcon, .clock)
+                figure("In the commons", week.accepted, TC.inkSecondary, .columns)
             }
         }
         .padding(.top, TC.Space.s)
     }
 
-    private func figure(_ title: String, _ count: Int, _ tone: TC.Tone, _ symbol: String) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
+    private func figure(
+        _ title: String,
+        _ count: Int,
+        _ ink: Color,
+        _ glyph: QueueGlyphs
+    ) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
             HStack(spacing: TC.Space.xs) {
-                Image(systemName: symbol)
-                    .imageScale(.small)
-                    .foregroundStyle(tone.textColor)
-                    .accessibilityHidden(true)
+                QueueGlyph(glyph: glyph, size: 11, color: ink)
                 TCFieldLabel(title)
             }
             Text("\(count)")
-                .font(.title2.weight(.bold))
+                .font(TC.Font_.metricValue)
                 .monospacedDigit()
+                .foregroundStyle(TC.inkPrimary)
         }
         .padding(TC.Space.m)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -359,16 +402,15 @@ struct UndoBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.s) {
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-                Image(systemName: TC.Tone.held.symbol)
-                    .imageScale(.small)
-                    .foregroundStyle(TC.Tone.held.textColor)
-                    .accessibilityHidden(true)
+                QueueGlyph(glyph: .clock, size: 12, color: TC.blueIcon)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
                 Text("Approved \(undo.projectLabel). Still on this machine.")
-                    .font(TC.Font_.meta.weight(.semibold))
+                    .font(TC.Font_.bodyDense)
+                    .foregroundStyle(TC.inkPrimary)
                 Text(held)
                     .font(TC.Font_.ledger)
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TC.inkSecondary)
                 Spacer(minLength: 0)
             }
             Text("""
@@ -378,7 +420,8 @@ struct UndoBar: View {
             it is already too late.
             """)
             .font(TC.Font_.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(TC.inkSecondary)
+            .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
             .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: TC.Space.s) {
                 // The one Return binding in this app, and it is on the safe
@@ -393,7 +436,8 @@ struct UndoBar: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(TC.Space.l)
+        .padding(.vertical, TC.Space.md)
+        .padding(.horizontal, TC.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard()
     }
@@ -413,27 +457,157 @@ struct UndoBar: View {
 struct NotOfferedDisclosure: View {
     let counts: [String: Int]
 
+    @State private var expanded = false
+
     var body: some View {
         if !counts.isEmpty {
-            DisclosureGroup("Sessions no longer waiting (\(counts.values.reduce(0, +)))") {
-                VStack(alignment: .leading, spacing: TC.Space.xxs) {
-                    ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { label, count in
-                        Text("\(count) — \(OutcomeCopy.sentence(for: label))")
-                            .font(TC.Font_.meta)
-                            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                // Drawn rather than taken from `DisclosureGroup`, whose
+                // triangle and label type are the system's. The design's row
+                // is a plain right chevron and a 12.5pt line, and it collapses
+                // to nothing more than that.
+                Button {
+                    expanded.toggle()
+                } label: {
+                    HStack(spacing: TC.Space.s) {
+                        QueueGlyph(
+                            glyph: .chevronRight,
+                            size: 10,
+                            stroke: 1.8,
+                            color: TC.inkSecondary
+                        )
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        Text("Sessions no longer waiting (\(counts.values.reduce(0, +)))")
+                            .font(TC.Font_.disclosure)
+                            .foregroundStyle(TC.inkPrimary)
                     }
-                    Text("""
-                    This covers sessions that reached the queue. Sessions that were \
-                    never queued at all are not counted here.
-                    """)
-                    .font(TC.Font_.footnote)
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, TC.Space.xxs)
+                    .contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, TC.Space.xs)
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(expanded ? [.isButton, .isSelected] : .isButton)
+
+                if expanded {
+                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                        ForEach(counts.sorted(by: { $0.key < $1.key }), id: \.key) { label, count in
+                            Text("\(count) — \(OutcomeCopy.sentence(for: label))")
+                                .font(TC.Font_.meta)
+                                .foregroundStyle(TC.inkSecondary)
+                        }
+                        Text("""
+                        This covers sessions that reached the queue. Sessions that were \
+                        never queued at all are not counted here.
+                        """)
+                        .font(TC.Font_.footnote)
+                        .foregroundStyle(TC.inkTertiary)
+                        .padding(.top, TC.Space.xxs)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, TC.Space.lg)
+                }
             }
-            .font(TC.Font_.meta)
         }
+    }
+}
+
+// MARK: - Glyphs
+
+/// One of the design's glyphs, stated on its own 16-unit grid and stroked at
+/// whatever size the call site asks for. See the note beside the same type in
+/// `MainWindowView`; a later pass folds the two together.
+private struct QueueGlyph: View {
+    let glyph: QueueGlyphs
+    var size: CGFloat = 12
+    /// Stroke width in grid units, converted against `size`.
+    var stroke: CGFloat = 1.4
+    var color: Color
+
+    var body: some View {
+        QueueGlyphShape(glyph: glyph)
+            .stroke(
+                color,
+                style: StrokeStyle(
+                    lineWidth: stroke * size / 16,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct QueueGlyphShape: Shape {
+    let glyph: QueueGlyphs
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        glyph.draw(into: &path)
+        let scale = min(rect.width, rect.height) / 16
+        return path
+            .applying(CGAffineTransform(scaleX: scale, y: scale))
+            .offsetBy(dx: rect.minX, dy: rect.minY)
+    }
+}
+
+private enum QueueGlyphs {
+    case clock
+    case triangle
+    case chevronRight
+    case checkCircle
+    case columns
+
+    func draw(into path: inout Path) {
+        switch self {
+        case .clock: Self.clock(&path)
+        case .triangle: Self.triangle(&path)
+        case .chevronRight: Self.chevronRight(&path)
+        case .checkCircle: Self.checkCircle(&path)
+        case .columns: Self.columns(&path)
+        }
+    }
+
+    /// `<circle cx=8 cy=8 r=5.7/><path d="M8 4.8V8l2.3 1.4"/>`
+    static func clock(_ path: inout Path) {
+        path.addEllipse(in: CGRect(x: 2.3, y: 2.3, width: 11.4, height: 11.4))
+        path.move(to: CGPoint(x: 8, y: 4.8))
+        path.addLine(to: CGPoint(x: 8, y: 8))
+        path.addLine(to: CGPoint(x: 10.3, y: 9.4))
+    }
+
+    /// The warning triangle without its dot: `M8 2.2 14.6 13.4H1.4Z`.
+    static func triangle(_ path: inout Path) {
+        path.move(to: CGPoint(x: 8, y: 2.2))
+        path.addLine(to: CGPoint(x: 14.6, y: 13.4))
+        path.addLine(to: CGPoint(x: 1.4, y: 13.4))
+        path.closeSubpath()
+    }
+
+    /// `m6 4 4 4-4 4` -- the disclosure chevron, pointing right when closed.
+    static func chevronRight(_ path: inout Path) {
+        path.move(to: CGPoint(x: 6, y: 4))
+        path.addLine(to: CGPoint(x: 10, y: 8))
+        path.addLine(to: CGPoint(x: 6, y: 12))
+    }
+
+    /// A tick in a circle, using the design's tick path `m5.2 8.3 1.9 1.9 3.6-4.3`.
+    static func checkCircle(_ path: inout Path) {
+        path.addEllipse(in: CGRect(x: 1.8, y: 1.8, width: 12.4, height: 12.4))
+        path.move(to: CGPoint(x: 5.2, y: 8.3))
+        path.addLine(to: CGPoint(x: 7.1, y: 10.2))
+        path.addLine(to: CGPoint(x: 10.7, y: 5.9))
+    }
+
+    /// `M2 13.5h12M3.5 13.5V7.5M6.5 13.5V7.5M9.5 13.5V7.5M12.5 13.5V7.5M2 6.8 8 2.6l6 4.2z`
+    static func columns(_ path: inout Path) {
+        path.move(to: CGPoint(x: 2, y: 13.5))
+        path.addLine(to: CGPoint(x: 14, y: 13.5))
+        for x in [3.5, 6.5, 9.5, 12.5] as [CGFloat] {
+            path.move(to: CGPoint(x: x, y: 13.5))
+            path.addLine(to: CGPoint(x: x, y: 7.5))
+        }
+        path.move(to: CGPoint(x: 2, y: 6.8))
+        path.addLine(to: CGPoint(x: 8, y: 2.6))
+        path.addLine(to: CGPoint(x: 14, y: 6.8))
+        path.closeSubpath()
     }
 }
