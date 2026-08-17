@@ -130,4 +130,58 @@ public class UpdateProtocolTests
     {
         Assert.Equal("quiesce", DaemonProtocol.Methods.Quiesce);
     }
+
+    [Theory]
+    [InlineData(TcUpdateAvailability.Available, true)]
+    [InlineData(TcUpdateAvailability.Required, true)]
+    [InlineData(TcUpdateAvailability.NoUpdates, false)]
+    [InlineData(TcUpdateAvailability.Unknown, false)]
+    [InlineData(TcUpdateAvailability.Error, false)]
+    public void OnlyARealOfferPutsTheBannerOnScreen(
+        TcUpdateAvailability availability, bool expected)
+    {
+        Assert.Equal(expected, UpdateProtocol.ShouldOfferUpdate(availability));
+    }
+
+    [Fact]
+    public void UnknownIsNotAnErrorMessage()
+    {
+        // Unknown is what a build with no .appinstaller association reports,
+        // which is a normal state for a locally built app rather than a
+        // fault worth alarming a contributor about.
+        Assert.Equal(
+            "Updates are not managed for this installation.",
+            UpdateProtocol.DescribeAvailability(TcUpdateAvailability.Unknown));
+    }
+
+    [Fact]
+    public void EveryAvailabilityHasASentence()
+    {
+        foreach (TcUpdateAvailability value in new[]
+                 {
+                     TcUpdateAvailability.Unknown,
+                     TcUpdateAvailability.NoUpdates,
+                     TcUpdateAvailability.Available,
+                     TcUpdateAvailability.Required,
+                     TcUpdateAvailability.Error,
+                 })
+        {
+            string text = UpdateProtocol.DescribeAvailability(value);
+            Assert.False(string.IsNullOrWhiteSpace(text));
+            Assert.EndsWith(".", text);
+        }
+    }
+
+    [Fact]
+    public void TheEnumMirrorsTheWinRtNumbering()
+    {
+        // Task 7 maps WinRT's PackageUpdateAvailability onto this enum with
+        // an explicit switch, but the numbering is asserted here so the two
+        // cannot quietly disagree if anyone reaches for a cast.
+        Assert.Equal(0, (int)TcUpdateAvailability.Unknown);
+        Assert.Equal(1, (int)TcUpdateAvailability.NoUpdates);
+        Assert.Equal(2, (int)TcUpdateAvailability.Available);
+        Assert.Equal(3, (int)TcUpdateAvailability.Required);
+        Assert.Equal(4, (int)TcUpdateAvailability.Error);
+    }
 }

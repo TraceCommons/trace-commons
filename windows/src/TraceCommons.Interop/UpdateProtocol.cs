@@ -23,6 +23,33 @@ public enum TcQuiesceOutcome
 }
 
 /// <summary>
+/// Whether an update is waiting, mirroring WinRT's
+/// <c>Windows.ApplicationModel.PackageUpdateAvailability</c> member for
+/// member and value for value.
+///
+/// A separate type because this assembly targets plain net8.0 and must never
+/// name a Windows type -- that is what keeps its tests running on macOS and
+/// Linux against the same Rust crate.
+/// </summary>
+public enum TcUpdateAvailability
+{
+    /// <summary>The package has no App Installer association.</summary>
+    Unknown = 0,
+
+    /// <summary>Up to date.</summary>
+    NoUpdates = 1,
+
+    /// <summary>An update is waiting and is optional.</summary>
+    Available = 2,
+
+    /// <summary>An update is waiting and the feed marks it required.</summary>
+    Required = 3,
+
+    /// <summary>The check itself failed.</summary>
+    Error = 4,
+}
+
+/// <summary>
 /// The daemon's answer to <c>quiesce</c>, reduced to the one question the
 /// caller has: may an update proceed.
 /// </summary>
@@ -133,4 +160,36 @@ public static class UpdateProtocol
         _ =>
             "The daemon is not available. The update will install the next time you open the app.",
     };
+
+    /// <summary>
+    /// Whether to put the update banner on screen.
+    ///
+    /// An allow-list of two, not a deny-list. <c>Unknown</c> and
+    /// <c>Error</c> both mean the check told us nothing, and offering an
+    /// update we cannot confirm exists is how a contributor ends up
+    /// restarting an app for no reason.
+    /// </summary>
+    public static bool ShouldOfferUpdate(TcUpdateAvailability availability) =>
+        availability == TcUpdateAvailability.Available
+        || availability == TcUpdateAvailability.Required;
+
+    /// <summary>
+    /// One sentence per availability, for the banner and the status line.
+    /// Fixed strings only, per the repo's label-only rule for anything that
+    /// reaches a screen or a log.
+    /// </summary>
+    public static string DescribeAvailability(TcUpdateAvailability availability) =>
+        availability switch
+        {
+            TcUpdateAvailability.Available =>
+                "A newer version is ready to install.",
+            TcUpdateAvailability.Required =>
+                "A required update is ready to install.",
+            TcUpdateAvailability.NoUpdates =>
+                "Trace Commons is up to date.",
+            TcUpdateAvailability.Unknown =>
+                "Updates are not managed for this installation.",
+            _ =>
+                "The update check did not complete.",
+        };
 }
