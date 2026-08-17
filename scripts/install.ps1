@@ -110,7 +110,25 @@ It may be rate-limiting you. Pass a version explicitly instead:
   .\install.ps1 -Version 0.1.0
 "@
     }
-    $tag = ($releases |
+    # Check the SHAPE before reading it. A rate-limited GitHub returns a JSON
+    # object -- {message, documentation_url} -- rather than an array of
+    # releases, and under `Set-StrictMode -Version Latest` reading .tag_name off
+    # that dies with "The property 'tag_name' cannot be found on this object".
+    # That is a true statement and a useless one: it sends the reader looking
+    # for a malformed release instead of telling them they were throttled. The
+    # unauthenticated limit is 60 requests/hour PER IP, so anyone behind a
+    # shared address can hit it without having run this script before.
+    $usable = @($releases | Where-Object { $_.PSObject.Properties.Name -contains 'tag_name' })
+    if ($usable.Count -eq 0) {
+        Die @"
+GitHub did not return a release list. It is most likely rate-limiting you --
+the unauthenticated limit is 60 requests/hour for everyone sharing your IP
+address. Pass a version explicitly to skip this lookup entirely:
+  .\install.ps1 -Version 0.1.0
+"@
+    }
+
+    $tag = ($usable |
         Where-Object { $_.tag_name -like 'contributor-v*' } |
         Select-Object -First 1).tag_name
     if (-not $tag) {

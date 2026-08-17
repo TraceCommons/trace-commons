@@ -348,11 +348,26 @@ jobs:
       # fail. Asserting the refusal leaves ZERO files behind is the point --
       # an installer that reports failure after writing the binary has already
       # lost.
+      # -Version is passed explicitly so this job never calls the GitHub REST
+      # API. Resolving "latest" costs an unauthenticated request, which is
+      # limited to 60/hour PER IP -- shared across every Actions runner leaving
+      # the same egress address. This job failed exactly that way
+      # ("The property 'tag_name' cannot be found on this object": the API
+      # returned a rate-limit body instead of a release list), and it failed on
+      # main as well as on PRs, so it was flaking for reasons that had nothing
+      # to do with the change under test.
+      #
+      # Pinning also makes the job deterministic: it asserts install.ps1's
+      # verify-and-refuse behavior against a known published artifact rather
+      # than against whatever was cut most recently. The cost is that this
+      # version must be bumped when contributor-v0.1.0's assets are eventually
+      # removed; the job will fail loudly if that happens, which is the right
+      # way to find out.
       - name: It installs the real, verified binary
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
-          ./scripts/install.ps1 -Dir $dir
+          ./scripts/install.ps1 -Dir $dir -Version 0.1.0
           $exe = Join-Path $dir 'trace-commons-contributor.exe'
           if (-not (Test-Path $exe)) { throw "no binary at $exe" }
           $v = & $exe --version
@@ -369,7 +384,13 @@ jobs:
             Replace("'O=Iqlusion Inc'", "'O=Somebody Else Entirely'") |
             Set-Content -Path $bad -Encoding UTF8
 
-          $out = & pwsh -File $bad -Dir $dir 2>&1 | Out-String
+          # -Version here for the same reason as the step above, and for one
+          # more: this step asserts the installer fails ON THE SIGNATURE CHECK
+          # specifically. A rate-limited API call would make it fail earlier,
+          # for an unrelated reason, and the guard below would then correctly
+          # report that the test proved nothing. Removing the network variable
+          # keeps a red result here meaning what it claims to mean.
+          $out = & pwsh -File $bad -Dir $dir -Version 0.1.0 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
 
@@ -568,8 +589,53 @@ jobs:
       # failures on a clean Windows box.
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Build the WinUI app
+      # Packaging, not just compiling. Package.appxmanifest, MakePri and the
+      # visual assets are only exercised by a packaging build, and every one
+      # of them can break without touching a line of C#. The package is
+      # unsigned here -- this runner holds no signing authority and must not.
+      - name: Build and package the WinUI app
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+
+      - name: Confirm exactly one package was produced
+        working-directory: windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $found = @(Get-ChildItem -Recurse -Filter *.msix -Path dist\msix)
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
+          }
+          Write-Host $found[0].Name
+
+      # The feed generator runs against the same identity the manifest
+      # carries, so a rename on either side fails here rather than at
+      # release time.
+      - name: Generate and parse the appinstaller feed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./windows/scripts/make-appinstaller.ps1 `
+            -PackageName ai.tracecommons.Contributor `
+            -Publisher "CN=TraceCommons Development, O=TraceCommons, C=US" `
+            -Version 0.0.1.0 -ProcessorArchitecture x64 `
+            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
+            -PackageFileName probe.msix `
+            -OutputPath "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          [xml]$feed = Get-Content "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
+          $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
+          $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
+          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/s4:AutomaticBackgroundTask', $ns)) {
+            throw "the feed lost its background update task"
+          }
+          if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
+            throw "the feed allows downgrades, which this project forbids"
+          }
+          $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
+          [xml]$manifest = Get-Content windows\src\TraceCommons.App\Package.appxmanifest
+          if ($main.Name -ne $manifest.Package.Identity.Name) {
+            throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
+          }
