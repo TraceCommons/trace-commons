@@ -4,3 +4,4 @@
 //! version exists. It is signed because the transport is not: a public
 //! bucket is a fine place to put bytes and a poor place to put authority.
 pub mod manifest;
+pub mod version;
