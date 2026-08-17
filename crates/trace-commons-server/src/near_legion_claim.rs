@@ -43,6 +43,16 @@ use crate::trace_invite_registry::InviteRegistry as _;
 pub const POLICY_LABEL_VANGUARD: &str = "near-legion-vanguard";
 pub const POLICY_LABEL_ASCENDANT: &str = "near-legion-ascendant";
 
+/// Every pool a Legion claim can land in. One account may hold a grant in at
+/// most one of these, across all ranks — see the cross-rank check in
+/// `claim_handler`.
+pub fn all_policy_labels() -> Vec<String> {
+    LegionRank::RESOLUTION_ORDER
+        .iter()
+        .map(|r| r.policy_label().to_string())
+        .collect()
+}
+
 /// A qualifying NEAR Legion rank. Ordered highest-first; the discriminant order
 /// is the resolution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,6 +555,17 @@ pub async fn near_account_holds_token(
 #[async_trait::async_trait]
 pub trait InviteGrantSink: Send + Sync {
     async fn count_live(&self, policy_label: &str) -> Result<u32>;
+    /// Count grants occupying the uniqueness index, expired ones included.
+    /// A cap must bound this, not the live count; see the note on
+    /// `count_bound_invite_grants`.
+    async fn count_bound(&self, policy_label: &str) -> Result<u32>;
+    /// True iff this credential already holds an unrevoked grant in any of
+    /// these pools. The V42 index is per-pool and cannot see across them.
+    async fn credential_bound_in_any(
+        &self,
+        policy_labels: &[String],
+        credential_binding_hash: &str,
+    ) -> Result<bool>;
     async fn insert(
         &self,
         write: crate::db::InviteGrantWrite,
@@ -557,6 +578,26 @@ impl InviteGrantSink for crate::db::postgres::PgBackend {
         self.count_live_invite_grants(policy_label)
             .await
             .context("invite grant count failed")
+    }
+
+    async fn count_bound(&self, policy_label: &str) -> Result<u32> {
+        self.count_bound_invite_grants(policy_label)
+            .await
+            .context("invite grant bound-count failed")
+    }
+
+    async fn credential_bound_in_any(
+        &self,
+        policy_labels: &[String],
+        credential_binding_hash: &str,
+    ) -> Result<bool> {
+        crate::db::postgres::PgBackend::credential_bound_in_any(
+            self,
+            policy_labels,
+            credential_binding_hash,
+        )
+        .await
+        .context("invite credential binding lookup failed")
     }
 
     async fn insert(
@@ -644,8 +685,17 @@ fn near_legion_cors_layer() -> tower_http::cors::CorsLayer {
         .filter_map(|o| HeaderValue::from_str(o).ok())
         .collect();
 
+    // `AllowOrigin::list` panics on a wildcard entry, and `*` is the most
+    // natural thing an operator writes for "allow everything". Map it rather
+    // than crash router construction at startup.
+    let allow_origin = if configured.split(',').any(|o| o.trim() == "*") {
+        tower_http::cors::AllowOrigin::any()
+    } else {
+        tower_http::cors::AllowOrigin::list(origins)
+    };
+
     tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+        .allow_origin(allow_origin)
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([ACCEPT, CONTENT_TYPE])
         .max_age(std::time::Duration::from_secs(600))
@@ -743,10 +793,11 @@ async fn challenge_handler(
 /// `POST /v1/onboard/near-legion/claim` — verify and mint.
 ///
 /// Check order is deliberate. The signature comes first so nothing downstream
-/// is observable without proving control of a key. The cap is checked next
-/// because it is a cheap local read and a full pool should not spend two NEAR
-/// RPC round-trips to refuse. Ownership — the expensive check — comes last
-/// before the write.
+/// is observable without proving control of a key. Rank resolution comes next,
+/// because rank decides both the grant size and which pool the cap counts
+/// against — so unlike the original flat gate, the cap cannot be checked before
+/// the chain is consulted. The cross-rank binding check and the cap follow, and
+/// the write is last.
 async fn claim_handler(
     State(state): State<NearLegionClaimState>,
     Json(request): Json<ClaimRequest>,
@@ -840,12 +891,36 @@ async fn claim_handler(
 
     let tier = state.legion.tier(rank);
     let policy_label = rank.policy_label();
+    let binding = credential_binding_hash(&account_id);
 
-    let live = match state.sink.count_live(policy_label).await {
+    // CROSS-RANK CLAIM CHECK. The V42 index is scoped by policy label, and the
+    // ranks are separate pools, so it cannot catch an account that claimed at
+    // one rank and comes back at another. That is not hypothetical: ranks are
+    // promoted. An Ascendant who claims 3 uses and is later minted Vanguard
+    // resolves to a different label, the index stays quiet, and they collect 5
+    // more. Determinism only holds at fixed chain state; this does not.
+    //
+    // Like the cap, this is a soft bound — the check and the insert are not one
+    // transaction — but the race needs two concurrent claims from one account
+    // spanning a promotion, whereas the promotion itself needs none.
+    match state
+        .sink
+        .credential_bound_in_any(&all_policy_labels(), &binding)
+        .await
+    {
+        Ok(true) => return claim_refusal(ClaimError::InviteCredentialAlreadyBound),
+        Ok(false) => {}
+        Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
+    }
+
+    // Counted with `count_bound`, not `count_live`: an expired grant still
+    // occupies the uniqueness index, so counting only unexpired ones would let
+    // a fresh cohort refill the whole cap every TTL.
+    let taken = match state.sink.count_bound(policy_label).await {
         Ok(n) => n,
         Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
     };
-    if live >= tier.cap {
+    if taken >= tier.cap {
         return claim_refusal(ClaimError::NearLegionClaimCapReached);
     }
 
@@ -930,7 +1005,7 @@ async fn status_handler(
     let mut body = serde_json::Map::new();
     for rank in LegionRank::RESOLUTION_ORDER {
         let tier = state.legion.tier(rank);
-        let claimed = match state.sink.count_live(rank.policy_label()).await {
+        let claimed = match state.sink.count_bound(rank.policy_label()).await {
             Ok(n) => n,
             Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
         };
@@ -1263,6 +1338,29 @@ mod router_tests {
             }
             let g = self.grants.lock().unwrap();
             Ok(g.iter().filter(|w| w.policy_label == policy_label).count() as u32)
+        }
+
+        async fn count_bound(&self, policy_label: &str) -> Result<u32> {
+            // The fake carries no expiry semantics, so this matches count_live.
+            // The distinction that matters in production — an expired grant
+            // still occupying the uniqueness index — is a property of the SQL
+            // predicates and belongs to a database test, not this fake.
+            self.count_live(policy_label).await
+        }
+
+        async fn credential_bound_in_any(
+            &self,
+            policy_labels: &[String],
+            credential_binding_hash: &str,
+        ) -> Result<bool> {
+            if self.fail_count {
+                return Err(anyhow!("count unavailable"));
+            }
+            let g = self.grants.lock().unwrap();
+            Ok(g.iter().any(|w| {
+                policy_labels.contains(&w.policy_label)
+                    && w.credential_binding_hash.as_deref() == Some(credential_binding_hash)
+            }))
         }
 
         async fn insert(
@@ -1821,6 +1919,51 @@ mod router_tests {
         assert_eq!(second, StatusCode::CONFLICT);
         assert_eq!(error_of(&body), "InviteCredentialAlreadyBound");
         assert_eq!(h.sink.grants.lock().unwrap().len(), 1);
+    }
+
+    /// Ranks get promoted. An Ascendant who has already claimed and is later
+    /// minted a Vanguard SBT resolves to a *different* pool, where the V42
+    /// index — scoped by policy label — cannot see the grant they already hold.
+    /// Without the cross-rank check they would collect 3 uses and then 5 more.
+    ///
+    /// This is the case `a_multi_rank_holder_cannot_claim_once_per_rank` does
+    /// not reach: that one holds both ranks from the start, so it never changes
+    /// pools between claims.
+    #[tokio::test]
+    async fn a_promoted_holder_cannot_claim_again_at_the_higher_rank() {
+        let sink = Arc::new(FakeSink::default());
+
+        // First claim: Ascendant only, 3 uses, ascendant pool.
+        let before = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+        let state_before = NearLegionClaimState {
+            sink: sink.clone(),
+            ..before.state
+        };
+        let (first, body) = claim_as(&state_before, HOLDER).await;
+        assert_eq!(first, StatusCode::CREATED, "first claim failed: {body}");
+        assert_eq!(body["maxUses"].as_u64(), Some(3));
+
+        // Same account, same grant store, but the chain now says Vanguard.
+        let after = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT, DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+        let state_after = NearLegionClaimState {
+            sink: sink.clone(),
+            ..after.state
+        };
+        let (second, body) = claim_as(&state_after, HOLDER).await;
+
+        assert_eq!(second, StatusCode::CONFLICT, "promotion re-claim: {body}");
+        assert_eq!(error_of(&body), "InviteCredentialAlreadyBound");
+        assert_eq!(sink.grants.lock().unwrap().len(), 1);
     }
 
     /// An Initiate or base-collection holder holds something real. Telling them

@@ -546,6 +546,74 @@ impl PgBackend {
         })
     }
 
+    /// Count grants that occupy the V42 one-claim-per-account index, ignoring
+    /// expiry.
+    ///
+    /// [`count_live_invite_grants`] excludes expired rows, but the V42 index is
+    /// `WHERE credential_binding_hash IS NOT NULL AND revoked_at IS NULL` —
+    /// expiry is not in the predicate, and cannot be: Postgres requires index
+    /// predicates to be IMMUTABLE, so `NOW()` is not permitted there. An
+    /// expired grant therefore still blocks its account from claiming again
+    /// while no longer counting toward the cap. Counting the two differently
+    /// turns a fixed cap into a rolling window — after one TTL a fresh cohort
+    /// could claim the whole cap again, on top of everyone already holding a
+    /// binding.
+    ///
+    /// This counts what the index enforces, so a cap bounds total issuance.
+    pub async fn count_bound_invite_grants(
+        &self,
+        policy_label: &str,
+    ) -> Result<u32, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS bound
+                   FROM onboarding_invite_grants
+                  WHERE policy_label = $1
+                    AND revoked_at IS NULL
+                    AND credential_binding_hash IS NOT NULL",
+                &[&policy_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let bound: i64 = row.get("bound");
+        u32::try_from(bound).map_err(|_| {
+            DatabaseError::Serialization("invite grant count out of range".to_string())
+        })
+    }
+
+    /// True iff this credential already holds an unrevoked grant in any of
+    /// `policy_labels`.
+    ///
+    /// The V42 index is scoped `(policy_label, credential_binding_hash)`, so it
+    /// cannot see across pools. Where one cohort is split into several pools —
+    /// as the Legion ranks are — an account whose rank changes resolves to a
+    /// different label and the index does not fire. This is the cross-pool
+    /// check the index structurally cannot perform.
+    pub async fn credential_bound_in_any(
+        &self,
+        policy_labels: &[String],
+        credential_binding_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM onboarding_invite_grants
+                      WHERE policy_label = ANY($1)
+                        AND credential_binding_hash = $2
+                        AND revoked_at IS NULL
+                 ) AS bound",
+                &[&policy_labels, &credential_binding_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.get("bound"))
+    }
+
     pub async fn insert_invite_grant(
         &self,
         write: crate::db::InviteGrantWrite,
