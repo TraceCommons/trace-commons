@@ -177,13 +177,15 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 27] = [
+pub const METHODS: [&str; 31] = [
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
+    "clear_public_profile",
     "consent_options",
     "dismiss",
     "enroll",
+    "get_public_profile",
     "get_settings",
     "hello",
     "history_rollup",
@@ -194,11 +196,13 @@ pub const METHODS: [&str; 27] = [
     "pause",
     "preview",
     "preview_body",
+    "preview_turns",
     "queue_outcome_counts",
     "refresh_history",
     "resume",
     "set_consent_scopes",
     "set_project_mode",
+    "set_public_profile",
     "set_settings",
     "shutdown",
     "status",
@@ -861,6 +865,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // than a partial answer. No real caller reaches it -- see the module
         // doc's "Sync vs. async dispatch" section.
         "preview_body" => Response::err(req.id, ERR_UNAVAILABLE, "preview-body-requires-async"),
+        // The turn index is resolved from the same envelope as the body, by
+        // the same async path, so it refuses here for the same reason.
+        "preview_turns" => Response::err(req.id, ERR_UNAVAILABLE, "preview-turns-requires-async"),
         "pause" => {
             // An optional timed pause, persisted so it survives a restart of
             // either the daemon or the app that requested it -- an app-side
@@ -992,11 +999,38 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "history_rollup" => match HistoryCache::load(&shared.store) {
-            Ok(records) => Response::ok(
-                req.id,
-                serde_json::to_value(rollup(&records, Utc::now()))
-                    .unwrap_or_else(|_| serde_json::json!({})),
-            ),
+            Ok(records) => {
+                let now = Utc::now();
+                let mut body = serde_json::to_value(rollup(&records, now))
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                // The public roster standing rides on this answer as an
+                // additive `community` object rather than on a method of its
+                // own: History is the one screen that draws it, and it
+                // already asks for this. A client that ignores the field is
+                // unaffected.
+                //
+                // No network call here. The poller
+                // (`daemon::refresh_community`) owns the fetch and this
+                // serves what it last cached -- and serves nothing at all
+                // when there is no standing, or when the cached one has
+                // aged past the roster's withdrawal bound. The field is
+                // then absent rather than null-filled, because a client
+                // that receives no standing must draw no section, and a
+                // null-filled object is a set of claims about someone's
+                // public standing that this daemon never received.
+                let standing = {
+                    let state = shared.state.lock().expect("state lock");
+                    state.community.clone()
+                };
+                if let Some(standing) = standing.filter(|s| s.is_fresh(now)) {
+                    if let (Some(object), Ok(value)) =
+                        (body.as_object_mut(), serde_json::to_value(&standing))
+                    {
+                        object.insert("community".to_string(), value);
+                    }
+                }
+                Response::ok(req.id, body)
+            }
             Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "history-read-failed"),
         },
         "refresh_history" => {
@@ -1039,12 +1073,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // `"enroll"` above.
         "withdraw" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
         "withdraw_bulk" => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-requires-async"),
+        // Claiming and withdrawing a public handle both call the server, so
+        // like `"withdraw"` above they are only answered for real by
+        // `handle_request_async`. Reading the profile back is a local cache
+        // read (there is no server read-back to make -- see
+        // `daemon::profile`), so it is complete here.
+        "set_public_profile" => Response::err(req.id, ERR_UNAVAILABLE, "profile-requires-async"),
+        "clear_public_profile" => Response::err(req.id, ERR_UNAVAILABLE, "profile-requires-async"),
+        "get_public_profile" => super::profile::handle_get_public_profile(shared, req),
         _ => Response::err(req.id, ERR_UNKNOWN_METHOD, "unknown-method"),
     }
 }
 
 /// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"preview_body"`, `"enroll"`, `"withdraw"`, `"withdraw_bulk"`) for real
+/// `"preview_body"`, `"preview_turns"`, `"enroll"`, `"withdraw"`,
+/// `"withdraw_bulk"`, `"set_public_profile"`, `"clear_public_profile"`) for real
 /// and delegates every other method, unchanged, to the synchronous
 /// `handle_request`. See the module doc's "Sync vs. async dispatch" section
 /// for why this is the only place that decides which methods are async, and
@@ -1054,9 +1097,12 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
     match req.method.as_str() {
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
+        "preview_turns" => handle_preview_turns(shared, req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "set_public_profile" => super::profile::handle_set_public_profile(shared, req).await,
+        "clear_public_profile" => super::profile::handle_clear_public_profile(shared, req).await,
         _ => handle_request(shared, req),
     }
 }
@@ -1340,6 +1386,136 @@ async fn handle_preview_body(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
+/// An index of the turns in the redacted preview body: where each one starts
+/// inside the body and what to label it. **An overlay, never a replacement.**
+///
+/// # Why this is an index and not a rendered transcript
+///
+/// The transcript surface a contributor approves from is titled "exactly
+/// what would be sent", and that is meant literally: what it shows is
+/// `preview_body`'s bytes, the same bytes the upload sends. Re-rendering
+/// those events as prose turns would drop everything that has no prose form
+/// -- `structured_payload`, `token_counts`, `latency_ms`, `cost_usd`,
+/// `failure_modes` -- and so would show *less* than the artifact under a
+/// heading promising the whole of it. So the daemon does not re-render. It
+/// says where the turns begin in the body the client already has, and the
+/// client draws separators there over text it renders verbatim.
+///
+/// `preview::turns_of` computes the offsets from `preview::body_of`'s own
+/// output, so there is exactly one definition of how events map to bytes,
+/// and one test asserts each span re-parses to the event it claims.
+///
+/// # Anchoring
+///
+/// `body_digest` is **required**, on the first call and every call, and is
+/// the same anchoring rule `preview_body`'s continuation pages use. An index
+/// is a set of offsets into a specific string; against any other string it
+/// is not merely stale but wrong, and wrong in the invisible way -- a
+/// separator drawn over the wrong text still looks like a transcript. A
+/// rebuilt envelope is a different artifact (event ids are minted per build,
+/// and an LLM-backed privacy filter does not reproduce its own spans), so a
+/// mismatch is refused with [`ERR_PREVIEW_BODY_CHANGED`] exactly as a
+/// mis-anchored page is, and the correct response is the same: re-read the
+/// body from `offset: 0` and ask again with the digest it returns.
+///
+/// # Framing
+///
+/// Unpaged, and it fits: a turn serializes to well under 100 bytes, and an
+/// envelope is capped at `MAX_ENVELOPE_BYTES` (1.5 MB) while one
+/// pretty-printed event costs upwards of 170 of those bytes, so the index
+/// stays a fraction of the 1 MiB line cap even for an envelope at the
+/// ceiling. If that ceiling ever rises materially, this has to page the way
+/// `preview_body` does rather than truncate -- a truncated index is a
+/// transcript with turns silently missing from the end.
+///
+/// The index itself carries no redacted trace text -- an event-type label,
+/// the tool name the envelope already records as metadata, and byte offsets.
+/// It is still only served for an entry the caller already holds, under the
+/// same rule as the rest of the preview surface, because the shape of a
+/// transcript is itself something a contributor has not offered anyone.
+async fn handle_preview_turns(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let expected_digest = match req.params.get("body_digest") {
+        // Fail-closed, and required from the first call: an index is only
+        // meaningful against the body the caller is holding.
+        None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_BODY_DIGEST_REQUIRED),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "body-digest-invalid"),
+        },
+    };
+
+    let (envelope, envelope_digest, _enrolled) = match resolve_preview_envelope(shared, id).await {
+        Ok(v) => v,
+        Err((code, label)) => return Response::err(req.id, code, label),
+    };
+    let body = match super::preview::body_of(&envelope) {
+        Ok(b) => b,
+        Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
+    };
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if expected_digest != body_digest {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERR_PREVIEW_BODY_CHANGED);
+    }
+    let turns = match super::preview::turns_of(&envelope) {
+        Ok(t) => t,
+        Err(_) => {
+            return Response::err(
+                req.id,
+                ERR_UNAVAILABLE,
+                super::preview::REASON_TURN_INDEX_FAILED,
+            );
+        }
+    };
+
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "entry_id": id,
+            "body_digest": body_digest,
+            "envelope_digest": envelope_digest,
+            "turn_count": turns.len(),
+            "turns": turns,
+        }),
+    )
+}
+
+/// The turn index for one entry, for a caller that already holds `shared`
+/// directly rather than issuing a request/response frame -- the C ABI's
+/// `tc_preview_turns_json`. Anchored by the same rule as the socket method:
+/// the caller passes the digest of the body it is showing, and a body that
+/// is not that one is refused rather than indexed.
+///
+/// Returns the same JSON object `"preview_turns"` puts in its `result`, so
+/// the two surfaces cannot describe the same entry differently.
+pub async fn open_preview_turns(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    expected_body_digest: &str,
+) -> Result<String, &'static str> {
+    let (envelope, envelope_digest, _enrolled) = resolve_preview_envelope(shared, entry_id)
+        .await
+        .map_err(|(_code, label)| label)?;
+    let body = super::preview::body_of(&envelope).map_err(|_| "preview-failed")?;
+    let body_digest = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    if expected_body_digest != body_digest {
+        return Err(ERR_PREVIEW_BODY_CHANGED);
+    }
+    let turns = super::preview::turns_of(&envelope)
+        .map_err(|_| super::preview::REASON_TURN_INDEX_FAILED)?;
+    serde_json::to_string(&serde_json::json!({
+        "entry_id": entry_id,
+        "body_digest": body_digest,
+        "envelope_digest": envelope_digest,
+        "turn_count": turns.len(),
+        "turns": turns,
+    }))
+    .map_err(|_| "turns-serialize-failed")
+}
+
 /// The redacted body for one entry, plus its envelope digest and whether the
 /// build behind it was an enrolled one. See `handle_preview_body` for which
 /// of the two sources is used and why.
@@ -1347,6 +1523,27 @@ async fn resolve_preview_body(
     shared: &DaemonShared,
     entry_id: Uuid,
 ) -> Result<(String, String, bool), (&'static str, &'static str)> {
+    let (envelope, digest, enrolled) = resolve_preview_envelope(shared, entry_id).await?;
+    let body =
+        super::preview::body_of(&envelope).map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    Ok((body, digest, enrolled))
+}
+
+/// The redacted envelope one preview surface is describing, resolved once so
+/// the body and the turn index over it can never come from two different
+/// builds. `handle_preview_body` documents which of the two sources is used
+/// and why a pinned-but-missing artifact is refused rather than rebuilt.
+async fn resolve_preview_envelope(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+) -> Result<
+    (
+        trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+        String,
+        bool,
+    ),
+    (&'static str, &'static str),
+> {
     let entry = {
         let queue = shared.queue.lock().expect("queue lock");
         queue
@@ -1358,10 +1555,8 @@ async fn resolve_preview_body(
         Ok(Some(envelope)) => {
             let digest = super::preview::envelope_digest(&envelope)
                 .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
-            let body = super::preview::body_of(&envelope)
-                .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
             // Only an enrolled preview is ever stored.
-            Ok((body, digest, true))
+            Ok((envelope, digest, true))
         }
         // Pinned, but the bytes are not there. Refuse rather than rebuild:
         // a rebuild is a different artifact from the one this entry is
@@ -1372,9 +1567,9 @@ async fn resolve_preview_body(
         )),
         Ok(None) => {
             let cfg = shared.store.load_config().ok().flatten();
-            let (summary, body, _envelope) =
+            let (summary, _body, envelope) =
                 build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref()).await?;
-            Ok((body, summary.envelope_digest, summary.enrolled))
+            Ok((envelope, summary.envelope_digest, summary.enrolled))
         }
         Err(_) => Err((
             ERR_UNAVAILABLE,
@@ -2897,6 +3092,9 @@ mod tests {
                 consent_scopes: vec!["debugging_evaluation".to_string()],
                 pii_filter: None,
                 allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
             })
             .unwrap();
         handle_request(

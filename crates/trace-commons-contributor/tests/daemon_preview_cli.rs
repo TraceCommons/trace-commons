@@ -78,6 +78,9 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
         consent_scopes: vec!["debugging_evaluation".into()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     };
     if enrolled {
         store.save_config(&cfg).unwrap();

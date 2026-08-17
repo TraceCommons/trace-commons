@@ -524,6 +524,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -584,6 +587,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -635,6 +641,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 
@@ -979,6 +988,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
@@ -1038,6 +1050,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&cfg).unwrap();
 

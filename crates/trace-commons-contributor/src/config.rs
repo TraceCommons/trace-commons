@@ -62,6 +62,42 @@ pub struct ContributorConfig {
     pub consent_scopes: Vec<String>,
     pub pii_filter: Option<String>,
     pub allowed_hosts: Option<String>,
+    /// The public handle this device last claimed on the community roster,
+    /// with the bio and roster date the server reported alongside it.
+    ///
+    /// This is a local cache of server-owned state, not the authority: the
+    /// server derives the principal from the authenticated request, and
+    /// there is no `GET /v1/community/profile` for a contributor to read
+    /// their own row back. Without the cache a shell could not render the
+    /// profile panel it just wrote, so the three fields are written on a
+    /// successful `set_profile` and cleared on a successful `clear_profile`.
+    ///
+    /// Not a secret -- the whole point of a roster handle is that it is
+    /// public -- but identity, so it lives with the enrollment it belongs to
+    /// and is swept by `wipe()` on logout rather than left for whoever
+    /// enrolls on this machine next.
+    ///
+    /// `#[serde(default)]` on all three is belt-and-braces, and the reason is
+    /// worth stating so nobody "fixes" the two `Option` fields above to match.
+    /// serde already treats a missing `Option` field as `None` without the
+    /// attribute -- verified, not assumed -- so `pii_filter` and
+    /// `allowed_hosts` are correct as they stand and a `contributor.json`
+    /// written before any of these fields existed loads either way. The
+    /// attribute is kept here because it states the intent at the field, and
+    /// because the guarantee it makes explicit is the one that matters: this
+    /// struct is read from a file the previous release wrote.
+    ///
+    /// It would NOT be optional on a non-`Option` field. `daemon-queue.jsonl`
+    /// is the cautionary case -- unversioned, parsed line by line, and lines
+    /// that fail are dropped with a warning rather than surfaced, so a
+    /// non-defaulted addition there would silently empty a contributor's
+    /// pending queue.
+    #[serde(default)]
+    pub display_handle: Option<String>,
+    #[serde(default)]
+    pub public_bio: Option<String>,
+    #[serde(default)]
+    pub public_since: Option<DateTime<Utc>>,
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -427,6 +463,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 

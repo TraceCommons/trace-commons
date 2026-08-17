@@ -78,6 +78,9 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         consent_scopes: vec!["debugging_evaluation".to_string()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     }
 }
 
@@ -104,6 +107,9 @@ fn unenrolled_preview_config() -> trace_commons_contributor::config::Contributor
         consent_scopes: vec!["debugging_evaluation".to_string()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     }
 }
 

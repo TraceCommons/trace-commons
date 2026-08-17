@@ -1087,6 +1087,88 @@ pub unsafe extern "C" fn tc_preview_open(
     }
 }
 
+/// The turn index over a redacted preview body, as an owned JSON string:
+/// `{entry_id, body_digest, envelope_digest, turn_count, turns: [{index,
+/// role, tool_name, byte_offset, byte_len}]}`. Free it with
+/// [`tc_string_free`]. Returns NULL and sets `*err` (if non-null, also
+/// owned, also freed with `tc_string_free`) on failure.
+///
+/// An **overlay on the body, never a replacement for it.** A window renders
+/// `tc_preview_body`'s bytes verbatim and draws a separator at each
+/// `byte_offset`; the offsets index that exact string. Nothing here
+/// re-renders the transcript, because a prose re-render would drop the
+/// fields that have no prose form (`structured_payload`, `token_counts`,
+/// `latency_ms`, `cost_usd`, `failure_modes`) and so would show a
+/// contributor less than the artifact an approval covers.
+///
+/// `body_digest` is required and is the anchor: pass
+/// `"sha256:<lowercase hex>"` over the exact UTF-8 bytes of the body being
+/// displayed (the string `tc_preview_body` returned). A body the daemon
+/// resolves that is not that one is refused with `preview-body-changed`
+/// rather than indexed -- offsets against the wrong string still *look*
+/// like a transcript, which is why this is not optional. Re-open the
+/// preview, take the new body, and ask again.
+///
+/// Carries no redacted trace text: event-type labels, tool names the
+/// envelope already records as metadata, and byte offsets.
+///
+/// # Safety
+/// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
+/// `body_digest` must be valid NUL-terminated C strings (or NULL, which is
+/// an error). `err`, if non-null, must point to writable `*mut c_char`
+/// storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_preview_turns_json(
+    handle: *mut tc_handle,
+    entry_id: *const c_char,
+    body_digest: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    // `guard_forwarding` for the same reason `tc_preview_open` uses it:
+    // every error this closure can produce is already a fixed, content-free
+    // label -- `borrow_str`'s, this function's own, or
+    // `ipc::open_preview_turns`'s `&'static str` labels.
+    let outcome = guard_forwarding(|| {
+        if handle.is_null() {
+            anyhow::bail!("null-handle");
+        }
+        let handle = unsafe { &*handle };
+        let entry_id = unsafe { borrow_str(entry_id) }?;
+        let digest = unsafe { borrow_str(body_digest) }?.to_string();
+        let id = entry_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("entry-id-invalid"))?;
+        let Some(shared) = shared_of(handle) else {
+            anyhow::bail!("daemon-stopped");
+        };
+        // A dedicated OS thread with its own runtime rather than
+        // `handle.rt.block_on(..)`, for the reason spelled out in
+        // `tc_preview_open`: the natural GUI flow calls this from inside a
+        // `tc_subscribe` callback, which runs on one of `handle.rt`'s own
+        // workers, where a nested `block_on` panics.
+        let turns = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "runtime-unavailable")?;
+            rt.block_on(ipc::open_preview_turns(&shared, id, &digest))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("turns-thread-panicked"))?;
+        turns.map_err(|label| anyhow::anyhow!("{label}"))
+    });
+    match outcome {
+        Ok(json) => to_owned_cstring(&json),
+        Err(e) => {
+            set_last_error(&e);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(&e) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// The fixed label the borrowing preview accessors report for a pointer
 /// that is not a live `tc_preview*`.
 const ERR_INVALID_PREVIEW_POINTER: &str = "invalid-preview-pointer";

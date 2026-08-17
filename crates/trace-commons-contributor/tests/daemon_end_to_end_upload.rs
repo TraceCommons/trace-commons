@@ -86,6 +86,9 @@ impl Harness {
                 consent_scopes: vec!["debugging_evaluation".into()],
                 pii_filter: None,
                 allowed_hosts: Some("127.0.0.1".into()),
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
             })
             .unwrap();
 
