@@ -31,6 +31,19 @@ let package = Package(
             dependencies: ["CTraceCommons"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // Update logic that must be testable without a framework, a bundle,
+        // or a running app. Deliberately depends on nothing: the moment this
+        // target imports Sparkle, `swift test` needs Sparkle.framework
+        // present at runtime and the unit tests stop being unit tests.
+        .target(
+            name: "TCUpdates",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TCUpdatesTests",
+            dependencies: ["TCUpdates"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "TraceCommonsApp",
             dependencies: ["TCBridge"],
