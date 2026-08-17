@@ -52,9 +52,20 @@ function Get-Installer($url, $file) {
 # ---------------------------------------------------------------------------
 Write-Log 'Installing Visual Studio Build Tools (C++ workload). This is the slow one.'
 $vs = Get-Installer 'https://aka.ms/vs/17/release/vs_BuildTools.exe' 'vs_BuildTools.exe'
+# VCTools alone is NOT enough, and the failure is confusing when it is missing.
+#
+# VCTools covers Rust, which links through MSVC's link.exe. But a WinUI 3
+# project also needs the Appx/MSIX MSBuild tasks -- Microsoft.Build.AppxPackage
+# and Microsoft.Build.Packaging.Pri.Tasks -- which ship ONLY with Visual
+# Studio's UWP tooling, never with the .NET SDK. Without them the build fails
+# with MSB4062 naming a path under the dotnet SDK directory, which reads like a
+# .NET problem and is not one. Disabling the offending target just surfaces the
+# next task from the same missing assembly set.
 $vsArgs = @(
     '--quiet', '--wait', '--norestart', '--nocache',
     '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+    '--add', 'Microsoft.VisualStudio.Workload.UniversalBuildTools',
+    '--add', 'Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools',
     '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.22621',
     '--includeRecommended'
 )
@@ -81,10 +92,33 @@ Write-Log '.NET SDK installed'
 # ---------------------------------------------------------------------------
 # Rust, MSVC toolchain.
 # ---------------------------------------------------------------------------
-Write-Log 'Installing Rust (stable-msvc)'
+#
+# CARGO_HOME and RUSTUP_HOME are set machine-wide FIRST, and that is the whole
+# point of this block.
+#
+# GCE runs startup scripts as SYSTEM, so a bare rustup-init installs into
+# C:\Windows\System32\config\systemprofile\.cargo -- a directory no interactive
+# login can reach. The box then looks correctly provisioned and the first thing
+# anyone tries reports "cargo: command not found". Installing to a shared
+# location instead makes the toolchain available to whichever account actually
+# logs in.
+Write-Log 'Installing Rust (stable-msvc) to a machine-wide location'
+$cargoHome = 'C:\Rust\cargo'
+$rustupHome = 'C:\Rust\rustup'
+[Environment]::SetEnvironmentVariable('CARGO_HOME', $cargoHome, 'Machine')
+[Environment]::SetEnvironmentVariable('RUSTUP_HOME', $rustupHome, 'Machine')
+$env:CARGO_HOME = $cargoHome
+$env:RUSTUP_HOME = $rustupHome
+
 $rustup = Get-Installer 'https://win.rustup.rs/x86_64' 'rustup-init.exe'
 & $rustup -y --default-toolchain stable-x86_64-pc-windows-msvc --profile minimal | Out-Null
-Write-Log 'Rust installed'
+
+# Everyone needs to read and execute it; only administrators may change it.
+$rustAcl = Get-Acl 'C:\Rust'
+$rustAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+Set-Acl -Path 'C:\Rust' -AclObject $rustAcl
+Write-Log "Rust installed to $cargoHome"
 
 # ---------------------------------------------------------------------------
 # Git.
@@ -102,7 +136,7 @@ Write-Log 'Git installed'
 # ---------------------------------------------------------------------------
 Write-Log 'Updating machine PATH'
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-foreach ($entry in @('C:\Program Files\dotnet', "$env:SystemDrive\Users\Administrator\.cargo\bin", 'C:\Program Files\Git\cmd')) {
+foreach ($entry in @('C:\Program Files\dotnet', 'C:\Rust\cargo\bin', 'C:\Program Files\Git\cmd')) {
     if ($machinePath -notlike "*$entry*") {
         $machinePath = "$machinePath;$entry"
     }
@@ -120,8 +154,12 @@ Build the cdylib first, then the app:
   dotnet test windows\tests\TraceCommons.Interop.Tests\TraceCommons.Interop.Tests.csproj
   dotnet build windows\src\TraceCommons.App\TraceCommons.App.csproj -p:Platform=x64
 
-If cargo is not on PATH, it is under %USERPROFILE%\.cargo\bin for the account
-that ran rustup. Re-run rustup-init from C:\bootstrap-downloads for a new user.
+Rust lives at C:\Rust\cargo (CARGO_HOME/RUSTUP_HOME are set machine-wide), so
+every account gets the same toolchain. A per-user install would land in the
+SYSTEM profile, because startup scripts run as SYSTEM.
+
+The WinUI app needs Visual Studio's Appx/MSIX MSBuild tasks, which the .NET SDK
+does not ship. Build it with MSBuild from Build Tools, not `dotnet build`.
 
 Stop this VM when you are done -- it bills by the hour while running.
 '@

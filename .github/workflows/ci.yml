@@ -415,8 +415,23 @@ jobs:
       # Windows, so a change that builds cleanly on a contributor's Mac can
       # still be broken here. Warnings are errors in both projects, matching
       # the RUSTFLAGS="-D warnings" discipline the Rust jobs apply.
+      #
+      # MSBuild FROM VISUAL STUDIO, not `dotnet build`, and that is not a
+      # preference.
+      #
+      # A WinUI 3 project invokes MSBuild tasks that live in
+      # Microsoft.Build.AppxPackage.dll and
+      # Microsoft.Build.Packaging.Pri.Tasks.dll. Those assemblies ship with
+      # Visual Studio's tooling and are NEVER part of the .NET SDK, so
+      # `dotnet build` fails with MSB4062 naming a path under the dotnet SDK
+      # directory -- which reads like a .NET version problem and is not one.
+      # Suppressing the first failing target only surfaces the next task from
+      # the same missing assembly set; this was confirmed by reproducing both
+      # failures on a clean Windows box.
+      - uses: microsoft/setup-msbuild@v2
+
       - name: Build the WinUI app
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: dotnet build src/TraceCommons.App/TraceCommons.App.csproj --configuration Release -p:Platform=x64
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
