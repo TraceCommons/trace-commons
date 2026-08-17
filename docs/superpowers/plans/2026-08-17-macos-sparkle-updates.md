@@ -1913,6 +1913,147 @@ cat macos/Package.resolved
 
 Expected: every command exits 0; `otool -L` prints exactly one Sparkle line reading `@rpath/Sparkle.framework/Versions/B/Sparkle`; `ls` shows `Autoupdate`, `Modules`, `Resources`, `Sparkle`, `Updater.app`, `XPCServices`; `plutil -lint` prints `-: OK` twice; `Package.resolved` names `sparkle` at `2.9.6` and nothing else.
 
+### Task 10: Publish the signed appcast from the release pipeline
+
+**Files:**
+- Modify: `.github/workflows/release-apps.yml` (extend the existing `publish-updates` job)
+- Modify: `crates/trace-commons-contributor/tests/release_pipeline.rs` (append one test)
+
+**Interfaces:**
+- Consumes: `scripts/updates/generate-appcast.sh` (manifest-publishing plan, Task 4); `macos/.build/artifacts/sparkle/Sparkle/bin/sign_update` (Task 4 of this plan); the `macos-dmg` artifact; the `sparkle-signing-key` secret.
+- Produces: `updates/appcast.xml` in the `tracecommons-flatpak` bucket — the feed `SUFeedURL` points at.
+
+**Why this task exists and why it is here rather than in the other plan.**
+The manifest-publishing plan writes `generate-appcast.sh` but deliberately never
+runs it: `sign_update` ships inside Sparkle's SwiftPM artifact bundle and does
+not exist on any runner until this plan adds Sparkle as a dependency. Both plans
+originally assumed the other published the appcast, so nothing did — and an
+unpublished appcast means `SUFeedURL` 404s and every update check fails closed
+and silently, which is the hardest failure mode to notice. This task closes that
+gap.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `crates/trace-commons-contributor/tests/release_pipeline.rs`:
+
+```rust
+#[test]
+fn the_release_workflow_publishes_the_appcast() {
+    let wf = read(".github/workflows/release-apps.yml");
+    assert!(
+        wf.contains("generate-appcast.sh"),
+        "release-apps.yml must run generate-appcast.sh. Without it SUFeedURL \
+         404s and every Sparkle check fails closed and silently -- the app \
+         reports no update forever and nothing logs an error."
+    );
+    assert!(
+        wf.contains("sparkle-signing-key"),
+        "the appcast must be signed with the Sparkle EdDSA key from Secret Manager"
+    );
+    assert!(
+        wf.contains("appcast.xml"),
+        "the generated appcast must be uploaded to the bucket"
+    );
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p trace-commons-contributor --test release_pipeline the_release_workflow_publishes_the_appcast`
+Expected: FAIL — "release-apps.yml must run generate-appcast.sh".
+
+- [ ] **Step 3: Extend the publish-updates job**
+
+The `publish-updates` job already resolves a real OpenSSL, fetches the manifest
+signing key, builds and verifies `latest.json`, and uploads it. Add the appcast
+alongside, gated on the macOS build having succeeded — an appcast naming a DMG
+that was never built would point every installed Mac at a 404.
+
+Insert these steps into `publish-updates`, after the manifest verification step
+and before the upload step:
+
+```yaml
+      # Sparkle's sign_update lives inside the SwiftPM artifact bundle, so the
+      # package has to be resolved before the appcast can be signed. This is
+      # why appcast publication lives in the Sparkle plan and not in the
+      # manifest-publishing job that produces latest.json.
+      - name: Resolve Sparkle so sign_update exists
+        if: needs.macos.result == 'success'
+        run: swift package --package-path macos resolve
+
+      - name: Import the Sparkle signing key
+        if: needs.macos.result == 'success'
+        env:
+          GCP_PROJECT: tracecommons-pilot-2026
+        run: |
+          set -euo pipefail
+          gcloud secrets versions access latest \
+            --secret=sparkle-signing-key --project "$GCP_PROJECT" \
+            > "$RUNNER_TEMP/sparkle-ed-key"
+          chmod 600 "$RUNNER_TEMP/sparkle-ed-key"
+
+      - name: Generate the signed appcast
+        if: needs.macos.result == 'success'
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          V="$SHORT_VERSION"
+          SIGN_UPDATE="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          test -x "$SIGN_UPDATE" || {
+            echo "sign_update missing at $SIGN_UPDATE" >&2; exit 1; }
+          ./scripts/updates/generate-appcast.sh \
+            --short-version "$V" \
+            --build-version "$BUILD_VERSION" \
+            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg" \
+            --dmg-path "dist/macos-dmg/TraceCommons-$V.dmg" \
+            --sign-update "$SIGN_UPDATE" \
+            --out dist/updates/appcast.xml
+          cat dist/updates/appcast.xml
+```
+
+Then change the existing upload step to include the appcast when it was built:
+
+```yaml
+      - name: Publish to the bucket
+        env:
+          BUCKET: tracecommons-flatpak
+        run: |
+          set -euo pipefail
+          gcloud storage cp --cache-control="public, max-age=300" \
+            dist/updates/latest.json dist/updates/latest.json.sig \
+            "gs://$BUCKET/updates/"
+          # Conditional on the file rather than on a job result, so a macOS
+          # failure simply leaves the previous appcast in place rather than
+          # replacing it with one pointing at a DMG that does not exist.
+          if [ -f dist/updates/appcast.xml ]; then
+            gcloud storage cp --cache-control="public, max-age=300" \
+              dist/updates/appcast.xml "gs://$BUCKET/updates/"
+          fi
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cargo test -p trace-commons-contributor --test release_pipeline`
+Expected: PASS, all tests.
+
+Then confirm the workflow still parses:
+
+Run: `python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/release-apps.yml')); print(sorted(d['jobs'].keys()))"`
+Expected: the same six job names as before, unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .github/workflows/release-apps.yml \
+  crates/trace-commons-contributor/tests/release_pipeline.rs
+git commit -m "Publish the signed Sparkle appcast when a macOS release is cut"
+```
+
+---
+
 ## Not verified by this plan
 
 Two things remain unproven when every command above passes, and neither may be described as working:
@@ -1927,4 +2068,4 @@ Not code; required before the first release that uses this plan.
 1. Generate the Sparkle EdDSA keypair with `macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys`. It stores the private key in the login keychain and prints the base64 public key.
 2. Store the private key in GCP Secret Manager as `sparkle-signing-key` in `tracecommons-pilot-2026`, for `scripts/updates/generate-appcast.sh` to use.
 3. Add the printed public key as the GitHub Actions secret `SPARKLE_PUBLIC_ED_KEY` in the `release` environment. It is a public key, but it is added as a secret so that a change to it is an audited action rather than an ordinary commit.
-4. Confirm `https://storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml` is publicly readable once the manifest-publishing plan uploads it. An app that cannot fetch its appcast fails closed and silently.
+4. Confirm `https://storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml` is publicly readable once Task 10 of this plan uploads it. An app that cannot fetch its appcast fails closed and silently.

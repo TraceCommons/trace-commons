@@ -833,7 +833,15 @@ git commit -m "Generate the Sparkle appcast alongside the update manifest"
 
 **Interfaces:**
 - Consumes: `scripts/updates/generate-manifest.sh` (Task 3), `scripts/updates/generate-appcast.sh` (Task 4), and the `macos-dmg` / `windows-zip` artifacts the existing build jobs upload.
-- Produces: `updates/latest.json`, `updates/latest.json.sig`, and `updates/appcast.xml` in the `tracecommons-flatpak` bucket.
+- Produces: `updates/latest.json` and `updates/latest.json.sig` in the `tracecommons-flatpak` bucket.
+
+**The appcast is deliberately NOT published here.** Task 4 writes
+`generate-appcast.sh`, but running it requires Sparkle's `sign_update` binary,
+which ships inside Sparkle's SwiftPM artifact bundle and therefore does not
+exist until the macOS plan adds Sparkle as a dependency. Appcast generation and
+publication live in the macOS Sparkle plan's Task 10, which is where both
+`sign_update` and the Sparkle EdDSA key become available. Do not add an appcast
+step to this job — it would reference a binary that is not on the runner.
 
 - [ ] **Step 1: Add the job**
 
