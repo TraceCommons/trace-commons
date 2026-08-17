@@ -341,6 +341,7 @@ history record, audit entry, notification text, or IPC response.
 | `refresh_history` | — | `requested: true` | |
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
+| `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
@@ -678,6 +679,25 @@ non-eligible verdict or an `Ignore`-mode project. Do not present this
 method's output as covering that case; a future method may be added for it,
 and this name was deliberately chosen to leave room for that without another
 contract break.
+
+### `quiesce`
+
+```json
+{ "quiesced": true, "waited_ms": 412 }
+```
+
+Parks the upload queue and waits for anything already in flight to finish, so
+an update can replace the binary without abandoning a half-uploaded trace.
+Used by `trace-commons-contributor update`.
+
+The park is in-memory and dies with the daemon process. It is deliberately not
+`pause`: pause is the contributor's own persisted setting, and an update must
+not rewrite it. There is no `unquiesce` verb for the same reason -- the process
+that was quiesced is the process the swap replaces.
+
+On timeout the daemon answers `busy` / `quiesce-timeout` and un-parks itself.
+The caller leaves the update staged and retries later. There is no forced
+path.
 
 ### `set_settings`
 

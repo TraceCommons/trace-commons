@@ -299,6 +299,14 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     if shared.is_paused(now) {
         return Ok(());
     }
+    // Quiesced for an update swap. Same gate as pause and for the same
+    // reason -- this is the one place "nothing leaves this machine" is
+    // enforced -- but a separate, in-memory flag, so an update never rewrites
+    // the contributor's own persisted pause setting. See `DaemonShared::
+    // quiesced`.
+    if shared.quiesced.load(Ordering::Relaxed) {
+        return Ok(());
+    }
 
     // The post-approval hold. An entry approved a moment ago is skipped
     // until its hold elapses, so the undo a client offers after `approve`
