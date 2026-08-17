@@ -81,10 +81,19 @@ public static class UpdateProtocol
         if (response.IsError)
         {
             DaemonError error = response.Error!;
+            // Error codes here must match crates/trace-commons-contributor/
+            // src/daemon/ipc.rs, the source of truth for this wire contract.
+            // The sync-dispatch refusal in particular is
+            // Response::err(req.id, ERR_UNAVAILABLE, "quiesce-requires-async")
+            // (ipc.rs:892, asserted by a Rust test at ipc.rs:3158-3163) --
+            // code "unavailable", not "bad_params". tc_call always reaches
+            // the async dispatcher, so this shape should never arrive here,
+            // but the mapping is written to match what the daemon actually
+            // sends rather than an invented shape.
             TcQuiesceOutcome outcome = error.Code switch
             {
                 "unknown_method" => TcQuiesceOutcome.Unsupported,
-                "bad_params" when error.Message == "quiesce-requires-async"
+                "unavailable" when error.Message == "quiesce-requires-async"
                     => TcQuiesceOutcome.Unsupported,
                 "busy" when error.Message == "quiesce-timeout"
                     => TcQuiesceOutcome.TimedOut,

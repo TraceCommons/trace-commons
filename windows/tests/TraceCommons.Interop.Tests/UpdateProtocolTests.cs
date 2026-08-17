@@ -61,14 +61,22 @@ public class UpdateProtocolTests
         Assert.False(outcome.CanUpdate);
     }
 
+    // The daemon's actual sync-dispatch refusal
+    // (crates/trace-commons-contributor/src/daemon/ipc.rs:892, asserted by a
+    // Rust test at ipc.rs:3158-3163) is code "unavailable", not "bad_params".
+    // tc_call never reaches this path -- it always hits the async dispatcher
+    // -- but the shape modelled here must still match what the daemon really
+    // sends, not an invented one, so this stays trustworthy as documentation
+    // of the wire contract even though it is presently unreachable.
     [Fact]
     public void TheSynchronousRefusalIsAlsoUnsupported()
     {
         QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
             DaemonResponse.Parse(
-                "{\"id\":1,\"error\":{\"code\":\"bad_params\",\"message\":\"quiesce-requires-async\"}}"));
+                "{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"quiesce-requires-async\"}}"));
 
         Assert.Equal(TcQuiesceOutcome.Unsupported, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
     }
 
     [Fact]
