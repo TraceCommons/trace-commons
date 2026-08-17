@@ -992,6 +992,7 @@ jobs:
             --dmg-url "https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg" \
             --dmg-path "dist/macos-dmg/TraceCommons-$V.dmg" \
             --sign-update "$SIGN_UPDATE" \
+            --ed-key-file "$RUNNER_TEMP/sparkle-ed-key" \
             --out dist/updates/appcast.xml
           cat dist/updates/appcast.xml
 
