@@ -8,9 +8,15 @@
 //! hands off to `update::UpdateMonitor::request_install`, which asks the
 //! portal, which does the work.
 
-use super::style::Tone;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use adw::prelude::*;
+
+use super::App;
+use super::style::{Tone, space};
 use crate::copy;
-use crate::update::UpdateState;
+use crate::update::{self, UpdateState};
 
 /// What the banner's one button does, if it has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +77,195 @@ pub fn banner_for(state: &UpdateState) -> Option<Banner> {
             action: None,
         }),
     }
+}
+
+/// The banner itself. Built in the same shape as the health banner in
+/// `ui::mod` -- glyph, wrapping body, one optional button -- because a
+/// contributor should not have to learn two kinds of notice bar.
+pub struct UpdateView {
+    pub root: gtk::Box,
+    glyph: gtk::Label,
+    body: gtk::Label,
+    button: gtk::Button,
+    /// The live state, owned by the UI thread. The D-Bus threads never
+    /// touch it; they send signals and this applies them.
+    state: RefCell<UpdateState>,
+    /// What the button currently means, so one handler serves both actions.
+    action: RefCell<Option<BannerAction>>,
+    /// `None` outside a flatpak, where no monitor is ever created.
+    monitor: RefCell<Option<update::UpdateMonitor>>,
+}
+
+impl Default for UpdateView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UpdateView {
+    pub fn new() -> Self {
+        let glyph = gtk::Label::new(Some(Tone::Neutral.glyph()));
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+
+        let body = gtk::Label::builder()
+            .wrap(true)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        body.add_css_class("tc-body");
+
+        let button = gtk::Button::builder().visible(false).build();
+        button.add_css_class("tc-quiet");
+        button.set_valign(gtk::Align::Center);
+
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(space::M)
+            .visible(false)
+            .margin_top(space::M)
+            .margin_start(space::L)
+            .margin_end(space::L)
+            .build();
+        root.append(&glyph);
+        root.append(&body);
+        root.append(&button);
+        root.add_css_class("tc-banner");
+
+        Self {
+            root,
+            glyph,
+            body,
+            button,
+            state: RefCell::new(UpdateState::Idle),
+            action: RefCell::new(None),
+            monitor: RefCell::new(None),
+        }
+    }
+}
+
+/// Draw the current state. Called once at startup and after every signal.
+fn render(app: &Rc<App>) {
+    let view = &app.update;
+    let banner = banner_for(&view.state.borrow());
+
+    let Some(banner) = banner else {
+        view.root.set_visible(false);
+        *view.action.borrow_mut() = None;
+        return;
+    };
+
+    view.glyph.set_text(banner.tone.glyph());
+    // One tone class at a time, so a state change does not leave the
+    // previous state's colour behind.
+    for tone in [
+        Tone::Neutral,
+        Tone::Clear,
+        Tone::Attention,
+        Tone::Held,
+        Tone::Refused,
+    ] {
+        view.glyph.remove_css_class(tone.css());
+    }
+    view.glyph.add_css_class(banner.tone.css());
+    view.body.set_text(&banner.body);
+
+    match banner.action {
+        Some((label, action)) => {
+            view.button.set_label(label);
+            view.button.set_visible(true);
+            *view.action.borrow_mut() = Some(action);
+        }
+        None => {
+            view.button.set_visible(false);
+            *view.action.borrow_mut() = None;
+        }
+    }
+    view.root.set_visible(true);
+}
+
+/// Start the monitor, pump its signals onto the main loop, and connect the
+/// one button.
+///
+/// Outside a flatpak nothing is started at all: the state goes straight to
+/// `Unmanaged` and the banner says so. Under flatpak the monitor runs on
+/// its own threads and the window never blocks on it, so a portal that
+/// never answers costs nothing but a missing banner.
+pub fn wire(app: &Rc<App>) {
+    if update::detect_install_kind() != update::InstallKind::Flatpak {
+        *app.update.state.borrow_mut() = UpdateState::Unmanaged;
+        render(app);
+        return;
+    }
+
+    let monitor = update::spawn_monitor();
+    let signals = monitor.signals.clone();
+    *app.update.monitor.borrow_mut() = Some(monitor);
+    render(app);
+
+    let pump = Rc::clone(app);
+    gtk::glib::spawn_future_local(async move {
+        while let Ok(signal) = signals.recv().await {
+            let next = {
+                let current = pump.update.state.borrow();
+                update::next_state(&current, &signal)
+            };
+            *pump.update.state.borrow_mut() = next;
+            render(&pump);
+        }
+    });
+
+    let pressed = Rc::clone(app);
+    app.update.button.connect_clicked(move |_| {
+        let action = *pressed.update.action.borrow();
+        match action {
+            Some(BannerAction::Confirm) => confirm_install(&pressed),
+            // The existing close-request handler runs, so quitting still
+            // says what keeps running afterwards. This does not relaunch:
+            // a confined process cannot start itself, and the honest
+            // instruction is to reopen it.
+            Some(BannerAction::Restart) => pressed.window.close(),
+            None => {}
+        }
+    });
+}
+
+/// The confirmation. Nothing about the installed application changes
+/// without a person pressing the accept response here.
+fn confirm_install(app: &Rc<App>) {
+    let dialog = adw::MessageDialog::new(
+        Some(&app.window),
+        Some(copy::UPDATE_CONFIRM_HEADING),
+        Some(copy::UPDATE_CONFIRM_BODY),
+    );
+    dialog.add_responses(&[
+        ("cancel", copy::UPDATE_CONFIRM_CANCEL),
+        ("install", copy::UPDATE_CONFIRM_ACCEPT),
+    ]);
+    dialog.set_close_response("cancel");
+
+    let app = Rc::clone(app);
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        if response != "install" {
+            return;
+        }
+        // Move into Installing before the call goes out, so the window
+        // shows work starting rather than sitting on a stale offer until
+        // the first Progress signal arrives. `begin_install` is a no-op
+        // from any state that is not an offer.
+        let next = {
+            let current = app.update.state.borrow();
+            update::begin_install(&current)
+        };
+        *app.update.state.borrow_mut() = next;
+        render(&app);
+
+        if let Some(monitor) = app.update.monitor.borrow().as_ref() {
+            monitor.request_install();
+        }
+    });
+    dialog.present();
 }
 
 #[cfg(test)]
