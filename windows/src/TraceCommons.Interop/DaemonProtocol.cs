@@ -40,6 +40,15 @@ public static class DaemonProtocol
         public const string Approve = "approve";
         public const string Dismiss = "dismiss";
         public const string Shutdown = "shutdown";
+
+        /// <summary>
+        /// Drains in-flight uploads and parks the queue, bounded by
+        /// <c>timeout_secs</c>. Answered only by the async dispatcher, which
+        /// is what <c>tc_call</c> reaches: it routes through
+        /// <c>ipc::handle_local</c> to <c>handle_request_async</c>, so the
+        /// socket path's "quiesce-requires-async" refusal never applies here.
+        /// </summary>
+        public const string Quiesce = "quiesce";
     }
 
     public static class Events
