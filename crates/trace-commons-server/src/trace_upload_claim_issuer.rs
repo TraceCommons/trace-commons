@@ -524,6 +524,10 @@ impl TraceUploadClaimIssuerConfig {
                 self.invite_admin_backend.clone(),
                 self.invite_admin_registry.clone(),
             ),
+            celestine_sloth_claim: crate::celestine_sloth_claim::CelestineSlothClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
         }))
     }
 }
@@ -675,6 +679,12 @@ struct TraceUploadClaimIssuerState {
     /// are both configured. Built once here so the in-flight challenge store
     /// is shared across requests rather than rebuilt per call.
     near_legion_claim: Option<crate::near_legion_claim::NearLegionClaimState>,
+    /// Self-serve Celestine Sloth Society claim surface. `None` — routes
+    /// unmounted — unless the feature is enabled AND the collection, the LCD
+    /// endpoint, the tenant template and the invite backend are all configured.
+    /// Built once here so the in-flight challenge store is shared across
+    /// requests rather than rebuilt per call.
+    celestine_sloth_claim: Option<crate::celestine_sloth_claim::CelestineSlothClaimState>,
 }
 
 impl TraceUploadClaimIssuerState {
@@ -1094,6 +1104,7 @@ fn router_from_state(
     // state; merging it in keeps the self-serve surface unmounted (404) on any
     // deployment that has not configured it.
     let near_legion = state.near_legion_claim.clone();
+    let celestine_sloths = state.celestine_sloth_claim.clone();
     let router = Router::new()
         .route("/health", get(health_handler))
         .route(
@@ -1110,6 +1121,13 @@ fn router_from_state(
         Some(claim_state) => router.merge(crate::near_legion_claim::near_legion_claim_router(
             claim_state,
         )),
+        None => router,
+    };
+
+    let router = match celestine_sloths {
+        Some(claim_state) => router.merge(
+            crate::celestine_sloth_claim::celestine_sloth_claim_router(claim_state),
+        ),
         None => router,
     };
 
@@ -4236,9 +4254,11 @@ mod tests {
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
-                // The self-serve claim surface has its own hermetic tests in
-                // `near_legion_claim`; these issuer tests build state without it.
+                // The self-serve claim surfaces have their own hermetic tests in
+                // `near_legion_claim` and `celestine_sloth_claim`; these issuer
+                // tests build state without either.
                 near_legion_claim: None,
+                celestine_sloth_claim: None,
             }
         }
     }
