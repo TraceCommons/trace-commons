@@ -31,10 +31,48 @@ use serde::Deserialize;
 use crate::config::NearConfig;
 use crate::trace_invite_registry::InviteRegistry as _;
 
-/// Invite pool these grants live in. Distinct from the operator pool so the
-/// unique index scopes per-account claims to Legion claims only, and so an
-/// operator can list or revoke the cohort as a unit.
-pub const POLICY_LABEL: &str = "near-legion";
+/// Invite pools these grants live in — one per qualifying rank. Distinct from
+/// the operator pool so the unique index scopes per-account claims to Legion
+/// claims only, and split by rank so each rank carries its own cap and can be
+/// listed or revoked as a unit.
+///
+/// Splitting the label also scopes the V42 one-live-grant-per-account index per
+/// rank. That is only safe because rank resolution is server-side, ordered, and
+/// deterministic — see [`resolve_rank`]. If a caller could steer resolution, a
+/// Vanguard (who also holds an Ascendant token) could claim under both labels.
+pub const POLICY_LABEL_VANGUARD: &str = "near-legion-vanguard";
+pub const POLICY_LABEL_ASCENDANT: &str = "near-legion-ascendant";
+
+/// A qualifying NEAR Legion rank. Ordered highest-first; the discriminant order
+/// is the resolution order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegionRank {
+    Vanguard,
+    Ascendant,
+}
+
+impl LegionRank {
+    /// Ranks in resolution order, highest first. The ranks are cumulative on
+    /// chain — every sampled Vanguard holder also holds an Ascendant token — so
+    /// this order is what decides which grant a multi-rank holder receives. It
+    /// is a correctness requirement, not an optimisation.
+    pub const RESOLUTION_ORDER: [Self; 2] = [Self::Vanguard, Self::Ascendant];
+
+    pub fn policy_label(self) -> &'static str {
+        match self {
+            Self::Vanguard => POLICY_LABEL_VANGUARD,
+            Self::Ascendant => POLICY_LABEL_ASCENDANT,
+        }
+    }
+
+    /// Wire name used in the status response and returned on a successful claim.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Vanguard => "vanguard",
+            Self::Ascendant => "ascendant",
+        }
+    }
+}
 
 /// Recorded on every grant so audit can separate self-serve claims from
 /// operator-minted invites.
@@ -48,9 +86,23 @@ pub const ISSUED_BY_LABEL: &str = "near-legion-claim";
 /// be replayed into the other.
 pub const CLAIM_MESSAGE: &str = "Claim Trace Commons invite codes for this NEAR account. This does not authorize a transaction.";
 
-pub const DEFAULT_CONTRACT: &str = "nearlegion.nfts.tg";
-pub const DEFAULT_CAP: u32 = 100;
-pub const DEFAULT_MAX_USES: u32 = 3;
+pub const DEFAULT_VANGUARD_CONTRACT: &str = "vanguard.nearlegion.near";
+pub const DEFAULT_ASCENDANT_CONTRACT: &str = "ascendant.nearlegion.near";
+
+/// Queried only to tell a refused caller something truthful. Never gates.
+pub const DEFAULT_INITIATE_CONTRACT: &str = "initiate.nearlegion.near";
+pub const DEFAULT_BASE_CONTRACT: &str = "nearlegion.nfts.tg";
+
+pub const DEFAULT_VANGUARD_MAX_USES: u32 = 5;
+pub const DEFAULT_ASCENDANT_MAX_USES: u32 = 3;
+
+/// Caps default to the full on-chain cohort (66 Vanguard, 580 Ascendant as of
+/// 2026-08-17), making the cap a circuit breaker rather than a rationing
+/// device: the gate itself — soulbound, rank-assigned, 580 accounts — is the
+/// scarcity mechanism. Lower them by environment variable for a smaller pilot.
+pub const DEFAULT_VANGUARD_CAP: u32 = 66;
+pub const DEFAULT_ASCENDANT_CAP: u32 = 580;
+
 pub const DEFAULT_GRANT_TTL_DAYS: i64 = 30;
 
 /// Accounts that hold Legion tokens but are not people. The treasury holds the
@@ -66,12 +118,34 @@ const MAX_ACCOUNT_ID_LEN: usize = 64;
 /// set fails closed so the routes stay 404 rather than half-working.
 #[derive(Debug, Clone)]
 pub struct NearLegionConfig {
-    pub contract: String,
+    pub vanguard: RankTier,
+    pub ascendant: RankTier,
+    /// Diagnostic-only contracts. Queried on the refusal path so a holder of a
+    /// non-qualifying credential is told they hold the wrong rank rather than
+    /// that they hold nothing. Never consulted on the eligibility path.
+    pub initiate_contract: String,
+    pub base_contract: String,
     pub denylist: Vec<String>,
-    pub cap: u32,
     pub tenant_template_id: String,
-    pub max_uses: u32,
     pub grant_ttl_days: i64,
+}
+
+/// Per-rank gate parameters: which contract proves the rank, how many uses the
+/// resulting invite carries, and how many such grants may be live at once.
+#[derive(Debug, Clone)]
+pub struct RankTier {
+    pub contract: String,
+    pub max_uses: u32,
+    pub cap: u32,
+}
+
+impl NearLegionConfig {
+    pub fn tier(&self, rank: LegionRank) -> &RankTier {
+        match rank {
+            LegionRank::Vanguard => &self.vanguard,
+            LegionRank::Ascendant => &self.ascendant,
+        }
+    }
 }
 
 /// Every way a claim can be refused. Each maps to one public label and one
@@ -85,6 +159,11 @@ pub enum ClaimError {
     SignatureInvalid,
     PublicKeyNotFullAccess,
     AccountHoldsNoLegionToken,
+    /// Holds a Legion credential — Initiate, or the tradeable base collection —
+    /// but not at a qualifying rank. Distinct from holding nothing: telling
+    /// ~26,700 real holders they hold nothing is copy users would rightly
+    /// report as a bug.
+    AccountRankNotEligible,
     AccountNotEligible,
     InviteCredentialAlreadyBound,
     NearLegionClaimCapReached,
@@ -101,6 +180,7 @@ impl ClaimError {
             Self::SignatureInvalid => "SignatureInvalid",
             Self::PublicKeyNotFullAccess => "PublicKeyNotFullAccess",
             Self::AccountHoldsNoLegionToken => "AccountHoldsNoLegionToken",
+            Self::AccountRankNotEligible => "AccountRankNotEligible",
             Self::AccountNotEligible => "AccountNotEligible",
             Self::InviteCredentialAlreadyBound => "InviteCredentialAlreadyBound",
             Self::NearLegionClaimCapReached => "NearLegionClaimCapReached",
@@ -117,6 +197,7 @@ impl ClaimError {
             | Self::SignatureInvalid
             | Self::PublicKeyNotFullAccess
             | Self::AccountHoldsNoLegionToken
+            | Self::AccountRankNotEligible
             | Self::AccountNotEligible => 400,
             Self::InviteCredentialAlreadyBound | Self::NearLegionClaimCapReached => 409,
             Self::NearRpcUnavailable | Self::ClaimBackendUnavailable => 503,
@@ -145,23 +226,28 @@ impl NearLegionConfig {
 
         let tenant_template_id = non_blank_env("TRACE_COMMONS_NEAR_LEGION_TENANT_TEMPLATE")?;
 
-        let contract = non_blank_env("TRACE_COMMONS_NEAR_LEGION_CONTRACT")
-            .unwrap_or_else(|| DEFAULT_CONTRACT.to_string());
-
         let denylist = match non_blank_env("TRACE_COMMONS_NEAR_LEGION_DENYLIST") {
             Some(raw) => parse_denylist(&raw),
             None => DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect(),
         };
 
-        let cap = non_blank_env("TRACE_COMMONS_NEAR_LEGION_CLAIM_CAP")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|c| *c > 0)
-            .unwrap_or(DEFAULT_CAP);
+        let vanguard = RankTier {
+            contract: non_blank_env("TRACE_COMMONS_NEAR_LEGION_VANGUARD_CONTRACT")
+                .unwrap_or_else(|| DEFAULT_VANGUARD_CONTRACT.to_string()),
+            max_uses: positive_env("TRACE_COMMONS_NEAR_LEGION_VANGUARD_MAX_USES")
+                .unwrap_or(DEFAULT_VANGUARD_MAX_USES),
+            cap: positive_env("TRACE_COMMONS_NEAR_LEGION_VANGUARD_CAP")
+                .unwrap_or(DEFAULT_VANGUARD_CAP),
+        };
 
-        let max_uses = non_blank_env("TRACE_COMMONS_NEAR_LEGION_MAX_USES")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|m| *m > 0)
-            .unwrap_or(DEFAULT_MAX_USES);
+        let ascendant = RankTier {
+            contract: non_blank_env("TRACE_COMMONS_NEAR_LEGION_ASCENDANT_CONTRACT")
+                .unwrap_or_else(|| DEFAULT_ASCENDANT_CONTRACT.to_string()),
+            max_uses: positive_env("TRACE_COMMONS_NEAR_LEGION_ASCENDANT_MAX_USES")
+                .unwrap_or(DEFAULT_ASCENDANT_MAX_USES),
+            cap: positive_env("TRACE_COMMONS_NEAR_LEGION_ASCENDANT_CAP")
+                .unwrap_or(DEFAULT_ASCENDANT_CAP),
+        };
 
         let grant_ttl_days = non_blank_env("TRACE_COMMONS_NEAR_LEGION_GRANT_TTL_DAYS")
             .and_then(|v| v.parse::<i64>().ok())
@@ -169,11 +255,14 @@ impl NearLegionConfig {
             .unwrap_or(DEFAULT_GRANT_TTL_DAYS);
 
         Some(Self {
-            contract,
+            vanguard,
+            ascendant,
+            initiate_contract: non_blank_env("TRACE_COMMONS_NEAR_LEGION_INITIATE_CONTRACT")
+                .unwrap_or_else(|| DEFAULT_INITIATE_CONTRACT.to_string()),
+            base_contract: non_blank_env("TRACE_COMMONS_NEAR_LEGION_BASE_CONTRACT")
+                .unwrap_or_else(|| DEFAULT_BASE_CONTRACT.to_string()),
             denylist,
-            cap,
             tenant_template_id,
-            max_uses,
             grant_ttl_days,
         })
     }
@@ -187,6 +276,16 @@ impl NearLegionConfig {
             .iter()
             .any(|d| d.trim().eq_ignore_ascii_case(candidate))
     }
+}
+
+/// Parse a strictly-positive `u32` from the environment. A malformed or zero
+/// value yields `None` so the caller falls back to its default: an unparseable
+/// cap must not open the surface wider than intended, and a zero `max_uses`
+/// would mint invites nobody can redeem.
+fn positive_env(key: &str) -> Option<u32> {
+    non_blank_env(key)
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
 }
 
 fn non_blank_env(key: &str) -> Option<String> {
@@ -306,14 +405,86 @@ pub fn parse_nft_supply_response(response: &serde_json::Value) -> Result<u64> {
 /// path installs no override.
 #[async_trait::async_trait]
 pub trait NearLegionTokenChecker: Send + Sync {
-    /// Return `true` iff `account_id` holds at least one token of the
-    /// configured collection. Any error is fail-closed by the caller.
-    async fn holds_legion_token(
+    /// Return `true` iff `account_id` holds at least one token of `contract`.
+    ///
+    /// The seam is a single-contract probe rather than a whole-gate decision so
+    /// that rank resolution order — the part that must be right — lives in
+    /// [`resolve_rank`] and is exercised by tests rather than stubbed out by
+    /// them. Any error is fail-closed by the caller.
+    async fn holds_token(
         &self,
         near_cfg: &NearConfig,
-        legion_cfg: &NearLegionConfig,
+        contract: &str,
         account_id: &str,
     ) -> Result<bool>;
+}
+
+/// Resolve an account to its highest qualifying rank.
+///
+/// Probes the rank contracts in [`LegionRank::RESOLUTION_ORDER`] — Vanguard
+/// first — and returns on the first hit. The ranks are cumulative on chain, so
+/// a Vanguard holder also matches the Ascendant contract; probing in this order
+/// is the only thing that stops a top-rank holder being issued the smaller
+/// Ascendant grant.
+///
+/// An RPC failure at any step is propagated, never treated as "not this rank".
+/// Falling through on error would silently downgrade a Vanguard to a three-use
+/// grant whenever the Vanguard contract query happened to fail.
+///
+/// This function takes no caller-supplied rank hint, and nothing in the request
+/// influences the order. That determinism is what makes per-rank policy labels
+/// safe against double claims.
+pub async fn resolve_rank(
+    checker: &dyn NearLegionTokenChecker,
+    near_cfg: &NearConfig,
+    legion_cfg: &NearLegionConfig,
+    account_id: &str,
+) -> Result<Option<LegionRank>> {
+    for rank in LegionRank::RESOLUTION_ORDER {
+        if checker
+            .holds_token(near_cfg, &legion_cfg.tier(rank).contract, account_id)
+            .await?
+        {
+            return Ok(Some(rank));
+        }
+    }
+    Ok(None)
+}
+
+/// Distinguish "holds a non-qualifying Legion credential" from "holds nothing".
+///
+/// Runs only on the refusal path, after both rank probes have come back empty,
+/// so a successful claim never pays for these round-trips. Purely diagnostic:
+/// it selects which refusal label to render and gates nothing, so a failure
+/// here degrades to the plain "holds nothing" answer rather than failing the
+/// request.
+pub async fn holds_non_qualifying_credential(
+    checker: &dyn NearLegionTokenChecker,
+    near_cfg: &NearConfig,
+    legion_cfg: &NearLegionConfig,
+    account_id: &str,
+) -> bool {
+    for contract in [&legion_cfg.initiate_contract, &legion_cfg.base_contract] {
+        if let Ok(true) = checker.holds_token(near_cfg, contract, account_id).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// Production [`NearLegionTokenChecker`], issuing the live view call.
+pub struct LiveTokenChecker;
+
+#[async_trait::async_trait]
+impl NearLegionTokenChecker for LiveTokenChecker {
+    async fn holds_token(
+        &self,
+        near_cfg: &NearConfig,
+        contract: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        near_account_holds_token(near_cfg, contract, account_id).await
+    }
 }
 
 /// Live `nft_supply_for_owner` view call against the configured collection.
@@ -321,9 +492,9 @@ pub trait NearLegionTokenChecker: Send + Sync {
 /// Bounded timeout: a hanging NEAR RPC must surface as `NearRpcUnavailable`
 /// rather than holding the request open. Public NEAR RPC rate-limits
 /// aggressively, so `NearConfig::rpc_url` should point at a keyed provider.
-pub async fn near_account_holds_legion_token(
+pub async fn near_account_holds_token(
     near_cfg: &NearConfig,
-    legion_cfg: &NearLegionConfig,
+    contract: &str,
     account_id: &str,
 ) -> Result<bool> {
     use base64::Engine as _;
@@ -338,7 +509,7 @@ pub async fn near_account_holds_legion_token(
         "params": {
             "request_type": "call_function",
             "finality": "final",
-            "account_id": legion_cfg.contract,
+            "account_id": contract,
             "method_name": "nft_supply_for_owner",
             "args_base64": args_base64,
         },
@@ -607,15 +778,6 @@ async fn claim_handler(
         return claim_refusal(ClaimError::SignatureInvalid);
     }
 
-    // Cheap local bound before any network call.
-    let live = match state.sink.count_live(POLICY_LABEL).await {
-        Ok(n) => n,
-        Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
-    };
-    if live >= state.legion.cap {
-        return claim_refusal(ClaimError::NearLegionClaimCapReached);
-    }
-
     if state.legion.is_denylisted(&account_id) {
         return claim_refusal(ClaimError::AccountNotEligible);
     }
@@ -643,21 +805,48 @@ async fn claim_handler(
         Err(_) => return claim_refusal(ClaimError::NearRpcUnavailable),
     }
 
-    let holds = match &state.token_checker_override {
-        Some(checker) => {
-            checker
-                .holds_legion_token(&state.near, &state.legion, &account_id)
-                .await
-        }
-        None => near_account_holds_legion_token(&state.near, &state.legion, &account_id).await,
+    // RANK RESOLUTION: which rank this account holds decides both the grant
+    // size and which pool the cap is counted against, so it has to happen
+    // before the cap check. That reorders the original flow, where the cap was
+    // a cheap local read taken before any network call; with per-rank caps
+    // there is no single pool to check first. A full-pool refusal now costs the
+    // rank probes, which is the price of the cap meaning anything per rank.
+    let live_checker: &dyn NearLegionTokenChecker = match &state.token_checker_override {
+        Some(checker) => checker.as_ref(),
+        None => &LiveTokenChecker,
     };
-    match holds {
-        Ok(true) => {}
-        Ok(false) => return claim_refusal(ClaimError::AccountHoldsNoLegionToken),
+    let rank = match resolve_rank(live_checker, &state.near, &state.legion, &account_id).await {
+        Ok(Some(rank)) => rank,
+        Ok(None) => {
+            // Diagnostic only, and only here: tell an Initiate or base-collection
+            // holder they hold the wrong rank rather than that they hold nothing.
+            if holds_non_qualifying_credential(
+                live_checker,
+                &state.near,
+                &state.legion,
+                &account_id,
+            )
+            .await
+            {
+                return claim_refusal(ClaimError::AccountRankNotEligible);
+            }
+            return claim_refusal(ClaimError::AccountHoldsNoLegionToken);
+        }
         // An RPC failure must not read as "holds nothing": that would be
         // indistinguishable from a genuine non-holder and would tell the user
         // to go mint a token they may already own.
         Err(_) => return claim_refusal(ClaimError::NearRpcUnavailable),
+    };
+
+    let tier = state.legion.tier(rank);
+    let policy_label = rank.policy_label();
+
+    let live = match state.sink.count_live(policy_label).await {
+        Ok(n) => n,
+        Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
+    };
+    if live >= tier.cap {
+        return claim_refusal(ClaimError::NearLegionClaimCapReached);
     }
 
     // The raw code exists here and in exactly one response body. It is never
@@ -669,14 +858,14 @@ async fn claim_handler(
 
     let write = crate::db::InviteGrantWrite {
         invite_subject_hash: invite_subject_hash.clone(),
-        policy_label: POLICY_LABEL.to_string(),
+        policy_label: policy_label.to_string(),
         tenant_mode: crate::trace_invite_registry::InviteTenantMode::Derived,
         fixed_tenant_id: None,
         tenant_template_id: Some(state.legion.tenant_template_id.clone()),
         policy_version: "v1".to_string(),
         allowed_consent_scopes: Vec::new(),
         allowed_uses: Vec::new(),
-        max_uses: state.legion.max_uses,
+        max_uses: tier.max_uses,
         expires_at,
         issuance_source: ISSUANCE_SOURCE.to_string(),
         issued_by_label: Some(ISSUED_BY_LABEL.to_string()),
@@ -692,14 +881,14 @@ async fn claim_handler(
             if let Some(registry) = &state.registry {
                 registry.note_write(crate::trace_invite_registry::InviteEntry {
                     invite_subject_hash: invite_subject_hash.clone(),
-                    policy_label: POLICY_LABEL.to_string(),
+                    policy_label: policy_label.to_string(),
                     tenant_mode: crate::trace_invite_registry::InviteTenantMode::Derived,
                     fixed_tenant_id: None,
                     tenant_template_id: Some(state.legion.tenant_template_id.clone()),
                     policy_version: "v1".to_string(),
                     allowed_consent_scopes: Vec::new(),
                     allowed_uses: Vec::new(),
-                    max_uses: state.legion.max_uses,
+                    max_uses: tier.max_uses,
                     expires_at,
                     issuance_source: ISSUANCE_SOURCE.to_string(),
                     issued_by_label: Some(ISSUED_BY_LABEL.to_string()),
@@ -712,7 +901,8 @@ async fn claim_handler(
                 StatusCode::CREATED,
                 Json(serde_json::json!({
                     "inviteCode": code,
-                    "maxUses": state.legion.max_uses,
+                    "rank": rank.wire_name(),
+                    "maxUses": tier.max_uses,
                     "expiresAt": expires_at,
                 })),
             )
@@ -737,19 +927,24 @@ async fn claim_handler(
 async fn status_handler(
     State(state): State<NearLegionClaimState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let claimed = match state.sink.count_live(POLICY_LABEL).await {
-        Ok(n) => n,
-        Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
-    };
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "claimed": claimed,
-            "cap": state.legion.cap,
-            "remaining": state.legion.cap.saturating_sub(claimed),
-            "maxUses": state.legion.max_uses,
-        })),
-    )
+    let mut body = serde_json::Map::new();
+    for rank in LegionRank::RESOLUTION_ORDER {
+        let tier = state.legion.tier(rank);
+        let claimed = match state.sink.count_live(rank.policy_label()).await {
+            Ok(n) => n,
+            Err(_) => return claim_refusal(ClaimError::ClaimBackendUnavailable),
+        };
+        body.insert(
+            rank.wire_name().to_string(),
+            serde_json::json!({
+                "claimed": claimed,
+                "cap": tier.cap,
+                "remaining": tier.cap.saturating_sub(claimed),
+                "maxUses": tier.max_uses,
+            }),
+        );
+    }
+    (StatusCode::OK, Json(serde_json::Value::Object(body)))
 }
 
 #[cfg(test)]
@@ -758,11 +953,20 @@ mod tests {
 
     fn cfg() -> NearLegionConfig {
         NearLegionConfig {
-            contract: DEFAULT_CONTRACT.to_string(),
+            vanguard: RankTier {
+                contract: DEFAULT_VANGUARD_CONTRACT.to_string(),
+                max_uses: DEFAULT_VANGUARD_MAX_USES,
+                cap: DEFAULT_VANGUARD_CAP,
+            },
+            ascendant: RankTier {
+                contract: DEFAULT_ASCENDANT_CONTRACT.to_string(),
+                max_uses: DEFAULT_ASCENDANT_MAX_USES,
+                cap: DEFAULT_ASCENDANT_CAP,
+            },
+            initiate_contract: DEFAULT_INITIATE_CONTRACT.to_string(),
+            base_contract: DEFAULT_BASE_CONTRACT.to_string(),
             denylist: DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect(),
-            cap: DEFAULT_CAP,
             tenant_template_id: "tpl".to_string(),
-            max_uses: DEFAULT_MAX_USES,
             grant_ttl_days: DEFAULT_GRANT_TTL_DAYS,
         }
     }
@@ -1107,21 +1311,55 @@ mod router_tests {
         }
     }
 
-    struct FakeTokenChecker(Answer);
+    /// Contract-addressed stand-in for the chain. `holds` lists contracts that
+    /// answer non-zero; `fails` lists contracts whose query errors. Addressing
+    /// by contract rather than by a single yes/no is what lets a test express
+    /// the case that matters — an account holding *several* ranks at once.
+    #[derive(Default, Clone)]
+    struct FakeTokenChecker {
+        holds: Vec<String>,
+        fails: Vec<String>,
+    }
+
+    impl FakeTokenChecker {
+        fn holding(contracts: &[&str]) -> Self {
+            Self {
+                holds: contracts.iter().map(|c| c.to_string()).collect(),
+                fails: Vec::new(),
+            }
+        }
+
+        fn failing_on(mut self, contract: &str) -> Self {
+            self.fails.push(contract.to_string());
+            self
+        }
+
+        /// Bridge for the pre-existing tests, whose `Answer` meant "holds a
+        /// Legion token". A plain holder is now an Ascendant: it keeps those
+        /// tests asserting the same three-use grant they always did.
+        fn from_answer(answer: Answer) -> Self {
+            match answer {
+                Answer::Yes => Self::holding(&[DEFAULT_ASCENDANT_CONTRACT]),
+                Answer::No => Self::default(),
+                Answer::Fails => Self::default()
+                    .failing_on(DEFAULT_VANGUARD_CONTRACT)
+                    .failing_on(DEFAULT_ASCENDANT_CONTRACT),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl NearLegionTokenChecker for FakeTokenChecker {
-        async fn holds_legion_token(
+        async fn holds_token(
             &self,
             _near: &NearConfig,
-            _legion: &NearLegionConfig,
+            contract: &str,
             _account_id: &str,
         ) -> Result<bool> {
-            match self.0 {
-                Answer::Yes => Ok(true),
-                Answer::No => Ok(false),
-                Answer::Fails => Err(anyhow!("rpc down")),
+            if self.fails.iter().any(|c| c == contract) {
+                return Err(anyhow!("rpc down"));
             }
+            Ok(self.holds.iter().any(|c| c == contract))
         }
     }
 
@@ -1130,7 +1368,32 @@ mod router_tests {
         sink: Arc<FakeSink>,
     }
 
-    fn harness_with(cap: u32, key: Answer, token: Answer, sink: FakeSink) -> Harness {
+    fn test_config(vanguard_cap: u32, ascendant_cap: u32) -> NearLegionConfig {
+        NearLegionConfig {
+            vanguard: RankTier {
+                contract: DEFAULT_VANGUARD_CONTRACT.to_string(),
+                max_uses: DEFAULT_VANGUARD_MAX_USES,
+                cap: vanguard_cap,
+            },
+            ascendant: RankTier {
+                contract: DEFAULT_ASCENDANT_CONTRACT.to_string(),
+                max_uses: DEFAULT_ASCENDANT_MAX_USES,
+                cap: ascendant_cap,
+            },
+            initiate_contract: DEFAULT_INITIATE_CONTRACT.to_string(),
+            base_contract: DEFAULT_BASE_CONTRACT.to_string(),
+            denylist: DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect(),
+            tenant_template_id: "tpl-legion".to_string(),
+            grant_ttl_days: 30,
+        }
+    }
+
+    fn harness_full(
+        legion: NearLegionConfig,
+        key: Answer,
+        token: FakeTokenChecker,
+        sink: FakeSink,
+    ) -> Harness {
         let sink = Arc::new(sink);
         let state = NearLegionClaimState {
             sink: sink.clone(),
@@ -1140,23 +1403,46 @@ mod router_tests {
                 network: "mainnet".to_string(),
                 recipient: TEST_RECIPIENT.to_string(),
             }),
-            legion: Arc::new(NearLegionConfig {
-                contract: DEFAULT_CONTRACT.to_string(),
-                denylist: DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect(),
-                cap,
-                tenant_template_id: "tpl-legion".to_string(),
-                max_uses: 3,
-                grant_ttl_days: 30,
-            }),
+            legion: Arc::new(legion),
             challenges: Arc::new(crate::account_passkey::CeremonyStore::new()),
             access_key_override: Some(Arc::new(FakeKeyChecker(key))),
-            token_checker_override: Some(Arc::new(FakeTokenChecker(token))),
+            token_checker_override: Some(Arc::new(token)),
         };
         Harness { state, sink }
     }
 
+    fn harness_with(cap: u32, key: Answer, token: Answer, sink: FakeSink) -> Harness {
+        harness_full(
+            test_config(cap, cap),
+            key,
+            FakeTokenChecker::from_answer(token),
+            sink,
+        )
+    }
+
     fn harness() -> Harness {
         harness_with(100, Answer::Yes, Answer::Yes, FakeSink::default())
+    }
+
+    /// Claim as `account`, returning the raw status and body.
+    async fn claim_as(
+        state: &NearLegionClaimState,
+        account: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let kp = keypair();
+        let (id, nonce) = start_challenge(state, account).await;
+        call(
+            state,
+            "POST",
+            "/v1/onboard/near-legion/claim",
+            Some(serde_json::json!({
+                "challengeId": id,
+                "accountId": account,
+                "publicKey": pubkey_string(&kp),
+                "signature": sign_claim(&kp, &nonce, TEST_RECIPIENT, CLAIM_MESSAGE),
+            })),
+        )
+        .await
     }
 
     async fn call(
@@ -1239,7 +1525,7 @@ mod router_tests {
         let grants = h.sink.grants.lock().unwrap();
         assert_eq!(grants.len(), 1);
         let g = &grants[0];
-        assert_eq!(g.policy_label, POLICY_LABEL);
+        assert_eq!(g.policy_label, POLICY_LABEL_ASCENDANT);
         assert_eq!(g.issuance_source, ISSUANCE_SOURCE);
         assert_eq!(g.max_uses, 3);
         assert_eq!(
@@ -1453,8 +1739,202 @@ mod router_tests {
         assert!(h.sink.grants.lock().unwrap().is_empty());
     }
 
-    /// The treasury holds 2683 of 3333 tokens. Without the denylist it would
-    /// pass every other check.
+    // ---- Rank gate ----------------------------------------------------
+
+    #[tokio::test]
+    async fn a_vanguard_receives_five_uses_from_the_vanguard_pool() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT]),
+            FakeSink::default(),
+        );
+
+        let (status, body) = claim_as(&h.state, HOLDER).await;
+
+        assert_eq!(status, StatusCode::CREATED, "claim failed: {body}");
+        assert_eq!(body["maxUses"].as_u64(), Some(5));
+        assert_eq!(body["rank"].as_str(), Some("vanguard"));
+        let grants = h.sink.grants.lock().unwrap();
+        assert_eq!(grants[0].policy_label, POLICY_LABEL_VANGUARD);
+        assert_eq!(grants[0].max_uses, 5);
+    }
+
+    #[tokio::test]
+    async fn an_ascendant_receives_three_uses_from_the_ascendant_pool() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+
+        let (status, body) = claim_as(&h.state, HOLDER).await;
+
+        assert_eq!(status, StatusCode::CREATED, "claim failed: {body}");
+        assert_eq!(body["maxUses"].as_u64(), Some(3));
+        assert_eq!(body["rank"].as_str(), Some("ascendant"));
+        let grants = h.sink.grants.lock().unwrap();
+        assert_eq!(grants[0].policy_label, POLICY_LABEL_ASCENDANT);
+        assert_eq!(grants[0].max_uses, 3);
+    }
+
+    /// The case that actually occurs on chain: the ranks are cumulative, so
+    /// every Vanguard also holds an Ascendant token. Resolution order is the
+    /// only thing that stops a top-rank holder being issued the smaller grant.
+    #[tokio::test]
+    async fn a_holder_of_every_rank_is_resolved_to_vanguard() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[
+                DEFAULT_VANGUARD_CONTRACT,
+                DEFAULT_ASCENDANT_CONTRACT,
+                DEFAULT_INITIATE_CONTRACT,
+            ]),
+            FakeSink::default(),
+        );
+
+        let (status, body) = claim_as(&h.state, HOLDER).await;
+
+        assert_eq!(status, StatusCode::CREATED, "claim failed: {body}");
+        assert_eq!(body["maxUses"].as_u64(), Some(5));
+        assert_eq!(body["rank"].as_str(), Some("vanguard"));
+    }
+
+    /// Splitting the pool by rank scoped the V42 uniqueness index by rank too.
+    /// A multi-rank holder must still get exactly one grant — otherwise the
+    /// split silently opened a double-claim path worth 5 + 3 uses.
+    #[tokio::test]
+    async fn a_multi_rank_holder_cannot_claim_once_per_rank() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT, DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+
+        let (first, _) = claim_as(&h.state, HOLDER).await;
+        assert_eq!(first, StatusCode::CREATED);
+
+        let (second, body) = claim_as(&h.state, HOLDER).await;
+        assert_eq!(second, StatusCode::CONFLICT);
+        assert_eq!(error_of(&body), "InviteCredentialAlreadyBound");
+        assert_eq!(h.sink.grants.lock().unwrap().len(), 1);
+    }
+
+    /// An Initiate or base-collection holder holds something real. Telling them
+    /// they hold nothing is the refusal-copy bug this label exists to prevent.
+    #[tokio::test]
+    async fn a_non_qualifying_holder_is_told_their_rank_is_wrong() {
+        for contract in [DEFAULT_INITIATE_CONTRACT, DEFAULT_BASE_CONTRACT] {
+            let h = harness_full(
+                test_config(66, 580),
+                Answer::Yes,
+                FakeTokenChecker::holding(&[contract]),
+                FakeSink::default(),
+            );
+
+            let (status, body) = claim_as(&h.state, HOLDER).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "for {contract}");
+            assert_eq!(error_of(&body), "AccountRankNotEligible", "for {contract}");
+            assert!(h.sink.grants.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_account_holding_nothing_is_told_it_holds_nothing() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::default(),
+            FakeSink::default(),
+        );
+
+        let (status, body) = claim_as(&h.state, HOLDER).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_of(&body), "AccountHoldsNoLegionToken");
+    }
+
+    /// A failing Vanguard probe must not fall through to an Ascendant grant:
+    /// that would silently downgrade a top-rank holder on a transient error.
+    #[tokio::test]
+    async fn a_vanguard_rpc_failure_does_not_downgrade_to_ascendant() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT, DEFAULT_ASCENDANT_CONTRACT])
+                .failing_on(DEFAULT_VANGUARD_CONTRACT),
+            FakeSink::default(),
+        );
+
+        let (status, body) = claim_as(&h.state, HOLDER).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_of(&body), "NearRpcUnavailable");
+        assert!(h.sink.grants.lock().unwrap().is_empty());
+    }
+
+    /// Each rank carries its own cap. A full Vanguard pool must not refuse an
+    /// Ascendant — that was the whole reason for splitting the label.
+    #[tokio::test]
+    async fn a_full_vanguard_pool_does_not_block_an_ascendant() {
+        let h = harness_full(
+            test_config(1, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT, DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+
+        // Fill the single Vanguard slot.
+        let (first, _) = claim_as(&h.state, "vanguard-one.near").await;
+        assert_eq!(first, StatusCode::CREATED);
+
+        // A second Vanguard is refused: that pool is full.
+        let (second, body) = claim_as(&h.state, "vanguard-two.near").await;
+        assert_eq!(second, StatusCode::CONFLICT);
+        assert_eq!(error_of(&body), "NearLegionClaimCapReached");
+
+        // An Ascendant-only account still claims from its own untouched pool.
+        let asc = harness_full(
+            test_config(1, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_ASCENDANT_CONTRACT]),
+            FakeSink::default(),
+        );
+        let (third, body) = claim_as(&asc.state, "ascendant-one.near").await;
+        assert_eq!(third, StatusCode::CREATED, "ascendant refused: {body}");
+        assert_eq!(body["maxUses"].as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn status_reports_each_rank_separately() {
+        let h = harness_full(
+            test_config(66, 580),
+            Answer::Yes,
+            FakeTokenChecker::holding(&[DEFAULT_VANGUARD_CONTRACT]),
+            FakeSink::default(),
+        );
+
+        let (_, _) = claim_as(&h.state, HOLDER).await;
+        let (status, body) = call(&h.state, "GET", "/v1/onboard/near-legion/status", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["vanguard"]["cap"].as_u64(), Some(66));
+        assert_eq!(body["vanguard"]["maxUses"].as_u64(), Some(5));
+        assert_eq!(body["vanguard"]["claimed"].as_u64(), Some(1));
+        assert_eq!(body["vanguard"]["remaining"].as_u64(), Some(65));
+        // The Vanguard claim must not have drawn down the Ascendant pool.
+        assert_eq!(body["ascendant"]["cap"].as_u64(), Some(580));
+        assert_eq!(body["ascendant"]["maxUses"].as_u64(), Some(3));
+        assert_eq!(body["ascendant"]["claimed"].as_u64(), Some(0));
+        assert_eq!(body["ascendant"]["remaining"].as_u64(), Some(580));
+    }
+
+    /// The treasury holds 2683 of 3333 base tokens and 1 Ascendant token.
+    /// Without the denylist it would pass every other check.
     #[tokio::test]
     async fn the_treasury_and_contract_accounts_cannot_claim() {
         for account in ["nearlegion.near", "intents.near"] {
@@ -1517,7 +1997,7 @@ mod router_tests {
             .unwrap()
             .push(crate::db::InviteGrantWrite {
                 invite_subject_hash: "sha256:".to_string() + &"a".repeat(64),
-                policy_label: POLICY_LABEL.to_string(),
+                policy_label: POLICY_LABEL_ASCENDANT.to_string(),
                 tenant_mode: crate::trace_invite_registry::InviteTenantMode::Derived,
                 fixed_tenant_id: None,
                 tenant_template_id: Some("tpl-legion".to_string()),
@@ -1629,10 +2109,12 @@ mod router_tests {
         let h = harness_with(5, Answer::Yes, Answer::Yes, FakeSink::default());
         let (status, body) = call(&h.state, "GET", "/v1/onboard/near-legion/status", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["claimed"].as_u64(), Some(0));
-        assert_eq!(body["cap"].as_u64(), Some(5));
-        assert_eq!(body["remaining"].as_u64(), Some(5));
-        assert_eq!(body["maxUses"].as_u64(), Some(3));
+        // `harness_with` gives both pools the same cap; this holder is an
+        // Ascendant, so that is the pool the claim below draws down.
+        assert_eq!(body["ascendant"]["claimed"].as_u64(), Some(0));
+        assert_eq!(body["ascendant"]["cap"].as_u64(), Some(5));
+        assert_eq!(body["ascendant"]["remaining"].as_u64(), Some(5));
+        assert_eq!(body["ascendant"]["maxUses"].as_u64(), Some(3));
 
         // After a claim the counter moves, so the page shows real scarcity.
         let kp = keypair();
@@ -1650,8 +2132,10 @@ mod router_tests {
         )
         .await;
         let (_, body) = call(&h.state, "GET", "/v1/onboard/near-legion/status", None).await;
-        assert_eq!(body["claimed"].as_u64(), Some(1));
-        assert_eq!(body["remaining"].as_u64(), Some(4));
+        assert_eq!(body["ascendant"]["claimed"].as_u64(), Some(1));
+        assert_eq!(body["ascendant"]["remaining"].as_u64(), Some(4));
+        // The other pool is untouched by a claim that did not come from it.
+        assert_eq!(body["vanguard"]["claimed"].as_u64(), Some(0));
     }
 
     #[tokio::test]
@@ -1665,7 +2149,7 @@ mod router_tests {
                 .unwrap()
                 .push(crate::db::InviteGrantWrite {
                     invite_subject_hash: format!("sha256:{}{}", i, "b".repeat(63)),
-                    policy_label: POLICY_LABEL.to_string(),
+                    policy_label: POLICY_LABEL_ASCENDANT.to_string(),
                     tenant_mode: crate::trace_invite_registry::InviteTenantMode::Derived,
                     fixed_tenant_id: None,
                     tenant_template_id: Some("tpl-legion".to_string()),
@@ -1683,6 +2167,6 @@ mod router_tests {
         let h = harness_with(1, Answer::Yes, Answer::Yes, sink);
         let (status, body) = call(&h.state, "GET", "/v1/onboard/near-legion/status", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["remaining"].as_u64(), Some(0));
+        assert_eq!(body["ascendant"]["remaining"].as_u64(), Some(0));
     }
 }
