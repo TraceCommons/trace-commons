@@ -111,6 +111,30 @@ pub async fn fetch_capped(
     Ok(body.to_vec())
 }
 
+/// A path proven, at the moment it was returned, to hold bytes matching a
+/// signed manifest's published digest.
+///
+/// `download_verified` is the only production constructor. `swap::swap_in_place`
+/// takes this type rather than a raw path so that it is impossible to call it
+/// with bytes that were never checked against the manifest -- the compiler
+/// enforces the ordering that the doc comment on `download_verified` used to
+/// only assert in prose.
+pub struct VerifiedArtifact(std::path::PathBuf);
+
+impl VerifiedArtifact {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Test-only escape hatch. `swap::tests` exercises swap mechanics
+    /// directly against files it writes itself, without running a network
+    /// fetch, and needs a way to construct this type without one.
+    #[cfg(test)]
+    pub(crate) fn for_test(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+}
+
 /// Download an artifact, verify it, and only then write it to `dest`.
 ///
 /// The order is the point: nothing unverified is ever written to a path that
@@ -119,7 +143,7 @@ pub async fn download_verified(
     client: &reqwest::Client,
     artifact: &PlatformArtifact,
     dest: &Path,
-) -> Result<(), FetchError> {
+) -> Result<VerifiedArtifact, FetchError> {
     require_https(&artifact.url)?;
     if artifact.size > MAX_ASSET_BYTES as u64 {
         return Err(FetchError::TooLarge);
@@ -133,7 +157,7 @@ pub async fn download_verified(
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|_| FetchError::Io)?;
     }
-    Ok(())
+    Ok(VerifiedArtifact(dest.to_path_buf()))
 }
 
 #[cfg(test)]

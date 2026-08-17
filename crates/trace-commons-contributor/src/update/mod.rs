@@ -8,4 +8,5 @@ pub mod endpoint;
 pub mod fetch;
 pub mod manifest;
 pub mod source;
+pub mod swap;
 pub mod version;
