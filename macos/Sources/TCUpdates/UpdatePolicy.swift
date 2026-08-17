@@ -10,6 +10,15 @@ public enum UpdateMode: Equatable, Sendable {
     /// Neither. `reason` is a stable label, never a URL or a path, so it is
     /// safe to log and safe to show.
     case disabled(reason: String)
+
+    /// True exactly when this mode permits Sparkle to be constructed and
+    /// started. `UpdateController.start()` gates on this predicate and
+    /// nothing else, so the mapping from policy decision to "did Sparkle
+    /// start" stays a single, unit-tested value outside of Sparkle itself.
+    public var startsUpdater: Bool {
+        if case .selfUpdating = self { return true }
+        return false
+    }
 }
 
 public enum UpdatePolicy {
