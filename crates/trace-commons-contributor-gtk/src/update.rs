@@ -25,6 +25,10 @@
 
 use std::path::Path;
 
+use std::collections::HashMap;
+
+use zbus::zvariant::{OwnedValue, Value};
+
 /// Where this running copy came from, decided by a local path check and
 /// nothing else. No network, in keeping with the design spec's rule that
 /// install-source detection is a filesystem question.
@@ -208,6 +212,76 @@ pub fn begin_install(current: &UpdateState) -> UpdateState {
     match current {
         UpdateState::Available { .. } => UpdateState::Installing { percent: 0 },
         _ => current.clone(),
+    }
+}
+
+/// The flatpak portal. Note this is **not** `org.freedesktop.portal.Desktop`
+/// -- that is xdg-desktop-portal, which `src/portal.rs` talks to for
+/// Background. The update monitor lives on a separate service shipped by
+/// flatpak itself and D-Bus-activated on demand.
+pub const FLATPAK_PORTAL_BUS_NAME: &str = "org.freedesktop.portal.Flatpak";
+/// The flatpak portal's own object.
+pub const FLATPAK_PORTAL_OBJECT_PATH: &str = "/org/freedesktop/portal/Flatpak";
+/// The interface carrying `CreateUpdateMonitor` and the `version` property.
+pub const FLATPAK_PORTAL_INTERFACE: &str = "org.freedesktop.portal.Flatpak";
+/// The interface on the object `CreateUpdateMonitor` hands back. Its path
+/// is `/org/freedesktop/portal/Flatpak/update_monitor/SENDER/TOKEN` and is
+/// never constructed here -- it is whatever the portal returned.
+pub const UPDATE_MONITOR_INTERFACE: &str = "org.freedesktop.portal.Flatpak.UpdateMonitor";
+/// The offer signal.
+pub const SIGNAL_UPDATE_AVAILABLE: &str = "UpdateAvailable";
+/// The install-progress signal.
+pub const SIGNAL_PROGRESS: &str = "Progress";
+/// `CreateUpdateMonitor` was added in version 2 of the flatpak portal
+/// interface (flatpak 1.5.0). Current flatpak reports 8. An older portal
+/// answers on the bus but has no such method, so the version is read first
+/// rather than discovering it as an `UnknownMethod` error.
+pub const MINIMUM_PORTAL_VERSION: u32 = 2;
+
+/// Pull a string out of an `a{sv}`, or `None` if it is absent or not a
+/// string. Matching the `Value` variant directly rather than going through
+/// a `TryFrom` conversion keeps this independent of which zvariant
+/// conversion impls are available in a given point release.
+fn dict_str(dict: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    match dict.get(key).map(|value| &**value) {
+        Some(Value::Str(text)) => Some(text.to_string()),
+        _ => None,
+    }
+}
+
+/// Pull a `u` out of an `a{sv}`, or `None` if it is absent or not a `u`.
+fn dict_u32(dict: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
+    match dict.get(key).map(|value| &**value) {
+        Some(Value::U32(number)) => Some(*number),
+        _ => None,
+    }
+}
+
+/// Turn one received signal into a [`PortalSignal`], or drop it.
+///
+/// Two fields are required and everything else has a default, and that
+/// split is the fail-closed rule expressed in a parser: without a
+/// `remote-commit` there is no update to offer, and without a `status` a
+/// `Progress` signal cannot be classified -- and the wrong guess would be
+/// "done".
+pub fn parse_signal(name: &str, dict: &HashMap<String, OwnedValue>) -> Option<PortalSignal> {
+    match name {
+        SIGNAL_UPDATE_AVAILABLE => Some(PortalSignal::UpdateAvailable {
+            running_commit: dict_str(dict, "running-commit").unwrap_or_default(),
+            local_commit: dict_str(dict, "local-commit").unwrap_or_default(),
+            remote_commit: dict_str(dict, "remote-commit")?,
+        }),
+        SIGNAL_PROGRESS => Some(PortalSignal::Progress {
+            // The portal omits these on terminal signals; zero is the
+            // honest reading of "no operation is in flight", and
+            // `overall_percent` already treats n_ops == 0 as 0%.
+            n_ops: dict_u32(dict, "n_ops").unwrap_or(0),
+            op: dict_u32(dict, "op").unwrap_or(0),
+            progress: dict_u32(dict, "progress").unwrap_or(0),
+            status: dict_u32(dict, "status")?,
+            error: dict_str(dict, "error"),
+        }),
+        _ => None,
     }
 }
 
@@ -454,5 +528,122 @@ mod tests {
                 "{state:?} is not an offer and must not start an install"
             );
         }
+    }
+
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedValue, Value};
+
+    /// A real `a{sv}` payload, built the way the portal builds one, so
+    /// parsing is exercised through the actual zvariant types rather than a
+    /// stand-in for them.
+    fn vardict(pairs: Vec<(&str, Value<'static>)>) -> HashMap<String, OwnedValue> {
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), OwnedValue::try_from(value).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn an_update_available_payload_parses_into_its_three_commits() {
+        let dict = vardict(vec![
+            ("running-commit", Value::from("1111111111111111")),
+            ("local-commit", Value::from("2222222222222222")),
+            ("remote-commit", Value::from("3333333333333333")),
+        ]);
+        assert_eq!(
+            parse_signal(SIGNAL_UPDATE_AVAILABLE, &dict),
+            Some(PortalSignal::UpdateAvailable {
+                running_commit: "1111111111111111".to_string(),
+                local_commit: "2222222222222222".to_string(),
+                remote_commit: "3333333333333333".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_update_available_payload_missing_the_remote_commit_is_dropped() {
+        // Fail closed: without a remote commit there is nothing to offer,
+        // and offering an update whose target is unknown is worse than
+        // staying quiet.
+        let dict = vardict(vec![
+            ("running-commit", Value::from("1111111111111111")),
+            ("local-commit", Value::from("2222222222222222")),
+        ]);
+        assert_eq!(parse_signal(SIGNAL_UPDATE_AVAILABLE, &dict), None);
+    }
+
+    #[test]
+    fn a_progress_payload_parses_every_numeric_field() {
+        let dict = vardict(vec![
+            ("n_ops", Value::from(4u32)),
+            ("op", Value::from(1u32)),
+            ("progress", Value::from(50u32)),
+            ("status", Value::from(PROGRESS_STATUS_RUNNING)),
+        ]);
+        assert_eq!(
+            parse_signal(SIGNAL_PROGRESS, &dict),
+            Some(PortalSignal::Progress {
+                n_ops: 4,
+                op: 1,
+                progress: 50,
+                status: PROGRESS_STATUS_RUNNING,
+                error: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_progress_payload_without_a_status_is_dropped() {
+        // The portal omits op/n_ops/progress on some terminal signals, but
+        // never status. A payload with no status could not be classified as
+        // anything, and defaulting it would risk defaulting it to Done.
+        let dict = vardict(vec![("n_ops", Value::from(1u32))]);
+        assert_eq!(parse_signal(SIGNAL_PROGRESS, &dict), None);
+    }
+
+    #[test]
+    fn a_terminal_error_payload_parses_with_its_counters_absent() {
+        let dict = vardict(vec![
+            ("status", Value::from(PROGRESS_STATUS_ERROR)),
+            (
+                "error",
+                Value::from("org.freedesktop.DBus.Error.AccessDenied"),
+            ),
+            ("error_message", Value::from("nope")),
+        ]);
+        assert_eq!(
+            parse_signal(SIGNAL_PROGRESS, &dict),
+            Some(PortalSignal::Progress {
+                n_ops: 0,
+                op: 0,
+                progress: 0,
+                status: PROGRESS_STATUS_ERROR,
+                error: Some("org.freedesktop.DBus.Error.AccessDenied".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_signal_this_application_did_not_subscribe_to_is_ignored() {
+        let dict = vardict(vec![("status", Value::from(PROGRESS_STATUS_DONE))]);
+        assert_eq!(parse_signal("SomethingElse", &dict), None);
+    }
+
+    #[test]
+    fn the_portal_addresses_are_the_flatpak_portal_not_the_desktop_portal() {
+        // These are a different service from org.freedesktop.portal.Desktop,
+        // which is what src/portal.rs talks to. Getting them confused
+        // produces an UnknownMethod at runtime and nothing at compile time.
+        assert_eq!(FLATPAK_PORTAL_BUS_NAME, "org.freedesktop.portal.Flatpak");
+        assert_eq!(
+            FLATPAK_PORTAL_OBJECT_PATH,
+            "/org/freedesktop/portal/Flatpak"
+        );
+        assert_eq!(
+            UPDATE_MONITOR_INTERFACE,
+            "org.freedesktop.portal.Flatpak.UpdateMonitor"
+        );
+        // CreateUpdateMonitor landed in interface version 2 (flatpak 1.5.0).
+        assert_eq!(MINIMUM_PORTAL_VERSION, 2);
     }
 }
