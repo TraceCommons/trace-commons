@@ -492,3 +492,46 @@ jobs:
           git commit -am "trace-commons-contributor $V"
           git push -u origin "bump-formula-$V"
           gh pr create --fill --repo TraceCommons/homebrew-tap
+
+  winget-bump:
+    name: bump the winget manifest
+    needs: [publish]
+    # Matches the publish job's own gate: a dispatch can satisfy
+    # startsWith(github.ref, 'refs/tags/') alone, so the push event is
+    # required too. The generator downloads the published release asset to
+    # compute its hash, so it cannot run before publish has created the
+    # release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Opens a pull request rather than pushing, matching the Homebrew
+      # formula bump above: winget-pkgs is a third-party repository with its
+      # own review, and a bad manifest reaches everyone who runs
+      # `winget upgrade`.
+      #
+      # No artifact download and no hash argument here: generate-manifests.sh
+      # fetches the published asset itself and computes InstallerSha256 from
+      # the bytes it got. A hash passed in by hand is exactly the value that
+      # gets copied from the wrong release.
+      - name: Generate and submit
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#contributor-v}"
+          ./scripts/winget/generate-manifests.sh "$V"
+          gh repo clone microsoft/winget-pkgs winget-pkgs -- --depth 1
+          # The generator already wrote the partitioned path winget-pkgs
+          # expects, so copy the tree across rather than individual files.
+          cp -R "manifests/t" "winget-pkgs/manifests/"
+          cd winget-pkgs
+          git switch -c "TraceCommons.Contributor-$V"
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git add "manifests/t/TraceCommons/Contributor/$V"
+          git commit -m "New version: TraceCommons.Contributor version $V"
+          git push -u origin "TraceCommons.Contributor-$V"
+          gh pr create --fill --repo microsoft/winget-pkgs

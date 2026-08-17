@@ -37,3 +37,9 @@ store the public key in the app's Info.plist as `SUPublicEDKey`.
 Sparkle compares `sparkle:version` (CFBundleVersion), not the short version,
 so the appcast must carry the same monotonic build number the release
 workflow stamps into the bundle.
+
+## Winget
+
+`WINGET_PKGS_TOKEN` is a fine-grained PAT with contents and pull-request write
+on a fork of `microsoft/winget-pkgs`. `github.token` cannot reach another
+repository, which is why this secret exists.
