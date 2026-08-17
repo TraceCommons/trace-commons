@@ -133,6 +133,22 @@ impl VerifiedArtifact {
     pub(crate) fn for_test(path: std::path::PathBuf) -> Self {
         Self(path)
     }
+
+    /// The second (and only other) way to construct this type outside of
+    /// tests.
+    ///
+    /// `update::run::apply_staged` applies a binary that a *previous* run of
+    /// this process downloaded and verified via `download_verified` -- there
+    /// is no download to re-run on the staged-apply path, only a disk read.
+    /// That disk read is re-verified by the caller against the recorded
+    /// `StagedUpdate::sha256` before this is called, which is what makes it
+    /// safe: the precondition is spelled out in the name, and `pub(crate)`
+    /// keeps it out of reach of anything outside this crate that has not
+    /// done that check. Do not call this before the digest comparison
+    /// succeeds.
+    pub(crate) fn verified_from_stage(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
 }
 
 /// Download an artifact, verify it, and only then write it to `dest`.

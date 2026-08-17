@@ -150,6 +150,26 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         );
     }
 
+    // A verified update parked by an earlier check is applied here, at the
+    // daemon's natural start, rather than swapped underneath a running
+    // process. The binary this process is executing is unaffected -- on unix
+    // it holds the old inode, and on Windows the old image is renamed aside
+    // -- so the new code runs from the following start. `trace-commons-
+    // contributor update` is the path for applying one immediately.
+    //
+    // Failures here are never fatal to starting the daemon: not updating is
+    // always better than not running. The label is fixed, and no path is
+    // logged.
+    if let Ok(exe) = std::env::current_exe() {
+        match crate::update::run::apply_staged(&exe) {
+            Ok(Some(_version)) => {
+                tracing::info!("applied a staged update; it takes effect at the next start");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(reason = %e, "staged update was refused"),
+        }
+    }
+
     let shared = Arc::new(ipc::DaemonShared::load(store)?);
     // The two transports are the same protocol over different plumbing: a
     // unix socket guarded by its 0700 state directory, or a Windows named
