@@ -500,6 +500,102 @@ pub fn reason_sentence(label: &str) -> &'static str {
     }
 }
 
+// --- Onboarding --------------------------------------------------------
+//
+// Six screens, one decision each. Every string below is verbatim from
+// `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`,
+// "## Onboarding" -- that document specifies the copy for every shell, so
+// this is transcription, not authorship. If a sentence here reads oddly,
+// change it there first.
+
+pub const ONBOARD_WELCOME_TITLE: &str = "Trace Commons";
+pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts to learn from. Almost all of that \
+     data is locked inside companies. Trace Commons is a shared pool that isn't.";
+/// The bold half of screen 1. Split from the paragraph around it because it
+/// is the promise the whole product is judged against.
+pub const ONBOARD_WELCOME_DECIDES: &str =
+    "You decide what gets contributed. Nothing is sent unless you say so.";
+pub const ONBOARD_WELCOME_BODY_2: &str = "This app watches for finished Claude Code and Codex sessions on this machine and shows them \
+     to you.";
+/// "Good and it is not perfect" is load-bearing: a developer knows automatic
+/// redaction is imperfect, and conceding it first is what makes the rest
+/// credible. Do not soften it into "thorough" or drop the second clause.
+pub const ONBOARD_WELCOME_SCRUB: &str = "Before anything leaves this machine it is scrubbed locally for secrets, keys, and tokens. \
+     That scrubbing is good and it is not perfect — which is why you get to look first.";
+pub const ONBOARD_GET_STARTED: &str = "Get started";
+
+pub const ONBOARD_CONNECT_TITLE: &str = "Connect";
+pub const ONBOARD_CONNECT_PROMPT: &str =
+    "Paste the invite link someone sent you, or click it from your email.";
+pub const ONBOARD_CONNECT_PLACEHOLDER: &str = "https://…/onboard#…";
+pub const ONBOARD_CONNECT_BUTTON: &str = "Connect";
+/// One sentence for the entire invite path -- an invite this app cannot
+/// parse and one the daemon refused both land here.
+///
+/// `enroll` answers `enroll-failed` and never echoes the underlying HTTP
+/// condition (see "### `enroll`" in `docs/contributor-daemon-ipc-v1_1.md`),
+/// so showing anything more specific would either invent detail the daemon
+/// withheld or leak the detail it deliberately withheld.
+pub const ONBOARD_CONNECT_FAILED: &str =
+    "This invite link is no longer valid. Ask whoever sent it for a new one.";
+
+pub const ONBOARD_CONSENT_TITLE: &str = "How may your traces be used?";
+pub const ONBOARD_CONSENT_SUBTITLE: &str =
+    "You can change this later. It applies to traces you send from now on.";
+pub const ONBOARD_CONSENT_ALWAYS: &str = "Always included";
+pub const ONBOARD_CONSENT_OPTIONAL: &str = "Optional — each one lets your traces do more";
+pub const ONBOARD_CONSENT_CREDIT: &str = "Credit";
+pub const ONBOARD_ALWAYS_ON_TAG: &str = "always on";
+
+pub const ONBOARD_SCAN_TITLE: &str = "Extra scrub before sending? (optional)";
+pub const ONBOARD_SCAN_LOCAL_ALWAYS: &str = "Local scrubbing removes secrets, keys, tokens and credentials by pattern before anything \
+     leaves this machine. It runs either way.";
+pub const ONBOARD_SCAN_OFFER: &str = "You can additionally send the message text of each trace — not tool output, not file \
+     contents — through a second scanner run by NEAR AI, a third party, to catch personal \
+     information the patterns miss: names, addresses, that kind of thing.";
+/// Both halves of the disclosure. The cost (text really does leave the
+/// machine to a third party) and the reassurance (an unreachable scanner
+/// holds traces rather than sending them unscanned). Cutting either half
+/// makes the screen dishonest in one direction, so they live in one string.
+pub const ONBOARD_SCAN_DISCLOSURE: &str = "This means your message text is transmitted to NEAR AI before it reaches Trace Commons. If \
+     that scanner is unreachable, nothing is sent at all — traces wait rather than going out \
+     unscanned.";
+pub const ONBOARD_SCAN_LOCAL_ONLY: &str = "Local scrubbing only";
+pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
+
+pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
+pub const ONBOARD_CONTINUE: &str = "Continue";
+
+pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";
+/// The macOS wording says "menu bar"; this is the Linux shell, so it says
+/// where the app actually lives here. Everything after that first clause is
+/// the spec's, unchanged -- the 30-minute quiet period and the at-most-one
+/// -every-4-hours promise are commitments the daemon actually keeps.
+pub const ONBOARD_DONE_BODY: &str = "Trace Commons lives in your system tray. When a session finishes and goes quiet for 30 \
+     minutes, it'll show up there. You'll get at most one notification every 4 hours, and none \
+     at all if there's nothing waiting.";
+pub const ONBOARD_DONE_BUTTON: &str = "Finish";
+
+/// The short bold label for a consent scope.
+///
+/// `consent_options` carries the wire name and the description but no
+/// human title, so every shell maps them. The fallback matters as much as
+/// the table: an operator who adds a scope this build has never heard of
+/// still gets a readable row rather than a blank one, and the description
+/// beside it comes from the daemon regardless.
+pub fn scope_title(wire_name: &str) -> String {
+    match wire_name {
+        "debugging_evaluation" => "Finding bugs and measuring agents".to_string(),
+        "benchmark_only" | "benchmark_creation" => "Turn my traces into test cases".to_string(),
+        "ranking_training" | "reward_model_training" => {
+            "Train models that judge agent output".to_string()
+        }
+        "model_training" => "Train coding models directly".to_string(),
+        "public_attribution" => "List my handle publicly as a contributor".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

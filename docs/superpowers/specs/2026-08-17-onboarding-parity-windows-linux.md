@@ -40,12 +40,32 @@ This slice is therefore entirely UI plus per-platform URL registration.
 
 ## Flow to mirror
 
-`OnboardingCoordinatorView` sequences six steps:
+The screens are already specified for **every** shell, with copy, in
+`docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`,
+"## Onboarding" — six screens, one decision each. That document is the source
+of copy; this one is only the port's engineering notes. Do not paraphrase it
+and do not re-derive the wording from the Swift.
+
+macOS is the reference implementation. `OnboardingCoordinatorView` sequences:
 
     welcome -> connect -> consent -> privacyScan* -> projects -> done
 
-`privacyScan` is conditional; `consent` advances into it only when the
-coordinator's guard says so, otherwise it goes straight to `projects`.
+`privacyScan` is conditional: it is shown only where the operator has
+configured the second scanner, which the shell learns from `get_settings`.
+
+Two things about that screen matter for this slice specifically. It is **not**
+a macOS concern that the ports can skip: `acknowledge_near_ai_notice` is the
+only way an app-only contributor clears the notice, because they never see the
+CLI's stdout version. A Windows or Linux contributor who never sees this screen
+can never acknowledge it. And its disclosure has two halves — that message text
+really does leave the machine to a third party, and that nothing is sent at all
+if that scanner is unreachable. Cutting either half makes the screen dishonest
+in one direction.
+
+From "### 3. Consent scopes": the scope list and its descriptions come from
+`consent_options` and are **never hardcoded per shell**. A port that inlines
+the four scopes to save a round trip has broken the contract that lets the
+operator change them.
 
 ## Contract invariants the ports must not break
 
@@ -68,6 +88,19 @@ These are properties of the daemon contract, not macOS styling. A port that
 
 4. **The invite never reaches a log, an audit row, or an error string.** It is
    a credential; see the hash-only rule in CLAUDE.md.
+
+5. **`logged_in` does not mean "onboarded", and must not gate the flow.**
+   `enroll` succeeds on screen 2 and flips `status.logged_in` to true there,
+   before consent is chosen on screen 3. A port that resumes on `logged_in`
+   drops a contributor who quit mid-flow straight into the main window with
+   whatever `enroll`'s floor-only default left in place — silently narrower
+   consent than they were about to choose, and no prompt to finish. macOS
+   instead persists a completion flag keyed by `status.tenant_id`
+   (`isOnboardingComplete` / `markOnboardingComplete`) and resumes onboarding
+   until the Done screen is reached. Both ports need their own equivalent:
+   `GSettings`/state file on Linux, and the app's local settings store on
+   Windows — keyed by tenant, never a single global boolean, or re-enrolling
+   into a different tenant inherits the old tenant's "done".
 
 ## Deep links
 

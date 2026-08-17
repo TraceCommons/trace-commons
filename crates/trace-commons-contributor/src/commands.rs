@@ -1774,9 +1774,52 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
     })
 }
 
+/// The instance an invite names, for a shell that has to show a contributor
+/// whose commons they are about to join before they commit to joining it
+/// (shared design spec, "### 2. Connect": *resolve and show the instance
+/// before committing*).
+///
+/// Returns the host only, and deliberately nothing else. The obvious API
+/// here would expose [`ParsedInvite`], but that carries `code` -- the
+/// credential -- and handing it to four shells is four chances to put it in
+/// a label, a log line, or a window title. A shell cannot leak what it was
+/// never given, so this returns the one field it has a reason to draw.
+///
+/// `None` for anything `parse_invite` refuses, which is what the caller
+/// wants: the shared spec gives the whole invite path a single failure
+/// sentence, so the distinction between "not a URL" and "no code in it" is
+/// one the interface must not draw anyway.
+pub fn invite_issuer_host(raw: &str) -> Option<String> {
+    let parsed = parse_invite(raw).ok()?;
+    reqwest::Url::parse(&parsed.issuer_url)
+        .ok()?
+        .host_str()
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod invite_tests {
-    use super::parse_invite;
+    use super::{invite_issuer_host, parse_invite};
+
+    #[test]
+    fn issuer_host_is_shown_without_the_code() {
+        let host = invite_issuer_host("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+            .expect("a well-formed invite resolves to its host");
+        assert_eq!(host, "issuer.tracecommons.ai");
+        // The point of the narrow return type: the credential is not in it.
+        assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
+    }
+
+    #[test]
+    fn issuer_host_refuses_what_parse_invite_refuses() {
+        // A bare code, and a URL carrying no code at all. Both are `None`,
+        // because the interface shows one sentence for every failure here.
+        assert_eq!(invite_issuer_host("VQWWPGYSG8Y4LTP6"), None);
+        assert_eq!(
+            invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
+            None
+        );
+    }
 
     #[test]
     fn parses_fragment_form() {
