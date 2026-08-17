@@ -959,3 +959,100 @@ fn flatpak_manifest_pinned_toolchain_meets_the_crates_rust_version_floor() {
          (url + sha256, both arches) before releasing"
     );
 }
+
+/// Runs info-plist.sh with a given TC_SPARKLE_PUBLIC_ED_KEY (None = unset).
+fn info_plist_with_key(key: Option<&str>) -> String {
+    let script = repo_root().join("macos/scripts/info-plist.sh");
+    let mut command = Command::new("bash");
+    command.arg(&script).args(["0.4.2", "17"]);
+    match key {
+        Some(value) => {
+            command.env("TC_SPARKLE_PUBLIC_ED_KEY", value);
+        }
+        None => {
+            command.env_remove("TC_SPARKLE_PUBLIC_ED_KEY");
+        }
+    }
+    let output = command.output().expect("failed to run info-plist.sh");
+    assert!(
+        output.status.success(),
+        "info-plist.sh failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn info_plist_carries_the_approved_sparkle_configuration() {
+    let plist = info_plist_with_key(Some("dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ=="));
+
+    assert!(
+        plist.contains(
+            "<key>SUFeedURL</key><string>\
+             https://storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml</string>"
+        ),
+        "the appcast feed URL is wrong or missing:\n{plist}"
+    );
+    assert!(
+        plist.contains(
+            "<key>SUPublicEDKey</key><string>dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ==</string>"
+        ),
+        "the EdDSA public key was not injected:\n{plist}"
+    );
+    // Checks on, install off. Sparkle checks in the background without ever
+    // asking permission to check, and nothing is replaced until a person
+    // says yes. Flipping SUAutomaticallyUpdate to true would make this app
+    // swap its own bytes silently, which the design forbids.
+    assert!(
+        plist.contains("<key>SUEnableAutomaticChecks</key><true/>"),
+        "automatic checks are not enabled:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUAutomaticallyUpdate</key><false/>"),
+        "automatic install must stay off:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUScheduledCheckInterval</key><integer>86400</integer>"),
+        "the daily check interval is wrong or missing:\n{plist}"
+    );
+}
+
+#[test]
+fn info_plist_ships_no_feed_at_all_without_a_public_key() {
+    // Fail closed. A bundle with a feed but no key would ask Sparkle to
+    // fetch an appcast it cannot authenticate; a bundle with neither simply
+    // has no update path, which is the correct state for a dev build.
+    let plist = info_plist_with_key(None);
+    assert!(
+        !plist.contains("SUFeedURL"),
+        "a keyless bundle must not carry a feed URL:\n{plist}"
+    );
+    assert!(
+        !plist.contains("SUPublicEDKey"),
+        "a keyless bundle must not carry an empty key:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUEnableAutomaticChecks</key><false/>"),
+        "a keyless bundle must not enable automatic checks:\n{plist}"
+    );
+}
+
+#[test]
+fn the_release_script_refuses_without_the_sparkle_public_key() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+    assert!(
+        script.contains("TC_SPARKLE_PUBLIC_ED_KEY"),
+        "make-release-dmg.sh must require TC_SPARKLE_PUBLIC_ED_KEY. A release \
+         built without it ships an app that can never receive an update, and \
+         nothing about the DMG would look wrong."
+    );
+}
+
+#[test]
+fn the_release_workflow_passes_the_sparkle_public_key() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(
+        workflow.contains("TC_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"),
+        "the macOS release job must pass the Sparkle public key through"
+    );
+}
