@@ -8,14 +8,19 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <!--
-                    The stock WinUI theme resources. Deliberately unstyled for
-                    this slice: matching the macOS app's design system is real
-                    work, and a half-applied theme reads worse than the
-                    platform default. The theme also follows the system
-                    light/dark setting for free, which is what a contributor
-                    expects of a native app.
+                    The stock WinUI theme resources, first so that every
+                    control template still resolves the keys it expects, then
+                    the Trace Commons design system on top of them.
+
+                    Order matters and only in this direction: the design
+                    system adds its own Tc* keys and overrides nothing WinUI
+                    defines, so the stock templates keep working while
+                    anything drawn against a Tc* key gets the design. Both
+                    dictionaries carry per-theme values, so the window follows
+                    the system light/dark/high-contrast setting.
                 -->
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Themes/DesignSystem.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>
