@@ -89,3 +89,19 @@ fn the_fixture_artifact_matches_the_digest_the_manifest_publishes() {
     assert_eq!(actual, published.sha256);
     assert_eq!(bytes.len() as u64, published.size);
 }
+
+#[test]
+fn an_artifact_tampered_with_after_signing_is_refused() {
+    use trace_commons_contributor::update::fetch::{FetchError, verify_bytes};
+    let manifest = good_manifest();
+    let bytes = std::fs::read(fixture_dir().join("tampered/artifact.bin")).expect("tampered");
+    // Same length as the good artifact, so this fails on the digest and not
+    // incidentally on the size -- otherwise the test would pass even if the
+    // digest check were removed.
+    let published = &manifest.platforms["linux-x86_64-cli"];
+    assert_eq!(bytes.len() as u64, published.size);
+    assert!(matches!(
+        verify_bytes(published, &bytes).unwrap_err(),
+        FetchError::DigestMismatch
+    ));
+}
