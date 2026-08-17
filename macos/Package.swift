@@ -21,6 +21,18 @@ let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
 let package = Package(
     name: "TraceCommons",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        // Pinned exactly, not by range. This dependency decides which bytes
+        // replace the running app, so "whatever resolves today" is not an
+        // acceptable answer; a bump is a reviewed change with a new
+        // Package.resolved in the diff.
+        //
+        // Sparkle is a single binaryTarget (an XCFramework zip) with no
+        // transitive dependencies. Its adoption is a recorded waiver of the
+        // repo's dependency policy -- see
+        // docs/superpowers/specs/2026-08-17-desktop-auto-update-design.md.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6")
+    ],
     targets: [
         .systemLibrary(
             name: "CTraceCommons"
@@ -46,7 +58,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "TraceCommonsApp",
-            dependencies: ["TCBridge"],
+            dependencies: [
+                "TCBridge",
+                "TCUpdates",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .unsafeFlags([
