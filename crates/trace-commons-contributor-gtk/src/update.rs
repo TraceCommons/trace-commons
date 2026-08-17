@@ -348,6 +348,13 @@ pub fn spawn_monitor() -> UpdateMonitor {
             }
         };
 
+        // A shadow copy of `UpdateState`, kept only so the command loop
+        // below can decide whether `Update` is worth calling at all. It is
+        // driven by the same pure `next_state`/`begin_install` the UI's own
+        // copy uses (see `ui::update`); this thread never renders it and
+        // never sends it anywhere.
+        let mirrored_state = std::sync::Arc::new(std::sync::Mutex::new(UpdateState::Idle));
+
         // One reader thread per signal name: a blocking signal iterator
         // owns its thread for as long as the monitor lives, and there are
         // two signals to read from the same object.
@@ -355,25 +362,22 @@ pub fn spawn_monitor() -> UpdateMonitor {
             let connection = connection.clone();
             let path = monitor_path.clone();
             let tx = signal_tx.clone();
-            std::thread::spawn(move || read_signals(&connection, &path, name, &tx));
+            let mirrored_state = std::sync::Arc::clone(&mirrored_state);
+            std::thread::spawn(move || {
+                read_signals(&connection, &path, name, &tx, &mirrored_state)
+            });
         }
 
         // Commands run on this thread, sharing the same connection. The
         // loop ends when the UI side is dropped, which is process exit.
         while command_rx.recv().is_ok() {
-            if call_update(&connection, &monitor_path).is_err() {
-                eprintln!("trace-commons-shell: flatpak update portal refused the install");
-                // Synthesised so the window leaves `Installing` instead of
-                // showing a progress bar that will never move again. It is
-                // shaped exactly like the portal's own terminal error so
-                // the state machine has one path, not two.
-                let _ = signal_tx.send_blocking(PortalSignal::Progress {
-                    n_ops: 0,
-                    op: 0,
-                    progress: 0,
-                    status: PROGRESS_STATUS_ERROR,
-                    error: None,
-                });
+            let mut state = mirrored_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(signal) =
+                apply_install(&mut state, || call_update(&connection, &monitor_path))
+            {
+                let _ = signal_tx.send_blocking(signal);
             }
         }
     });
@@ -413,11 +417,18 @@ fn create_monitor() -> anyhow::Result<(zbus::blocking::Connection, zbus::zvarian
 
 /// Read one signal name off the monitor object until the channel closes or
 /// the bus goes away. Runs on its own thread; the iterator blocks.
+///
+/// Every signal that reaches a contributor also updates `mirrored_state`
+/// first, via the same [`next_state`] the UI uses -- so the command loop's
+/// re-entrancy guard (see [`apply_install`]) sees a real `Installing` ->
+/// `Ready`/`Failed`/`Idle` transition land, not just the one it makes
+/// itself.
 fn read_signals(
     connection: &zbus::blocking::Connection,
     path: &zbus::zvariant::OwnedObjectPath,
     name: &str,
     tx: &async_channel::Sender<PortalSignal>,
+    mirrored_state: &std::sync::Mutex<UpdateState>,
 ) {
     let proxy = match zbus::blocking::Proxy::new(
         connection,
@@ -449,6 +460,12 @@ fn read_signals(
         let Some(signal) = parse_signal(name, &dict) else {
             continue;
         };
+        {
+            let mut state = mirrored_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state = next_state(&state, &signal);
+        }
         if tx.send_blocking(signal).is_err() {
             return;
         }
@@ -475,6 +492,60 @@ fn call_update(
     let options: HashMap<&str, Value> = HashMap::new();
     let _: () = proxy.call("Update", &("", options))?;
     Ok(())
+}
+
+/// Apply one `Install` request to the shadow `UpdateState` the command loop
+/// keeps, calling `update` only when doing so is meaningful, and return the
+/// synthesized failure signal to forward to the UI if it was and `update`
+/// failed.
+///
+/// This is the whole re-entrancy guard, and it is deliberately not built on
+/// the portal's own error semantics: matching on
+/// `org.freedesktop.DBus.Error.Failed` would also swallow genuine failures
+/// that share that generic name, and matching on the portal's "Already
+/// installing" message text would mean reasoning about a string this
+/// codebase otherwise refuses to log or interpret. Instead this reuses
+/// [`begin_install`], the same pure function [`ui::update`] uses to gate the
+/// confirmation button: a request is meaningful exactly when `begin_install`
+/// would actually move `state`, which is true only from `Available`. A
+/// second request arriving while already `Installing` -- or from any other
+/// state -- leaves `state` unchanged and never calls `update` at all, which
+/// makes the double call unrepresentable rather than merely handled.
+///
+/// `update` is injected so this can be exercised without a live portal: a
+/// closure stands in for [`call_update`], and a test can assert both the
+/// resulting state and whether the closure ran.
+fn apply_install(
+    state: &mut UpdateState,
+    update: impl FnOnce() -> anyhow::Result<()>,
+) -> Option<PortalSignal> {
+    let next = begin_install(state);
+    if next == *state {
+        // Not meaningful right now -- most notably a re-entrant request
+        // while an install is already in flight.
+        return None;
+    }
+    *state = next;
+
+    match update() {
+        Ok(()) => None,
+        Err(_) => {
+            eprintln!("trace-commons-shell: flatpak update portal refused the install");
+            // Synthesised so the window leaves `Installing` instead of
+            // showing a progress bar that will never move again. It is
+            // shaped exactly like the portal's own terminal error so the
+            // state machine has one path, not two.
+            let signal = PortalSignal::Progress {
+                n_ops: 0,
+                op: 0,
+                progress: 0,
+                status: PROGRESS_STATUS_ERROR,
+                error: None,
+            };
+            *state = next_state(state, &signal);
+            Some(signal)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -720,6 +791,103 @@ mod tests {
                 "{state:?} is not an offer and must not start an install"
             );
         }
+    }
+
+    #[test]
+    fn a_reentrant_install_request_while_installing_calls_nothing_and_stays_installing() {
+        // The bug this guards against: a contributor who double-clicks
+        // Update (or a portal re-announcing the same offer mid-install --
+        // see `a_repeat_offer_does_not_restart_an_install_already_in_flight`)
+        // must not turn a perfectly healthy in-flight install into a
+        // synthesized Failed state.
+        let mut state = UpdateState::Installing { percent: 40 };
+        let mut calls = 0;
+        let signal = apply_install(&mut state, || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(calls, 0, "Update must not be called a second time");
+        assert_eq!(signal, None, "a no-op must never synthesize a failure");
+        assert_eq!(
+            state,
+            UpdateState::Installing { percent: 40 },
+            "a dropped re-entrant request must leave the state untouched"
+        );
+    }
+
+    #[test]
+    fn an_install_request_only_calls_the_portal_from_an_offer() {
+        // Same guard, the rest of the state space: `apply_install` must
+        // never call `update` from anywhere `begin_install` itself refuses
+        // to leave.
+        for state in [
+            UpdateState::Idle,
+            UpdateState::Unmanaged,
+            UpdateState::Unavailable,
+            UpdateState::Ready,
+            UpdateState::Failed {
+                label: FAILED_LABEL,
+            },
+        ] {
+            let mut state = state;
+            let before = state.clone();
+            let mut calls = 0;
+            let signal = apply_install(&mut state, || {
+                calls += 1;
+                Ok(())
+            });
+            assert_eq!(calls, 0, "{before:?} must not call Update");
+            assert_eq!(signal, None);
+            assert_eq!(state, before, "{before:?} must be left untouched");
+        }
+    }
+
+    #[test]
+    fn an_install_request_from_an_offer_calls_the_portal_exactly_once_and_moves_to_installing() {
+        let mut state = UpdateState::Available {
+            remote_commit: "beefbeefbeef".to_string(),
+        };
+        let mut calls = 0;
+        let signal = apply_install(&mut state, || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(signal, None);
+        assert_eq!(state, UpdateState::Installing { percent: 0 });
+    }
+
+    #[test]
+    fn a_failed_portal_call_still_only_happens_once_and_reports_the_fixed_label() {
+        // The failure path this guard leaves untouched: a *first* call that
+        // genuinely fails still becomes the fixed-label Failed state, same
+        // as before this change -- the guard only ever prevents a *second*
+        // call, never masks a real one failing.
+        let mut state = UpdateState::Available {
+            remote_commit: "beefbeefbeef".to_string(),
+        };
+        let mut calls = 0;
+        let signal = apply_install(&mut state, || {
+            calls += 1;
+            Err(anyhow::anyhow!("org.freedesktop.DBus.Error.Failed"))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(
+            signal,
+            Some(PortalSignal::Progress {
+                n_ops: 0,
+                op: 0,
+                progress: 0,
+                status: PROGRESS_STATUS_ERROR,
+                error: None,
+            })
+        );
+        assert_eq!(
+            state,
+            UpdateState::Failed {
+                label: FAILED_LABEL
+            }
+        );
     }
 
     use std::collections::HashMap;
