@@ -218,59 +218,28 @@ jobs:
           TS_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           TS_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
           # Independently verified 2026-08-16 by downloading the package and
-          # hashing it. When bumping $nugetVersion, re-derive this from a
+          # hashing it. When bumping the version, re-derive this from a
           # trusted machine -- do not copy a hash from anywhere.
           TRUSTED_SIGNING_CLIENT_SHA256: 3BFCF1E0A3CB42AF1692F0A8ED45C15DE070C2DE86F28A59B2795D904D8A920F
         run: |
-          $ErrorActionPreference = "Stop"
-          $nugetVersion = "1.0.95"
-          $pkgZip = Join-Path $env:RUNNER_TEMP "mtsc.zip"
-          $pkgDir = Join-Path $env:RUNNER_TEMP "mtsc"
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/$nugetVersion" `
-            -OutFile $pkgZip
-
-          $expected = $env:TRUSTED_SIGNING_CLIENT_SHA256
-          $actual = (Get-FileHash -Path $pkgZip -Algorithm SHA256).Hash
-          Write-Host "Microsoft.Trusted.Signing.Client $nugetVersion SHA-256: $actual"
-          if ([string]::IsNullOrWhiteSpace($expected)) {
-            throw "TRUSTED_SIGNING_CLIENT_SHA256 is not set (observed: $actual). Refusing to extract an unverified signing package."
-          }
-          if ($actual -ne $expected.Trim().ToUpperInvariant()) {
-            throw "Hash mismatch for Microsoft.Trusted.Signing.Client $nugetVersion. Expected $($expected.Trim().ToUpperInvariant()), got $actual. Refusing to expand a potentially tampered signing package."
-          }
-
-          Expand-Archive -Path $pkgZip -DestinationPath $pkgDir -Force
-          $dlib = Join-Path $pkgDir "bin\x64\Azure.CodeSigning.Dlib.dll"
-          if (-not (Test-Path $dlib)) {
-            $dlib = (Get-ChildItem -Path $pkgDir -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
-                     Select-Object -First 1 -ExpandProperty FullName)
-          }
-          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll not found in package" }
-
-          $metadata = Join-Path $env:RUNNER_TEMP "ts-metadata.json"
-          [ordered]@{
-            Endpoint               = $env:TS_ENDPOINT
-            CodeSigningAccountName = $env:TS_ACCOUNT
-            CertificateProfileName = $env:TS_PROFILE
-          } | ConvertTo-Json | Out-File -FilePath $metadata -Encoding utf8
-
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
-                         -ErrorAction SilentlyContinue |
-                       Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
-                       Select-Object -First 1 -ExpandProperty FullName)
-          if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
-
-          "dlib=$dlib"         >> $env:GITHUB_OUTPUT
-          "metadata=$metadata" >> $env:GITHUB_OUTPUT
-          "signtool=$signtool" >> $env:GITHUB_OUTPUT
+          ./scripts/windows/setup-trusted-signing.ps1 `
+            -Endpoint $env:TS_ENDPOINT `
+            -Account $env:TS_ACCOUNT `
+            -Profile $env:TS_PROFILE `
+            -ExpectedSha256 $env:TRUSTED_SIGNING_CLIENT_SHA256
 
       # /tr plus /td is the RFC3161 countersignature. It is not optional here:
       # Trusted Signing certificates carry roughly three-day validity, and the
       # timestamp is the only reason a signature outlives them. An untimestamped
       # binary starts failing validation days after release -- a failure no
       # same-day test would catch.
-      - name: Sign
+      #
+      # Signing and verification are one step, not two, so there is no
+      # arrangement of this workflow in which a file is signed and then
+      # shipped without a verifier having looked at it. /pa uses the
+      # Authenticode policy an end user's machine uses -- the real check is
+      # what a verifier says, not what the signing step reported.
+      - name: Sign and verify
         shell: pwsh
         env:
           TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
@@ -278,29 +247,10 @@ jobs:
           TS_METADATA: ${{ steps.ts.outputs.metadata }}
         run: |
           $ErrorActionPreference = "Stop"
-          Get-ChildItem signed\*.exe | ForEach-Object {
-            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
-              /tr http://timestamp.acs.microsoft.com /td SHA256 `
-              /dlib "$env:TS_DLIB" `
-              /dmdf "$env:TS_METADATA" `
-              $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "signing failed for $($_.Name)" }
-          }
-
-      # The real check: what a verifier says, not what the signing step
-      # reported. /pa uses the Authenticode policy an end user's machine uses.
-      # The real check: what a verifier says, not what the signing step
-      # reported. /pa uses the Authenticode policy an end user's machine uses.
-      - name: Verify the signatures
-        shell: pwsh
-        env:
-          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          Get-ChildItem signed\*.exe | ForEach-Object {
-            & "$env:TS_SIGNTOOL" verify /pa /v $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $($_.Name)" }
-          }
+          $files = @(Get-ChildItem signed\*.exe | ForEach-Object { $_.FullName })
+          ./scripts/windows/sign-with-trusted-signing.ps1 `
+            -SignTool $env:TS_SIGNTOOL -Dlib $env:TS_DLIB `
+            -Metadata $env:TS_METADATA -Path $files
 
       # After signing, so the provenance covers the signed bytes rather than the
       # unsigned build output. The Authenticode signature travels inside the .exe,
