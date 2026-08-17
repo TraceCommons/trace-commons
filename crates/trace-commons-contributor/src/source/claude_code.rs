@@ -46,8 +46,10 @@
 //!   never delegated anything.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -73,6 +75,14 @@ use super::{
 /// bytes by construction, and the drop is counted into
 /// `SessionTranscript::subagents_dropped` rather than silently trimming a
 /// conversation.
+///
+/// The budget bounds what is *read*, not merely what is kept. It is decided
+/// from the sizes `group_members_for` has already stat'd, before any member
+/// file is opened, so a `subagents/` directory holding a gigabyte never
+/// becomes resident in the daemon on its way to being discarded. A member
+/// that grows between that stat and its read can overshoot by the amount it
+/// grew; the hash covers exactly the bytes that were read either way, so the
+/// consent invariant is untouched.
 pub const GROUP_RAW_BYTE_BUDGET: u64 = 64_000_000;
 
 /// How far into a member file `peek_session_id` reads looking for a
@@ -80,6 +90,54 @@ pub const GROUP_RAW_BYTE_BUDGET: u64 = 64_000_000;
 /// read makes the per-member verification strictly cheaper than the
 /// whole-file `peek_cwd` that discovery already pays on the parent.
 const SESSION_ID_PEEK_BYTES: u64 = 64 * 1024;
+
+/// How many memoized `sessionId` peeks to hold before starting over.
+///
+/// The probed machine had 842 members, so this is roughly an order of
+/// magnitude of headroom over the largest tree on record. When it is
+/// reached the whole memo is dropped rather than evicted one entry at a
+/// time: an LRU would need either a dependency or a second index, and the
+/// cost of being wrong here is one discovery pass paying what every pass
+/// used to pay.
+const SESSION_ID_MEMO_CAP: usize = 8192;
+
+/// One memoized answer from `peek_session_id`, valid while the file it
+/// describes still reports the same size and mtime.
+#[derive(Debug, Clone)]
+struct SessionIdMemo {
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The peeked id, or `None` for a file that carries none in its head --
+    /// memoized too, because absence is the answer for any member written
+    /// without the field, and re-deriving it would cost the same read every
+    /// pass.
+    session_id: Option<String>,
+}
+
+/// Process-wide memo for `peek_session_id`, keyed on the member's path.
+///
+/// `discover` runs on every watcher tick and again inside every
+/// `find_session`, and it verifies every member's `sessionId`. Unmemoized
+/// that is one open and up to `SESSION_ID_PEEK_BYTES` per member per pass --
+/// on the 842-member tree this adapter was written for, up to ~54 MB of
+/// reads a minute to re-derive an answer that only changes when a file
+/// changes. This mirrors what `watcher::resolve_cwd` already does for the
+/// far more expensive whole-file cwd peek.
+///
+/// It lives at module scope rather than on `ClaudeCodeSource` because
+/// `watcher::tick_blocking` builds its sources fresh on every tick: a memo
+/// owned by the adapter would be discarded before the next pass could use
+/// it, and that next pass is precisely the one that needs it.
+///
+/// Keying on (size, mtime) makes a rewritten member re-peek, and assumes
+/// only what the cwd cache already assumes: that a file whose size and mtime
+/// are unchanged has unchanged contents. That is not a trust boundary. The
+/// `sessionId` check catches format drift and stray files, not an adversary
+/// -- anyone able to backdate a member's mtime can equally well write the
+/// matching `sessionId` into it, so the memo grants no capability the
+/// unmemoized path withheld.
+static SESSION_ID_MEMO: LazyLock<Mutex<HashMap<PathBuf, SessionIdMemo>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// One validated member of a session group.
 #[derive(Debug, Clone)]
@@ -352,16 +410,8 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
                 continue;
             }
         }
-        // The directory decides membership; `sessionId` verifies it. On the
-        // probed machine all 842 members agreed with their grandparent
-        // directory, so a disagreement means either a format change or a
-        // planted file. Exclude on disagreement, include on absence.
-        if let Some(id) = peek_session_id(&path) {
-            if id != session_uuid {
-                excluded += 1;
-                continue;
-            }
-        }
+        // Stat first, because the memo below is keyed on what a stat
+        // returns and the member needs these two facts regardless.
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => {
@@ -369,13 +419,25 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
                 continue;
             }
         };
+        let size_bytes = metadata.len();
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from);
+        // The directory decides membership; `sessionId` verifies it. On the
+        // probed machine all 842 members agreed with their grandparent
+        // directory, so a disagreement means either a format change or a
+        // planted file. Exclude on disagreement, include on absence.
+        if let Some(id) = peek_session_id_memoized(&path, size_bytes, modified_at) {
+            if id != session_uuid {
+                excluded += 1;
+                continue;
+            }
+        }
         members.push(GroupMember {
             path,
-            size_bytes: metadata.len(),
-            modified_at: metadata
-                .modified()
-                .ok()
-                .map(chrono::DateTime::<chrono::Utc>::from),
+            size_bytes,
+            modified_at,
         });
     }
     members.sort_by_key(|m| file_name_bytes(&m.path));
@@ -388,6 +450,45 @@ fn file_name_bytes(path: &Path) -> Vec<u8> {
     path.file_name()
         .map(|n| n.as_encoded_bytes().to_vec())
         .unwrap_or_default()
+}
+
+/// `peek_session_id`, answered from `SESSION_ID_MEMO` when the file still
+/// reports the size and mtime the memoized answer was derived from.
+///
+/// Discovery calls this once per member per pass, so on a large tree it is
+/// the difference between re-reading every delegated transcript every minute
+/// and stat-ing them. See `SESSION_ID_MEMO` for why the memo is process-wide
+/// and why keying on (size, mtime) is sound here.
+fn peek_session_id_memoized(
+    path: &Path,
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    // A poisoned memo is a cache, not state anything depends on: fall
+    // through to the read rather than propagating another thread's panic
+    // into discovery.
+    if let Ok(memo) = SESSION_ID_MEMO.lock() {
+        if let Some(hit) = memo.get(path) {
+            if hit.size_bytes == size_bytes && hit.modified_at == modified_at {
+                return hit.session_id.clone();
+            }
+        }
+    }
+    let session_id = peek_session_id(path);
+    if let Ok(mut memo) = SESSION_ID_MEMO.lock() {
+        if memo.len() >= SESSION_ID_MEMO_CAP && !memo.contains_key(path) {
+            memo.clear();
+        }
+        memo.insert(
+            path.to_path_buf(),
+            SessionIdMemo {
+                size_bytes,
+                modified_at,
+                session_id: session_id.clone(),
+            },
+        );
+    }
+    session_id
 }
 
 /// Bounded head-read for a member file's `sessionId`.
@@ -433,6 +534,24 @@ fn peek_session_id(path: &Path) -> Option<String> {
 /// `dropped` is folded in so a group trimmed to fit the byte budget can
 /// never collide with a genuinely smaller group that happens to have the
 /// same kept members.
+///
+/// Member *file names* are deliberately not folded in, and that is a
+/// consent decision rather than an oversight. The hash has to cover exactly
+/// what the contributor was shown, and a name never reaches them: the
+/// boundary marker `load_group` emits carries only `index`, derived from
+/// sorted position, and the loaded bytes are the file's contents. So a
+/// rename splits into two cases and both are already correct. A rename that
+/// leaves the member in the same sorted position produces byte-identical
+/// output -- same contents, same concatenation order, same indices -- and
+/// the hash rightly does not move, because nothing the approval described
+/// has changed. A rename that moves the member in sort order changes the
+/// concatenation order, and the fold is order-sensitive, so the hash moves
+/// and the uploader's re-hash guard fires. Folding names in would buy
+/// nothing for the first case except a spurious re-ask for a conversation
+/// that did not change, which is its own consent failure: an approval
+/// invalidated for no reason a contributor can see teaches them to click
+/// through the next one. `renaming_a_member_moves_the_hash_only_when_sort_
+/// order_moves` pins both halves.
 fn group_session_hash<B: AsRef<[u8]>>(
     parent_bytes: &[u8],
     member_bytes: &[B],
@@ -454,36 +573,38 @@ fn group_session_hash<B: AsRef<[u8]>>(
 /// Drop members largest-first until the group fits `GROUP_RAW_BYTE_BUDGET`,
 /// returning how many were dropped.
 ///
+/// This runs on the stat'd `GroupMember` list, before a single member file
+/// is opened, so the budget caps the bytes the daemon *reads* rather than
+/// the bytes it decides to keep afterwards. Deciding after reading meant a
+/// `subagents/` directory holding a gigabyte was fully resident before
+/// anything was discarded, which is a memory profile set by whatever is on
+/// disk rather than by this constant.
+///
 /// The parent is never dropped: a conversation without the human's own turns
 /// is not a conversation. Ties on size break on file name descending, so the
 /// choice never depends on `read_dir` order -- two loads of an unchanged
 /// group must drop exactly the same members, or the hash moves underneath an
 /// approval.
-fn apply_group_budget(
-    members: &mut Vec<(PathBuf, Vec<u8>)>,
-    parent_len: usize,
-    budget: u64,
-) -> u32 {
-    let mut total = members.iter().fold(parent_len as u64, |acc, (_, b)| {
-        acc.saturating_add(b.len() as u64)
-    });
+fn apply_group_budget(members: &mut Vec<GroupMember>, parent_len: u64, budget: u64) -> u32 {
+    let mut total = members
+        .iter()
+        .fold(parent_len, |acc, m| acc.saturating_add(m.size_bytes));
     if total <= budget {
         return 0;
     }
     let mut order: Vec<usize> = (0..members.len()).collect();
     order.sort_by(|&a, &b| {
         members[b]
-            .1
-            .len()
-            .cmp(&members[a].1.len())
-            .then_with(|| file_name_bytes(&members[b].0).cmp(&file_name_bytes(&members[a].0)))
+            .size_bytes
+            .cmp(&members[a].size_bytes)
+            .then_with(|| file_name_bytes(&members[b].path).cmp(&file_name_bytes(&members[a].path)))
     });
     let mut doomed = std::collections::HashSet::new();
     for i in order {
         if total <= budget {
             break;
         }
-        total = total.saturating_sub(members[i].1.len() as u64);
+        total = total.saturating_sub(members[i].size_bytes);
         doomed.insert(i);
     }
     let dropped = doomed.len() as u32;
@@ -556,16 +677,20 @@ struct ParsedSession {
 /// `GROUP_RAW_BYTE_BUDGET`.
 fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
     let parent_bytes = std::fs::read(parent)?;
-    let (member_refs, _excluded) = group_members_for(parent);
+    let (mut member_refs, _excluded) = group_members_for(parent);
+    // Budget first, then read. `group_members_for` has already stat'd every
+    // member, so the over-budget tail can be dropped without ever being
+    // opened -- see `apply_group_budget`.
+    let dropped = apply_group_budget(&mut member_refs, parent_bytes.len() as u64, budget);
     // A member that vanished or turned unreadable between the directory
     // listing and here is simply not in the group: the hash covers what was
     // actually read, so a preview and the upload that follows it cannot
-    // describe different bytes.
-    let mut members: Vec<(PathBuf, Vec<u8>)> = member_refs
+    // describe different bytes. It is not counted as `dropped`, which means
+    // one specific thing -- left out to fit the budget.
+    let members: Vec<(PathBuf, Vec<u8>)> = member_refs
         .into_iter()
         .filter_map(|m| std::fs::read(&m.path).ok().map(|bytes| (m.path, bytes)))
         .collect();
-    let dropped = apply_group_budget(&mut members, parent_bytes.len(), budget);
     let kept = members.len() as u32;
 
     let member_slices: Vec<&[u8]> = members.iter().map(|(_, b)| b.as_slice()).collect();
@@ -1411,6 +1536,148 @@ mod tests {
         body.push_str("\",\"sessionId\":\"late\"}\n");
         std::fs::write(&huge, body).unwrap();
         assert_eq!(peek_session_id(&huge), None);
+    }
+
+    #[test]
+    fn a_member_peek_is_memoized_until_its_size_or_mtime_moves() {
+        // Discovery verifies every member on every pass, and on the tree
+        // this adapter was written for that was 842 opens a minute. The memo
+        // is what makes a pass cost a stat per member instead of a read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-memo.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\",\"sessionId\":\"aaa\"}\n").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let size = md.len();
+        let mtime = md
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from);
+        assert_eq!(
+            peek_session_id_memoized(&path, size, mtime),
+            Some("aaa".to_string())
+        );
+
+        // Same length, different id. Passing the original (size, mtime) is
+        // the memo's key, so the answer must come back from the memo rather
+        // than from the file -- that is the whole saving, stated as a fact
+        // rather than as a timing.
+        std::fs::write(&path, "{\"type\":\"user\",\"sessionId\":\"bbb\"}\n").unwrap();
+        assert_eq!(
+            peek_session_id_memoized(&path, size, mtime),
+            Some("aaa".to_string()),
+            "an unchanged (size, mtime) must not re-read the file"
+        );
+
+        // And a file that did change is re-peeked, so a member rewritten
+        // under a different sessionId stops being trusted.
+        let moved = mtime.map(|t| t + chrono::Duration::seconds(1));
+        assert_eq!(
+            peek_session_id_memoized(&path, size, moved),
+            Some("bbb".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_budget_is_decided_before_any_member_is_read() {
+        // The budget has to bound what is READ, not merely what is kept: a
+        // `subagents/` directory holding a gigabyte must not become resident
+        // in the daemon on its way to being discarded.
+        //
+        // Made observable by an oversized member the process cannot open. If
+        // the drop were decided after reading, the unreadable member would
+        // fall out as unreadable and the group would report nothing dropped;
+        // deciding from the stat'd size reports the drop it actually made.
+        // (Running as root defeats the permission bit, in which case this
+        // asserts the same outcome for the ordinary reason.)
+        use std::os::unix::fs::PermissionsExt;
+
+        let session = "22222222-2222-2222-2222-222222222222";
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+        let subagents = project_dir.join(session).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let parent = project_dir.join(format!("{session}.jsonl"));
+        std::fs::write(&parent, record(session, "parent turn")).unwrap();
+        std::fs::write(subagents.join("agent-s1.jsonl"), record(session, "s1")).unwrap();
+        std::fs::write(subagents.join("agent-s2.jsonl"), record(session, "s2")).unwrap();
+        let big = subagents.join("agent-big.jsonl");
+        std::fs::write(&big, record(session, &"x".repeat(4000))).unwrap();
+        // Membership itself is unaffected either way -- an unreadable head
+        // peeks as "no sessionId", and absence is not disagreement -- but
+        // assert it here so a failure below is unambiguously about the
+        // budget and not about the member having fallen out of the group.
+        let (members, _) = group_members_for(&parent);
+        assert_eq!(members.len(), 3);
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let t = load_group(&parent, 1_000).unwrap();
+        assert_eq!(
+            t.subagents_dropped, 1,
+            "the oversized member is dropped on its stat'd size, never opened"
+        );
+        assert_eq!(t.subagent_count, 2);
+
+        // Leave the fixture deletable.
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(root);
+    }
+
+    #[test]
+    fn renaming_a_member_moves_the_hash_only_when_sort_order_moves() {
+        // `group_session_hash` folds member CONTENTS and never member names,
+        // which reads like a gap until you ask what the contributor was
+        // shown. Names never reach them: the boundary marker carries only a
+        // sorted `index`, and the bytes are the file's contents. So a rename
+        // that leaves sort order alone changes nothing about the previewed
+        // conversation and must NOT invalidate an approval -- a spurious
+        // re-ask is its own consent failure -- while a rename that reorders
+        // the fold changes the bytes and must.
+        let (root, parent) = group_fixture(&[
+            ("agent-a.jsonl", "alpha"),
+            ("agent-m.jsonl", "middle"),
+            ("agent-z.jsonl", "omega"),
+        ]);
+        let subagents = parent
+            .parent()
+            .unwrap()
+            .join(parent.file_stem().unwrap())
+            .join("subagents");
+        let base = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+
+        // Still sorts between `agent-a` and `agent-z`, so the concatenation
+        // and every index is byte-identical.
+        std::fs::rename(
+            subagents.join("agent-m.jsonl"),
+            subagents.join("agent-n.jsonl"),
+        )
+        .unwrap();
+        let in_place = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        assert_eq!(
+            base, in_place,
+            "a rename the contributor cannot see must not invalidate their approval"
+        );
+
+        // Now move the same member to the end of the order. The fold is
+        // order-sensitive, so the hash moves and the uploader's re-hash
+        // guard refuses the stale approval.
+        std::fs::rename(
+            subagents.join("agent-n.jsonl"),
+            subagents.join("agent-zz.jsonl"),
+        )
+        .unwrap();
+        let reordered = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        assert_ne!(
+            base, reordered,
+            "reordering the members reorders the bytes, so the hash must move"
+        );
+        drop(root);
     }
 
     #[test]

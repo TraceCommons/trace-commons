@@ -231,64 +231,70 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
             let entry_id = entry.entry_id;
 
             let mut queue = shared.queue.lock().expect("queue lock");
-            // Retire any earlier offer for this same session that no longer
-            // describes it, before adding the new one. Without this, a
+            // Add the new offer and retire any earlier one for this same
+            // session in a single step. Without the retirement, a
             // conversation that gains a delegated transcript accumulates a
             // card per delegation -- `upsert` dedups on hash, and the hash
-            // is precisely what moved. See `Queue::supersede_live_at_path`.
-            if queue.supersede_live_at_path(&obs.path, &transcript.session_hash) > 0 {
-                changed = true;
-            }
-            let already = queue.get(entry_id).is_some();
-            match queue.upsert(entry, max_queue_entries) {
-                Ok(()) if !already => {
-                    changed = true;
-                    if armed {
-                        report.auto_ready += 1;
-                    } else {
-                        report.queued += 1;
-                    }
-                    // A new entry passed capacity check: there is space in the queue.
-                    let mut health = shared.health.lock().expect("health lock");
-                    health.resolve(health::LABEL_QUEUE_FULL);
-                }
-                Ok(()) => {
-                    // Dedup path: re-observing an already-queued session.
-                    // `Queue::upsert` deliberately never rewrites an
-                    // existing entry, which used to mean a standing opt-in
-                    // simply stopped applying to an entry that had been put
-                    // back to `Pending` since it was created -- by
-                    // `supersede`, or by the consent-scope guard. The entry
-                    // sat `Pending` until it aged out, in a project the
-                    // contributor had explicitly armed. Re-apply the
-                    // standing decision here, which is the one place that
-                    // knows both the entry and the mode in force.
-                    //
-                    // `Queue::approve` only moves `Pending`, so this can
-                    // never resurrect a dismissed-and-refused, expired, or
-                    // already-uploaded entry.
-                    // `approval_inputs` is passed through as `Option`, not
-                    // flattened to `""`: the upsert path above records
-                    // `None` for "the config could not be read", and this
-                    // path recording `Some("")` for the same condition made
-                    // two spellings of "unknown". Both fail closed, but the
-                    // uploader should only have one shape to recognize.
-                    // `None` for `approved_at`, matching the fresh-entry
-                    // path above: a standing opt-in is not held.
-                    if armed
-                        && queue.approve(
-                            entry_id,
-                            &consent_scopes,
-                            approval_inputs.as_deref(),
-                            None,
-                        )
-                    {
+            // is precisely what moved. Without the atomicity, a `queue-full`
+            // between the two would retire the old offer and never land the
+            // replacement, leaving the conversation with no live card at
+            // all. See `Queue::replace_live_at_path`.
+            match queue.replace_live_at_path(entry, max_queue_entries) {
+                Ok(outcome) => {
+                    if outcome.superseded > 0 {
                         changed = true;
-                        report.auto_ready += 1;
                     }
-                    // Queue::upsert returns Ok(()) here BEFORE checking capacity,
-                    // so this does not prove space is available. Do not retract
-                    // queue-full.
+                    if outcome.inserted {
+                        changed = true;
+                        if armed {
+                            report.auto_ready += 1;
+                        } else {
+                            report.queued += 1;
+                        }
+                        // A new entry passed the capacity check: there is
+                        // space in the queue.
+                        let mut health = shared.health.lock().expect("health lock");
+                        health.resolve(health::LABEL_QUEUE_FULL);
+                    } else {
+                        // Dedup path: re-observing an already-queued session.
+                        // The insert deliberately never rewrites an existing
+                        // entry, which used to mean a standing opt-in simply
+                        // stopped applying to an entry that had been put
+                        // back to `Pending` since it was created -- by
+                        // `supersede`, or by the consent-scope guard. The
+                        // entry sat `Pending` until it aged out, in a
+                        // project the contributor had explicitly armed.
+                        // Re-apply the standing decision here, which is the
+                        // one place that knows both the entry and the mode
+                        // in force.
+                        //
+                        // `Queue::approve` only moves `Pending`, so this can
+                        // never resurrect a dismissed-and-refused, expired,
+                        // or already-uploaded entry.
+                        // `approval_inputs` is passed through as `Option`,
+                        // not flattened to `""`: the insert path above
+                        // records `None` for "the config could not be read",
+                        // and this path recording `Some("")` for the same
+                        // condition made two spellings of "unknown". Both
+                        // fail closed, but the uploader should only have one
+                        // shape to recognize. `None` for `approved_at`,
+                        // matching the fresh-entry path above: a standing
+                        // opt-in is not held.
+                        if armed
+                            && queue.approve(
+                                entry_id,
+                                &consent_scopes,
+                                approval_inputs.as_deref(),
+                                None,
+                            )
+                        {
+                            changed = true;
+                            report.auto_ready += 1;
+                        }
+                        // This path returns Ok without checking capacity, so
+                        // it does not prove space is available. Do not
+                        // retract queue-full.
+                    }
                 }
                 Err(_) => {
                     let mut health = shared.health.lock().expect("health lock");

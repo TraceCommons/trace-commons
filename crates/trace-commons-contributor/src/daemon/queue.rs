@@ -234,6 +234,36 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
     }
 }
 
+/// What `Queue::replace_live_at_path` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplaceOutcome {
+    /// How many stale live offers at the same path were retired.
+    pub superseded: usize,
+    /// Whether the entry was added, as opposed to already being tracked
+    /// under this session hash. The caller reports a genuinely new offer
+    /// differently from re-observing one it already made.
+    pub inserted: bool,
+}
+
+/// How many `Superseded` entries the queue file keeps.
+///
+/// Every other resolved state records something that happened to a trace: it
+/// was uploaded (and carries the receipt's `submission_id`), refused,
+/// failed, or aged out without a decision. `Superseded` records only that an
+/// offer was replaced by a newer offer that is itself in the file, so it is
+/// the one resolved state produced mechanically rather than by an outcome --
+/// and the only one whose volume scales with how much an agent delegates
+/// rather than with how much a contributor contributes. With grouping, one
+/// long delegating conversation mints a fresh hash per delegation, so
+/// unbounded retention means a permanently growing `daemon-queue.jsonl` that
+/// the daemon re-parses at every start.
+///
+/// Keeping the most recent handful preserves what the state is actually good
+/// for -- explaining why a card the contributor remembers is no longer
+/// there -- while bounding the file. Nothing else is ever compacted: a
+/// receipt is not bookkeeping.
+const MAX_SUPERSEDED_ENTRIES: usize = 50;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
     entries: Vec<QueueEntry>,
@@ -529,8 +559,8 @@ impl Queue {
         })
     }
 
-    /// Mark every live entry at `path` whose hash is no longer `new_hash` as
-    /// `Superseded`, returning how many were retired.
+    /// Add `entry` and, in the same step, retire every live entry at the same
+    /// path whose hash is no longer `entry.session_hash`.
     ///
     /// `upsert` dedups on `session_hash` alone, so a session that grew
     /// between being offered and being decided already produced a *second*
@@ -545,17 +575,52 @@ impl Queue {
     /// preview is made. `Uploading` is deliberately not touched -- an upload
     /// may already be in flight, and the uploader's own re-hash guard is
     /// what covers that race.
-    pub fn supersede_live_at_path(&mut self, path: &std::path::Path, new_hash: &str) -> usize {
+    ///
+    /// The retirement and the insert are one operation because doing them in
+    /// sequence left a window with no offer at all. Retiring first and then
+    /// hitting the queue cap meant the replacement never landed, so a
+    /// conversation whose only live card had just been superseded had none
+    /// until capacity freed up -- and nothing would re-retire it, since the
+    /// stale card was already gone. This refuses before mutating anything,
+    /// so a `queue-full` leaves the previous offer exactly where it was: a
+    /// full queue delays the new offer rather than destroying the old one.
+    ///
+    /// The cap is counted against the entries that would *survive* this call,
+    /// because the stale cards this is about to retire are being replaced,
+    /// not added to. Counting them as occupants would let a busy conversation
+    /// fill the queue with its own superseded predecessors.
+    pub fn replace_live_at_path(
+        &mut self,
+        entry: QueueEntry,
+        max_entries: usize,
+    ) -> Result<ReplaceOutcome> {
         let stale: Vec<Uuid> = self
             .entries
             .iter()
             .filter(|e| {
-                e.path == path
-                    && e.session_hash != new_hash
+                e.path == entry.path
+                    && e.session_hash != entry.session_hash
                     && matches!(e.state, QueueState::Pending | QueueState::Approved)
             })
             .map(|e| e.entry_id)
             .collect();
+        let already_tracked = self
+            .entries
+            .iter()
+            .any(|e| e.session_hash == entry.session_hash);
+        if !already_tracked {
+            let live = self
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(e.state, QueueState::Pending | QueueState::Approved)
+                        && !stale.contains(&e.entry_id)
+                })
+                .count();
+            if live >= max_entries {
+                bail!("queue-full");
+            }
+        }
         for entry_id in &stale {
             self.set_state(
                 *entry_id,
@@ -563,7 +628,13 @@ impl Queue {
                 Some(REASON_CHANGED.to_string()),
             );
         }
-        stale.len()
+        if !already_tracked {
+            self.entries.push(entry);
+        }
+        Ok(ReplaceOutcome {
+            superseded: stale.len(),
+            inserted: !already_tracked,
+        })
     }
 
     /// Return an approved entry to pending, backing the "undo" window on an
@@ -610,6 +681,44 @@ impl Queue {
             }
         }
         expired
+    }
+
+    /// Drop all but the `MAX_SUPERSEDED_ENTRIES` most recent `Superseded`
+    /// entries, returning how many were removed.
+    ///
+    /// Nothing else is touched. In particular an `Uploaded` entry is never
+    /// removed: it carries the `submission_id` that ties a local decision to
+    /// a server receipt, and the history view joins on it.
+    ///
+    /// Recency is `discovered_at`, which for a superseded entry is when its
+    /// offer was made, with insertion order breaking ties -- `sort_by_key` is
+    /// stable and entries are appended, so two offers made inside the same
+    /// clock tick retire oldest-first rather than arbitrarily. See
+    /// `MAX_SUPERSEDED_ENTRIES` for why this state alone is compacted.
+    pub fn compact_superseded(&mut self) -> usize {
+        let superseded: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.state == QueueState::Superseded)
+            .map(|(i, _)| i)
+            .collect();
+        if superseded.len() <= MAX_SUPERSEDED_ENTRIES {
+            return 0;
+        }
+        let mut by_age = superseded.clone();
+        by_age.sort_by_key(|&i| self.entries[i].discovered_at);
+        let doomed: std::collections::HashSet<usize> = by_age
+            .into_iter()
+            .take(superseded.len() - MAX_SUPERSEDED_ENTRIES)
+            .collect();
+        let mut index = 0usize;
+        self.entries.retain(|_| {
+            let keep = !doomed.contains(&index);
+            index += 1;
+            keep
+        });
+        doomed.len()
     }
 }
 
@@ -827,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn supersede_live_at_path_retires_only_stale_live_entries_at_that_path() {
+    fn replacing_retires_only_stale_live_entries_at_that_path() {
         // `upsert` dedups on hash alone, so without this a conversation
         // would collect a fresh card every time it delegated. Entries that
         // already match the new hash, sit at another path, or have reached a
@@ -839,10 +948,6 @@ mod tests {
         stale.path = path.clone();
         q.upsert(stale, 500).unwrap();
 
-        let mut current = entry("sha256:new", "2026-08-08T12:00:00Z");
-        current.path = path.clone();
-        q.upsert(current, 500).unwrap();
-
         let mut elsewhere = entry("sha256:other", "2026-08-08T12:00:00Z");
         elsewhere.path = PathBuf::from("/Users/z/.claude/projects/x/t.jsonl");
         q.upsert(elsewhere, 500).unwrap();
@@ -852,7 +957,11 @@ mod tests {
         q.upsert(done, 500).unwrap();
         q.set_state(entry_id_for("sha256:done"), QueueState::Uploaded, None);
 
-        assert_eq!(q.supersede_live_at_path(&path, "sha256:new"), 1);
+        let mut current = entry("sha256:new", "2026-08-08T12:00:00Z");
+        current.path = path.clone();
+        let outcome = q.replace_live_at_path(current, 500).unwrap();
+        assert_eq!(outcome.superseded, 1);
+        assert!(outcome.inserted);
         assert_eq!(
             q.get(entry_id_for("sha256:old")).unwrap().state,
             QueueState::Superseded
@@ -876,6 +985,150 @@ mod tests {
             q.get(entry_id_for("sha256:done")).unwrap().state,
             QueueState::Uploaded,
             "a resolved entry is history and must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_keeps_the_offer_it_could_not_replace() {
+        // The window this closes: retire-then-insert meant a `queue-full` on
+        // the insert left the conversation with no live offer at all, and
+        // nothing to re-retire later. Refusing before mutating means a full
+        // queue delays the new offer instead of destroying the old one.
+        let mut q = Queue::new();
+        let path = PathBuf::from("/Users/z/.claude/projects/x/s.jsonl");
+
+        let mut live = entry("sha256:old", "2026-08-08T12:00:00Z");
+        live.path = path.clone();
+        q.upsert(live, 2).unwrap();
+        // A second live entry elsewhere, so retiring the first would not by
+        // itself free the slot this call needs.
+        let mut other = entry("sha256:other", "2026-08-08T12:00:00Z");
+        other.path = PathBuf::from("/Users/z/.claude/projects/x/t.jsonl");
+        q.upsert(other, 2).unwrap();
+
+        let mut third = entry("sha256:third", "2026-08-08T12:00:00Z");
+        third.path = PathBuf::from("/Users/z/.claude/projects/x/u.jsonl");
+        assert!(
+            q.replace_live_at_path(third, 2).is_err(),
+            "the cap still applies"
+        );
+        assert_eq!(
+            q.get(entry_id_for("sha256:old")).unwrap().state,
+            QueueState::Pending,
+            "the existing offer must survive a refused replacement"
+        );
+        assert_eq!(q.all().len(), 2);
+    }
+
+    #[test]
+    fn a_replacement_does_not_have_to_wait_for_the_offer_it_retires() {
+        // The stale card is being replaced, not joined, so counting it as an
+        // occupant would let one busy conversation wedge itself out of the
+        // queue with its own predecessors.
+        let mut q = Queue::new();
+        let path = PathBuf::from("/Users/z/.claude/projects/x/s.jsonl");
+
+        let mut live = entry("sha256:old", "2026-08-08T12:00:00Z");
+        live.path = path.clone();
+        q.upsert(live, 1).unwrap();
+
+        let mut fresh = entry("sha256:new", "2026-08-08T12:05:00Z");
+        fresh.path = path.clone();
+        let outcome = q.replace_live_at_path(fresh, 1).unwrap();
+        assert!(outcome.inserted);
+        assert_eq!(outcome.superseded, 1);
+    }
+
+    #[test]
+    fn re_observing_the_same_hash_inserts_nothing_and_retires_nothing() {
+        let mut q = Queue::new();
+        let e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        let path = e.path.clone();
+        q.upsert(e.clone(), 500).unwrap();
+
+        let outcome = q.replace_live_at_path(e, 500).unwrap();
+        assert!(!outcome.inserted);
+        assert_eq!(outcome.superseded, 0);
+        assert_eq!(q.all().len(), 1);
+        assert_eq!(q.all()[0].path, path);
+    }
+
+    #[test]
+    fn superseded_entries_are_compacted_but_receipts_never_are() {
+        // A superseded row records only that an offer was replaced by one
+        // that is still in the file, and grouping mints one per delegation.
+        // Uploaded rows carry the receipt that history joins on, so they are
+        // never what gets discarded -- see `MAX_SUPERSEDED_ENTRIES`.
+        let mut q = Queue::new();
+        for i in 0..(MAX_SUPERSEDED_ENTRIES + 10) {
+            let hash = format!("sha256:s{i:03}");
+            // Ascending timestamps, so "most recent" is unambiguous and the
+            // oldest are the ones expected to go.
+            let discovered = format!("2026-08-{:02}T12:00:00Z", (i % 28) + 1);
+            q.upsert(entry(&hash, &discovered), 5000).unwrap();
+            q.set_state(entry_id_for(&hash), QueueState::Superseded, None);
+        }
+        for state in [
+            QueueState::Uploaded,
+            QueueState::Failed,
+            QueueState::Refused,
+            QueueState::Expired,
+        ] {
+            let hash = format!("sha256:{state:?}");
+            q.upsert(entry(&hash, "2026-07-01T12:00:00Z"), 5000)
+                .unwrap();
+            q.set_state(entry_id_for(&hash), state, None);
+        }
+        let live = entry("sha256:live", "2026-07-01T12:00:00Z");
+        q.upsert(live, 5000).unwrap();
+
+        assert_eq!(q.compact_superseded(), 10);
+        assert_eq!(
+            q.all()
+                .iter()
+                .filter(|e| e.state == QueueState::Superseded)
+                .count(),
+            MAX_SUPERSEDED_ENTRIES
+        );
+        for state in [
+            QueueState::Uploaded,
+            QueueState::Failed,
+            QueueState::Refused,
+            QueueState::Expired,
+            QueueState::Pending,
+        ] {
+            assert!(
+                q.all().iter().any(|e| e.state == state),
+                "compaction must only ever touch Superseded, lost {state:?}"
+            );
+        }
+        // Idempotent: a second pass with nothing over the bound is a no-op.
+        assert_eq!(q.compact_superseded(), 0);
+    }
+
+    #[test]
+    fn compaction_keeps_the_most_recent_superseded_entries() {
+        let mut q = Queue::new();
+        for i in 0..(MAX_SUPERSEDED_ENTRIES + 5) {
+            let hash = format!("sha256:s{i:03}");
+            let discovered = format!("2026-08-01T12:{i:02}:00Z");
+            q.upsert(entry(&hash, &discovered), 5000).unwrap();
+            q.set_state(entry_id_for(&hash), QueueState::Superseded, None);
+        }
+        q.compact_superseded();
+        for i in 0..5 {
+            assert!(
+                q.get(entry_id_for(&format!("sha256:s{i:03}"))).is_none(),
+                "the five oldest offers are the ones dropped"
+            );
+        }
+        assert!(
+            q.get(entry_id_for(&format!(
+                "sha256:s{:03}",
+                MAX_SUPERSEDED_ENTRIES + 4
+            )))
+            .is_some(),
+            "the newest must survive"
         );
     }
 
