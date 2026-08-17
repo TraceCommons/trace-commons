@@ -1036,6 +1036,15 @@ The design position is explicit: **GNOME has no system tray. On Linux the window
 is the primary surface**, and the periodic digest arrives as a portal
 notification instead. The frame draws the notification, not a tray.
 
+**DECIDED: read this as GNOME-specific, not Linux-wide.** The GTK client ships
+an `org.kde.StatusNotifierItem` (`crates/trace-commons-contributor-gtk/src/tray.rs`)
+and keeps it: an SNI item is the right surface on KDE, and on GNOME with an
+extension, and it already works. What the frame settles is that GNOME-without-an-
+extension must not be left with no ambient surface at all — so the portal
+notification is an addition, not a replacement, and it is implementation work
+this section specifies. The rule at the end of this section still binds both
+surfaces equally: no approve or contribute action in either.
+
 - GNOME top bar: 28px, `#1A1A1A`, `border-radius:8px 8px 0 0`, centred
   `700 11.5px` `#EDEDED`: **"Aug 16&nbsp;&nbsp;22:42"**.
 - **Notification bubble**: `#303030`, `radius 12px`,
@@ -1830,6 +1839,16 @@ Opened by the recovered sections:
     "landing-infused". Nothing in the document says which supersedes which. One
     of them has to go, and the choice sets whether first-run reads as the private
     tool or as the public brand.
+
+    **DECIDED: `3a` ships; `1e` is superseded.** First-run reads as the public
+    brand. `3a` is the later turn, it is what is implemented and rendered today
+    (`OnboardingWelcomeView.swift`), and it carries the seam the rest of the
+    design rests on — the community language marks what becomes public, and the
+    first screen is where a contributor meets the commons rather than the tool.
+    `1e` stays specified in §5.5 as the record of the alternative; it is not an
+    implementation target. The step names `1e` gives (Connect, Consent, Extra
+    privacy scan, What to watch, Done) are still the useful part of it, since
+    `3a` never names its six.
 15. **"List my handle publicly" is a checkbox, not a toggle.** 2a and 2b both
     name it as a toggle in user-visible copy; 1d draws it as a consent checkbox
     card labelled **"List my handle publicly as a contributor"**. Either the
