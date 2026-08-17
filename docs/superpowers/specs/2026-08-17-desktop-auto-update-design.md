@@ -35,7 +35,8 @@ case where the app and a package manager both believe they own the same file.
 |---|---|---|
 | macOS | `Caskroom/trace-commons` exists under the Homebrew prefix | `.app` in `/Applications` with no Caskroom entry (DMG drag-install) |
 | Linux | n/a — flatpak self-updates via the portal, see below | CLI in `~/.local/bin` from `install.sh` |
-| Windows | running exe path contains `\Microsoft\WinGet\Packages\` | `%LOCALAPPDATA%\Programs\TraceCommons` from `install.ps1` |
+| Windows CLI | running exe path contains `\Microsoft\WinGet\Packages\` | `%LOCALAPPDATA%\Programs\TraceCommons` from `install.ps1` |
+| Windows app | MSIX package identity present — App Installer owns the update | n/a — the app is never self-replacing |
 
 Winget is a hard defer, not a preference. Winget records portable-package
 versions in the registry; a self-swap leaves that record stale, so winget
@@ -184,10 +185,43 @@ check in one implementation fails a test rather than shipping. A dedicated CI
 job covers the Windows verify path, in the spirit of the existing named-pipe
 ACL job — that path cannot be exercised from a cross-compile.
 
+### Windows desktop app — MSIX and App Installer
+
+**Premise correction.** An earlier draft of this spec stated that Windows had
+no GUI app and only a CLI. That was true of the `winget-manifests` branch it
+was written against and false of `main`: PR #277 landed a WinUI 3 contributor
+app under `windows/` on 2026-08-17, hosting the daemon in-process over the same
+`trace-commons-contributor-ffi` C ABI the macOS app uses. The Windows scope
+decision in this document was originally made against the wrong premise and has
+been revisited.
+
+The app is currently built unpackaged (`WindowsPackageType=None`,
+self-contained) and has no distribution path at all — no MSIX, no installer, and
+no job in `release-apps.yml`. Unpackaged deployments cannot use MSIX
+auto-update, because the App Installer APIs require package identity. So the
+update mechanism here is decided by a packaging choice, and the choice is MSIX.
+
+The app ships as an MSIX signed through the Azure Trusted Signing account the
+CLI already uses, published alongside a `.appinstaller` feed. Windows checks
+that feed on its own schedule and performs the update; the app additionally uses
+the App Installer APIs to surface "an update is available" and to let a
+contributor apply it immediately rather than waiting for the scheduled check.
+
+This is the governing rule honored rather than excepted: on Windows desktop the
+platform installer owns replacing the bytes, exactly as Homebrew, flatpak, and
+winget do on the other paths. The app never replaces itself.
+
+Because the daemon is hosted in-process here, quiesce is not a separate-process
+concern: the app drains in-flight uploads and parks the queue before it allows
+the update to proceed, and App Installer restarts it.
+
+Note that the `windows/README.md` blocker "no certificate exists yet" is stale.
+The release pipeline already signs the CLI through Azure Trusted Signing, and
+the same account signs an MSIX.
+
 ## Out of scope
 
-Delta updates. Staged rollout percentages. Forced or mandatory updates. A
-Windows GUI app.
+Delta updates. Staged rollout percentages. Forced or mandatory updates.
 
 ## Recorded deviation: Sparkle adopted without a dependency workup
 
