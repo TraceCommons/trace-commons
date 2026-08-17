@@ -899,9 +899,13 @@ section at all:
   community surface, not an error, and it must not surface to a contributor
   as one.
 - The handle is not on the roster.
+- `accepted_in_window` cannot be represented -- the snapshot reported a
+  negative or out-of-range count. It is a bare number on the wire with no
+  absent form, so rather than being rounded into a definite "0 accepted" it
+  withholds the whole object.
 
-`rank` may itself be `null` inside an otherwise present object; render a dash,
-not `#0`.
+`rank` and `accept_rate` may themselves be `null` inside an otherwise present
+object; render a dash rather than `#0` or `0%`.
 
 The daemon fetches the roster on its own interval (15 minutes, matching the
 server's snapshot cadence and its published 15-minute withdrawal bound) and

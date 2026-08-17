@@ -683,21 +683,23 @@ async fn refresh_community(
         }
         return Ok(());
     };
-    let standing =
-        match community::fetch_standing(&cfg.ingest_url, cfg.allowed_hosts.as_deref(), handle, now)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => {
-                // A failed poll serves the cache as-is, which the serve path
-                // ages out on its own. Like history, the roster is not worth a
-                // health failure: it is a public read-back, not part of the
-                // upload path.
-                return Ok(());
-            }
-        };
+    let outcome =
+        community::fetch_standing(&cfg.ingest_url, cfg.allowed_hosts.as_deref(), handle, now).await;
     let mut state = shared.state.lock().expect("state lock");
-    state.community = standing;
+    match outcome {
+        Ok(standing) => state.community = standing,
+        Err(_) => {
+            // A failed poll serves the cache as-is, which the serve path ages
+            // out on its own. Like history, the roster is not worth a health
+            // failure: it is a public read-back, not part of the upload path.
+            //
+            // The attempt is still stamped below rather than returning here.
+            // The stamp is what spaces these polls out, so skipping it on
+            // failure would turn an unreachable ingest into a roster GET on
+            // every supervise tick -- a retry storm against a public endpoint,
+            // caused by exactly the outage that makes it useless.
+        }
+    }
     state.last_community_poll_at = Some(now);
     state.save(&shared.store)?;
     Ok(())
@@ -813,6 +815,82 @@ mod tests {
                 .clone()
         };
         assert_eq!(label.as_deref(), Some(health::LABEL_INGEST_UNREACHABLE));
+    }
+
+    #[tokio::test]
+    async fn a_failed_roster_poll_still_waits_out_the_interval() {
+        // The stamp is the only thing spacing these polls out. Writing it
+        // only on success turned an unreachable ingest into a roster GET on
+        // every supervise tick -- a retry storm against a public endpoint,
+        // caused by exactly the outage that makes the poll useless.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        store
+            .save_config(&crate::config::ContributorConfig {
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "http://127.0.0.1:9".to_string(),
+                // Port 9 (discard) refuses immediately on loopback, so this
+                // is a transport failure without a wait.
+                ingest_url: "http://127.0.0.1:9".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: Some("127.0.0.1".to_string()),
+                display_handle: Some("quiet-otter".to_string()),
+                public_bio: None,
+                public_since: None,
+            })
+            .unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+
+        // A standing already cached: a failed poll serves it as-is rather
+        // than blanking a section over one unreachable request.
+        let cached = community::CommunityStanding {
+            rank: Some(14),
+            novelty_credit: 1240.0,
+            accepted_in_window: 12,
+            accept_rate: Some(0.75),
+            window_label: "7d".to_string(),
+            public_since: None,
+            snapshot_at: Some(at("2026-08-17T12:00:00Z")),
+            analytics_withheld: true,
+        };
+        {
+            let mut state = shared.state.lock().expect("state lock");
+            state.community = Some(cached.clone());
+        }
+
+        let first = at("2026-08-17T12:05:00Z");
+        refresh_community(&shared, first).await.unwrap();
+        {
+            let state = shared.state.lock().expect("state lock");
+            assert_eq!(
+                state.last_community_poll_at,
+                Some(first),
+                "a failed poll must still record the attempt"
+            );
+            assert_eq!(
+                state.community.as_ref(),
+                Some(&cached),
+                "a failed poll serves the cache as-is"
+            );
+        }
+
+        // A tick a minute later is inside the interval, so the poll is
+        // skipped entirely -- the stamp does not move.
+        refresh_community(&shared, at("2026-08-17T12:06:00Z"))
+            .await
+            .unwrap();
+        let state = shared.state.lock().expect("state lock");
+        assert_eq!(
+            state.last_community_poll_at,
+            Some(first),
+            "the next tick must not re-poll inside the interval"
+        );
     }
 
     /// `trace-commons-contributor-ffi`'s own lock-contention test

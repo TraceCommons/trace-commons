@@ -838,6 +838,54 @@ pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Resu
     Ok(())
 }
 
+/// Record the profile the server just accepted in the local cache, and
+/// persist it. Returns whether the write stuck.
+///
+/// There is no `GET /v1/community/profile`: the server derives the principal
+/// from the authenticated request and offers no read-back, so this cache is
+/// the only way anything on this machine can tell that a handle was ever
+/// claimed. Both shells depend on it -- the daemon's `get_public_profile`
+/// answers from it, and `daemon::refresh_community` polls the roster only
+/// when it names a handle -- so a caller of `set_profile` that does not write
+/// it leaves the contributor on the roster with no local sign of it, and
+/// their community section never appears.
+///
+/// The write is here rather than in either shell so the CLI and the socket
+/// cache identically. The reason this is a plain function taking `&mut
+/// ContributorConfig` rather than part of `set_profile` is that the caller
+/// already holds the config it loaded, and reloading it inside the network
+/// call would race that copy.
+///
+/// A failed write is reported, not raised: the handle is published either
+/// way -- the server already accepted it -- so a caller must not tell the
+/// contributor their profile did not go up. The weaker true statement is
+/// that the profile will not read back until the next successful call.
+pub fn cache_public_profile(
+    store: &ConfigStore,
+    cfg: &mut ContributorConfig,
+    profile: &CommunityProfile,
+) -> bool {
+    cfg.display_handle = Some(profile.display_handle.clone());
+    cfg.public_bio = profile.bio.clone();
+    cfg.public_since = Some(profile.public_since);
+    store.save_config(cfg).is_ok()
+}
+
+/// Drop the cached public profile after a successful withdrawal, and
+/// persist. Returns whether the write stuck.
+///
+/// The reverse of [`cache_public_profile`]'s reasoning: the row is gone from
+/// the server regardless, and a cache that still names a withdrawn handle is
+/// worse than one that is merely stale -- it keeps `refresh_community`
+/// polling for a row that no longer exists and keeps a settings panel
+/// claiming public attribution the contributor has withdrawn.
+pub fn clear_cached_public_profile(store: &ConfigStore, cfg: &mut ContributorConfig) -> bool {
+    cfg.display_handle = None;
+    cfg.public_bio = None;
+    cfg.public_since = None;
+    store.save_config(cfg).is_ok()
+}
+
 /// Fetch a server-signed attestation of this contributor's own scores.
 ///
 /// The returned value is a compact JWS the contributor hands to a collector

@@ -122,6 +122,11 @@ pub struct CommunityStanding {
     pub novelty_credit: f64,
     /// Server `accepted_count`, which is a count *within the snapshot's
     /// window*; the client name says so, the server name does not.
+    ///
+    /// Not an `Option`, unlike `rank` and `accept_rate`: both clients parse
+    /// it as a bare number, so there is no absent form to send. A count that
+    /// does not fit therefore withholds the whole standing in `map_entry`
+    /// rather than being approximated into this field.
     pub accepted_in_window: u32,
     /// Server `accept_rate`. `None` when the value was outside `0..=1`, since
     /// the clients render it as a percentage and a nonsensical one is worse
@@ -209,10 +214,21 @@ fn map_entry(
         None => true,
     };
 
+    // `accepted_in_window` has no absent form on the wire -- both clients
+    // parse it as a bare number -- so a count this daemon cannot represent
+    // suppresses the whole standing rather than being rounded into one.
+    // `unwrap_or(0)` here used to render a negative or out-of-range count as
+    // a definite "0 accepted", which is a false claim about someone's public
+    // standing and the exact thing the module's absent-beats-approximate
+    // rule exists to prevent. `rank` and `accept_rate` can drop the figure
+    // alone because each of them is an `Option`; this one cannot, so it
+    // drops the section.
+    let accepted_in_window = u32::try_from(entry.accepted_count).ok()?;
+
     Some(CommunityStanding {
         rank: u32::try_from(entry.rank).ok().filter(|r| *r > 0),
         novelty_credit: entry.score,
-        accepted_in_window: u32::try_from(entry.accepted_count).unwrap_or(0),
+        accepted_in_window,
         accept_rate: Some(entry.accept_rate).filter(|r| (0.0..=1.0).contains(r)),
         window_label: snapshot.window.clone(),
         public_since: Some(entry.public_since),
@@ -444,6 +460,24 @@ mod tests {
         let s = standing_from_payload(&p, "quiet-otter", at("2026-08-17T12:05:00Z")).unwrap();
         assert_eq!(s.accept_rate, None);
         assert_eq!(s.rank, Some(14), "the rest of the row still stands");
+    }
+
+    #[test]
+    fn an_unrepresentable_accepted_count_withholds_the_standing() {
+        // "0 accepted" is a definite claim about someone's public standing.
+        // A count the daemon cannot represent is not evidence for it, so the
+        // section does not render at all -- the same answer as a missing row.
+        let mut p = payload();
+        p["leaderboard"][1]["accepted_count"] = serde_json::json!(-3);
+        assert!(standing_from_payload(&p, "quiet-otter", at("2026-08-17T12:05:00Z")).is_none());
+
+        p["leaderboard"][1]["accepted_count"] = serde_json::json!(i64::from(u32::MAX) + 1);
+        assert!(standing_from_payload(&p, "quiet-otter", at("2026-08-17T12:05:00Z")).is_none());
+
+        // The boundary itself is representable and still served.
+        p["leaderboard"][1]["accepted_count"] = serde_json::json!(u32::MAX);
+        let s = standing_from_payload(&p, "quiet-otter", at("2026-08-17T12:05:00Z")).unwrap();
+        assert_eq!(s.accepted_in_window, u32::MAX);
     }
 
     #[test]

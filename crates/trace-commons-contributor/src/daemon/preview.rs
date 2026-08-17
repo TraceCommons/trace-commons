@@ -159,12 +159,65 @@ fn strip_volatile(value: &mut serde_json::Value) {
 /// version bump.
 pub const REDACTION_RULESET_VERSION: &str = "1";
 
+/// Contributor-config fields that are deliberately **not** fingerprinted,
+/// with the reason each one is out.
+///
+/// All three are this device's local cache of its public roster profile
+/// (`config::ContributorConfig::display_handle` and the two fields beside
+/// it). None of them reaches the envelope: `build_raw_contribution` never
+/// reads them, the server derives the roster principal from the
+/// authenticated request rather than from anything in a body, and a handle
+/// is public by construction -- so no consent decision a contributor made
+/// about a queued trace turns on any of them.
+///
+/// Fingerprinting them was actively harmful rather than merely redundant.
+/// The cache is rewritten on every `set_public_profile` and every
+/// `clear_public_profile`, and a moved fingerprint revokes **every** approved
+/// entry in the queue (the `REASON_INPUTS_CHANGED` guard in `uploader`). So
+/// claiming a handle silently re-asked the contributor to approve every
+/// upload they had already approved -- a consent prompt raised by an action
+/// with no consent content in it, which is how contributors learn to click
+/// through the prompt that does matter.
+///
+/// A field left off this list is fingerprinted, and that is the safe
+/// default: over-invalidating re-asks, under-invalidating sends something
+/// the contributor did not approve. Adding a field to `ContributorConfig`
+/// therefore needs no edit here to be *safe* -- but
+/// `every_config_field_is_a_deliberate_fingerprint_decision` pins the whole
+/// field set, so the addition fails that test until someone says which side
+/// of this line the new field falls on.
+const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "public_since"];
+
+/// The contributor config reduced to its envelope-determining fields, as
+/// canonical bytes for [`input_fingerprint`].
+///
+/// Serialized whole and then narrowed by name rather than rebuilt field by
+/// field: a field added to `ContributorConfig` later is covered without
+/// anyone remembering to come back here, and dropping one out of the
+/// fingerprint takes a deliberate entry in `NON_ENVELOPE_CONFIG_FIELDS`.
+///
+/// `serde_json::Value`'s map is a `BTreeMap` under this crate's feature set,
+/// so the re-serialization is key-ordered and these bytes are stable for a
+/// given config.
+fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
+    let Ok(mut value) = serde_json::to_value(cfg) else {
+        return Vec::new();
+    };
+    if let Some(map) = value.as_object_mut() {
+        for field in NON_ENVELOPE_CONFIG_FIELDS {
+            map.remove(*field);
+        }
+    }
+    serde_json::to_vec(&value).unwrap_or_default()
+}
+
 /// A fingerprint of everything outside the session file that determines the
-/// envelope: the whole contributor config (consent scopes, PII filter
-/// selection, tenant/instance/subject/device identity, audience, endpoints,
-/// host allowlist), the presence and identity of the NEAR AI
-/// privacy-filter backend, and the redaction ruleset/build this daemon is
-/// running.
+/// envelope: the envelope-determining fields of the contributor config
+/// (consent scopes, PII filter selection, tenant/instance/subject/device
+/// identity, audience, endpoints, host allowlist -- that is, everything
+/// except `NON_ENVELOPE_CONFIG_FIELDS`), the presence and identity of the
+/// NEAR AI privacy-filter backend, and the redaction ruleset/build this
+/// daemon is running.
 ///
 /// Cheap -- no redaction pass, no network -- so it is recorded on every
 /// approval and re-derived before every upload, including for entries that
@@ -182,10 +235,7 @@ pub const REDACTION_RULESET_VERSION: &str = "1";
 /// See the note at the daemon's construction site in `daemon::drain_approved`.
 pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSettings>) -> String {
     let mut h = Sha256::new();
-    // Serialized rather than field-by-field so a field added to
-    // `ContributorConfig` later is covered without anyone remembering to
-    // come back here.
-    h.update(serde_json::to_vec(cfg).unwrap_or_default().as_slice());
+    h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
     h.update(REDACTION_RULESET_VERSION.as_bytes());
     h.update(b"\x00");
@@ -903,6 +953,88 @@ mod tests {
             input_fingerprint(&base, Some(&near)),
             input_fingerprint(&base, Some(&rotated))
         );
+    }
+
+    #[test]
+    fn claiming_a_public_handle_does_not_invalidate_the_approved_backlog() {
+        // The whole point of `NON_ENVELOPE_CONFIG_FIELDS`. A contributor who
+        // claims, edits, or withdraws a public handle has said nothing about
+        // any queued trace, so every approval they have already given must
+        // survive it -- otherwise the uploader re-offers the entire backlog
+        // under `approval-inputs-changed`.
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let base = sample_cfg(&store);
+        let baseline = input_fingerprint(&base, None);
+
+        let mut claimed = base.clone();
+        claimed.display_handle = Some("quiet-otter".into());
+        claimed.public_bio = Some("Ships billing systems by day.".into());
+        claimed.public_since = Some(chrono::Utc::now());
+        assert_eq!(
+            baseline,
+            input_fingerprint(&claimed, None),
+            "claiming a handle must not move the fingerprint"
+        );
+
+        let mut renamed = claimed.clone();
+        renamed.display_handle = Some("loud-otter".into());
+        renamed.public_bio = None;
+        assert_eq!(
+            baseline,
+            input_fingerprint(&renamed, None),
+            "editing a published profile must not move the fingerprint"
+        );
+    }
+
+    #[test]
+    fn every_config_field_is_a_deliberate_fingerprint_decision() {
+        // The blanket property `input_fingerprint` is built on is "hash the
+        // config whole", which only stays trustworthy while every exception
+        // to it is written down. This pins the full serialized field set so
+        // that adding a field to `ContributorConfig` fails here until
+        // whoever added it decides whether it determines the envelope. The
+        // safe answer -- and the default if they simply drop it into the
+        // list below -- is that it does.
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let value = serde_json::to_value(&cfg).unwrap();
+        let mut all: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            vec![
+                "allowed_hosts",
+                "audience",
+                "consent_scopes",
+                "device_key_id",
+                "display_handle",
+                "ingest_url",
+                "instance_id",
+                "issuer_url",
+                "pii_filter",
+                "public_bio",
+                "public_since",
+                "schema_version",
+                "tenant_id",
+                "user_subject",
+            ],
+            "a new ContributorConfig field must be classified: leave it out of \
+             NON_ENVELOPE_CONFIG_FIELDS to fingerprint it, or add it there with a reason"
+        );
+
+        // And the exclusions must name fields that actually exist -- a typo
+        // would silently fingerprint the field it meant to drop.
+        for field in NON_ENVELOPE_CONFIG_FIELDS {
+            assert!(
+                all.contains(field),
+                "NON_ENVELOPE_CONFIG_FIELDS names {field}, which is not a config field"
+            );
+        }
     }
 
     #[tokio::test]

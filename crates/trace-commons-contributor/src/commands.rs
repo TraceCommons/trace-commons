@@ -953,7 +953,7 @@ pub async fn profile(
     withdraw: bool,
     json: bool,
 ) -> Result<()> {
-    let cfg = store
+    let mut cfg = store
         .load_config()
         .context("loading contributor config")?
         .context("not logged in; run `login` first")?;
@@ -968,10 +968,23 @@ pub async fn profile(
 
     if withdraw {
         submit::clear_profile(store, &cfg).await?;
+        // Same local cache the daemon's `clear_public_profile` drops, through
+        // the same helper. A CLI withdrawal that left the cache in place
+        // would keep the daemon polling the roster for a row that is gone.
+        let cache_written = submit::clear_cached_public_profile(store, &mut cfg);
         if json {
-            println!("{}", serde_json::json!({"withdrawn": true}));
+            println!(
+                "{}",
+                serde_json::json!({"withdrawn": true, "handle_persisted": cache_written})
+            );
         } else {
             println!("public attribution withdrawn; the row goes at the next snapshot");
+            if !cache_written {
+                println!(
+                    "note: withdrawn on the server, but this machine's local copy could not \
+                     be updated"
+                );
+            }
         }
         return Ok(());
     }
@@ -996,6 +1009,14 @@ pub async fn profile(
             "setting your public handle (this needs the public_attribution scope; if the \
              server refuses, re-run `login` with --scopes debugging_evaluation,public_attribution)",
         )?;
+    // Cache what the server reported, through the same helper the daemon's
+    // `set_public_profile` uses. This is not cosmetic bookkeeping: there is
+    // no read-back endpoint, so without this write nothing on the machine
+    // knows a handle was claimed. `daemon::refresh_community` polls the
+    // roster only when the config names a handle, so a contributor who
+    // claimed one through the CLI -- the flow that ships today -- would never
+    // see their community standing appear.
+    let cache_written = submit::cache_public_profile(store, &mut cfg, &profile);
     if json {
         println!(
             "{}",
@@ -1003,12 +1024,20 @@ pub async fn profile(
                 "display_handle": profile.display_handle,
                 "bio": profile.bio,
                 "public_since": profile.public_since,
+                "handle_persisted": cache_written,
             })
         );
     } else {
         println!("public handle: {}", profile.display_handle);
         println!("public since: {}", profile.public_since);
         println!("your handle appears once an accepted submission lands in the window");
+        if !cache_written {
+            // Published either way; only the local read-back is missing.
+            println!(
+                "note: published, but this machine could not record it, so the desktop app \
+                 will not show your community standing until you run this again"
+            );
+        }
     }
     Ok(())
 }
@@ -1233,6 +1262,187 @@ mod tests {
         let cfg = store.load_config().unwrap().unwrap();
         assert_eq!(cfg.issuer_url, "https://issuer.original.invalid");
         assert_eq!(cfg.tenant_id, "tenant-original");
+    }
+
+    /// A local issuer that hands back a fixed claim, and a local ingest that
+    /// answers the profile PUT/DELETE. Neither validates anything: these
+    /// tests are about what the command does with the answer, not about the
+    /// protocol, which `submit`'s own tests pin.
+    async fn spawn_stub(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn stub_issuer() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation"],
+                    "allowed_uses": ["debugging"],
+                }))
+            }),
+        )
+    }
+
+    fn stub_profile_ingest() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/community/profile",
+            axum::routing::put(|| async {
+                axum::Json(serde_json::json!({
+                    "display_handle": "quiet-otter",
+                    "handle_normalized": "quiet-otter",
+                    "bio": "Ships billing systems by day.",
+                    "public_since": "2026-07-09T10:30:00Z",
+                    "last_updated_at": "2026-07-09T10:30:00Z",
+                    "update_count": 0,
+                }))
+            })
+            .delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_cli_profile_command_records_the_handle_it_claimed() {
+        // The CLI is the flow that ships today, and there is no
+        // `GET /v1/community/profile`. A `profile --handle` that publishes
+        // without writing the local cache leaves the contributor on the
+        // roster with nothing on the machine that knows it: the daemon's
+        // `get_public_profile` answers `on_roster: false`, and
+        // `refresh_community` takes its no-handle branch and never polls, so
+        // the History screen's community section never appears for them.
+        let issuer = spawn_stub(stub_issuer()).await;
+        let ingest = spawn_stub(stub_profile_ingest()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = enrolled_with_a_claimed_handle(&device.device_key_id);
+        cfg.issuer_url = issuer;
+        cfg.ingest_url = ingest;
+        cfg.allowed_hosts = Some("127.0.0.1".to_string());
+        cfg.display_handle = None;
+        cfg.public_bio = None;
+        cfg.public_since = None;
+        store.save_config(&cfg).unwrap();
+
+        profile(
+            &store,
+            Some("quiet-otter"),
+            Some("Ships billing systems by day."),
+            false,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let saved = store.load_config().unwrap().unwrap();
+        assert_eq!(saved.display_handle.as_deref(), Some("quiet-otter"));
+        assert_eq!(
+            saved.public_bio.as_deref(),
+            Some("Ships billing systems by day.")
+        );
+        assert!(saved.public_since.is_some());
+
+        // ...and a withdrawal takes all three back off again, so the daemon
+        // stops polling the roster for a row that no longer exists.
+        profile(&store, None, None, false, true, true)
+            .await
+            .unwrap();
+        let saved = store.load_config().unwrap().unwrap();
+        assert!(saved.display_handle.is_none());
+        assert!(saved.public_bio.is_none());
+        assert!(saved.public_since.is_none());
+    }
+
+    /// A config with a public handle already claimed on this machine.
+    fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
+        ContributorConfig {
+            schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.original.invalid".to_string(),
+            ingest_url: "https://ingest.original.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-original".to_string(),
+            instance_id: "instance-original".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: device_key_id.to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: Some("quiet-otter".to_string()),
+            public_bio: Some("Ships billing systems by day.".to_string()),
+            public_since: Some(chrono::Utc::now()),
+        }
+    }
+
+    #[tokio::test]
+    async fn re_enrolling_cannot_destroy_a_claimed_public_handle() {
+        // Both enrollment constructors write `display_handle: None`, which
+        // would be a real loss if either could run over an existing config:
+        // the server row would survive with no way to read it back, so the
+        // handle would exist publicly and be invisible locally forever.
+        //
+        // It is safe because neither path can run over an existing config --
+        // both refuse before any config write, and before the network call
+        // that would produce a response to write. So the `None` is the value
+        // for a device with no prior enrollment, which by construction has no
+        // prior handle. `logout` (`ConfigStore::wipe`) removes the config
+        // file outright and is the one operation that is *meant* to take the
+        // handle with it.
+        //
+        // That makes this a test about the refusals holding, since the day
+        // one of them stops refusing is the day the `None` becomes data loss.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        store
+            .save_config(&enrolled_with_a_claimed_handle(&device.device_key_id))
+            .unwrap();
+
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let grant = mint_grant(
+            doc.as_ref(),
+            "https://issuer.other.invalid",
+            "instance-other",
+            "alice",
+            "aud",
+            &device.device_key_id,
+            300,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let err = login(&store, Some(&grant.encode()), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("already enrolled"));
+
+        // The invite path refuses before the redemption call, so an
+        // unreachable issuer host in the invite is never contacted.
+        let err = enroll_with_invite_core(
+            &store,
+            "https://issuer.other.invalid/onboard#VQWWPGYSG8Y4LTP6",
+            None,
+            &device,
+            vec!["debugging_evaluation".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("already enrolled"));
+
+        let cfg = store.load_config().unwrap().unwrap();
+        assert_eq!(cfg.display_handle.as_deref(), Some("quiet-otter"));
+        assert_eq!(
+            cfg.public_bio.as_deref(),
+            Some("Ships billing systems by day.")
+        );
+        assert!(cfg.public_since.is_some());
     }
 
     #[test]
