@@ -6,6 +6,11 @@
 //! Only the ingest side (`/v1/traces`, `/v1/contributors/me/submission-
 //! status`) is stubbed; the enrollment and claim-minting paths run through
 //! the real `trace_upload_claim_issuer_router` from `trace-commons-server`.
+//!
+//! Non-Windows only: `trace-commons-server` is not a dev-dependency on
+//! Windows (see its Cargo.toml comment) because its dependency chain reaches
+//! openssl-sys, which is unusable on the CI Windows runner.
+#![cfg(not(windows))]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};

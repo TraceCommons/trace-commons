@@ -40,9 +40,21 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-trace-commons-server = { path = "../trace-commons-server" }
 async-trait = "0.1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tokio = { version = "1", features = ["net"] }
+
+# Not on Windows: trace-commons-server's dependency chain reaches openssl-sys
+# via webauthn-rs -> webauthn-rs-core -> webauthn-attestation-ca -> openssl.
+# The CI Windows runner has OpenSSL headers but not the link libraries, so
+# `cargo test` (which builds dev-deps) panics there with "OpenSSL libdir ...
+# does not contain the required files to either statically or dynamically
+# link OpenSSL". This crate's own code never needs trace-commons-server; only
+# three cross-check tests in account_auth.rs and the e2e_enroll_and_submit
+# integration test use it, and both are gated `#[cfg(not(windows))]` /
+# `#![cfg(not(windows))]` to match. Do not move this back into unconditional
+# [dev-dependencies] without first fixing the openssl-sys link on Windows.
+[target.'cfg(not(windows))'.dev-dependencies]
+trace-commons-server = { path = "../trace-commons-server" }
