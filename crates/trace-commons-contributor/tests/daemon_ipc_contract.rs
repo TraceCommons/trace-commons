@@ -787,6 +787,11 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
                 approved_inputs: None,
                 previewed_envelope_digest: None,
                 approved_at: None,
+                // A single-file session: no delegated transcripts, nothing
+                // dropped to fit the budget. This fixture is about the turn
+                // index, not about grouping.
+                subagent_count: 0,
+                subagents_dropped: 0,
             },
             100,
         )

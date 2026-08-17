@@ -546,6 +546,12 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            // No public profile claimed. These are cache fields, excluded
+            // from the input fingerprint, so they cannot affect what this
+            // test measures -- the re-hash guard seeing a new subagent.
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&cfg).unwrap();
 
