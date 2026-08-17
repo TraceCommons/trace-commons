@@ -281,8 +281,37 @@ jobs:
           key: ${{ runner.os }}-cargo-windows-update-conformance-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-windows-update-conformance-
+      # Proven on a real Windows host (the tc-win-dev GCE box) on 2026-08-17:
+      # this compiles every #[cfg(windows)] body under -D warnings. It is the
+      # load-bearing step of this job. It uses --bins and needs no OpenSSL,
+      # because nothing here pulls the dev-dependency graph.
       - name: Build trace-commons-contributor for Windows
-        run: cargo build -p trace-commons-contributor
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p trace-commons-contributor --bins
+      # The test steps below DO pull dev-dependencies, and that graph reaches
+      # OpenSSL: trace-commons-contributor dev-depends on trace-commons-server,
+      # which depends on webauthn-rs -> webauthn-rs-core ->
+      # webauthn-attestation-ca -> openssl -> openssl-sys. On the real Windows
+      # box that build script fails with "Could not find directory of OpenSSL
+      # installation", so the tests cannot run without pointing it at one.
+      # windows-latest ships OpenSSL; this locates it rather than assuming a
+      # hardcoded path, and fails loudly if the image ever stops shipping it.
+      - name: Point openssl-sys at the runner's OpenSSL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "C:\Program Files\OpenSSL",
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\Strawberry\c"
+          ) | Where-Object { Test-Path (Join-Path $_ "include\openssl\ssl.h") }
+          if (-not $candidates) {
+            throw "No OpenSSL installation found on this runner. openssl-sys cannot build, so the update tests cannot run. Install one or adjust this step."
+          }
+          $dir = $candidates[0]
+          Write-Host "using OPENSSL_DIR=$dir"
+          "OPENSSL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Run the update unit tests
         run: cargo test -p trace-commons-contributor --lib "update::"
       # Includes the_platform_verifier_refuses_the_unsigned_fixture, the only
