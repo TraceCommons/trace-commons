@@ -9,10 +9,16 @@
 //! value affordance in the product: someone under an NDA gets certainty in
 //! five seconds without reading 148 turns.
 //!
-//! `Contribute` exists here and nowhere else, and it is followed by an undo
-//! counted against the daemon's own deadline.
+//! `Contribute` exists here and nowhere else, it has no keyboard shortcut,
+//! and it is followed by an undo counted against the daemon's own deadline.
+//! It is also gated: the sheet will not arm it until the transcript tab has
+//! been opened *and* the acknowledgement below it has been ticked. The
+//! footnote under those two boxes says out loud what the gate can and
+//! cannot know -- it sees that the tab was opened, not that anything on it
+//! was read -- because a gate that implied otherwise would be the rubber
+//! stamp this sheet exists to prevent.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -21,7 +27,7 @@ use gtk::glib;
 use super::App;
 use super::style::{self, Tone, space};
 use crate::copy;
-use crate::model::{ApproveResult, PreviewSummary, human_bytes};
+use crate::model::{ApproveResult, PreviewSummary, human_bytes, human_when};
 
 /// Open the preview sheet on the `index`-th pending entry.
 pub fn open(app: &Rc<App>, index: usize) {
@@ -53,10 +59,27 @@ struct Sheet {
     pending: Vec<crate::model::QueueEntry>,
     index: RefCell<usize>,
 
+    /// The four tabs' pages. Which one is showing is the single source of
+    /// truth for the strip's selection and for the first half of the read
+    /// gate.
+    stack: gtk::Stack,
+
+    /// The identity row of the sheet header: who ran this, with what, and
+    /// when. The same three facts the queue row led with.
+    identity_project: gtk::Label,
+    identity_agent: gtk::Label,
+    identity_when: gtk::Label,
+
     /// The same four fields the queue row carried, kept in view on every
     /// tab. A person who is deciding should not have to go back to a tab to
     /// re-read what the payload was.
     manifest_slot: gtk::Box,
+
+    /// The two counts the tab strip carries: how many turns are in the
+    /// trace, and how many permissions the contribution would run under.
+    /// Both are read off the pinned preview, never typed in.
+    count_whats_in_it: gtk::Label,
+    count_permissions: gtk::Label,
 
     search_entry: gtk::SearchEntry,
     search_results: gtk::Box,
@@ -67,11 +90,57 @@ struct Sheet {
     body_view: gtk::TextView,
     permissions: gtk::Box,
 
+    /// The read gate. The first box is set by opening the transcript tab and
+    /// cannot be ticked by hand; the second is the contributor's own
+    /// statement. `Contribute` needs both, and a pinned preview besides.
+    gate_opened: gtk::CheckButton,
+    gate_acknowledged: gtk::CheckButton,
+    /// Whether the preview now showing is bindable to an approval at all.
+    /// An unenrolled build previews against a placeholder identity, so there
+    /// is nothing for a `Contribute` to cover.
+    pinned: Cell<bool>,
+
     contribute: gtk::Button,
     /// The redacted body for the entry currently shown, when this
     /// deployment can serve one. See `backend`.
     body: RefCell<Option<String>>,
 }
+
+/// One tab of the preview strip: the stack child it shows, its label, and
+/// the icon that keeps it legible at a glance.
+struct Tab {
+    name: &'static str,
+    label: &'static str,
+    icon: &'static str,
+}
+
+/// The four tabs, in the order the shared spec gives them. Search is first
+/// because it is the question a contributor can actually answer.
+const TABS: [Tab; 4] = [
+    Tab {
+        name: "search",
+        label: copy::TAB_SEARCH,
+        icon: "system-search-symbolic",
+    },
+    Tab {
+        name: "whats-in-it",
+        label: copy::TAB_WHATS_IN_IT,
+        icon: "view-list-symbolic",
+    },
+    Tab {
+        name: "would-be-sent",
+        label: copy::TAB_WOULD_BE_SENT,
+        icon: "text-x-generic-symbolic",
+    },
+    Tab {
+        name: "permissions",
+        label: copy::TAB_PERMISSIONS,
+        icon: "emblem-ok-symbolic",
+    },
+];
+
+/// The stack child whose opening satisfies the first half of the read gate.
+const TRANSCRIPT_TAB: &str = "would-be-sent";
 
 impl Sheet {
     fn present(
@@ -93,28 +162,79 @@ impl Sheet {
         header.add_css_class("tc-header");
         header.pack_start(&style::brand_mark());
 
+        // The sheet header: who and when, then the manifest strip, then the
+        // one sentence that has to survive every other word on the screen.
+        // The spec draws it as a full-bleed band on the card surface; this
+        // shell has no full-bleed surface class, so it is drawn as a card in
+        // the same margins as everything else in the window.
+        let identity_project = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        identity_project.add_css_class("tc-card-title");
+        let identity_agent = gtk::Label::builder().xalign(0.0).build();
+        identity_agent.add_css_class("tc-meta");
+        let identity_when = gtk::Label::builder().xalign(1.0).build();
+        identity_when.add_css_class("tc-meta");
+        let identity_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        identity_spacer.set_hexpand(true);
+        let identity = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        identity.append(&identity_project);
+        identity.append(&identity_agent);
+        identity.append(&identity_spacer);
+        identity.append(&identity_when);
+
         let manifest_slot = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .margin_top(space::M)
-            .margin_start(space::L)
-            .margin_end(space::L)
             .build();
+
+        // Green, a padlock's worth of words, and a glyph -- the status of
+        // the whole sheet, said before anything asks for a decision.
+        let status_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let status_chip = style::tag(copy::NOTHING_SENT_YET, Tone::Clear);
+        status_chip.set_valign(gtk::Align::Center);
+        let reassurance = gtk::Label::builder()
+            .label(copy::NOTHING_SENT_REASSURANCE)
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .build();
+        reassurance.add_css_class("tc-meta");
+        status_row.append(&status_chip);
+        status_row.append(&reassurance);
+
+        let sheet_header = style::card(gtk::Orientation::Vertical, space::S);
+        sheet_header.set_margin_top(space::M);
+        sheet_header.set_margin_start(space::L);
+        sheet_header.set_margin_end(space::L);
+        sheet_header.append(&identity);
+        sheet_header.append(&manifest_slot);
+        sheet_header.append(&status_row);
 
         let stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::None)
             .vexpand(true)
             .build();
-        let switcher = gtk::StackSwitcher::builder().stack(&stack).build();
-        switcher.set_margin_top(space::M);
-        switcher.set_halign(gtk::Align::Center);
 
         // 1. Search, first and focused.
         let search_entry = gtk::SearchEntry::new();
         search_entry.set_placeholder_text(Some("Anything that must not leave this machine"));
+        search_entry.set_hexpand(true);
+        let search_button = gtk::Button::with_label(copy::SEARCH_SUBMIT);
+        search_button.add_css_class("tc-quiet");
+        let search_field = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        search_field.append(&search_entry);
+        search_field.append(&search_button);
+
+        // The match count is the loudest thing on the tab when there is
+        // one, and the quietest when there is not. It is set at the screen
+        // title's step because it is the answer the whole tab exists for.
         let search_summary = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        let search_results = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let recent_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        search_summary.add_css_class("tc-ledger");
+        search_summary.add_css_class("tc-screen-title");
+        let search_results = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        let recent_row = gtk::Box::new(gtk::Orientation::Horizontal, space::XS);
+        let recent_label = gtk::Label::new(Some(copy::RECENT_LABEL));
+        recent_label.add_css_class("tc-meta");
+        let recents = gtk::Box::new(gtk::Orientation::Horizontal, space::XS);
+        recents.append(&recent_label);
+        recents.append(&recent_row);
         let search_page = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(space::M)
@@ -130,8 +250,8 @@ impl Sheet {
             .build();
         search_prompt.add_css_class("tc-body");
         search_page.append(&search_prompt);
-        search_page.append(&search_entry);
-        search_page.append(&recent_row);
+        search_page.append(&search_field);
+        search_page.append(&recents);
         search_page.append(&search_summary);
         let results_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -158,26 +278,53 @@ impl Sheet {
         stack.add_titled(&whats_scroller, Some("whats-in-it"), copy::TAB_WHATS_IN_IT);
 
         // 3. Exactly what would be sent.
+        //
+        // Flat monospaced text, deliberately not chat bubbles: what is on
+        // this tab is the literal bytes an approval covers, and anything
+        // that dressed them up as a conversation would be showing a
+        // rendering of the payload rather than the payload.
         let body_view = gtk::TextView::builder()
             .editable(false)
             .cursor_visible(false)
             .wrap_mode(gtk::WrapMode::WordChar)
             .monospace(true)
-            .left_margin(space::L)
-            .right_margin(space::L)
-            .top_margin(space::L)
-            .bottom_margin(space::L)
             .build();
         body_view.add_css_class("tc-transcript");
+        // The spec sets the transcript at 11px / 1.7. GTK 4 CSS has no
+        // line-height, so the leading is set here in pixels instead: an
+        // 11px monospaced line lands around 15px on its own metrics, and
+        // 1.7 asks for about 19. `pixels_inside_wrap` carries the same
+        // leading across a wrapped line, which is most of them -- a
+        // transcript is one very long paragraph per turn.
+        body_view.set_pixels_above_lines(2);
+        body_view.set_pixels_below_lines(2);
+        body_view.set_pixels_inside_wrap(4);
         let body_scroller = gtk::ScrolledWindow::builder()
             .vexpand(true)
             .child(&body_view)
             .build();
-        stack.add_titled(
-            &body_scroller,
-            Some("would-be-sent"),
-            copy::TAB_WOULD_BE_SENT,
-        );
+        // The caption states the framing before the bytes arrive, and it
+        // names a marker so the first chip a person meets is one they have
+        // already been told about.
+        let body_caption = gtk::Label::builder()
+            .label(copy::TRANSCRIPT_CAPTION)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        body_caption.add_css_class("tc-meta");
+        let body_panel = style::card(gtk::Orientation::Vertical, 0);
+        body_panel.append(&body_scroller);
+        let body_page = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::M)
+            .margin_top(space::M)
+            .margin_bottom(space::M)
+            .margin_start(space::L)
+            .margin_end(space::L)
+            .build();
+        body_page.append(&body_caption);
+        body_page.append(&body_panel);
+        stack.add_titled(&body_page, Some(TRANSCRIPT_TAB), copy::TAB_WOULD_BE_SENT);
 
         // 4. Permissions.
         let permissions = gtk::Box::builder()
@@ -205,9 +352,96 @@ impl Sheet {
 
         stack.set_visible_child_name("search");
 
+        // The tab strip: a segmented control rather than a
+        // `GtkStackSwitcher`, because two of the four tabs carry a count and
+        // a switcher has nowhere to put one. The selected item is a raised
+        // pill on the surface colour with no border -- the Linux column of
+        // the spec, and the one place in this window where a shadow is
+        // allowed. See `.tc-tab` in `style.css`.
+        let count_whats_in_it = gtk::Label::new(None);
+        count_whats_in_it.add_css_class("tc-tab-count");
+        let count_permissions = gtk::Label::new(None);
+        count_permissions.add_css_class("tc-tab-count");
+        let tab_track = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(space::XXS)
+            .halign(gtk::Align::Center)
+            .margin_top(space::M)
+            .build();
+        tab_track.add_css_class("tc-tab-track");
+        let mut tab_buttons: Vec<gtk::ToggleButton> = Vec::with_capacity(TABS.len());
+        for tab in &TABS {
+            let button = gtk::ToggleButton::new();
+            button.add_css_class("tc-tab");
+            let inner = gtk::Box::new(gtk::Orientation::Horizontal, space::XXS);
+            let icon = gtk::Image::from_icon_name(tab.icon);
+            icon.set_pixel_size(11);
+            inner.append(&icon);
+            inner.append(&gtk::Label::new(Some(tab.label)));
+            match tab.name {
+                "whats-in-it" => inner.append(&count_whats_in_it),
+                "permissions" => inner.append(&count_permissions),
+                _ => {}
+            }
+            button.set_child(Some(&inner));
+            // One selection, not four independent toggles.
+            if let Some(first) = tab_buttons.first() {
+                button.set_group(Some(first));
+            }
+            button.set_active(tab.name == "search");
+            let stack_for_tab = stack.clone();
+            let name = tab.name;
+            button.connect_toggled(move |button| {
+                if button.is_active() {
+                    stack_for_tab.set_visible_child_name(name);
+                }
+            });
+            tab_track.append(&button);
+            tab_buttons.push(button);
+        }
+
+        // The read gate, and the footnote that says what it can and cannot
+        // know. Both rows are 11px; the spec ranks the second one's label a
+        // step darker than the first, which this shell has no type class for
+        // yet -- see the report.
+        let gate_opened = gtk::CheckButton::new();
+        // System-set, not contributor-set: it says the transcript tab was
+        // opened, and a box a person could tick themselves would be saying
+        // something else. Left sensitive rather than disabled so it renders
+        // as a ticked statement instead of a greyed-out control.
+        gate_opened.set_can_target(false);
+        gate_opened.set_focusable(false);
+        let gate_acknowledged = gtk::CheckButton::new();
+        let gate = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XS)
+            .build();
+        gate.append(&gate_row(&gate_opened, copy::GATE_OPENED));
+        gate.append(&gate_row(&gate_acknowledged, copy::GATE_ACKNOWLEDGED));
+        let footnote = gtk::Label::builder()
+            .label(copy::GATE_FOOTNOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        footnote.add_css_class("tc-caveat");
+        footnote.add_css_class("tc-tertiary");
+        gate.append(&footnote);
+
+        // The concession, on the footer rather than on a tab, so it is on
+        // screen at the moment of the decision whichever tab is open. See
+        // `copy::RESIDUAL_RISK`.
+        let residual_risk = gtk::Label::builder()
+            .label(copy::RESIDUAL_RISK)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        residual_risk.add_css_class("tc-caveat");
+
         let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
         skip.add_css_class("tc-quiet");
         skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
+        let close = gtk::Button::with_label(copy::CLOSE);
+        close.add_css_class("tc-quiet");
         let contribute = gtk::Button::with_label(copy::CONTRIBUTE);
         // `.suggested-action` fills with `accent_bg_color` and labels with
         // `accent_fg_color`, which `style` sets to the measured pair. This
@@ -216,34 +450,46 @@ impl Sheet {
         contribute.add_css_class("suggested-action");
         contribute.add_css_class("tc-primary");
         contribute.set_sensitive(false);
+        // Deliberately no accelerator and no default-widget binding: the
+        // one irreversible action in the product is reachable by pointing
+        // at it and nothing else.
         let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         let actions = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
+            .spacing(space::S)
+            .build();
+        actions.append(&skip);
+        actions.append(&spacer);
+        actions.append(&close);
+        actions.append(&contribute);
+
+        // A rule above the footer, so the gate and the actions sit on a
+        // footer rather than floating under whichever tab happens to be
+        // open.
+        let footer_rule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        footer_rule.add_css_class("tc-rule");
+        footer_rule.set_height_request(1);
+        let footer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
             .spacing(space::S)
             .margin_top(space::M)
             .margin_bottom(space::M)
             .margin_start(space::L)
             .margin_end(space::L)
             .build();
-        actions.append(&skip);
-        actions.append(&spacer);
-        actions.append(&contribute);
-
-        // A rule above the actions, so the two controls sit on a footer
-        // rather than floating under whichever tab happens to be open.
-        let footer_rule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        footer_rule.add_css_class("tc-rule");
-        footer_rule.set_height_request(1);
+        footer.append(&residual_risk);
+        footer.append(&gate);
+        footer.append(&actions);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
-        content.append(&manifest_slot);
-        content.append(&switcher);
+        content.append(&sheet_header);
+        content.append(&tab_track);
         content.append(&stack);
         content.append(&footer_rule);
-        content.append(&actions);
+        content.append(&footer);
         window.set_content(Some(&content));
 
         let sheet = Rc::new(Sheet {
@@ -252,7 +498,13 @@ impl Sheet {
             title,
             pending,
             index: RefCell::new(index),
+            stack: stack.clone(),
+            identity_project,
+            identity_agent,
+            identity_when,
             manifest_slot,
+            count_whats_in_it,
+            count_permissions,
             search_entry: search_entry.clone(),
             search_results,
             search_summary,
@@ -260,6 +512,9 @@ impl Sheet {
             whats_in_it,
             body_view,
             permissions,
+            gate_opened: gate_opened.clone(),
+            gate_acknowledged: gate_acknowledged.clone(),
+            pinned: Cell::new(false),
             contribute: contribute.clone(),
             body: RefCell::new(None),
         });
@@ -274,9 +529,42 @@ impl Sheet {
             s.run_search(&entry.text(), true);
         });
         let s = Rc::clone(&sheet);
+        search_button.connect_clicked(move |_| {
+            let term = s.search_entry.text();
+            s.remember_search(&term);
+            s.run_search(&term, true);
+        });
+        let s = Rc::clone(&sheet);
         skip.connect_clicked(move |_| s.dismiss_current());
         let s = Rc::clone(&sheet);
         contribute.connect_clicked(move |_| s.approve_current());
+        let window_for_close = window.clone();
+        close.connect_clicked(move |_| window_for_close.close());
+
+        // The first half of the read gate. It is satisfied by the tab
+        // actually coming into view, so it holds however the tab was
+        // reached -- the strip, a programmatic open, or a future keyboard
+        // path -- rather than only when the strip was clicked.
+        let s = Rc::clone(&sheet);
+        let buttons = tab_buttons.clone();
+        stack.connect_visible_child_name_notify(move |stack| {
+            let Some(name) = stack.visible_child_name() else {
+                return;
+            };
+            let name = name.as_str();
+            for (button, tab) in buttons.iter().zip(TABS.iter()) {
+                if tab.name == name {
+                    button.set_active(true);
+                }
+            }
+            if name == TRANSCRIPT_TAB {
+                s.gate_opened.set_active(true);
+            }
+        });
+        let s = Rc::clone(&sheet);
+        gate_opened.connect_toggled(move |_| s.sync_contribute());
+        let s = Rc::clone(&sheet);
+        gate_acknowledged.connect_toggled(move |_| s.sync_contribute());
 
         sheet.load();
         window.present();
@@ -305,14 +593,33 @@ impl Sheet {
             self.window.close();
             return;
         };
-        self.title.set_title(&entry.project_label);
-        self.title.set_subtitle(&format!(
-            "{} - {} of {}",
+        self.title.set_title(&format!(
+            "{} \u{2014} {}",
+            copy::SHEET_TITLE_PREFIX,
+            entry.project_label
+        ));
+        self.title.set_subtitle("");
+        self.identity_project.set_text(&entry.project_label);
+        self.identity_agent.set_text(&format!(
+            "{} \u{2014} {} of {}",
             entry.agent_label(),
             *self.index.borrow() + 1,
             self.pending.len()
         ));
-        self.contribute.set_sensitive(false);
+        self.identity_when
+            .set_text(&human_when(entry.discovered_at));
+        // A new entry is a new decision, so the gate starts closed again --
+        // including the half that was satisfied by reading the *previous*
+        // trace's transcript. The exception is a sheet that is sitting on
+        // the transcript tab already: that tab is about to show the new
+        // trace, so the statement the box makes is true of this one too.
+        self.pinned.set(false);
+        self.gate_opened
+            .set_active(self.stack.visible_child_name().as_deref() == Some(TRANSCRIPT_TAB));
+        self.gate_acknowledged.set_active(false);
+        self.sync_contribute();
+        self.count_whats_in_it.set_text("");
+        self.count_permissions.set_text("");
         self.search_summary.set_text("");
         self.clear_results();
         self.set_manifest(None);
@@ -338,19 +645,31 @@ impl Sheet {
         });
     }
 
-    /// Rebuild the strip at the top of the sheet from the same function the
+    /// Rebuild the strip in the sheet header from the same function the
     /// queue row uses, so the four fields are identical in both places.
+    ///
+    /// It sits inside the header card, where the inset surface reads
+    /// against the card's face. On the ground it would not: `surface-2` and
+    /// `bg` are within a hair of each other and the strip would disappear.
     fn set_manifest(&self, summary: Option<&PreviewSummary>) {
         while let Some(child) = self.manifest_slot.first_child() {
             self.manifest_slot.remove(&child);
         }
-        // On a card the inset strip reads against the card's face; here it
-        // would be sitting straight on the ground, where `surface-2` and
-        // `bg` are within a hair of each other and the strip disappears. So
-        // it keeps its card.
-        let holder = style::card(gtk::Orientation::Vertical, 0);
-        holder.append(&super::queue::manifest_for(summary));
-        self.manifest_slot.append(&holder);
+        self.manifest_slot
+            .append(&super::queue::manifest_for(summary));
+    }
+
+    /// Arm `Contribute` only when all three conditions hold at once: a
+    /// pinned preview to approve against, the transcript tab opened, and
+    /// the acknowledgement ticked.
+    ///
+    /// One function, called from every place any of the three can change,
+    /// so there is no path that sets the button sensitive while forgetting
+    /// one of them.
+    fn sync_contribute(&self) {
+        let ready =
+            self.pinned.get() && self.gate_opened.is_active() && self.gate_acknowledged.is_active();
+        self.contribute.set_sensitive(ready);
     }
 
     fn fill(self: &Rc<Self>, summary: &PreviewSummary, body: Option<String>) {
@@ -359,7 +678,13 @@ impl Sheet {
         // unenrolled build carries a placeholder identity and is not
         // bindable to an approval, so the button stays off and the sheet
         // says why.
-        self.contribute.set_sensitive(summary.enrolled);
+        self.pinned.set(summary.enrolled);
+        self.sync_contribute();
+        // The two counts on the tab strip, read off the pinned preview.
+        self.count_whats_in_it
+            .set_text(&summary.event_count.to_string());
+        self.count_permissions
+            .set_text(&summary.consent_scopes.len().to_string());
 
         *self.body.borrow_mut() = body.clone();
         match &body {
@@ -398,14 +723,11 @@ impl Sheet {
         ] {
             detail.append(&super::titled_paragraph(heading, &value));
         }
-        // The constant, verbatim and in full. The queue row carries a line
-        // that varies with what scrubbing did to that session; this is the
-        // screen a person is actually reading on when they decide, so it is
-        // where the whole sentence belongs. See `copy::residual_risk_line`.
-        detail.append(&super::titled_paragraph(
-            "Residual risk",
-            copy::RESIDUAL_RISK,
-        ));
+        // The concession used to be restated here as a "Residual risk"
+        // field. It now lives on the sheet's footer instead, which is the
+        // same sentence in a strictly better place: the footer is on screen
+        // on every tab, so it cannot be the one thing a person happened not
+        // to be looking at when they decided. See `copy::RESIDUAL_RISK`.
         self.whats_in_it.append(&detail);
 
         if !summary.enrolled {
@@ -472,7 +794,8 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
-        self.contribute.set_sensitive(false);
+        self.pinned.set(false);
+        self.sync_contribute();
         let sentence = match label {
             "preview-failed" | "unavailable" => {
                 "Trace Commons can't work out what would be sent right now, so there is nothing \
@@ -540,6 +863,24 @@ impl Sheet {
             self.set_summary_tone(Tone::Clear);
             self.search_summary
                 .set_text(&format!("{}  0 matches", Tone::Clear.glyph()));
+            // A clean answer is still worth one caution, and the caution is
+            // the gold one: a literal search finds the spelling it was
+            // given and no other. Glyph, words and colour, so it survives
+            // greyscale.
+            let card = style::card(gtk::Orientation::Vertical, space::S);
+            card.add_css_class("tc-flagged");
+            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            heading.append(&style::tag(copy::NOTHING_MATCHED, Tone::Attention));
+            heading.set_halign(gtk::Align::Start);
+            let caution = gtk::Label::builder()
+                .label(copy::NOTHING_MATCHED_BODY)
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            caution.add_css_class("tc-body");
+            card.append(&heading);
+            card.append(&caution);
+            self.search_results.append(&card);
             return;
         }
         self.set_summary_tone(Tone::Attention);
@@ -550,15 +891,18 @@ impl Sheet {
             if hits.len() == 1 { "match" } else { "matches" }
         ));
         for start in hits.iter().take(50) {
-            let snippet = context_around(body, *start, needle.len());
+            let excerpt = context_around(body, *start, needle.len());
             let label = gtk::Label::builder()
-                .label(snippet)
                 .xalign(0.0)
                 .wrap(true)
                 .selectable(true)
                 .build();
+            label.set_markup(&excerpt.markup());
             label.add_css_class("tc-mono");
-            let row = style::card(gtk::Orientation::Vertical, 0);
+            // A recess in the tab rather than a card of its own: an excerpt
+            // is a quotation of the transcript, not a second document.
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            row.add_css_class("tc-code");
             row.append(&label);
             self.search_results.append(&row);
         }
@@ -602,6 +946,11 @@ impl Sheet {
             });
             self.recent_row.append(&button);
         }
+        // "Recent:" with nothing after it is a label for an empty set, so
+        // the whole row goes when there is nothing to recall.
+        if let Some(row) = self.recent_row.parent() {
+            row.set_visible(self.recent_row.first_child().is_some());
+        }
     }
 
     fn dismiss_current(self: &Rc<Self>) {
@@ -620,9 +969,15 @@ impl Sheet {
 
     /// Approve exactly the bytes this sheet described, then offer a real
     /// undo.
+    ///
+    /// The undo itself is the queue's, not the sheet's: recovery lives on
+    /// the screen a contributor lands on after deciding, not behind a sheet
+    /// that has already closed or moved on to the next session. See
+    /// `App::offer_undo`.
     fn approve_current(self: &Rc<Self>) {
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
+        let project_label = entry.project_label.clone();
         self.contribute.set_sensitive(false);
         let sheet = Rc::clone(self);
         self.app.call(
@@ -637,7 +992,7 @@ impl Sheet {
                                 hold_secs: 0,
                                 hold_until: None,
                             });
-                        offer_undo(app, &entry_id, approved);
+                        app.offer_undo(&entry_id, &project_label, approved.hold_until);
                     }
                     Err(_) => {
                         app.toast("That couldn't be approved just now. Nothing has been sent.")
@@ -663,59 +1018,6 @@ impl Sheet {
     }
 }
 
-/// The undo window, counted against the daemon's clock.
-///
-/// `hold_until` is the instant the daemon will first consider the entry for
-/// upload, read from the entry it just wrote. Counting down against a
-/// duration this process picked instead would be the same bug as having no
-/// hold at all: the countdown and the daemon would disagree about when the
-/// decision stops being reversible. `hold_until: null` means no undo may be
-/// offered, so none is.
-fn offer_undo(app: &Rc<App>, entry_id: &str, approved: ApproveResult) {
-    let Some(hold_until) = approved.hold_until else {
-        app.toast(copy::APPROVED_NO_UNDO);
-        return;
-    };
-
-    let toast = adw::Toast::new(copy::SENDING);
-    toast.set_button_label(Some(copy::UNDO));
-    // Dismissed by the countdown below, not by a timeout of its own: the
-    // window that matters is the daemon's.
-    toast.set_timeout(0);
-
-    let entry_id_for_undo = entry_id.to_string();
-    let app_for_undo = Rc::clone(app);
-    toast.connect_button_clicked(move |toast| {
-        toast.dismiss();
-        let entry_id = entry_id_for_undo.clone();
-        app_for_undo.call(
-            "cancel",
-            serde_json::json!({ "entry_id": entry_id }),
-            |app, result| {
-                match result {
-                    Ok(_) => app.toast("Not sent. It's back in the queue."),
-                    // `cancel` is guaranteed to succeed for the whole hold,
-                    // so this is the rare late press.
-                    Err(_) => app.toast("Too late to take that one back -- it has already gone."),
-                }
-                app.refresh();
-            },
-        );
-    });
-
-    app.toasts.add_toast(toast.clone());
-
-    glib::timeout_add_seconds_local(1, move || {
-        let remaining = (hold_until - chrono::Utc::now()).num_seconds();
-        if remaining <= 0 {
-            toast.dismiss();
-            return glib::ControlFlow::Break;
-        }
-        toast.set_title(&format!("{} ({remaining})", copy::SENDING));
-        glib::ControlFlow::Continue
-    });
-}
-
 /// Show where scrubbing fired, rather than leaving holes.
 ///
 /// The pipeline replaces removed values with visible markers
@@ -735,6 +1037,14 @@ fn offer_undo(app: &Rc<App>, entry_id: &str, approved: ApproveResult) {
 /// A text tag cannot reference a CSS named colour, so these two pairs are
 /// the one place outside `style` that names a colour. They must be kept in
 /// step with `tc_redaction_bg` / `tc_redaction_fg`.
+///
+/// The spec draws the marker as a chip with a 3px radius and 4px of side
+/// padding. A `GtkTextTag` has neither -- a text buffer can set a run's
+/// colours and weight and nothing about its box -- so what lands is the
+/// same wash and weight with square ends. The property that matters is
+/// carried either way: the marker reads as a legible chip rather than as a
+/// hole. See `.tc-redaction` in `style.css` for the full treatment, which
+/// applies where a marker is drawn as a widget rather than as buffer text.
 fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
     let dark = adw::StyleManager::default().is_dark();
     let (background, foreground) = if dark {
@@ -780,10 +1090,74 @@ fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
     }
 }
 
+/// One row of the read gate: the box, then the sentence it is making.
+///
+/// The label is a separate widget rather than the check button's own, so it
+/// can wrap -- these are two full sentences, not control labels. The button
+/// carries the same words as its accessible name, so a screen reader reads
+/// the statement rather than an unnamed checkbox.
+fn gate_row(check: &gtk::CheckButton, text: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    check.set_valign(gtk::Align::Start);
+    check.update_property(&[gtk::accessible::Property::Label(text)]);
+    let label = gtk::Label::builder()
+        .label(text)
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .build();
+    label.add_css_class("tc-caveat");
+    row.append(check);
+    row.append(&label);
+    row
+}
+
+/// A readable window around a search hit, and where inside it the hit is.
+///
+/// The range is kept rather than re-found, because re-finding it in the
+/// rendered snippet would have to reproduce the case folding the search
+/// used and would mark the wrong run the first time the two disagreed.
+struct Excerpt {
+    text: String,
+    hit: std::ops::Range<usize>,
+}
+
+impl Excerpt {
+    /// The excerpt as Pango markup, with the matched run washed in the
+    /// brand's "weigh this" gold.
+    ///
+    /// Pango cannot reference a CSS named colour any more than a text tag
+    /// can, so the hue and its alpha are written out per scheme. They are
+    /// `tc_gold_highlight`'s own two components -- `rgba(185,130,31,.28)`
+    /// light, `rgba(220,170,67,.32)` dark -- and must be kept in step with
+    /// it. Only the background is set: the foreground stays the label's own
+    /// ink, which is what keeps the excerpt readable at both ends of the
+    /// scheme.
+    fn markup(&self) -> String {
+        let dark = adw::StyleManager::default().is_dark();
+        let (hue, alpha) = if dark {
+            ("#DCAA43", "32%")
+        } else {
+            ("#B9821F", "28%")
+        };
+        format!(
+            "{}<span background=\"{hue}\" bgalpha=\"{alpha}\">{}</span>{}",
+            glib::markup_escape_text(&self.text[..self.hit.start]),
+            glib::markup_escape_text(&self.text[self.hit.clone()]),
+            glib::markup_escape_text(&self.text[self.hit.end..]),
+        )
+    }
+}
+
 /// A readable window around a search hit. Character-safe: slicing a UTF-8
 /// body on a byte offset would panic on a multi-byte boundary, and traces
 /// contain plenty of those.
-fn context_around(body: &str, byte_start: usize, needle_len: usize) -> String {
+///
+/// Newlines are replaced rather than stripped so that the returned range
+/// still indexes the returned string: a snippet whose highlight had drifted
+/// by the number of line breaks in it would mark the wrong words, which on
+/// this screen is worse than marking none.
+fn context_around(body: &str, byte_start: usize, needle_len: usize) -> Excerpt {
     let start = body[..byte_start]
         .char_indices()
         .rev()
@@ -791,15 +1165,24 @@ fn context_around(body: &str, byte_start: usize, needle_len: usize) -> String {
         .last()
         .map(|(i, _)| i)
         .unwrap_or(byte_start);
-    let after = byte_start + needle_len;
-    let end = body[after.min(body.len())..]
+    let after = (byte_start + needle_len).min(body.len());
+    let end = body[after..]
         .char_indices()
         .take(60)
         .last()
         .map(|(i, _)| after + i)
         .unwrap_or(body.len());
-    let snippet = body[start..end.min(body.len())].replace('\n', " ");
-    format!("…{}…", snippet.trim())
+    let head = body[start..byte_start].replace('\n', " ");
+    let head = head.trim_start();
+    let hit = body[byte_start..after].replace('\n', " ");
+    let tail = body[after..end.min(body.len())].replace('\n', " ");
+    let tail = tail.trim_end();
+    let lead = "\u{2026}";
+    let hit_start = lead.len() + head.len();
+    Excerpt {
+        text: format!("{lead}{head}{hit}{tail}\u{2026}"),
+        hit: hit_start..hit_start + hit.len(),
+    }
 }
 
 #[cfg(test)]
@@ -810,7 +1193,26 @@ mod tests {
     fn context_never_splits_a_multibyte_character() {
         let body = "prefix ünïcödé haystack needle tail ünïcödé more";
         let start = body.find("needle").unwrap();
-        let snippet = context_around(body, start, "needle".len());
-        assert!(snippet.contains("needle"));
+        let excerpt = context_around(body, start, "needle".len());
+        assert!(excerpt.text.contains("needle"));
+    }
+
+    /// The highlight has to land on the matched term itself. A range that
+    /// drifted -- by the ellipsis, by a trimmed space, by a replaced
+    /// newline -- would gild the wrong words on the one screen where the
+    /// marked words are the answer.
+    #[test]
+    fn the_marked_range_is_exactly_the_matched_term() {
+        for body in [
+            "the client is Acme Corp -- their invoice template still uses the legacy footer",
+            "prefix ünïcödé Acme Corp ünïcödé suffix",
+            "a line\nbreak before Acme Corp and\nanother after it",
+            "Acme Corp at the very start",
+            "trailing hit is Acme Corp",
+        ] {
+            let start = body.find("Acme Corp").unwrap();
+            let excerpt = context_around(body, start, "Acme Corp".len());
+            assert_eq!(&excerpt.text[excerpt.hit.clone()], "Acme Corp", "{body}");
+        }
     }
 }

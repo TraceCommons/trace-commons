@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Trace Commons design system, Windows edition.
+
+    Every colour, size and radius here is transcribed from
+    design-import/DESIGN-SPEC.md - section 2.1 for the native palette, 3.1/3.2
+    for type, 4.1/4.2 for spacing and radii - taking the Windows column
+    wherever the spec gives per-platform values. Nothing in this file is
+    invented; where the spec is silent the deviation is called out in a comment
+    at the point it occurs.
+
+    Two conventions worth knowing before editing:
+
+    1. WinUI names the dark theme dictionary "Default", not "Dark". A
+       dictionary keyed "Dark" is silently never selected, so the dark values
+       live under "Default" and the light values under "Light".
+    2. Anything that does not change between themes - sizes, radii, font
+       families, TextBlock styles - sits at the dictionary root rather than
+       being duplicated three times. The styles reach the palette through
+       {ThemeResource}, which re-resolves when the system theme flips.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ResourceDictionary.ThemeDictionaries>
+
+        <!-- Dark. WinUI selects this dictionary for the dark theme; see the
+             header note on why it is not called "Dark". -->
+        <ResourceDictionary x:Key="Default">
+
+            <!-- Grounds and surfaces. The five dark greys are within six units
+                 of each other on purpose: they encode elevation (spec 2.1). -->
+            <SolidColorBrush x:Key="TcWindowBackgroundBrush" Color="#23251D" />
+            <SolidColorBrush x:Key="TcSidebarBackgroundBrush" Color="#262922" />
+            <SolidColorBrush x:Key="TcChromeBackgroundBrush" Color="#2B2D28" />
+            <SolidColorBrush x:Key="TcSurfaceCardBrush" Color="#21241E" />
+            <SolidColorBrush x:Key="TcSurfaceInsetBrush" Color="#2A2E27" />
+            <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#14FFFFFF" />
+            <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#1AFFFFFF" />
+
+            <!-- Hairlines. Two of them: card edges and structural dividers. -->
+            <SolidColorBrush x:Key="TcHairlineBrush" Color="#3B4038" />
+            <SolidColorBrush x:Key="TcHairlineDividerBrush" Color="#373A33" />
+
+            <!-- Ink. -->
+            <SolidColorBrush x:Key="TcInkPrimaryBrush" Color="#E8EAE3" />
+            <SolidColorBrush x:Key="TcInkSecondaryBrush" Color="#A6AC9F" />
+            <!-- Contrast-corrected; see the note in the light dictionary. -->
+            <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#878D81" />
+            <SolidColorBrush x:Key="TcOnAccentBrush" Color="#0B1F19" />
+
+            <!-- Green: "good standing". A deliberate three-step ramp - brand,
+                 darkened for fills, darkened again for small text. -->
+            <SolidColorBrush x:Key="TcGreenBrandBrush" Color="#3FBE9A" />
+            <SolidColorBrush x:Key="TcGreenFillBrush" Color="#3FBE9A" />
+            <SolidColorBrush x:Key="TcGreenTextBrush" Color="#5CD3AF" />
+            <SolidColorBrush x:Key="TcGreenChipBorderBrush" Color="#803FBE9A" />
+            <SolidColorBrush x:Key="TcActiveTabBorderBrush" Color="#993FBE9A" />
+
+            <!--
+                Blue: "held for privacy review". The mockups carry both
+                #315FBA and #315FBB one digit apart, for the mark/borders and
+                the icons/text respectively. Spec 7.2 flags them as almost
+                certainly one colour and asks for a decision: this file
+                standardises on #315FBA everywhere and drops #315FBB.
+            -->
+            <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#7FA0EC" />
+            <SolidColorBrush x:Key="TcBlueIconBrush" Color="#9DB6F1" />
+            <!-- The spec gives no dark chip border for blue; this is the same
+                 45% alpha the light palette uses, over the dark blue. -->
+            <SolidColorBrush x:Key="TcBlueChipBorderBrush" Color="#737FA0EC" />
+
+            <!-- Gold: "weigh this". -->
+            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#DCAA43" />
+            <SolidColorBrush x:Key="TcGoldTextBrush" Color="#E2B75C" />
+            <SolidColorBrush x:Key="TcGoldHighlightBrush" Color="#52DCAA43" />
+            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#99DCAA43" />
+
+            <!-- Coral: "refused". Spec 7.2 records that no dark values were
+                 ever drawn, because History has no dark frame. The light hues
+                 are carried through unchanged rather than invented, and this
+                 is the one pair to revisit when a dark History is designed. -->
+            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D65D4F" />
+            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#B8483B" />
+
+            <!-- Redaction marker chip in the transcript renderer. -->
+            <SolidColorBrush x:Key="TcRedactionChipBackgroundBrush" Color="#4A3C18" />
+            <SolidColorBrush x:Key="TcRedactionChipForegroundBrush" Color="#F0EBDD" />
+        </ResourceDictionary>
+
+        <ResourceDictionary x:Key="Light">
+
+            <SolidColorBrush x:Key="TcWindowBackgroundBrush" Color="#F6F7F4" />
+            <SolidColorBrush x:Key="TcSidebarBackgroundBrush" Color="#ECEEE8" />
+            <SolidColorBrush x:Key="TcChromeBackgroundBrush" Color="#F3F3F0" />
+            <SolidColorBrush x:Key="TcSurfaceCardBrush" Color="#FFFFFF" />
+            <SolidColorBrush x:Key="TcSurfaceInsetBrush" Color="#EEF2F0" />
+            <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#0F000000" />
+            <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#12000000" />
+
+            <SolidColorBrush x:Key="TcHairlineBrush" Color="#D9DFDC" />
+            <SolidColorBrush x:Key="TcHairlineDividerBrush" Color="#DDDFD8" />
+
+            <SolidColorBrush x:Key="TcInkPrimaryBrush" Color="#20241F" />
+            <SolidColorBrush x:Key="TcInkSecondaryBrush" Color="#5C635B" />
+            <!--
+                Spec ink.tertiary is #8A9086 light and #82887C dark, and both
+                are refused here. Every role the spec gives this token is small
+                text, and the stated pair clears 4.5:1 in none of the four
+                combinations it has to survive: 3.04:1 on the ground and 3.27:1
+                on a card in light, 4.26:1 and 4.31:1 in dark. What ships
+                instead is the nearest accessible twin on the same hue and
+                saturation, 4.58:1 and 4.93:1 light, 4.55:1 and 4.61:1 dark.
+
+                This is the same substitution the macOS and Linux clients make,
+                with the same two hexes, so the three clients agree. One
+                further limit carried over with it: the dark twin measures
+                4.05:1 against surface.inset, so small type inside a manifest
+                strip stays on ink.secondary rather than this token.
+            -->
+            <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#6D7269" />
+            <SolidColorBrush x:Key="TcOnAccentBrush" Color="#FEFEFE" />
+
+            <SolidColorBrush x:Key="TcGreenBrandBrush" Color="#178F70" />
+            <SolidColorBrush x:Key="TcGreenFillBrush" Color="#137C61" />
+            <SolidColorBrush x:Key="TcGreenTextBrush" Color="#0F7256" />
+            <SolidColorBrush x:Key="TcGreenChipBorderBrush" Color="#73178F70" />
+            <SolidColorBrush x:Key="TcActiveTabBorderBrush" Color="#8C178F70" />
+
+            <!-- #315FBA, not #315FBB. See the note in the dark dictionary. -->
+            <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#315FBA" />
+            <SolidColorBrush x:Key="TcBlueIconBrush" Color="#315FBA" />
+            <SolidColorBrush x:Key="TcBlueChipBorderBrush" Color="#73315FBA" />
+
+            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#B9821F" />
+            <SolidColorBrush x:Key="TcGoldTextBrush" Color="#8A5F12" />
+            <SolidColorBrush x:Key="TcGoldHighlightBrush" Color="#47B9821F" />
+            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8CB9821F" />
+
+            <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D65D4F" />
+            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#B8483B" />
+
+            <SolidColorBrush x:Key="TcRedactionChipBackgroundBrush" Color="#f3e3c0" />
+            <SolidColorBrush x:Key="TcRedactionChipForegroundBrush" Color="#202426" />
+        </ResourceDictionary>
+
+        <!--
+            High contrast.
+
+            The palette is abandoned wholesale here rather than adapted. A high
+            contrast theme is a user telling the system which colours they can
+            see, and a brand palette that overrides it is a brand palette that
+            makes the app unusable. Every token aliases a stock WinUI brush,
+            which the platform has already mapped to the active system colours.
+
+            This costs nothing the design depends on: the stated rule is
+            "tone = colour + glyph + words" (spec 7.3), so every state that a
+            hue distinguishes is also distinguished by an icon and by text.
+            Accents keep the primary ink colour so that fills and rules stay
+            visible against the page ground rather than disappearing into it.
+
+            Each token is an alias rather than a new brush, which is how WinUI
+            writes its own high contrast dictionaries: the stock brush already
+            carries a per-theme definition, so aliasing it inherits whichever
+            system colour the active contrast theme resolved to.
+        -->
+        <ResourceDictionary x:Key="HighContrast">
+
+            <StaticResource x:Key="TcWindowBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcSidebarBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcChromeBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcSurfaceCardBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcSurfaceInsetBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcSurfaceScrimBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcSurfaceSelectedBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+
+            <StaticResource x:Key="TcHairlineBrush" ResourceKey="DividerStrokeColorDefaultBrush" />
+            <StaticResource x:Key="TcHairlineDividerBrush" ResourceKey="DividerStrokeColorDefaultBrush" />
+
+            <StaticResource x:Key="TcInkPrimaryBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcInkSecondaryBrush" ResourceKey="TextFillColorSecondaryBrush" />
+            <StaticResource x:Key="TcInkTertiaryBrush" ResourceKey="TextFillColorTertiaryBrush" />
+            <StaticResource x:Key="TcOnAccentBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+
+            <StaticResource x:Key="TcGreenBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGreenFillBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGreenTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGreenChipBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcActiveTabBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+
+            <StaticResource x:Key="TcBlueBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcBlueIconBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcBlueChipBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+
+            <StaticResource x:Key="TcGoldBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGoldTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGoldHighlightBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGoldAttentionBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+
+            <StaticResource x:Key="TcCoralBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcCoralTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
+
+            <StaticResource x:Key="TcRedactionChipBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcRedactionChipForegroundBrush" ResourceKey="TextFillColorPrimaryBrush" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+
+    <!--
+        Font families (spec 3.1, Windows column).
+
+        Segoe UI Variable Text is the body optical size; window chrome and the
+        smallest controls use plain Segoe UI, which is what the spec calls for
+        and also what Windows itself draws in a title bar. Both fall back to
+        Segoe UI on Windows builds that predate the variable family.
+    -->
+    <FontFamily x:Key="TcUiFontFamily">Segoe UI Variable Text, Segoe UI</FontFamily>
+    <FontFamily x:Key="TcChromeFontFamily">Segoe UI</FontFamily>
+    <FontFamily x:Key="TcMonoFontFamily">Consolas</FontFamily>
+
+    <!-- Type sizes (spec 3.2). Sizes are identical across platforms; only the
+         weights differ, and Windows takes each one step lighter than macOS. -->
+    <x:Double x:Key="TcTitleScreenFontSize">15</x:Double>
+    <x:Double x:Key="TcTitleSectionFontSize">17</x:Double>
+    <x:Double x:Key="TcMetricValueFontSize">20</x:Double>
+    <x:Double x:Key="TcMetricValueMonoFontSize">18</x:Double>
+    <x:Double x:Key="TcHeadingAlertFontSize">16</x:Double>
+    <x:Double x:Key="TcTitleCardFontSize">13</x:Double>
+    <x:Double x:Key="TcBodyFontSize">13</x:Double>
+    <x:Double x:Key="TcBodyDenseFontSize">12.5</x:Double>
+    <x:Double x:Key="TcLabelControlFontSize">12</x:Double>
+    <x:Double x:Key="TcCaptionFontSize">11</x:Double>
+    <x:Double x:Key="TcCaptionSmallFontSize">10.5</x:Double>
+    <x:Double x:Key="TcEyebrowFontSize">10</x:Double>
+    <x:Double x:Key="TcMonoFigureFontSize">12</x:Double>
+    <x:Double x:Key="TcMonoChipFontSize">11</x:Double>
+    <x:Double x:Key="TcMonoBadgeFontSize">10</x:Double>
+    <x:Double x:Key="TcMonoCodeFontSize">11</x:Double>
+    <x:Double x:Key="TcMonoTranscriptFontSize">11</x:Double>
+
+    <!-- Spacing (spec 4.1). The scale is the set of values the mockups
+         actually use; it is not a generated ramp, and adding a step to it
+         should mean the design added one. -->
+    <x:Double x:Key="TcSpace05">2</x:Double>
+    <x:Double x:Key="TcSpace1">4</x:Double>
+    <x:Double x:Key="TcSpace15">6</x:Double>
+    <x:Double x:Key="TcSpace2">8</x:Double>
+    <x:Double x:Key="TcSpace25">10</x:Double>
+    <x:Double x:Key="TcSpace3">12</x:Double>
+    <x:Double x:Key="TcSpace35">14</x:Double>
+    <x:Double x:Key="TcSpace4">16</x:Double>
+    <x:Double x:Key="TcSpace45">18</x:Double>
+    <x:Double x:Key="TcSpace5">20</x:Double>
+    <x:Double x:Key="TcSpace55">22</x:Double>
+    <x:Double x:Key="TcSpace6">24</x:Double>
+    <x:Double x:Key="TcSpace7">28</x:Double>
+    <x:Double x:Key="TcSpace8">32</x:Double>
+
+    <!-- Radii (spec 4.2, Windows values: controls 4, cards 8, window 8). -->
+    <CornerRadius x:Key="TcControlCornerRadius">4</CornerRadius>
+    <CornerRadius x:Key="TcCardCornerRadius">8</CornerRadius>
+    <CornerRadius x:Key="TcWindowCornerRadius">8</CornerRadius>
+    <CornerRadius x:Key="TcPillCornerRadius">999</CornerRadius>
+    <!-- A card is drawn as a 1px border, so an element bleeding to its inside
+         edge is one pixel tighter than the card itself. -->
+    <CornerRadius x:Key="TcCardInnerBottomCornerRadius">0,0,7,7</CornerRadius>
+
+    <!-- Borders: 1px hairlines, never shadows, inside the window (spec 4.4). -->
+    <Thickness x:Key="TcHairlineThickness">1</Thickness>
+    <Thickness x:Key="TcHairlineTopThickness">0,1,0,0</Thickness>
+    <Thickness x:Key="TcHairlineBottomThickness">0,0,0,1</Thickness>
+
+    <!--
+        Type styles.
+
+        Weights follow the Windows column of spec 3.2: screen titles 600 where
+        macOS uses 700, card titles 600, secondary control labels 400. The
+        eyebrow is the one step Windows does not lighten - it stays 800 with
+        .5px tracking, and its text is authored uppercase at each use site,
+        since XAML has no text-transform.
+    -->
+    <Style x:Key="TcTitleScreenTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcTitleScreenFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcTitleSectionTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcTitleSectionFontSize}" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMetricValueTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMetricValueFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMetricValueMonoTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMetricValueMonoFontSize}" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcHeadingAlertTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcHeadingAlertFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcGoldTextBrush}" />
+    </Style>
+
+    <Style x:Key="TcTitleCardTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcTitleCardFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcBodyTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcBodyFontSize}" />
+        <Setter Property="LineHeight" Value="19" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="TcBodyDenseTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcBodyDenseFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcCaptionTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcCaptionFontSize}" />
+        <Setter Property="LineHeight" Value="16" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcCaptionSmallTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcCaptionSmallFontSize}" />
+        <Setter Property="LineHeight" Value="16" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkTertiaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcEyebrowTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcEyebrowFontSize}" />
+        <Setter Property="FontWeight" Value="ExtraBold" />
+        <!-- .5px of tracking at 10px, expressed in the thousandths of an em
+             that CharacterSpacing takes. -->
+        <Setter Property="CharacterSpacing" Value="50" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkTertiaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMonoFigureTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMonoFigureFontSize}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMonoChipTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMonoChipFontSize}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMonoBadgeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMonoBadgeFontSize}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcMonoCodeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMonoCodeFontSize}" />
+        <Setter Property="LineHeight" Value="17" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="TcMonoTranscriptTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcMonoFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcMonoTranscriptFontSize}" />
+        <!-- 1.7, not the 1.5 the other mono steps take: a transcript is read
+             line by line rather than scanned. -->
+        <Setter Property="LineHeight" Value="19" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!-- Chrome text: the title bar and the smallest controls, in plain Segoe
+         UI per spec 3.1. -->
+    <Style x:Key="TcChromeTitleTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcChromeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcLabelControlFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <!-- Nav rail rows: 12.5px, selected weight 600, per spec 6.7's Windows
+         line. -->
+    <Style x:Key="TcNavLabelTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcBodyDenseFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcNavLabelSelectedTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcNavLabelTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <!--
+        Buttons.
+
+        Both styles set only the resting appearance and inherit the stock
+        Fluent hover, pressed and focus visuals from DefaultButtonStyle. That
+        is deliberate: spec 7.2 records that no mockup ever draws a focus,
+        hover or pressed state for any control, so the platform's own states
+        are the honest fallback rather than something invented here. The
+        consequence to know about is that a pointer-over reverts the fill to
+        the Fluent brush - visible mainly on the primary style, and worth
+        revisiting if the design ever specifies those states.
+    -->
+    <Style x:Key="TcSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Background" Value="{ThemeResource TcSurfaceCardBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource TcControlCornerRadius}" />
+        <Setter Property="Padding" Value="11,4,11,4" />
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcLabelControlFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="TcPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Background" Value="{ThemeResource TcGreenFillBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TcControlCornerRadius}" />
+        <Setter Property="Padding" Value="11,4,11,4" />
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcLabelControlFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TcOnAccentBrush}" />
+    </Style>
+
+</ResourceDictionary>

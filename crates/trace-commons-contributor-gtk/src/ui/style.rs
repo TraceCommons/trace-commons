@@ -45,21 +45,29 @@
 //! `AdwStyleManager`'s accent.** If it is ever reverted, it should be
 //! reverted as a product decision, not as a theming cleanup.
 //!
-//! ## Dark is derived, not inverted
+//! ## Dark comes from the design spec, not from an inversion
 //!
 //! The site has no `prefers-color-scheme` block anywhere, so there was no
-//! dark palette to copy -- and on this platform dark is not optional, since
-//! a large share of GNOME and KDE users run it permanently. The dark
-//! palette below preserves the site's *relations* rather than flipping its
-//! hex values:
+//! dark palette to copy from it -- and on this platform dark is not
+//! optional, since a large share of GNOME and KDE users run it permanently.
+//! The dark values below are now the approved mockups' native palette
+//! (`design-import/DESIGN-SPEC.md` §2.1) rather than this file's earlier
+//! derivation, and they hold the same relations:
 //!
-//! * The site's ground (`#f6f7f4`) is not a neutral grey; it is warm, with
-//!   a faint green cast. The dark ground keeps that cast at the other end
-//!   of the scale rather than the blue-black a naive inversion produces.
+//! * The ground (`#23251D`) is not a neutral grey; it keeps the warm green
+//!   cast of the light ground (`#F6F7F4`) at the other end of the scale
+//!   rather than the blue-black a naive inversion produces.
 //! * ground / surface / inset keep the same order and roughly the same
 //!   perceptual spacing as `--bg` / `--surface` / `--surface-2`.
 //! * Every accent keeps its hue and its role and is lifted in lightness
 //!   until it clears text contrast on the dark ground.
+//!
+//! ## Where the tokens come from
+//!
+//! Every `tc_*` colour below is one row of §2.1's native-palette table, and
+//! the mapping is recorded inline. Two rows are deliberately absent:
+//! `bg.sidebar.macos` and `bg.chrome.windows` are other platforms' chrome
+//! and have no surface in this shell.
 //!
 //! ## Contrast is measured, never eyeballed
 //!
@@ -80,55 +88,84 @@ use gtk::gdk;
 
 /// Light tokens.
 ///
-/// The first block is the site's palette verbatim. The second is the
-/// text-safe darkened twins: the site's accents are tuned for fills, meter
-/// bars and borders where 3:1 is the bar, and several of them do not clear
-/// 4.5:1 as small type on white. Only the lightness moves, so the family
-/// resemblance survives and the sentence is legible.
+/// The first block is the design spec's native palette, §2.1's light
+/// column. The second is the text-safe darkened twins: the brand accents
+/// are tuned for fills, meter bars and borders where 3:1 is the bar, and
+/// several of them do not clear 4.5:1 as small type on white. Only the
+/// lightness moves, so the family resemblance survives and the sentence is
+/// legible.
 ///
 /// Measured (WCAG 2.1, computed not estimated):
 ///
 /// ```text
-///  14.55:1  ink        #202426 on bg         #f6f7f4
-///  15.65:1  ink        #202426 on surface    #ffffff
-///   5.46:1  muted      #5e6668 on bg         #f6f7f4
-///   5.20:1  muted      #5e6668 on surface-2  #eef2f0
-///   5.90:1  green text #0F7256 on surface    #ffffff
-///   5.64:1  gold text  #8A5F12 on surface    #ffffff
-///   4.99:1  gold text  #8A5F12 on surface-2  #eef2f0
-///   5.21:1  coral text #B8483B on surface    #ffffff
-///   6.04:1  blue text  #315FBA on surface    #ffffff
-///   5.14:1  PRIMARY    #ffffff on fill       #137C61   <- the consent action
-///   4.04:1  (rejected) #ffffff on site green #178f70
-///   3.35:1  gold rule  #b9821f on surface    #ffffff   (non-text, >= 3:1)
-///  12.34:1  redaction  #202426 on gold wash  #f3e3c0
+///  14.64:1  ink        #20241F on bg         #F6F7F4
+///  15.75:1  ink        #20241F on surface    #FFFFFF
+///   5.76:1  muted      #5C635B on bg         #F6F7F4
+///   6.19:1  muted      #5C635B on surface    #FFFFFF
+///   5.48:1  muted      #5C635B on surface-2  #EEF2F0
+///   4.58:1  tertiary   #6D7269 on bg         #F6F7F4   (see the note below)
+///   4.93:1  tertiary   #6D7269 on surface    #FFFFFF
+///   5.90:1  green text #0F7256 on surface    #FFFFFF
+///   5.48:1  green text #0F7256 on bg         #F6F7F4
+///   5.64:1  gold text  #8A5F12 on surface    #FFFFFF
+///   4.99:1  gold text  #8A5F12 on surface-2  #EEF2F0
+///   5.21:1  coral text #B8483B on surface    #FFFFFF
+///   6.04:1  blue text  #315FBA on surface    #FFFFFF
+///   5.10:1  PRIMARY    #FEFEFE on fill       #137C61   <- the consent action
+///   4.04:1  (rejected) #FFFFFF on brand green #178F70
+///   3.35:1  gold rule  #B9821F on surface    #FFFFFF   (non-text, >= 3:1)
+///  12.34:1  redaction  #202426 on gold wash  #F3E3C0
+///   3.27:1  (rejected) spec ink.tertiary #8A9086 on surface #FFFFFF
 /// ```
+///
+/// **The one deviation from §2.1.** The spec's `ink.tertiary` is `#8A9086`
+/// light / `#82887C` dark, and the spec assigns it to timestamps, eyebrow
+/// labels and footnotes -- all small text. Measured, it is 3.27:1 on white
+/// and 4.26:1 on the dark ground, so it fails the 4.5:1 body-text floor at
+/// both ends. `tc_ink_tertiary` therefore carries the nearest accessible
+/// twin on the same hue and saturation (`#6D7269` / `#878D81`, 4.58:1 and
+/// 4.55:1 on their grounds), which keeps the three-step ink ramp the spec
+/// asks for without putting sub-threshold type on a screen. It must not be
+/// used on the inset surface, where the dark twin measures 4.05:1; small
+/// type inside a manifest strip stays on `tc_muted`.
 const LIGHT_TOKENS: &str = r#"
-/* --- The site's palette, verbatim -------------------------------- */
-@define-color tc_bg        #f6f7f4;
-@define-color tc_surface   #ffffff;
-@define-color tc_surface2  #eef2f0;
-@define-color tc_ink       #202426;
-@define-color tc_muted     #5e6668;
-@define-color tc_line      #d9dfdc;
-@define-color tc_green     #178f70;
-@define-color tc_blue      #315fba;
-@define-color tc_coral     #d65d4f;
-@define-color tc_gold      #b9821f;
+/* --- Ground and ink, from DESIGN-SPEC §2.1 (light column) --------- */
+@define-color tc_bg        #F6F7F4;   /* bg.window */
+@define-color tc_surface   #FFFFFF;   /* surface.card */
+@define-color tc_surface2  #EEF2F0;   /* surface.inset */
+@define-color tc_surface_inset @tc_surface2;   /* the spec's name for it */
+@define-color tc_scrim     rgba(0, 0, 0, 0.06);   /* surface.scrim */
+@define-color tc_selected  rgba(0, 0, 0, 0.07);   /* surface.selected */
+@define-color tc_ink       #20241F;   /* ink.primary */
+@define-color tc_muted     #5C635B;   /* ink.secondary */
+@define-color tc_ink_tertiary #6D7269;   /* ink.tertiary, contrast-corrected */
+@define-color tc_line      #D9DFDC;   /* hairline */
+@define-color tc_line_divider #DDDFD8;   /* hairline.divider */
+
+/* --- Brand accents. Fills, rules and glyph strokes only. ---------- */
+@define-color tc_green     #178F70;   /* green.brand */
+@define-color tc_blue      #315FBA;   /* blue.brand */
+@define-color tc_coral     #D65D4F;   /* coral.brand */
+@define-color tc_gold      #B9821F;   /* gold.brand */
+@define-color tc_gold_highlight rgba(185, 130, 31, 0.28);   /* gold.highlight */
 
 /* --- Text-safe twins. Type only; fills and rules keep the values
        above. See the note on this constant. ------------------------ */
 @define-color tc_green_text #0F7256;
 @define-color tc_blue_text  #315FBA;
+/* §2.1 lists blue.brand as #315FBA and blue.icon as #315FBB, one digit
+   apart; standardised on #315FBA, which is the mark's own blue. */
+@define-color tc_blue_icon  #315FBA;
 @define-color tc_coral_text #B8483B;
 @define-color tc_gold_text  #8A5F12;
 
 /* --- The filled primary action, as a measured pair ---------------- */
-@define-color tc_primary_fill  #137C61;
-@define-color tc_primary_label #ffffff;
+@define-color tc_primary_fill  #137C61;   /* green.fill */
+@define-color tc_on_accent     #FEFEFE;   /* on.accent */
+@define-color tc_primary_label @tc_on_accent;
 
 /* --- Where scrubbing fired, in the transcript --------------------- */
-@define-color tc_redaction_bg  #f3e3c0;
+@define-color tc_redaction_bg  #F3E3C0;
 @define-color tc_redaction_fg  #202426;
 
 /* --- The libadwaita palette, recoloured wholesale ------------------
@@ -169,51 +206,69 @@ const LIGHT_TOKENS: &str = r#"
 @define-color borders              @tc_line;
 "#;
 
-/// Dark tokens. Derived from the light relations, not inverted.
+/// Dark tokens. §2.1's dark column, with the same corrections.
 ///
 /// Measured (WCAG 2.1, computed not estimated):
 ///
 /// ```text
-///  14.99:1  ink        #E9ECE2 on bg         #16180F
-///  13.49:1  ink        #E9ECE2 on surface    #1F221A
-///   7.05:1  muted      #A6AE9F on surface    #1F221A
-///   6.22:1  muted      #A6AE9F on surface-2  #282C23
-///   8.75:1  green text #5CD3AF on surface    #1F221A
-///   7.57:1  gold text  #E2B75C on surface-2  #282C23
-///   7.76:1  coral text #F79C8F on surface    #1F221A
-///   7.98:1  blue text  #9DB6F1 on surface    #1F221A
+///  12.79:1  ink        #E8EAE3 on bg         #23251D
+///  12.96:1  ink        #E8EAE3 on surface    #21241E
+///   6.75:1  muted      #A6AC9F on surface    #21241E
+///   6.66:1  muted      #A6AC9F on bg         #23251D
+///   5.94:1  muted      #A6AC9F on surface-2  #2A2E27
+///   4.55:1  tertiary   #878D81 on bg         #23251D   (see the light note)
+///   4.61:1  tertiary   #878D81 on surface    #21241E
+///   8.53:1  green text #5CD3AF on surface    #21241E
+///   8.36:1  gold text  #E2B75C on surface    #21241E
+///   7.35:1  gold text  #E2B75C on surface-2  #2A2E27
+///   7.57:1  coral text #F79C8F on surface    #21241E
+///   7.78:1  blue text  #9DB6F1 on surface    #21241E
+///   7.68:1  blue icon  #9DB6F1 on bg         #23251D
 ///   7.39:1  PRIMARY    #0B1F19 on fill       #3FBE9A   <- the consent action
-///   2.32:1  (rejected) #ffffff on mint       #3FBE9A
-///   7.58:1  gold rule  #DCAA43 on surface    #1F221A
+///   2.32:1  (rejected) #FFFFFF on mint       #3FBE9A
+///   7.39:1  gold rule  #DCAA43 on surface    #21241E
 ///   9.04:1  redaction  #F0EBDD on gold wash  #4A3C18
+///   4.26:1  (rejected) spec ink.tertiary #82887C on bg #23251D
 /// ```
 ///
 /// Dark flips the primary label rather than dulling the mint: the mint is
 /// what makes the dark scheme feel like the same product, and a duller
 /// green that could carry white would not.
 const DARK_TOKENS: &str = r#"
-/* --- Ground, derived. Warm near-black with the site's green cast,
-       not the blue-black a naive inversion produces. ---------------- */
-@define-color tc_bg        #16180F;
-@define-color tc_surface   #1F221A;
-@define-color tc_surface2  #282C23;
-@define-color tc_ink       #E9ECE2;
-@define-color tc_muted     #A6AE9F;
-@define-color tc_line      #3A3F35;
+/* --- Ground and ink, from DESIGN-SPEC §2.1 (dark column). Warm
+       near-black carrying the light ground's green cast, not the
+       blue-black a naive inversion produces. ------------------------ */
+@define-color tc_bg        #23251D;
+@define-color tc_surface   #21241E;
+@define-color tc_surface2  #2A2E27;
+@define-color tc_surface_inset @tc_surface2;
+@define-color tc_scrim     rgba(255, 255, 255, 0.08);
+@define-color tc_selected  rgba(255, 255, 255, 0.1);
+@define-color tc_ink       #E8EAE3;
+@define-color tc_muted     #A6AC9F;
+@define-color tc_ink_tertiary #878D81;   /* contrast-corrected, see LIGHT */
+@define-color tc_line      #3B4038;
+@define-color tc_line_divider #373A33;
 
 /* --- Same hue, same role, lifted until it clears the dark ground -- */
 @define-color tc_green     #3FBE9A;
 @define-color tc_blue      #7FA0EC;
+/* §2.1 does not draw coral in dark ("not drawn"). These two are this
+   file's lift of the light coral, kept so a withdrawn trace still reads
+   as withdrawn in the dark scheme. */
 @define-color tc_coral     #F2887A;
 @define-color tc_gold      #DCAA43;
+@define-color tc_gold_highlight rgba(220, 170, 67, 0.32);
 
 @define-color tc_green_text #5CD3AF;
 @define-color tc_blue_text  #9DB6F1;
+@define-color tc_blue_icon  #9DB6F1;
 @define-color tc_coral_text #F79C8F;
 @define-color tc_gold_text  #E2B75C;
 
 @define-color tc_primary_fill  #3FBE9A;
-@define-color tc_primary_label #0B1F19;
+@define-color tc_on_accent     #0B1F19;
+@define-color tc_primary_label @tc_on_accent;
 
 @define-color tc_redaction_bg  #4A3C18;
 @define-color tc_redaction_fg  #F0EBDD;

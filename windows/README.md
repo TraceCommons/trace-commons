@@ -95,6 +95,8 @@ each is its own piece of work:
 - System tray presence and run-at-login.
 - MSIX packaging and signing. The app builds unpackaged so that CI can verify
   it without a certificate.
-- A design system matching the macOS app and the community site. The window
-  uses stock WinUI theming, which at least follows the system light/dark
-  setting.
+- The rest of the queue frame the design specifies: the health banner, the undo
+  bar, the week band, and the per-row "Not this one" and "Look inside" actions.
+  The design system is in place (`src/TraceCommons.App/Themes/DesignSystem.xaml`
+  and the mark in `Controls/BrandMark.xaml`), but each of those elements needs
+  daemon state the app does not have yet, so none of them is drawn.

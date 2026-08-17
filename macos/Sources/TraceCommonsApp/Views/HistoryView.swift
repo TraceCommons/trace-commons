@@ -6,6 +6,18 @@ import SwiftUI
 /// time. Credit is a record: no currency symbol, no fiat estimate, no
 /// projection, no date, no streaks, no leaderboards.
 struct HistoryView: View {
+    /// The public roster snapshot, when this contributor is on the roster and
+    /// has "List my handle publicly" on. `nil` -- the shipping case today --
+    /// renders no Community section at all, which is exactly what the design
+    /// asks for off the roster.
+    ///
+    /// It is an input rather than a read off `AppModel` because the daemon
+    /// contract has no roster call yet: there is no `rank`, no `accept rate`
+    /// and no `public since` anywhere in `Models.swift`. Wiring one would be a
+    /// feature, not a design pass, so the section is built and left waiting
+    /// for its data instead of being drawn over invented numbers.
+    var roster: RosterSnapshot?
+
     @EnvironmentObject private var model: AppModel
     @State private var quarantineExpanded = false
 
@@ -18,6 +30,13 @@ struct HistoryView: View {
                         quarantine(rollup)
                     }
                     credit(rollup)
+                    // The public surface sits below the credit card, and the
+                    // seam between the two is the design: everything above is
+                    // the private tool, everything inside the black frame is
+                    // what other people can see.
+                    if let roster {
+                        CommunitySection(roster: roster)
+                    }
                 } else {
                     Text("Nothing yet.")
                         .font(TC.Font_.meta)
@@ -55,8 +74,12 @@ struct HistoryView: View {
         }
     }
 
+    /// A stat card: an 11pt glyph and an eyebrow over a 20/700 figure, on a
+    /// card face with a hairline. The glyph is what keeps the three states
+    /// apart without colour -- a check, a clock, and a circle that is drawn
+    /// dashed because it is waiting on something that has not started.
     private func tally(_ title: String, _ count: Int, _ tone: TC.Tone, _ symbol: String) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.s) {
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
             HStack(spacing: TC.Space.xs) {
                 Image(systemName: symbol)
                     .imageScale(.small)
@@ -65,7 +88,7 @@ struct HistoryView: View {
                 TCFieldLabel(title)
             }
             Text("\(count)")
-                .font(.title2.weight(.bold))
+                .font(TC.Font_.metricValue)
                 .monospacedDigit()
         }
         .padding(TC.Space.m)
@@ -233,6 +256,16 @@ struct HistoryRow: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if record.status == "quarantined" && record.explanations.isEmpty {
+                // Only when the server said nothing of its own. Its prose is
+                // about this trace; this sentence is about the state, and a
+                // held row that explains itself twice is a row nobody reads.
+                Text(HistoryCopy.heldExplanation)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: TC.Measure.prose, alignment: .leading)
+            }
 
             if let result = model.withdrawals[record.submissionID] {
                 outcome(result)
@@ -243,10 +276,11 @@ struct HistoryRow: View {
                 // one a person is being invited to take; this one only
                 // opens a question.
                 Button("Withdraw") { confirming = true }
-                    .font(TC.Font_.footnote)
+                    .buttonStyle(SmallSecondaryButtonStyle())
             }
         }
-        .padding(TC.Space.m)
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard()
     }
@@ -357,7 +391,263 @@ struct HistoryRow: View {
         }
     }
 
+    /// Overrides where the tone's default glyph is not the one the design
+    /// draws. A trace waiting to be scored carries a DASHED circle -- the
+    /// state is "nothing has happened to this yet", and a solid dot reads as
+    /// a state of its own. A withdrawn trace carries the undo arrow, because
+    /// the tone's cross would read as refused-by-us rather than taken back
+    /// by the person whose trace it is.
     private var statusSymbol: String? {
-        record.status == "withdrawn" ? "arrow.uturn.backward" : nil
+        switch record.status {
+        case "submitted": return "circle.dotted"
+        case "withdrawn": return "arrow.uturn.backward"
+        default: return nil
+        }
+    }
+}
+
+// MARK: - Copy
+
+/// History's own sentences. Withdrawal's live in `WithdrawalCopy`; these are
+/// the ones about a state rather than an act.
+enum HistoryCopy {
+    /// What "held for privacy review" means, on the row it applies to. Held,
+    /// never rejected, and with no turnaround time stated -- there is no
+    /// number this app could honour.
+    static let heldExplanation =
+        "Automated checks saw something that might be personal and couldn't decide on "
+        + "their own. It has not been rejected, and it has not been shared with anyone "
+        + "but the reviewer."
+}
+
+// MARK: - Small secondary action
+
+/// The small outlined button the design gives "Withdraw": 11pt on a card
+/// face, hairline bordered, sized to the row rather than to the screen.
+///
+/// It is a style rather than a bare `Button` because the point of the
+/// treatment is that this action is NOT the filled one. `TCPrimaryButtonStyle`
+/// is reserved for the action a person is being invited to take; this one only
+/// opens a question, so it is drawn quiet and small and never fills.
+private struct SmallSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(TC.Font_.meta)
+            .foregroundStyle(TC.inkPrimary)
+            .padding(.horizontal, TC.Space.sm)
+            .padding(.vertical, TC.Space.tiny)
+            .background(TC.surface, in: RoundedRectangle(cornerRadius: TC.Radius.control))
+            .overlay {
+                RoundedRectangle(cornerRadius: TC.Radius.control)
+                    .strokeBorder(TC.line, lineWidth: TC.Border.hairline)
+            }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.45)
+            .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Community
+
+/// The public roster snapshot, as History renders it.
+///
+/// Every figure is optional and every optional omits its own cell. That is
+/// not defensiveness: the panel is the exact boundary of what is public about
+/// a person, and a placeholder inside it -- a dash, a zero, "--" -- would be a
+/// claim about their standing that this app did not receive.
+struct RosterSnapshot: Equatable {
+    /// Position on the roster.
+    var rank: Int?
+    /// The same recorded credit the private card above shows, restated in the
+    /// public panel's own terms.
+    var noveltyCredit: Double?
+    /// Accepted within `windowLabel`.
+    var acceptedInWindow: Int?
+    /// 0...1. Rendered as a whole percent.
+    var acceptRate: Double?
+    /// The rolling window the two figures above are measured over, in the
+    /// server's own words ("7d").
+    var windowLabel: String?
+    /// When this contributor joined the public roster.
+    var publicSince: Date?
+    /// When the snapshot was taken. Its age is stated because a public figure
+    /// that is quietly stale is worse than one that says how old it is.
+    var snapshotTakenAt: Date?
+    /// The public web profile. Omitted from the header when absent rather
+    /// than rendered as a dead link.
+    var profileURL: URL?
+}
+
+/// History's Community section, drawn in the community brand rather than in
+/// this app's.
+///
+/// The foreignness is the feature. Everything else in this window is the
+/// private tool -- warm ground, hairlines, SF, rounded corners. This panel is
+/// 2px black frames, Helvetica, uppercase display type at landing scale, and
+/// no corner radius anywhere inside it, because the black frame is the exact
+/// boundary of what becomes public. A person scrolling History should be able
+/// to see where their private record stops without reading a word.
+private struct CommunitySection: View {
+    let roster: RosterSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
+            communityBrandPanel {
+                header
+                metricStrip
+                metaRow
+                withheldNotice
+            }
+
+            // Outside the frame, and therefore in the native voice again:
+            // this sentence is about a setting in this app, not about the
+            // public surface.
+            Text(
+                "Shown only while \u{201C}List my handle publicly\u{201D} is on. Turn it off in "
+                + "Settings and this section disappears with it."
+            )
+            .font(TC.Font_.caption)
+            .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
+            .foregroundStyle(TC.inkSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: TC.Measure.prose, alignment: .leading)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Community")
+                .font(CommunityBrand.Font_.displayPanel)
+                .textCase(.uppercase)
+                .tracking(CommunityBrand.Font_.displayPanelTracking)
+                .foregroundStyle(CommunityBrand.ink)
+            Spacer(minLength: TC.Space.m)
+            if let profileURL = roster.profileURL {
+                Link(destination: profileURL) {
+                    Text("View public profile \u{2197}")
+                        .font(CommunityBrand.Font_.labelMono)
+                        .textCase(.uppercase)
+                        .underline()
+                        .foregroundStyle(CommunityBrand.ink)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// One box divided into equal cells by 1px rules. Cells the snapshot did
+    /// not carry are not drawn at all, so the strip stays a row of facts.
+    @ViewBuilder
+    private var metricStrip: some View {
+        let cells: [(String, String)] = [
+            roster.rank.map { ("Rank", "#" + Self.figure(Double($0))) },
+            roster.noveltyCredit.map { ("Novelty credit", Self.figure($0)) },
+            roster.acceptedInWindow.map { count in
+                (roster.windowLabel.map { "Accepted \u{00B7} \($0)" } ?? "Accepted",
+                 Self.figure(Double(count)))
+            },
+            roster.acceptRate.map { ("Accept rate", "\(Int(($0 * 100).rounded()))%") },
+        ].compactMap { $0 }
+
+        if !cells.isEmpty {
+            HStack(spacing: 0) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
+                    VStack(alignment: .leading, spacing: TC.Space.xs) {
+                        Text(cell.0)
+                            .font(CommunityBrand.Font_.labelMono)
+                            .textCase(.uppercase)
+                            .tracking(CommunityBrand.Font_.monoTracking)
+                            .foregroundStyle(CommunityBrand.muted)
+                        Text(cell.1)
+                            .font(CommunityBrand.Font_.figure)
+                            .monospacedDigit()
+                            .tracking(CommunityBrand.Font_.figureTracking)
+                            .foregroundStyle(CommunityBrand.ink)
+                    }
+                    .padding(.vertical, TC.Space.m)
+                    .padding(.horizontal, TC.Space.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .trailing) {
+                        if index < cells.count - 1 {
+                            Rectangle()
+                                .fill(CommunityBrand.ink)
+                                .frame(width: CommunityBrand.Metric.rule)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(cell.0): \(cell.1)")
+                }
+            }
+            .overlay {
+                Rectangle().strokeBorder(
+                    CommunityBrand.ink,
+                    lineWidth: CommunityBrand.Metric.frame
+                )
+            }
+        }
+    }
+
+    private var metaRow: some View {
+        let items: [String] = [
+            roster.windowLabel.map { "Window \($0)" },
+            roster.publicSince.map { "Public since " + Self.day($0) },
+            roster.snapshotTakenAt.map { "Snapshot " + Format.when($0) },
+        ].compactMap { $0 }
+
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: TC.Space.lg) { metaLabels(items) }
+            VStack(alignment: .leading, spacing: TC.Space.xs) { metaLabels(items) }
+        }
+    }
+
+    @ViewBuilder
+    private func metaLabels(_ items: [String]) -> some View {
+        ForEach(items, id: \.self) { item in
+            Text(item)
+                .font(CommunityBrand.Font_.labelMono)
+                .textCase(.uppercase)
+                .tracking(CommunityBrand.Font_.monoTracking)
+                .foregroundStyle(CommunityBrand.muted)
+        }
+    }
+
+    /// Withheld analytics are stated in words. An empty chart would imply the
+    /// numbers exist and are merely unflattering; the truth is that the server
+    /// will not publish aggregates without a noise mechanism it does not have.
+    private var withheldNotice: some View {
+        Text(
+            "Corpus analytics are withheld. The server publishes the roster on consent, "
+            + "but will not publish aggregates without an approved noise mechanism \u{2014} so "
+            + "nothing is charted here either."
+        )
+        .font(CommunityBrand.Font_.body)
+        .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, 1.45))
+        .foregroundStyle(CommunityBrand.ink)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .background(CommunityBrand.tint)
+        .overlay {
+            Rectangle().strokeBorder(
+                CommunityBrand.ink,
+                lineWidth: CommunityBrand.Metric.frame
+            )
+        }
+    }
+
+    /// Grouped, never abbreviated, and never carrying a currency symbol:
+    /// credit is a record, and a `$` in front of it would be a claim this
+    /// product does not make.
+    private static func figure(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: value)) ?? "\(Int(value))"
+    }
+
+    private static func day(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.abbreviated).day().year())
     }
 }
