@@ -25,6 +25,7 @@ pub mod notify;
 pub mod portal;
 pub mod tray;
 pub mod ui;
+pub mod update;
 pub mod worker;
 
 /// Resolve the contributor state directory the same way the CLI does, so
