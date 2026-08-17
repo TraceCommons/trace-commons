@@ -62,6 +62,9 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         consent_scopes: vec!["debugging_evaluation".to_string()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     }
 }
 
@@ -156,6 +159,9 @@ pub(crate) async fn enroll_core(
         consent_scopes,
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     };
     store
         .save_config(&cfg)
@@ -1198,6 +1204,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".to_string()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         store.save_config(&existing).unwrap();
 
@@ -1462,6 +1471,9 @@ async fn enroll_with_invite_core(
         consent_scopes,
         pii_filter: None,
         allowed_hosts: allowed_hosts.map(str::to_string),
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     };
     store
         .save_config(&cfg)

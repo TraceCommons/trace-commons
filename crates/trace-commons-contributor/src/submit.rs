@@ -1246,6 +1246,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 
@@ -1292,6 +1295,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
         assert_eq!(preview_cfg.tenant_id.len(), 71);

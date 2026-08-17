@@ -23,6 +23,7 @@
 pub mod approved_envelope;
 pub mod audit;
 pub mod client;
+pub mod community;
 pub mod eligibility;
 pub mod enroll;
 pub mod health;
@@ -32,6 +33,7 @@ pub mod ipc;
 pub mod notify;
 pub mod policy;
 pub mod preview;
+pub mod profile;
 pub mod queue;
 pub mod settings;
 pub mod state;
@@ -269,6 +271,9 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
                     }
                     if refresh_history(&shared, now).await.is_err() {
                         tracing::warn!(pass = "history", "daemon pass failed");
+                    }
+                    if refresh_community(&shared, now).await.is_err() {
+                        tracing::warn!(pass = "community", "daemon pass failed");
                     }
                 }
             }
@@ -631,6 +636,69 @@ async fn refresh_history(
     history::HistoryCache::save(&shared.store, &records)?;
     let mut state = shared.state.lock().expect("state lock");
     state.last_history_poll_at = Some(now);
+    state.save(&shared.store)?;
+    Ok(())
+}
+
+/// Refresh this contributor's line on the public community roster, on its own
+/// interval, so `history_rollup` can answer with it without any client -- or
+/// the handler itself -- making a network call.
+///
+/// The roster is public and unauthenticated, so this poll mints no claim and
+/// carries no identity. The only thing linking it to this machine is the
+/// handle the contributor chose to publish, which is why the whole pass is
+/// skipped when there is no handle, and why a standing already cached is
+/// dropped the moment the handle goes away.
+async fn refresh_community(
+    shared: &Arc<ipc::DaemonShared>,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    let interval = {
+        let s = shared.settings.lock().expect("settings lock");
+        chrono::Duration::seconds(s.community_poll_secs as i64)
+    };
+    {
+        let state = shared.state.lock().expect("state lock");
+        if let Some(last) = state.last_community_poll_at {
+            if now.signed_duration_since(last) < interval {
+                return Ok(());
+            }
+        }
+    }
+    let Some(cfg) = shared.store.load_config()? else {
+        return Ok(());
+    };
+    let handle = cfg
+        .display_handle
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    let Some(handle) = handle else {
+        // No handle: nothing to look up, and anything cached from a handle
+        // that has since been cleared must go with it rather than keep being
+        // served.
+        let mut state = shared.state.lock().expect("state lock");
+        if state.community.take().is_some() {
+            state.save(&shared.store)?;
+        }
+        return Ok(());
+    };
+    let standing =
+        match community::fetch_standing(&cfg.ingest_url, cfg.allowed_hosts.as_deref(), handle, now)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => {
+                // A failed poll serves the cache as-is, which the serve path
+                // ages out on its own. Like history, the roster is not worth a
+                // health failure: it is a public read-back, not part of the
+                // upload path.
+                return Ok(());
+            }
+        };
+    let mut state = shared.state.lock().expect("state lock");
+    state.community = standing;
+    state.last_community_poll_at = Some(now);
     state.save(&shared.store)?;
     Ok(())
 }

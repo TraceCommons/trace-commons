@@ -416,6 +416,9 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
         consent_scopes: vec!["debugging_evaluation".into()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     };
     store.save_config(&cfg).unwrap();
 
@@ -549,6 +552,140 @@ async fn hello_reports_v1_1_and_still_claims_v1_compatibility() {
     );
 }
 
+/// A config carrying whatever public profile the test needs, written into a
+/// live daemon's state directory. The daemon reads the config on each
+/// profile call, so this may be written after it starts.
+fn write_config(store_dir: &std::path::Path, display_handle: Option<&str>) {
+    let store = ConfigStore::open(store_dir.to_path_buf()).unwrap();
+    let mut cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: "device-1".into(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: display_handle.map(str::to_string),
+        public_bio: display_handle.map(|_| "Ships billing systems by day.".to_string()),
+        public_since: display_handle.map(|_| chrono::Utc::now()),
+    };
+    cfg.consent_scopes.push("public_attribution".into());
+    store.save_config(&cfg).unwrap();
+}
+
+#[tokio::test]
+async fn get_public_profile_reports_the_handle_this_device_published() {
+    // The settings profile panel's whole data source. There is no
+    // `GET /v1/community/profile`, so if the daemon does not report the
+    // locally cached handle the panel renders empty for a contributor who
+    // is on the roster.
+    let h = TestDaemon::start().await;
+    write_config(&h.store_dir, Some("manian"));
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"get_public_profile"}"#).await;
+    let r = c.recv_json().await;
+    assert!(r["error"].is_null(), "{r}");
+    let result = &r["result"];
+    assert_eq!(result["on_roster"], true, "{result}");
+    assert_eq!(result["handle"], "manian", "{result}");
+    assert!(!result["bio"].is_null(), "{result}");
+    assert!(!result["public_since"].is_null(), "{result}");
+    // No origin for a public profile crosses this socket, so the field is
+    // present and null rather than a fabricated URL a client would link to.
+    assert!(
+        result.get("public_url").is_some() && result["public_url"].is_null(),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn get_public_profile_reports_off_the_roster_before_a_handle_is_claimed() {
+    let h = TestDaemon::start().await;
+    write_config(&h.store_dir, None);
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"get_public_profile"}"#).await;
+    let r = c.recv_json().await;
+    assert_eq!(r["result"]["on_roster"], false, "{r}");
+    assert!(r["result"]["handle"].is_null(), "{r}");
+}
+
+#[tokio::test]
+async fn get_public_profile_without_an_enrollment_says_so() {
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"get_public_profile"}"#).await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["code"], "unavailable", "{r}");
+    assert_eq!(r["error"]["message"], "not-logged-in", "{r}");
+}
+
+#[tokio::test]
+async fn set_public_profile_refuses_an_omitted_bio_rather_than_erasing_one() {
+    // The server upserts `bio = excluded.bio`, so the PUT replaces the whole
+    // profile. A client that omits `bio` on a handle rename would silently
+    // clear a published bio, which is why the daemon refuses instead of
+    // guessing. This is checked before anything touches the network.
+    let h = TestDaemon::start().await;
+    write_config(&h.store_dir, Some("manian"));
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"set_public_profile","params":{"handle":"manian"}}"#)
+        .await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["code"], ERR_BAD_PARAMS, "{r}");
+    assert_eq!(r["error"]["message"], "bio-required-or-null", "{r}");
+}
+
+#[tokio::test]
+async fn set_public_profile_applies_the_shared_handle_rules() {
+    // The refusal comes from `trace_commons_protocol::community_handle`, the
+    // same code the server validates with. A handle this daemon accepts and
+    // the server then refuses is the drift these labels exist to prevent.
+    let h = TestDaemon::start().await;
+    write_config(&h.store_dir, None);
+    let mut c = h.connect().await;
+    for (params, label) in [
+        (r#"{"handle":"ab","bio":null}"#, "handle-too-short"),
+        (r#"{"handle":"admin","bio":null}"#, "handle-reserved"),
+        (
+            r#"{"handle":"foo--bar","bio":null}"#,
+            "handle-consecutive-separators",
+        ),
+        (
+            r#"{"handle":"foo bar","bio":null}"#,
+            "handle-invalid-character",
+        ),
+        (r#"{"handle":"manian","bio":42}"#, "bio-invalid"),
+    ] {
+        c.send(&format!(
+            r#"{{"id":1,"method":"set_public_profile","params":{params}}}"#
+        ))
+        .await;
+        let r = c.recv_json().await;
+        assert_eq!(r["error"]["code"], ERR_BAD_PARAMS, "{r}");
+        assert_eq!(r["error"]["message"], label, "{r}");
+    }
+}
+
+#[tokio::test]
+async fn public_profile_calls_without_an_enrollment_never_reach_the_network() {
+    // Fail closed with the label that tells a shell what is actually
+    // missing, rather than attempting a call that cannot be authenticated.
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    c.send(r#"{"id":1,"method":"set_public_profile","params":{"handle":"manian","bio":null}}"#)
+        .await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["message"], "not-logged-in", "{r}");
+
+    c.send(r#"{"id":2,"method":"clear_public_profile"}"#).await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["message"], "not-logged-in", "{r}");
+}
+
 #[tokio::test]
 async fn an_over_long_socket_path_is_explained_rather_than_truncated() {
     // The kernel's own error names a constant most people have never heard
@@ -560,4 +697,248 @@ async fn an_over_long_socket_path_is_explained_rather_than_truncated() {
     let msg = err.to_string();
     assert!(msg.contains("kernel limit"), "{msg}");
     assert!(msg.contains("TRACE_COMMONS_CONTRIBUTOR_DIR"), "{msg}");
+}
+
+/// A daemon with one pending entry over a fixture session that carries a
+/// user message, an assistant message, and a tool call -- enough events for
+/// a turn index to be about something. Returns the harness pieces a socket
+/// client needs and nothing the daemon holds in memory.
+async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::PathBuf, uuid::Uuid) {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let project = sessions_root.join("-Users-testuser-code-myproj");
+    std::fs::create_dir_all(&project).unwrap();
+    let user = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "please list the files"},
+        "cwd": "/Users/testuser/code/myproj",
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": "33333333-3333-3333-3333-333333333333",
+        "uuid": "a1",
+    });
+    let assistant = serde_json::json!({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Reading the directory."},
+            {"type": "tool_use", "name": "Read", "input": {"path": "src/main.rs"}},
+        ]},
+        "cwd": "/Users/testuser/code/myproj",
+        "timestamp": "2026-08-08T10:00:01Z",
+        "version": "2.0.1",
+        "sessionId": "33333333-3333-3333-3333-333333333333",
+        "uuid": "a2",
+    });
+    std::fs::write(
+        project.join("33333333-3333-3333-3333-333333333333.jsonl"),
+        format!("{user}\n{assistant}\n"),
+    )
+    .unwrap();
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let session_ref = TraceSource::discover(&src).unwrap().remove(0);
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_root = Some(sessions_root.clone());
+    settings.save(&store).unwrap();
+
+    let entry_id = entry_id_for("turn-index-test-hash");
+    let mut queue = Queue::new();
+    queue
+        .upsert(
+            QueueEntry {
+                entry_id,
+                session_hash: "turn-index-test-hash".into(),
+                source: "claude-code".into(),
+                project_key: "/Users/testuser/code/myproj".into(),
+                project_label: "myproj".into(),
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                discovered_at: chrono::Utc::now(),
+                state: QueueState::Pending,
+                reason_label: None,
+                attempts: 0,
+                retry_after: None,
+                submission_id: None,
+                approved_scopes: None,
+                approved_inputs: None,
+                previewed_envelope_digest: None,
+                approved_at: None,
+            },
+            100,
+        )
+        .unwrap();
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    (dir, store_dir, entry_id)
+}
+
+async fn connect_to(store_dir: &std::path::Path) -> Client {
+    let stream = UnixStream::connect(store_dir.join("daemon.sock"))
+        .await
+        .unwrap();
+    let (r, w) = stream.into_split();
+    Client {
+        reader: BufReader::new(r),
+        writer: w,
+    }
+}
+
+/// Read the whole body through `preview_body`, following `next_offset` to
+/// the end, and return it with the digest the daemon reported. This is the
+/// flow a client is required to use, and the turn index is only meaningful
+/// against what it produces.
+async fn read_whole_body(c: &mut Client, entry_id: uuid::Uuid) -> (String, String) {
+    let mut body = String::new();
+    let mut offset = Some(0u64);
+    let mut digest = String::new();
+    let mut id = 1u64;
+    while let Some(next) = offset {
+        let anchor = if next == 0 {
+            String::new()
+        } else {
+            format!(r#","body_digest":"{digest}""#)
+        };
+        c.send(&format!(
+            r#"{{"id":{id},"method":"preview_body","params":{{"entry_id":"{entry_id}","offset":{next}{anchor}}}}}"#
+        ))
+        .await;
+        let r = c.recv_json().await;
+        assert!(r["error"].is_null(), "{r}");
+        body.push_str(r["result"]["chunk"].as_str().unwrap());
+        digest = r["result"]["body_digest"].as_str().unwrap().to_string();
+        offset = r["result"]["next_offset"].as_u64();
+        id += 1;
+    }
+    (body, digest)
+}
+
+#[tokio::test]
+async fn preview_turns_indexes_the_body_preview_body_returns() {
+    // The contract that makes the transcript surface possible without
+    // re-rendering it: every offset is a boundary in the body the client is
+    // already holding, so a separator drawn there lands between two events
+    // rather than inside one.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let mut c = connect_to(&store_dir).await;
+    let (body, body_digest) = read_whole_body(&mut c, entry_id).await;
+
+    c.send(&format!(
+        r#"{{"id":90,"method":"preview_turns","params":{{"entry_id":"{entry_id}","body_digest":"{body_digest}"}}}}"#
+    ))
+    .await;
+    let r = c.recv_json().await;
+    assert!(r["error"].is_null(), "{r}");
+    let result = &r["result"];
+    assert_eq!(result["body_digest"], body_digest.as_str(), "{result}");
+    assert!(
+        result["envelope_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    let turns = result["turns"].as_array().unwrap();
+    assert_eq!(result["turn_count"].as_u64().unwrap() as usize, turns.len());
+    assert!(turns.len() >= 3, "the fixture has three events: {result}");
+    let mut covered = 0usize;
+    for (i, turn) in turns.iter().enumerate() {
+        assert_eq!(turn["index"].as_u64().unwrap() as usize, i, "{turn}");
+        let offset = turn["byte_offset"].as_u64().unwrap() as usize;
+        let len = turn["byte_len"].as_u64().unwrap() as usize;
+        assert!(offset >= covered, "turns must not overlap: {turn}");
+        // Re-wrapped as an array because a turn may span more than one
+        // element: parsing at all is the assertion that the span begins and
+        // ends on element boundaries of the body the client is rendering.
+        let slice = &body[offset..offset + len];
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&format!("[{slice}]"))
+            .unwrap_or_else(|e| panic!("turn {i} is not a run of whole events: {e}"));
+        assert_eq!(
+            parsed[0]["event_type"], turn["role"],
+            "the label must be the event type in the bytes it points at"
+        );
+        covered = offset + len;
+    }
+    assert!(covered <= body.len());
+    // The index is labels and offsets. No redacted text rides along on it.
+    assert!(!r.to_string().contains("please list the files"), "{r}");
+}
+
+#[tokio::test]
+async fn preview_turns_refuses_an_unanchored_or_mis_anchored_request() {
+    // Offsets against the wrong body are not stale, they are wrong, and
+    // wrong invisibly: a separator drawn over the wrong text still looks
+    // like a transcript. So the anchor is required from the first call, and
+    // a digest that does not match is refused rather than indexed.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let mut c = connect_to(&store_dir).await;
+
+    c.send(&format!(
+        r#"{{"id":1,"method":"preview_turns","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["code"], ERR_BAD_PARAMS, "{r}");
+    assert_eq!(
+        r["error"]["message"],
+        trace_commons_contributor::daemon::ipc::ERR_BODY_DIGEST_REQUIRED,
+        "{r}"
+    );
+
+    c.send(&format!(
+        r#"{{"id":2,"method":"preview_turns","params":{{"entry_id":"{entry_id}","body_digest":"sha256:0000"}}}}"#
+    ))
+    .await;
+    let r = c.recv_json().await;
+    assert_eq!(
+        r["error"]["code"],
+        trace_commons_contributor::daemon::ipc::ERR_UNAVAILABLE,
+        "{r}"
+    );
+    assert_eq!(
+        r["error"]["message"],
+        trace_commons_contributor::daemon::ipc::ERR_PREVIEW_BODY_CHANGED,
+        "{r}"
+    );
+
+    // An entry the caller does not hold is refused under the same fixed
+    // label the rest of the preview surface uses.
+    let unknown = uuid::Uuid::new_v4();
+    c.send(&format!(
+        r#"{{"id":3,"method":"preview_turns","params":{{"entry_id":"{unknown}","body_digest":"sha256:0000"}}}}"#
+    ))
+    .await;
+    let r = c.recv_json().await;
+    assert_eq!(r["error"]["code"], ERR_BAD_PARAMS, "{r}");
+    assert_eq!(
+        r["error"]["message"],
+        trace_commons_contributor::daemon::ipc::ERR_UNKNOWN_ENTRY_ID,
+        "{r}"
+    );
 }
