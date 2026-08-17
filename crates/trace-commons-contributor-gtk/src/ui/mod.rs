@@ -12,6 +12,7 @@ pub mod preview;
 pub mod queue;
 pub mod settings;
 pub mod style;
+pub mod update;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
