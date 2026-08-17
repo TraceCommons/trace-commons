@@ -785,8 +785,12 @@ chmod +x scripts/updates/generate-appcast.sh
 Run each of these and confirm each exits non-zero with the stated message:
 
 ```bash
+# A REAL regular file is required here: the `-f` DMG check runs before the
+# version regex, so passing /dev/null would trip "dmg not found" instead and
+# prove nothing about the version validation.
+head -c 16 /dev/zero > /tmp/tc-fake.dmg
 ./scripts/updates/generate-appcast.sh --short-version 1.2 --build-version 100 \
-  --dmg-url https://example.invalid/a.dmg --dmg-path /dev/null --sign-update /bin/echo
+  --dmg-url https://example.invalid/a.dmg --dmg-path /tmp/tc-fake.dmg --sign-update /bin/echo
 ```
 Expected: exit 1, "short version must be three-part numeric, got '1.2'"
 
