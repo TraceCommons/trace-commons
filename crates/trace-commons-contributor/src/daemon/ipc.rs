@@ -2581,6 +2581,12 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    // `bind`'s socket-path-length refusal and `ensure_private_dir`'s 0700
+    // check are both properties of the unix-socket transport specifically:
+    // Windows has no socket path to overflow and no directory-mode access
+    // control (see `win_pipe.rs`, whose DACL plays that role instead), so
+    // there is no Windows equivalent of either function to test here.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bind_failure_never_names_a_local_path() {
         // These errors are returned to `daemon run`, which under a service
@@ -2588,7 +2594,6 @@ mod tests {
         // path carries the OS username.
         let deep = std::env::temp_dir().join("a".repeat(120));
         std::fs::create_dir_all(&deep).unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&deep, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2604,6 +2609,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&deep);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_state_directory_permissions_failure_never_names_a_local_path() {
         let missing = std::env::temp_dir().join("trace-commons-no-such-dir-xyz");

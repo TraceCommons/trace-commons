@@ -406,6 +406,7 @@ fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn store() -> (tempfile::TempDir, ConfigStore) {
@@ -437,11 +438,16 @@ mod tests {
         store.save_config(&sample_config()).unwrap();
         let loaded = store.load_config().unwrap().unwrap();
         assert_eq!(loaded.tenant_id, "tenant-abc");
-        let mode = std::fs::metadata(store_path(&store, "contributor.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        // Unix permission bits do not exist on Windows; the file's mode is
+        // only meaningful to assert on unix.
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(store_path(&store, "contributor.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]
@@ -450,11 +456,16 @@ mod tests {
         assert!(store.load_device_key().unwrap().is_none());
         store.save_device_key(b"fake-der-bytes").unwrap();
         assert_eq!(store.load_device_key().unwrap().unwrap(), b"fake-der-bytes");
-        let mode = std::fs::metadata(store.device_key_path())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        // Unix permission bits do not exist on Windows; the file's mode is
+        // only meaningful to assert on unix.
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(store.device_key_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]
