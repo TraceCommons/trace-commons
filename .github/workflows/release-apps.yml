@@ -684,6 +684,46 @@ jobs:
             -in dist/updates/latest.json
           cat dist/updates/latest.json
 
+      # Sparkle's sign_update lives inside the SwiftPM artifact bundle, so the
+      # package has to be resolved before the appcast can be signed. This is
+      # why appcast publication lives in the Sparkle plan and not in the
+      # manifest-publishing job that produces latest.json.
+      - name: Resolve Sparkle so sign_update exists
+        if: needs.macos.result == 'success'
+        run: swift package --package-path macos resolve
+
+      - name: Import the Sparkle signing key
+        if: needs.macos.result == 'success'
+        env:
+          GCP_PROJECT: tracecommons-pilot-2026
+        run: |
+          set -euo pipefail
+          gcloud secrets versions access latest \
+            --secret=sparkle-signing-key --project "$GCP_PROJECT" \
+            > "$RUNNER_TEMP/sparkle-ed-key"
+          chmod 600 "$RUNNER_TEMP/sparkle-ed-key"
+
+      - name: Generate the signed appcast
+        if: needs.macos.result == 'success'
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          BUILD_VERSION: ${{ needs.version.outputs.build }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          V="$SHORT_VERSION"
+          SIGN_UPDATE="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          test -x "$SIGN_UPDATE" || {
+            echo "sign_update missing at $SIGN_UPDATE" >&2; exit 1; }
+          ./scripts/updates/generate-appcast.sh \
+            --short-version "$V" \
+            --build-version "$BUILD_VERSION" \
+            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg" \
+            --dmg-path "dist/macos-dmg/TraceCommons-$V.dmg" \
+            --sign-update "$SIGN_UPDATE" \
+            --out dist/updates/appcast.xml
+          cat dist/updates/appcast.xml
+
       - name: Publish to the bucket
         env:
           BUCKET: tracecommons-flatpak
@@ -695,3 +735,10 @@ jobs:
           gcloud storage cp --cache-control="public, max-age=300" \
             dist/updates/latest.json dist/updates/latest.json.sig \
             "gs://$BUCKET/updates/"
+          # Conditional on the file rather than on a job result, so a macOS
+          # failure simply leaves the previous appcast in place rather than
+          # replacing it with one pointing at a DMG that does not exist.
+          if [ -f dist/updates/appcast.xml ]; then
+            gcloud storage cp --cache-control="public, max-age=300" \
+              dist/updates/appcast.xml "gs://$BUCKET/updates/"
+          fi

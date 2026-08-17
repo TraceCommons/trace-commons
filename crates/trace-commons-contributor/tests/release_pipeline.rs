@@ -1197,3 +1197,22 @@ fn the_release_script_signs_every_sparkle_component_for_notarization() {
          first is invalidated the moment anything inside it is touched"
     );
 }
+
+#[test]
+fn the_release_workflow_publishes_the_appcast() {
+    let wf = read(".github/workflows/release-apps.yml");
+    assert!(
+        wf.contains("generate-appcast.sh"),
+        "release-apps.yml must run generate-appcast.sh. Without it SUFeedURL \
+         404s and every Sparkle check fails closed and silently -- the app \
+         reports no update forever and nothing logs an error."
+    );
+    assert!(
+        wf.contains("sparkle-signing-key"),
+        "the appcast must be signed with the Sparkle EdDSA key from Secret Manager"
+    );
+    assert!(
+        wf.contains("appcast.xml"),
+        "the generated appcast must be uploaded to the bucket"
+    );
+}
