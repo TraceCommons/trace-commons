@@ -184,13 +184,20 @@ brew trust tracecommons/tap          # Homebrew refuses untrusted third-party ta
 brew install trace-commons-contributor
 ```
 
-Otherwise take a binary from the [latest release][releases]: macOS on both
+Otherwise take a binary from the [current CLI release][releases]: macOS on both
 architectures and Windows on x86_64 are code-signed — Developer ID and notarized,
 Authenticode and RFC3161-timestamped respectively — and the Linux x86_64 binary
-is not signed, so use the published checksum beside it. The desktop app ships as
-a universal notarized DMG (`brew install --cask trace-commons`) and as a
-GPG-signed flatpak. https://docs.tracecommons.ai/cli/quickstart/ is the fuller
-guide.
+is not signed, so use the published checksum beside it. Follow that link rather
+than GitHub's "latest release": CLI releases are tagged `contributor-v*` and
+desktop-app releases `app-v*`, so "latest" is whichever stream was cut most
+recently and today resolves to `app-v0.2.1`, which carries no CLI binary.
+
+The desktop app ships as a universal notarized DMG
+(`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows
+as a self-contained Authenticode-signed zip — unpack it and run
+`TraceCommons.exe`; the .NET runtime and Windows App SDK are inside, so there is
+nothing to install first. https://docs.tracecommons.ai/cli/quickstart/ is the
+fuller guide.
 
 To build it from this checkout instead — necessary on any platform without a
 published binary, Linux on arm64 for instance:
@@ -200,7 +207,7 @@ cargo build --release --bin trace-commons-contributor
 ./target/release/trace-commons-contributor login
 ```
 
-[releases]: https://github.com/TraceCommons/trace-commons-server/releases/latest
+[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.2.0
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 for the full quickstart, consent model, and subcommand reference. Consent is
