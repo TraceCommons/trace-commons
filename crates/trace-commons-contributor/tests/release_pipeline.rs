@@ -1056,3 +1056,76 @@ fn the_release_workflow_passes_the_sparkle_public_key() {
         "the macOS release job must pass the Sparkle public key through"
     );
 }
+
+#[test]
+fn the_bundle_script_embeds_sparkle_with_ditto() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    assert!(
+        script.contains("Sparkle.xcframework"),
+        "make-app-bundle.sh must locate the Sparkle XCFramework. SwiftPM \
+         links it but never embeds it; without a copy step the signed, \
+         notarized app crashes on launch with 'Library not loaded'."
+    );
+    assert!(
+        script.contains("macos-arm64_x86_64"),
+        "the universal XCFramework slice must be named explicitly"
+    );
+    assert!(
+        script.contains("ditto"),
+        "a framework must be copied with ditto: Versions/Current, Resources \
+         and the top-level binary are symlinks, and a copy that dereferences \
+         them produces a bundle codesign rejects"
+    );
+}
+
+#[test]
+fn no_script_signs_sparkle_with_deep() {
+    for path in [
+        "macos/scripts/make-app-bundle.sh",
+        "macos/scripts/make-release-dmg.sh",
+    ] {
+        let script = read(path);
+        for line in script.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.contains("codesign") && trimmed.contains("--sign") {
+                assert!(
+                    !line.contains("--deep"),
+                    "{path}: codesign --sign --deep re-signs Sparkle's Downloader \
+                     XPC service without its entitlements. Sign inside-out \
+                     instead. Offending line: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_bundle_script_signs_sparkle_inside_out() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    let order = [
+        "XPCServices/Installer.xpc",
+        "XPCServices/Downloader.xpc",
+        "Versions/B/Autoupdate",
+        "Versions/B/Updater.app",
+    ];
+    let mut previous = 0usize;
+    for needle in order {
+        let at = script
+            .find(needle)
+            .unwrap_or_else(|| panic!("make-app-bundle.sh never mentions {needle}"));
+        assert!(
+            at > previous,
+            "{needle} is signed out of order; nested code must be signed \
+             before the framework that seals it"
+        );
+        previous = at;
+    }
+    assert!(
+        script.contains("--preserve-metadata=entitlements"),
+        "Downloader.xpc must be signed with --preserve-metadata=entitlements \
+         (Sparkle >= 2.6), or it loses the entitlement it needs"
+    );
+}
