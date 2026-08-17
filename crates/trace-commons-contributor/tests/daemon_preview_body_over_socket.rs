@@ -119,6 +119,8 @@ impl Harness {
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
+                    subagent_count: 0,
+                    subagents_dropped: 0,
                 },
                 100,
             )

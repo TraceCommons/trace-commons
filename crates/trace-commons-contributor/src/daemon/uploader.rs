@@ -462,6 +462,23 @@ mod tests {
             .unwrap();
         }
 
+        /// Write a delegated transcript beside the session, stamped with its
+        /// `sessionId` so it verifies as a member of the group.
+        fn add_subagent(&self, agent: &str) {
+            let session = "33333333-3333-3333-3333-333333333333";
+            let subagents = self.path.parent().unwrap().join(session).join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            std::fs::write(
+                subagents.join(format!("{agent}.jsonl")),
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"delegated work\"}},\
+                     \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T18:00:00Z\",\
+                     \"version\":\"2.0.1\",\"sessionId\":\"{session}\",\"uuid\":\"s1\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
         /// An approved entry whose recorded terms match `cfg` -- i.e. the
         /// ordinary case where nothing moved between approval and upload.
         fn entry_for(&self, hash: &str, cfg: &crate::config::ContributorConfig) -> QueueEntry {
@@ -490,6 +507,8 @@ mod tests {
                 approved_inputs: None,
                 previewed_envelope_digest: None,
                 approved_at: None,
+                subagent_count: 0,
+                subagents_dropped: 0,
             }
         }
     }
@@ -503,6 +522,71 @@ mod tests {
             unenrolled_preview: false,
             remediate_quarantined: false,
         }
+    }
+
+    #[tokio::test]
+    async fn upload_refuses_when_a_delegated_transcript_appeared_after_approval() {
+        // The same consent property as the test below, one level out: an
+        // approval covers a conversation, and a conversation that has since
+        // delegated work to a subagent is not the one that was approved. The
+        // group hash is what makes the re-hash guard see it -- with a
+        // parent-only hash this would ship silently.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "http://issuer.invalid".into(),
+            ingest_url: "http://ingest.invalid".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+        };
+        store.save_config(&cfg).unwrap();
+
+        let offered_hash = session.current_hash();
+        let entry = session.entry_for(&offered_hash, &cfg);
+        session.add_subagent("agent-a");
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+
+        match decision {
+            UploadDecision::Superseded { new_hash } => {
+                assert_ne!(new_hash, entry.session_hash);
+                assert_eq!(new_hash, session.current_hash());
+            }
+            other => panic!("expected Superseded, got {other:?}"),
+        }
+        assert_eq!(
+            state.uploads_today, 0,
+            "nothing may be uploaded once the conversation has grown a delegate"
+        );
     }
 
     #[tokio::test]

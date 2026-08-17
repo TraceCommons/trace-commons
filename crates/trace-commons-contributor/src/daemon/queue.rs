@@ -147,6 +147,25 @@ pub struct QueueEntry {
     /// latter is deliberate -- see `Queue::approve`.
     #[serde(default)]
     pub approved_at: Option<DateTime<Utc>>,
+    /// How many delegated subagent transcripts this entry's session hash
+    /// covers, and how many were left out because the conversation exceeded
+    /// the source's raw byte budget.
+    ///
+    /// A card standing for 114 transcripts must be able to say so: what is
+    /// being consented to is the whole conversation, and its extent is part
+    /// of the description. `subagents_dropped` is the honest half of that --
+    /// a deliberately trimmed conversation says it was trimmed rather than
+    /// presenting as complete.
+    ///
+    /// Zero on every entry written before these fields existed, and on every
+    /// source with no such structure (codex, trajectory). Both are
+    /// `#[serde(default)]` because `Queue::load` drops a line it cannot
+    /// parse: a non-defaulted addition here would silently empty a
+    /// contributor's queue on upgrade.
+    #[serde(default)]
+    pub subagent_count: u32,
+    #[serde(default)]
+    pub subagents_dropped: u32,
 }
 
 impl QueueEntry {
@@ -184,6 +203,35 @@ impl QueueEntry {
 /// rewritten from scratch.
 pub fn entry_id_for(session_hash: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, session_hash.as_bytes())
+}
+
+/// The reason label both supersede paths record: the session no longer
+/// matches the description it was offered under.
+pub const REASON_CHANGED: &str = "session-changed-after-offer";
+
+/// Strip an entry back to a fresh offer, keeping only provenance.
+///
+/// Factored out so `supersede` and any future re-offer path cannot drift:
+/// a term of approval added to `QueueEntry` and cleared in one of them but
+/// not the other would carry a stale approval onto content it never
+/// covered, which is precisely the failure this whole mechanism exists to
+/// prevent.
+fn reoffered_from(old: QueueEntry) -> QueueEntry {
+    QueueEntry {
+        state: QueueState::Pending,
+        reason_label: None,
+        attempts: 0,
+        retry_after: None,
+        submission_id: None,
+        // Provenance carries over; the approval and every term it was given
+        // under -- scopes, envelope-determining inputs, and the artifact
+        // that was shown -- do not.
+        approved_scopes: None,
+        approved_inputs: None,
+        approved_at: None,
+        previewed_envelope_digest: None,
+        ..old
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -470,27 +518,52 @@ impl Queue {
         self.set_state(
             entry_id,
             QueueState::Superseded,
-            Some("session-changed-after-offer".to_string()),
+            Some(REASON_CHANGED.into()),
         );
         Some(QueueEntry {
             entry_id: entry_id_for(new_hash),
             session_hash: new_hash.to_string(),
             size_bytes: new_size,
             discovered_at: now,
-            state: QueueState::Pending,
-            reason_label: None,
-            attempts: 0,
-            retry_after: None,
-            submission_id: None,
-            // Provenance carries over; the approval and every term it was
-            // given under -- scopes, envelope-determining inputs, and the
-            // artifact that was shown -- do not.
-            approved_scopes: None,
-            approved_inputs: None,
-            approved_at: None,
-            previewed_envelope_digest: None,
-            ..old
+            ..reoffered_from(old)
         })
+    }
+
+    /// Mark every live entry at `path` whose hash is no longer `new_hash` as
+    /// `Superseded`, returning how many were retired.
+    ///
+    /// `upsert` dedups on `session_hash` alone, so a session that grew
+    /// between being offered and being decided already produced a *second*
+    /// `Pending` card while the first sat there: two cards, one file. That
+    /// was rare when a session was one file. With subagent grouping,
+    /// membership changes every time the agent delegates, so it would be the
+    /// normal case -- one conversation accumulating a card per delegation.
+    ///
+    /// Retiring the stale offer is the consent invariant applied to
+    /// membership rather than to content: the contributor approved a
+    /// description, the description moved, so the old offer dies and a fresh
+    /// preview is made. `Uploading` is deliberately not touched -- an upload
+    /// may already be in flight, and the uploader's own re-hash guard is
+    /// what covers that race.
+    pub fn supersede_live_at_path(&mut self, path: &std::path::Path, new_hash: &str) -> usize {
+        let stale: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.path == path
+                    && e.session_hash != new_hash
+                    && matches!(e.state, QueueState::Pending | QueueState::Approved)
+            })
+            .map(|e| e.entry_id)
+            .collect();
+        for entry_id in &stale {
+            self.set_state(
+                *entry_id,
+                QueueState::Superseded,
+                Some(REASON_CHANGED.to_string()),
+            );
+        }
+        stale.len()
     }
 
     /// Return an approved entry to pending, backing the "undo" window on an
@@ -568,6 +641,8 @@ mod tests {
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
         }
     }
 
@@ -728,6 +803,80 @@ mod tests {
             .write_daemon_file(DAEMON_QUEUE_FILE, format!("{good}\nnot json\n").as_bytes())
             .unwrap();
         assert_eq!(Queue::load(&store).unwrap().pending().len(), 1);
+    }
+
+    #[test]
+    fn a_queue_line_written_before_the_subagent_fields_still_loads() {
+        // `Queue::load` drops any line it cannot parse, with one warning. A
+        // field added without `#[serde(default)]` would therefore empty a
+        // contributor's whole queue on upgrade -- silently, from their point
+        // of view. This is the regression test for exactly that.
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("subagent_count");
+        object.remove("subagents_dropped");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].subagent_count, 0);
+        assert_eq!(loaded.all()[0].subagents_dropped, 0);
+    }
+
+    #[test]
+    fn supersede_live_at_path_retires_only_stale_live_entries_at_that_path() {
+        // `upsert` dedups on hash alone, so without this a conversation
+        // would collect a fresh card every time it delegated. Entries that
+        // already match the new hash, sit at another path, or have reached a
+        // terminal state are all untouched -- the last of those is history.
+        let mut q = Queue::new();
+        let path = PathBuf::from("/Users/z/.claude/projects/x/s.jsonl");
+
+        let mut stale = entry("sha256:old", "2026-08-08T12:00:00Z");
+        stale.path = path.clone();
+        q.upsert(stale, 500).unwrap();
+
+        let mut current = entry("sha256:new", "2026-08-08T12:00:00Z");
+        current.path = path.clone();
+        q.upsert(current, 500).unwrap();
+
+        let mut elsewhere = entry("sha256:other", "2026-08-08T12:00:00Z");
+        elsewhere.path = PathBuf::from("/Users/z/.claude/projects/x/t.jsonl");
+        q.upsert(elsewhere, 500).unwrap();
+
+        let mut done = entry("sha256:done", "2026-08-08T12:00:00Z");
+        done.path = path.clone();
+        q.upsert(done, 500).unwrap();
+        q.set_state(entry_id_for("sha256:done"), QueueState::Uploaded, None);
+
+        assert_eq!(q.supersede_live_at_path(&path, "sha256:new"), 1);
+        assert_eq!(
+            q.get(entry_id_for("sha256:old")).unwrap().state,
+            QueueState::Superseded
+        );
+        assert_eq!(
+            q.get(entry_id_for("sha256:old"))
+                .unwrap()
+                .reason_label
+                .as_deref(),
+            Some(REASON_CHANGED)
+        );
+        assert_eq!(
+            q.get(entry_id_for("sha256:new")).unwrap().state,
+            QueueState::Pending
+        );
+        assert_eq!(
+            q.get(entry_id_for("sha256:other")).unwrap().state,
+            QueueState::Pending
+        );
+        assert_eq!(
+            q.get(entry_id_for("sha256:done")).unwrap().state,
+            QueueState::Uploaded,
+            "a resolved entry is history and must not be rewritten"
+        );
     }
 
     #[test]

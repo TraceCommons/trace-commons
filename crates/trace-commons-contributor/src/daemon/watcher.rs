@@ -97,10 +97,24 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
             let Ok(modified) = meta.modified() else {
                 continue;
             };
+            // Size and mtime come from the `SessionRef`, not from a re-stat
+            // of `path`, because a ref can cover more than one file. A
+            // claude-code session's delegated transcripts live beside it
+            // under `<uuid>/subagents/`, and `path` deliberately stays the
+            // parent file so the queue and the upload state keep one stable
+            // address per conversation. Judging quiescence on the parent's
+            // own mtime would therefore make a subagent that is still being
+            // written completely invisible: the daemon would call the group
+            // finished mid-delegation, and would never re-offer a
+            // conversation that gained forty transcripts after the parent
+            // went quiet. `group_modified_at` is `None` for every
+            // single-file source, which is exactly the old behaviour.
             let obs = Observation {
                 path: session_ref.path.clone(),
-                size_bytes: meta.len(),
-                modified_at: DateTime::<Utc>::from(modified),
+                size_bytes: session_ref.size_bytes,
+                modified_at: session_ref
+                    .group_modified_at
+                    .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
             };
 
             let (previous_size, prior) = {
@@ -211,10 +225,20 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 // click to take back and no client counting down for it.
                 // See `Queue::approve`.
                 approved_at: None,
+                subagent_count: transcript.subagent_count,
+                subagents_dropped: transcript.subagents_dropped,
             };
             let entry_id = entry.entry_id;
 
             let mut queue = shared.queue.lock().expect("queue lock");
+            // Retire any earlier offer for this same session that no longer
+            // describes it, before adding the new one. Without this, a
+            // conversation that gains a delegated transcript accumulates a
+            // card per delegation -- `upsert` dedups on hash, and the hash
+            // is precisely what moved. See `Queue::supersede_live_at_path`.
+            if queue.supersede_live_at_path(&obs.path, &transcript.session_hash) > 0 {
+                changed = true;
+            }
             let already = queue.get(entry_id).is_some();
             match queue.upsert(entry, max_queue_entries) {
                 Ok(()) if !already => {
@@ -435,6 +459,29 @@ mod tests {
                  \"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
             );
             std::fs::write(&path, body).unwrap();
+            path
+        }
+
+        /// Write a delegated transcript under `<session>/subagents/`,
+        /// stamped with the parent's `sessionId` so it verifies as a member.
+        fn write_subagent(&self, project: &str, session: &str, agent: &str) -> PathBuf {
+            let subagents = self
+                .claude_root
+                .join(format!("-Users-testuser-code-{project}"))
+                .join(session)
+                .join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            let path = subagents.join(format!("{agent}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"delegated\"}},\
+                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                     \"sessionId\":\"{session}\",\"uuid\":\"s1\"}}\n"
+                ),
+            )
+            .unwrap();
             path
         }
 
@@ -776,6 +823,155 @@ mod tests {
             list_label.starts_with("api ("),
             "expected a collision suffix, got {list_label}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_and_its_subagents_are_offered_as_one_card() {
+        // The whole point: 911 files describing 69 conversations became 911
+        // cards. One conversation is one decision.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        f.write_session("proj", session, 0);
+        f.write_subagent("proj", session, "agent-a");
+        f.write_subagent("proj", session, "agent-b");
+        let report = f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(report.queued, 1, "{report:?}");
+        assert_eq!(f.queue_len(), 1);
+        let queue = f.shared.queue.lock().unwrap();
+        let e = &queue.all()[0];
+        assert_eq!(e.subagent_count, 2, "the card must state its own extent");
+        assert_eq!(e.subagents_dropped, 0);
+        assert!(e.path.ends_with(format!("{session}.jsonl")), "{:?}", e.path);
+    }
+
+    #[tokio::test]
+    async fn a_subagent_still_being_written_holds_the_whole_group_back() {
+        // The trap this change exists to avoid. `Observation` used to come
+        // from a re-stat of the parent file, so a subagent appearing or
+        // growing was invisible: the daemon would call a conversation
+        // finished while a delegate was mid-write. The parent here is
+        // deliberately old; only the member is fresh.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        f.write_session("proj", session, 0);
+        f.write_subagent("proj", session, "agent-a");
+        let report = f.settle(Utc::now()).await;
+        assert_eq!(
+            report.queued, 0,
+            "a group with a live delegate must not be offered: {report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_subagent_supersedes_the_offer_it_invalidates() {
+        // Membership is part of the description a contributor consents to.
+        // When it moves, the old offer dies and a fresh one is made -- one
+        // card, not one card per delegation.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        f.write_session("proj", session, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first_hash = {
+            let queue = f.shared.queue.lock().unwrap();
+            assert_eq!(queue.all().len(), 1);
+            queue.all()[0].session_hash.clone()
+        };
+
+        f.write_subagent("proj", session, "agent-a");
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == first_hash)
+            .unwrap();
+        assert_eq!(old.state, QueueState::Superseded);
+        assert_eq!(
+            old.reason_label.as_deref(),
+            Some(crate::daemon::queue::REASON_CHANGED)
+        );
+        assert_eq!(queue.pending().len(), 1, "exactly one live offer");
+        let fresh = queue.pending()[0];
+        assert_ne!(fresh.session_hash, first_hash, "the hash must have moved");
+        assert_eq!(fresh.subagent_count, 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_subagent_releases_the_preview_the_old_offer_was_pinned_to() {
+        // The end of the same story: the artifact a contributor was shown is
+        // stored on disk and pinned to the entry that was offered. Once that
+        // offer is superseded the stored bytes describe a conversation
+        // nobody will now be asked about, so the sweep must delete them --
+        // an entry the contributor never resolved must not leave redacted
+        // trace content lying around.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        f.write_session("proj", session, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let entry_id = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].entry_id
+        };
+        // Exactly what `preview` does: build the envelope, store it, pin the
+        // entry to it.
+        let src = crate::source::claude_code::ClaudeCodeSource::new(f.claude_root.clone());
+        let session_ref = src.discover().unwrap().remove(0);
+        let (summary, _body, envelope) =
+            crate::daemon::preview::build_preview(&f.shared.store, None, None, &src, &session_ref)
+                .await
+                .unwrap();
+        crate::daemon::approved_envelope::save(&f.shared.store, entry_id, &envelope).unwrap();
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(entry_id, &summary.envelope_digest));
+        }
+        assert!(
+            crate::daemon::approved_envelope::load(&f.shared.store, entry_id)
+                .unwrap()
+                .is_some(),
+            "the shown artifact should be on disk before the change"
+        );
+
+        f.write_subagent("proj", session, "agent-a");
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        {
+            let queue = f.shared.queue.lock().unwrap();
+            assert_eq!(queue.get(entry_id).unwrap().state, QueueState::Superseded);
+        }
+        assert!(
+            crate::daemon::approved_envelope::load(&f.shared.store, entry_id)
+                .unwrap()
+                .is_none(),
+            "the superseded offer's stored preview must be swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_group_is_superseded_when_a_subagent_lands() {
+        // The same rule, one state later: an approval covers a description,
+        // and a delegate arriving after it is a different description. The
+        // approval must not carry over.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        f.write_session("proj", session, 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Approved]);
+
+        f.write_subagent("proj", session, "agent-a");
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        let superseded = queue
+            .all()
+            .iter()
+            .filter(|e| e.state == QueueState::Superseded)
+            .count();
+        assert_eq!(superseded, 1, "{:?}", queue.all());
     }
 
     #[tokio::test]

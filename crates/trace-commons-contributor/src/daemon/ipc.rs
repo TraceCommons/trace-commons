@@ -313,6 +313,23 @@ impl DaemonShared {
         if queue.release_in_flight() {
             queue.save(&store)?;
         }
+        // One-time upgrade: retire entries that stand for a single subagent
+        // transcript.
+        //
+        // Those entries were minted when each `<uuid>/subagents/*.jsonl`
+        // file was discovered as a session in its own right. Discovery no
+        // longer yields those paths, so `find_session` cannot resolve them:
+        // an approved one would fail with `session-file-vanished` and a
+        // pending one would sit in the queue until it aged out. Both are
+        // safe and both are confusing, and leaving them would keep offering
+        // a fragment whose opening prompt was written by the parent agent
+        // rather than by the contributor. Superseding says what actually
+        // happened -- the conversation each belongs to is offered whole
+        // instead -- and releases the stored preview envelope on the next
+        // sweep.
+        if regroup_subagent_entries(&mut queue) {
+            queue.save(&store)?;
+        }
         // Sweep stored preview envelopes on the way up. A daemon that died
         // between resolving an entry and sweeping, or one whose queue file
         // was replaced underneath it, would otherwise leave redacted trace
@@ -461,6 +478,43 @@ pub fn relabel_queue_entries(policy: &ProjectPolicy, queue: &mut Queue) -> bool 
 /// `set_project_mode` to arm or silence the project this entry came from.
 /// It is a hash of the key, so it carries no path component (see
 /// `policy::project_id_for`).
+/// Supersede every live queue entry whose path sits under a `subagents/`
+/// directory, because such a path is no longer a session the daemon can
+/// discover. Returns whether anything changed.
+///
+/// Matched on the path shape rather than on the source name: it is the
+/// layout, not the adapter, that stopped being addressable. Entries in a
+/// terminal state are left exactly as they are -- they are history, and a
+/// record of what was uploaded must not be rewritten by an upgrade.
+fn regroup_subagent_entries(queue: &mut Queue) -> bool {
+    let stale: Vec<uuid::Uuid> = queue
+        .all()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.state,
+                super::queue::QueueState::Pending | super::queue::QueueState::Approved
+            ) && e
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "subagents")
+        })
+        .map(|e| e.entry_id)
+        .collect();
+    if stale.is_empty() {
+        return false;
+    }
+    for entry_id in stale {
+        queue.set_state(
+            entry_id,
+            super::queue::QueueState::Superseded,
+            Some("regrouped-under-parent".to_string()),
+        );
+    }
+    true
+}
+
 pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
     serde_json::json!({
         "entry_id": e.entry_id,
@@ -475,6 +529,16 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         "attempts": e.attempts,
         "retry_after": e.retry_after,
         "submission_id": e.submission_id,
+        // Additive, and the reason the card can be honest about its own
+        // extent: one entry can stand for a conversation plus a hundred
+        // delegated transcripts, which is material to the consent decision
+        // rather than decoration. `subagents_dropped` is non-zero only when
+        // the conversation was trimmed to fit the byte budget, and a card
+        // showing it is the difference between a trimmed trace and a
+        // silently partial one. No ordinal is exposed: there is no "1 of 3"
+        // to expose, because nothing in the format supplies one.
+        "subagent_count": e.subagent_count,
+        "subagents_dropped": e.subagents_dropped,
     })
 }
 
@@ -2013,6 +2077,8 @@ mod tests {
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
                     },
                     500,
                 )
@@ -2111,6 +2177,8 @@ mod tests {
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
                     },
                     500,
                 )
@@ -2197,6 +2265,8 @@ mod tests {
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
+                    subagent_count: 0,
+                    subagents_dropped: 0,
                 },
                 500,
             )
@@ -2589,6 +2659,8 @@ mod tests {
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
                     },
                     500,
                 )
@@ -2664,6 +2736,8 @@ mod tests {
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
                     },
                     500,
                 )
@@ -2816,6 +2890,8 @@ mod tests {
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
         };
         let body = serde_json::to_string(&entry_value(&e)).unwrap();
         assert!(
@@ -2823,6 +2899,134 @@ mod tests {
             "path leaked to the wire: {body}"
         );
         assert!(body.contains("secret-client-project"));
+    }
+
+    #[test]
+    fn the_upgrade_retires_entries_that_stand_for_a_lone_subagent_transcript() {
+        // Discovery no longer yields a `subagents/` path, so these entries
+        // are unreachable: an approved one would fail `session-file-vanished`
+        // and a pending one would sit until it aged out. Worse, each still
+        // offers a fragment whose opening prompt was written by the parent
+        // agent. Say what happened instead, and leave the top-level entry --
+        // and anything already resolved -- exactly as it was.
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let open = || crate::config::ConfigStore::open(state.clone()).unwrap();
+
+        let seed =
+            |hash: &str, path: &str, entry_state: QueueState| super::super::queue::QueueEntry {
+                entry_id: super::super::queue::entry_id_for(hash),
+                session_hash: hash.to_string(),
+                source: "claude-code".to_string(),
+                project_key: "/tmp/p".to_string(),
+                project_label: "p".to_string(),
+                path: std::path::PathBuf::from(path),
+                size_bytes: 1,
+                discovered_at: Utc::now(),
+                state: entry_state,
+                reason_label: None,
+                attempts: 0,
+                retry_after: None,
+                submission_id: None,
+                approved_scopes: None,
+                approved_inputs: None,
+                previewed_envelope_digest: None,
+                approved_at: None,
+                subagent_count: 0,
+                subagents_dropped: 0,
+            };
+        let mut queue = Queue::new();
+        queue
+            .upsert(
+                seed(
+                    "sha256:top",
+                    "/p/-Users-z-proj/aaa.jsonl",
+                    QueueState::Pending,
+                ),
+                500,
+            )
+            .unwrap();
+        queue
+            .upsert(
+                seed(
+                    "sha256:sub",
+                    "/p/-Users-z-proj/aaa/subagents/agent-1.jsonl",
+                    QueueState::Pending,
+                ),
+                500,
+            )
+            .unwrap();
+        queue
+            .upsert(
+                seed(
+                    "sha256:subapproved",
+                    "/p/-Users-z-proj/aaa/subagents/agent-2.jsonl",
+                    QueueState::Approved,
+                ),
+                500,
+            )
+            .unwrap();
+        queue
+            .upsert(
+                seed(
+                    "sha256:subdone",
+                    "/p/-Users-z-proj/aaa/subagents/agent-3.jsonl",
+                    QueueState::Uploaded,
+                ),
+                500,
+            )
+            .unwrap();
+        queue.save(&open()).unwrap();
+
+        let s = DaemonShared::load(open()).unwrap();
+        let q = s.queue.lock().unwrap();
+        let by_hash = |h: &str| q.all().iter().find(|e| e.session_hash == h).unwrap();
+        assert_eq!(by_hash("sha256:top").state, QueueState::Pending);
+        assert_eq!(by_hash("sha256:sub").state, QueueState::Superseded);
+        assert_eq!(
+            by_hash("sha256:sub").reason_label.as_deref(),
+            Some("regrouped-under-parent")
+        );
+        assert_eq!(by_hash("sha256:subapproved").state, QueueState::Superseded);
+        assert_eq!(
+            by_hash("sha256:subdone").state,
+            QueueState::Uploaded,
+            "an upload already recorded must not be rewritten by an upgrade"
+        );
+    }
+
+    #[test]
+    fn the_queue_card_reports_how_many_delegated_transcripts_it_covers() {
+        // A card standing for a hundred delegated transcripts has to say so:
+        // the extent of what is being sent is part of the consent decision,
+        // not decoration. No ordinal is exposed -- nothing in the format
+        // supplies one.
+        let e = super::super::queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: "sha256:aa".to_string(),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/s.jsonl"),
+            size_bytes: 1,
+            discovered_at: Utc::now(),
+            state: QueueState::Pending,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
+            approved_at: None,
+            subagent_count: 114,
+            subagents_dropped: 2,
+        };
+        let v = entry_value(&e);
+        assert_eq!(v["subagent_count"], 114);
+        assert_eq!(v["subagents_dropped"], 2);
+        let body = serde_json::to_string(&v).unwrap();
+        assert!(!body.contains("/tmp/s.jsonl"), "path leaked: {body}");
     }
 
     #[test]
@@ -2865,6 +3069,8 @@ mod tests {
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
+                    subagent_count: 0,
+                    subagents_dropped: 0,
                 },
                 500,
             )
