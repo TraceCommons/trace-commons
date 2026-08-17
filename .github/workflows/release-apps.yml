@@ -184,6 +184,67 @@ jobs:
       - name: Build the CLI
         run: cargo build --release --bin trace-commons-contributor -p trace-commons-contributor --target x86_64-pc-windows-msvc
 
+      # The WinUI desktop app, from here to the second signing pass below.
+      #
+      # Until this existed the Windows asset on an apps release was the CLI and
+      # nothing else, so Windows contributors could get the command line from
+      # two release streams and the desktop app from neither -- even though the
+      # app has built in CI (`windows contributor app` in ci.yml) since it
+      # landed. The CLI zip below is untouched; this is an additional asset.
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # MSBuild from Visual Studio, not `dotnet build`/`dotnet publish`, and
+      # that is not a preference. A WinUI 3 project invokes tasks that live in
+      # Microsoft.Build.AppxPackage.dll and Microsoft.Build.Packaging.Pri.Tasks.dll,
+      # which ship with Visual Studio's tooling and are never part of the .NET
+      # SDK; driving this project from the SDK CLI fails with MSB4062 naming a
+      # path under the dotnet SDK directory, which reads like a .NET version
+      # problem and is not one. ci.yml's app job hit exactly this.
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      # The app is C# over the same C ABI the macOS app uses, so the cdylib has
+      # to exist before anything managed builds. TraceCommons.App.csproj fails
+      # its own build when the DLL is absent rather than deferring that to a
+      # runtime "core not found", so this is a hard prerequisite, not an
+      # optimisation.
+      - name: Build the contributor FFI cdylib
+        run: cargo build --release -p trace-commons-contributor-ffi --target x86_64-pc-windows-msvc
+
+      # Self-contained and unpackaged (WindowsPackageType=None, SelfContained,
+      # WindowsAppSDKSelfContained -- all three set in the csproj), so the
+      # publish output carries the .NET runtime and the Windows App SDK with it
+      # and needs no prerequisites on a contributor's machine. That is why a
+      # zip of this directory is a usable distribution and no MSIX is involved.
+      #
+      # Run from windows/ so windows/global.json applies: MSBuild otherwise
+      # selects the newest installed SDK regardless of what setup-dotnet put
+      # there, and the runner image ships a .NET whose layout Windows App SDK
+      # 1.6 cannot build against.
+      #
+      # PublishDir is absolute and written with forward slashes deliberately. A
+      # relative PublishDir resolves against the project directory rather than
+      # the workspace, and a trailing backslash inside a quoted MSBuild
+      # property escapes the closing quote.
+      - name: Publish the WinUI app (self-contained, win-x64)
+        shell: pwsh
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publishDir = "$env:GITHUB_WORKSPACE/app-publish"
+          msbuild src/TraceCommons.App/TraceCommons.App.csproj `
+            -restore `
+            -t:Publish `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
+            -p:RuntimeIdentifier=win-x64 `
+            -p:SelfContained=true `
+            -p:PublishDir=$publishDir/
+          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
+
       - name: Stage the binary for signing
         shell: pwsh
         run: |
@@ -194,6 +255,73 @@ jobs:
           if ($staged.Count -ne 1) {
             throw "expected exactly 1 binary staged for signing, found $($staged.Count): $($staged.Name -join ', ')"
           }
+
+      # The app is signed in place inside its publish tree rather than staged
+      # into signed\, because the tree itself is the artifact: the binaries have
+      # to sit beside the runtime they were published with.
+      #
+      # A self-contained WinUI publish emits several hundred files, nearly all
+      # of them Microsoft's and already signed. This job holds signing authority
+      # through federated credentials, so it signs an explicit allowlist and
+      # never "everything in the directory". Signing whatever happens to be in
+      # the tree would mean a file an attacker managed to place there leaves
+      # here carrying the project's public-trust certificate.
+      #
+      # The assertion runs in both directions. Every allowlisted path must
+      # exist, and a recursive scan for anything named the way our own output is
+      # named must yield exactly the allowlist -- so a binary that went missing
+      # and an unexpected extra one both stop the release, instead of quietly
+      # changing what gets signed.
+      - name: Stage the app binaries for signing
+        id: appstage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publishDir = (Resolve-Path "$env:GITHUB_WORKSPACE/app-publish").Path
+
+          # TraceCommons.exe is the apphost and TraceCommons.dll the managed
+          # assembly behind it -- AssemblyName is TraceCommons in
+          # windows/src/TraceCommons.App/TraceCommons.App.csproj.
+          # TraceCommons.Interop.dll is our C ABI binding
+          # (windows/src/TraceCommons.Interop/TraceCommons.Interop.csproj), and
+          # the cdylib is the Rust core the app hosts in-process. Nothing else
+          # under app-publish is built by this repository.
+          $allowlist = @(
+            "TraceCommons.exe",
+            "TraceCommons.dll",
+            "TraceCommons.Interop.dll",
+            "trace_commons_contributor_ffi.dll"
+          )
+
+          $missing = @($allowlist | Where-Object {
+            -not (Test-Path (Join-Path $publishDir $_) -PathType Leaf)
+          })
+          if ($missing.Count -ne 0) {
+            throw "expected app binaries are missing from the publish output: $($missing -join ', ')"
+          }
+
+          $found = @(
+            Get-ChildItem -Path $publishDir -Recurse -File |
+              Where-Object { @(".exe", ".dll") -contains $_.Extension } |
+              Where-Object { $_.Name -like "TraceCommons*" -or $_.Name -like "trace_commons_*" } |
+              ForEach-Object { $_.FullName.Substring($publishDir.Length + 1) } |
+              Sort-Object
+          )
+          $expected = @($allowlist | Sort-Object)
+          if (($found -join "|") -ne ($expected -join "|")) {
+            throw "the binaries our build produces under app-publish do not match the signing allowlist. Expected: $($expected -join ', '). Found: $($found -join ', ')."
+          }
+
+          # Set-Content rather than Out-File: Out-File runs its input through
+          # the formatter, which has a line width, and these are long absolute
+          # paths whose truncation would be silent.
+          $listFile = Join-Path $env:RUNNER_TEMP "app-sign-list.txt"
+          Set-Content -Path $listFile -Encoding utf8 -Value @(
+            $allowlist | ForEach-Object { Join-Path $publishDir $_ }
+          )
+          Write-Host "staged for signing:"
+          Get-Content $listFile | ForEach-Object { Write-Host "  $_" }
+          "app_sign_list=$listFile" >> $env:GITHUB_OUTPUT
 
       - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
         with:
@@ -301,13 +429,62 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $($_.Name)" }
           }
 
+      # A separate pass from the CLI's, and driven by the list the staging step
+      # wrote rather than by a glob over a directory. That difference is the
+      # whole point: a glob over a self-contained publish tree would hand
+      # signtool several hundred files, most of them Microsoft's, and would sign
+      # anything that appeared there. The count check below is a second reading
+      # of the same invariant the staging step asserted, in the step that
+      # actually holds the certificate.
+      - name: Sign the app binaries
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+          APP_SIGN_LIST: ${{ steps.appstage.outputs.app_sign_list }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $paths = @(Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
+          if ($paths.Count -ne 4) {
+            throw "expected exactly 4 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
+          }
+          foreach ($p in $paths) {
+            if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
+            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
+              /tr http://timestamp.acs.microsoft.com /td SHA256 `
+              /dlib "$env:TS_DLIB" `
+              /dmdf "$env:TS_METADATA" `
+              $p
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $p" }
+          }
+
+      - name: Verify the app signatures
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          APP_SIGN_LIST: ${{ steps.appstage.outputs.app_sign_list }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
+            & "$env:TS_SIGNTOOL" verify /pa /v $_
+            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $_" }
+          }
+
       # After signing, so the provenance covers the signed bytes rather than the
       # unsigned build output. The Authenticode signature travels inside the .exe,
       # so provenance on the exe covers what a contributor executes; the zip is
-      # only transport.
+      # only transport. The same reasoning extends to the app: provenance names
+      # the four binaries we built and signed, not the Microsoft runtime files
+      # the publish tree carries alongside them.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
-          subject-path: signed/*.exe
+          subject-path: |
+            signed/*.exe
+            app-publish/TraceCommons.exe
+            app-publish/TraceCommons.dll
+            app-publish/TraceCommons.Interop.dll
+            app-publish/trace_commons_contributor_ffi.dll
 
       - name: Package
         shell: pwsh
@@ -323,6 +500,33 @@ jobs:
           "$hash  $(Split-Path -Leaf $zip)" |
             Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
+      # A second, separate asset. The CLI zip above keeps its name and its
+      # contents; nothing consumes this one yet, and winget and install.ps1
+      # both draw from the contributor release rather than from here.
+      #
+      # The publish tree is renamed into a versioned folder before compression
+      # so the zip carries that folder at its root. Extracting several hundred
+      # loose runtime files into whatever directory a contributor happened to be
+      # in is not a distribution, it is a mess.
+      - name: Package the app
+        shell: pwsh
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $v = $env:SHORT_VERSION
+          New-Item -ItemType Directory -Force -Path dist, app-staging | Out-Null
+          $folder = "app-staging\TraceCommons-$v"
+          Move-Item -Path app-publish -Destination $folder
+          $zip = "dist\trace-commons-app-windows-x86_64-$v.zip"
+          Compress-Archive -Path $folder -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $zip)" |
+            Out-File "$zip.sha256" -Encoding ascii -NoNewline
+
+      # Both Windows zips ride in the one artifact, so the publish job's
+      # existing download pattern and its `dist/*/*` upload glob pick the app up
+      # with no further wiring.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-zip
@@ -525,8 +729,13 @@ jobs:
           if [ "$WINDOWS_RESULT" = success ]; then
             NOTES="$NOTES
 
-          Windows: Authenticode-signed via Azure Trusted Signing and RFC3161
-          timestamped."
+          Windows: two assets, both Authenticode-signed via Azure Trusted
+          Signing and RFC3161 timestamped.
+          \`trace-commons-app-windows-x86_64-*.zip\` is the desktop app --
+          unzip it and run \`TraceCommons.exe\`; it is self-contained, so
+          there is no runtime to install first.
+          \`trace-commons-windows-x86_64-*.zip\` is the command-line
+          contributor."
           fi
           if [ "$LINUX_RESULT" = success ]; then
             NOTES="$NOTES
