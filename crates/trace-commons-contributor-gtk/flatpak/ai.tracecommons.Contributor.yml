@@ -60,6 +60,23 @@ finish-args:
   # their own finish-arg, except Notifications and the SNI watcher, which
   # need this socket explicitly.
   - --socket=session-bus
+  # The update path (src/update.rs). org.freedesktop.portal.Flatpak is the
+  # *flatpak* portal -- a different service from org.freedesktop.portal.Desktop
+  # -- and it is what CreateUpdateMonitor and UpdateMonitor.Update live on.
+  #
+  # Strictly, --socket=session-bus above already covers this: it takes
+  # flatpak's `unrestricted` branch (common/flatpak-run-dbus.c), which binds
+  # the real bus socket into the sandbox and bypasses xdg-dbus-proxy
+  # entirely. And even under the filtered proxy, the default rules include
+  # `--call=org.freedesktop.portal.*=*`, and the UpdateMonitor's signals are
+  # emitted unicast to the caller (portal/flatpak-portal.c emits with
+  # destination = the requesting sender), not as broadcasts, so they are not
+  # subject to the `--broadcast=...` path filter either.
+  #
+  # It is declared anyway, because a permission that the app genuinely needs
+  # should be visible where a reviewer looks for it, and because narrowing
+  # --socket=session-bus later must not silently break updating.
+  - --talk-name=org.freedesktop.portal.Flatpak
   # The two session roots this daemon reads by default, and nothing wider.
   # Read-only: this application only ever reads session files, and the
   # queue/redaction/upload pipeline holds its own working state entirely

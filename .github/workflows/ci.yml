@@ -494,6 +494,11 @@ jobs:
       # The GTK crate is its own workspace, excluded from the root one.
       - name: Build the shell
         run: cargo build --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
+      # The GTK crate is its own workspace, so the root workspace's test job
+      # never touches it. Its update, portal-parsing and copy logic is all
+      # pure and needs no display -- but without this step nothing runs it.
+      - name: Test the shell
+        run: cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
 
