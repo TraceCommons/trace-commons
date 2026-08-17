@@ -515,6 +515,37 @@ impl PgBackend {
         rows.into_iter().map(Self::invite_entry_from_row).collect()
     }
 
+    /// Count live grants in one pool. Backs the self-serve claim cap and the
+    /// public remaining-count surface.
+    ///
+    /// "Live" matches `list_invite_grants`: not revoked, not expired. An
+    /// expired Legion grant therefore frees a slot, which is the intended
+    /// behaviour — an unredeemed allotment should not hold the cap down
+    /// forever.
+    ///
+    /// Runs on the registry pool, whose permissive V42 policy authorizes the
+    /// cross-invite read. The runtime pool cannot do this: its RLS predicate
+    /// confines it to the single invite hash the caller presented.
+    pub async fn count_live_invite_grants(&self, policy_label: &str) -> Result<u32, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS live
+                   FROM onboarding_invite_grants
+                  WHERE policy_label = $1
+                    AND revoked_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > NOW())",
+                &[&policy_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let live: i64 = row.get("live");
+        u32::try_from(live).map_err(|_| {
+            DatabaseError::Serialization("invite grant count out of range".to_string())
+        })
+    }
+
     pub async fn insert_invite_grant(
         &self,
         write: crate::db::InviteGrantWrite,
