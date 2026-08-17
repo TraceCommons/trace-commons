@@ -259,6 +259,18 @@ jobs:
     name: install.ps1 against the real release
     runs-on: windows-latest
     timeout-minutes: 15
+    # The installer resolves the newest contributor-v* tag through the GitHub
+    # API, and anonymous api.github.com is rate-limited per source IP. Actions
+    # runners share those IPs, so unauthenticated the lookup fails on most
+    # runs -- sometimes as a 403, sometimes as an empty release list -- and
+    # this job goes red for reasons that have nothing to do with the change
+    # under test. GITHUB_TOKEN is read by install.ps1 when present and is
+    # read-only here; a contributor running the script by hand still makes the
+    # same anonymous request.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       # This installer's whole claim is that it refuses to install what it

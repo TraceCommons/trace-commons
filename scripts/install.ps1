@@ -99,10 +99,22 @@ $asset = "trace-commons-contributor-$target.exe"
 # GitHub's "latest release" is whichever was cut most recently and may hold no
 # CLI assets at all. Resolve the newest contributor-v* tag explicitly.
 if ($Version -eq 'latest') {
+    # Send a token when the environment already has one. Anonymous
+    # api.github.com is rate-limited per source IP, which is generous for one
+    # person on a home connection and hopeless from a shared one -- a CI
+    # runner, an office NAT, a VPN exit. GitHub Actions sets GITHUB_TOKEN, so
+    # this is the difference between the release lookup working there and
+    # failing on most runs. A token is never required and never requested:
+    # without one this is the same anonymous request it always was.
+    $headers = @{ 'Accept' = 'application/vnd.github+json' }
+    $token = $env:GH_TOKEN
+    if (-not $token) { $token = $env:GITHUB_TOKEN }
+    if ($token) { $headers['Authorization'] = "Bearer $token" }
+
     try {
         $releases = Invoke-RestMethod -UseBasicParsing `
             -Uri "https://api.github.com/repos/$Repo/releases?per_page=50" `
-            -Headers @{ 'Accept' = 'application/vnd.github+json' }
+            -Headers $headers
     } catch {
         Die @"
 could not reach the GitHub API to work out the latest CLI release.
@@ -110,12 +122,23 @@ It may be rate-limiting you. Pass a version explicitly instead:
   .\install.ps1 -Version 0.1.0
 "@
     }
-    $tag = ($releases |
+
+    # Bind the matched release before reading anything off it. Under
+    # `Set-StrictMode -Version Latest` a pipeline that matches nothing yields
+    # $null, and `$null.tag_name` throws "The property 'tag_name' cannot be
+    # found on this object" -- which fired BEFORE the guard below could report
+    # it, replacing a plain explanation with a stack trace about a property
+    # name. The API answering with an empty list is a real case, not
+    # a hypothetical: it is what an over-limit or briefly inconsistent
+    # response looks like, and it is precisely when someone needs the
+    # explanation rather than the trace.
+    $release = $releases |
         Where-Object { $_.tag_name -like 'contributor-v*' } |
-        Select-Object -First 1).tag_name
-    if (-not $tag) {
+        Select-Object -First 1
+    if (-not $release) {
         Die "found no contributor-v* release. Pass a version explicitly: .\install.ps1 -Version 0.1.0"
     }
+    $tag = $release.tag_name
 } else {
     $tag = "contributor-v$Version"
 }
