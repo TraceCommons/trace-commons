@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The interop layer targets plain net8.0, NOT net8.0-windows.
+
+    That is deliberate and it is what makes this layer testable. Nothing here
+    touches WinUI, WinRT, or any Windows-only API: it is P/Invoke against a
+    cdylib whose name .NET decorates per platform. So the same assembly, and
+    the same tests, run against a macOS .dylib or a Linux .so build of the very
+    same Rust crate the Windows app ships.
+
+    The payoff is that the risky half of this app — pointer ownership,
+    UTF-8 marshalling, the unsubscribe barrier — can be exercised on a
+    developer machine that is not running Windows, instead of only in CI. The
+    WinUI project is where the Windows-only target framework belongs, and it
+    is the only place it appears.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>TraceCommons.Interop</AssemblyName>
+    <RootNamespace>TraceCommons.Interop</RootNamespace>
+
+    <!--
+      Warnings as errors, matching the RUSTFLAGS="-D warnings" discipline CI
+      applies to the Rust side of this repo. A binding layer is exactly where a
+      "possible null reference" warning is a real bug rather than noise.
+    -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!--
+      Runtime marshalling stays ON. Disabling it is the usual modern default,
+      but it removes support for the [MarshalAs(UnmanagedType.LPUTF8Str)]
+      string marshalling this binding depends on throughout.
+    -->
+    <DisableRuntimeMarshalling>false</DisableRuntimeMarshalling>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TraceCommons.Interop.Tests" />
+  </ItemGroup>
+
+</Project>

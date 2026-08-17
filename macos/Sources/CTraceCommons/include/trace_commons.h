@@ -113,6 +113,42 @@ typedef struct tc_preview tc_preview;
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
+/* As tc_daemon_start, but applies settings BEFORE the watcher's first tick.
+ *
+ * tc_call(handle, "set_settings", ...) only works on an already-running
+ * daemon, by which point the first pass has already scanned whatever was on
+ * disk. A host that needs the watcher to scan a non-default location from the
+ * very first pass -- a native app watching a relocated session store, or a
+ * test harness that must never scan the real ~/.claude / ~/.codex -- cannot
+ * express that through tc_daemon_start.
+ *
+ * settings_json accepts exactly the fields "set_settings" does --
+ * quiescence_secs, digest_interval_secs, approval_hold_secs,
+ * local_notifications, claude_root, codex_root -- validated by the same
+ * function, so there is one definition of a valid settings object rather than
+ * two that can drift. An unrecognized top-level key, or a recognized key
+ * holding the wrong JSON type, is REJECTED with a fixed label rather than
+ * silently ignored: a misspelled claude_root that was ignored would leave the
+ * daemon watching the wrong directory with no signal to the host.
+ *
+ * settings_json may be NULL, or empty after trimming ASCII whitespace,
+ * meaning "use whatever is currently persisted" -- identical to
+ * tc_daemon_start.
+ *
+ * Returns NULL and sets *err (if non-NULL) on failure; *err is owned, free it
+ * with tc_string_free. A settings_json problem reports a fixed, content-free
+ * label and deliberately NEVER settings_json's own text -- it is the one
+ * input here that may itself contain a filesystem path, which is exactly what
+ * this boundary must not echo back. Any other failure reports the same opaque
+ * "daemon-start-failed" tc_daemon_start does.
+ *
+ * The returned handle is exactly a tc_daemon_start handle: same lifetime,
+ * same teardown, freed by tc_handle_free after tc_daemon_stop.
+ */
+tc_handle*  tc_daemon_start_with_settings(const char* config_dir,
+                                          const char* settings_json,
+                                          char** err);
+
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other
