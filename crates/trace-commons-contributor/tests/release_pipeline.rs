@@ -296,56 +296,71 @@ fn every_rust_toolchain_usage_pins_a_toolchain_input() {
     }
 }
 
-/// Both workflows sign Windows binaries with the same duplicated dlib block,
+/// Both workflows sign Windows binaries with the same duplicated dlib logic,
 /// so both must be pinned. Reading only one leaves the other free to drop the
 /// timestamp -- and an untimestamped Trusted Signing signature keeps validating
 /// for about three days, so no same-day run would catch it.
+///
+/// `release-apps.yml`'s windows job no longer inlines this logic: it calls
+/// out to `scripts/windows/setup-trusted-signing.ps1` and
+/// `scripts/windows/sign-with-trusted-signing.ps1`. `release-contributor.yml`
+/// still inlines it. So for `release-apps.yml` the label under test is the
+/// workflow text PLUS both extracted scripts' text -- the properties this
+/// test pins are properties of what that job actually runs, wherever the
+/// text for it now lives -- while `release-contributor.yml` is checked
+/// against its own (still-inline) text alone.
 #[test]
 fn windows_signing_is_timestamped() {
-    for path in [
-        ".github/workflows/release-apps.yml",
-        ".github/workflows/release-contributor.yml",
-    ] {
-        assert_windows_signing_is_hardened(path);
-    }
+    let apps = format!(
+        "{}\n{}\n{}",
+        read(".github/workflows/release-apps.yml"),
+        read("scripts/windows/setup-trusted-signing.ps1"),
+        read("scripts/windows/sign-with-trusted-signing.ps1"),
+    );
+    assert_windows_signing_is_hardened(
+        ".github/workflows/release-apps.yml (+ scripts/windows/*.ps1)",
+        &apps,
+    );
+
+    let contributor = read(".github/workflows/release-contributor.yml");
+    assert_windows_signing_is_hardened(".github/workflows/release-contributor.yml", &contributor);
 }
 
-fn assert_windows_signing_is_hardened(path: &str) {
-    let workflow = read(path);
+fn assert_windows_signing_is_hardened(label: &str, text: &str) {
     // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
     // client can be verified by content before it runs in a job that holds
     // signing authority.
     assert!(
-        workflow.contains("Azure.CodeSigning.Dlib.dll"),
-        "{path}: Windows signing drives Microsoft's Trusted Signing dlib via signtool"
+        text.contains("Azure.CodeSigning.Dlib.dll"),
+        "{label}: Windows signing drives Microsoft's Trusted Signing dlib via signtool"
     );
     assert!(
-        !workflow.contains("azure/trusted-signing-action"),
-        "{path}: the marketplace action was deliberately replaced by the SHA-verified \
+        !text.contains("azure/trusted-signing-action"),
+        "{label}: the marketplace action was deliberately replaced by the SHA-verified \
          dlib; reintroducing it drops the content check"
     );
     assert!(
-        workflow.contains("TRUSTED_SIGNING_CLIENT_SHA256")
-            && workflow.contains("Refusing to expand a potentially tampered"),
-        "{path}: the signing client must be verified by SHA-256 and fail closed before \
+        text.contains("TRUSTED_SIGNING_CLIENT_SHA256")
+            && text.contains("Refusing to expand a potentially tampered"),
+        "{label}: the signing client must be verified by SHA-256 and fail closed before \
          extraction"
     );
     // Trusted Signing certificates are valid for roughly three days. Without
     // an RFC3161 countersignature the signature stops validating days after
     // release -- a failure no same-day test would catch.
     assert!(
-        workflow.contains("/tr http://timestamp.acs.microsoft.com"),
-        "{path}: every sign invocation needs an RFC3161 timestamp server: Trusted \
+        text.contains("/tr http://timestamp.acs.microsoft.com"),
+        "{label}: every sign invocation needs an RFC3161 timestamp server: Trusted \
          Signing certificates carry ~3-day validity, so the countersignature \
          is the only reason a signature outlives them"
     );
     assert!(
-        workflow.contains("/td SHA256"),
-        "{path}: the timestamp digest algorithm must be pinned alongside /tr"
+        text.contains("/td SHA256"),
+        "{label}: the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
-        workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
-        "{path}: the signature must be verified in the job, not assumed"
+        text.contains("signtool") || text.contains("Get-AuthenticodeSignature"),
+        "{label}: the signature must be verified in the job, not assumed"
     );
     // Each real `signtool ... sign` invocation must carry its own /tr
     // timestamp flag. A `contains("/tr ")` check alone (as above) only
@@ -353,7 +368,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
     // a second `signtool sign` added later without one, which would pass
     // that check while shipping an untimestamped binary. Comments mention
     // "/tr " in prose (see above), so count only non-comment lines.
-    let executable_lines: Vec<&str> = workflow
+    let executable_lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .collect();
@@ -374,7 +389,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
         .count();
     assert!(
         sign_invocations > 0,
-        "{path}: found no signtool sign invocation at all -- either the \
+        "{label}: found no signtool sign invocation at all -- either the \
          Windows signing step was removed or this detector no longer matches it"
     );
     let tr_flags = executable_lines
@@ -383,7 +398,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
         .count();
     assert!(
         tr_flags >= sign_invocations,
-        "{path}: found {sign_invocations} `signtool sign` invocation(s) but \
+        "{label}: found {sign_invocations} `signtool sign` invocation(s) but \
          only {tr_flags} /tr flag(s) -- every sign call must be timestamped"
     );
 }
@@ -406,6 +421,20 @@ fn extract_between<'a>(haystack: &'a str, prefix: &str, suffix: char) -> &'a str
 /// byte-identical today, which makes the gap latent rather than visible: a
 /// bump to one file without the other would sign with mismatched
 /// expectations and nothing here would catch it.
+///
+/// The hash constant is still duplicated directly between the two workflow
+/// files: `release-apps.yml`'s windows job passes its
+/// `TRUSTED_SIGNING_CLIENT_SHA256` env var into
+/// `scripts/windows/setup-trusted-signing.ps1` as `-ExpectedSha256` rather
+/// than hardcoding it, but `release-contributor.yml` still hardcodes its own
+/// copy inline -- so the two workflow-level values must still agree.
+///
+/// The nuget version pin moved when `release-apps.yml`'s windows job was
+/// wired to the extracted scripts: it no longer sets `$nugetVersion` itself
+/// and instead relies on `setup-trusted-signing.ps1`'s own default
+/// (`-NuGetVersion`, unset by the caller). `release-contributor.yml` still
+/// sets `$nugetVersion` inline. The duplication that must not drift is now
+/// between the script's default and the contributor workflow's inline value.
 #[test]
 fn duplicated_windows_signing_constants_do_not_drift_between_workflows() {
     let apps = read(".github/workflows/release-apps.yml");
@@ -421,12 +450,20 @@ fn duplicated_windows_signing_constants_do_not_drift_between_workflows() {
          workflow is trusting a different signing-client binary than the \
          other"
     );
+    assert!(
+        !apps.contains("$nugetVersion"),
+        "release-apps.yml's windows job inlines $nugetVersion again -- it \
+         should be relying on setup-trusted-signing.ps1's -NuGetVersion \
+         default instead, or this test is checking the wrong value"
+    );
 
-    let apps_version = extract_between(&apps, "$nugetVersion = \"", '"');
+    let script = read("scripts/windows/setup-trusted-signing.ps1");
+    let apps_version = extract_between(&script, "NuGetVersion = '", '\'');
     let contributor_version = extract_between(&contributor, "$nugetVersion = \"", '"');
     assert_eq!(
         apps_version, contributor_version,
-        "release-apps.yml and release-contributor.yml pin different \
+        "scripts/windows/setup-trusted-signing.ps1's default -NuGetVersion \
+         and release-contributor.yml's inline $nugetVersion pin different \
          Microsoft.Trusted.Signing.Client nuget versions -- these must \
          agree, since the pinned SHA-256 is only valid for one version"
     );

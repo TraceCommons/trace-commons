@@ -100,7 +100,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use anyhow::bail;
 use anyhow::{Context, Result};
 use chrono::Utc;
