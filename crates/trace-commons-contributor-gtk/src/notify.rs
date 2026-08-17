@@ -13,6 +13,10 @@
 //! ships three real transcripts is unrecoverable, and no amount of
 //! convenience is worth that risk. The enum below is deliberately the only
 //! vocabulary this module has.
+//!
+//! What it may carry, beyond those two actions, is the mark: the design
+//! spec puts "The Turn" in every frame the product appears in, and a
+//! notification is one of them. See [`post`] for how the file gets there.
 
 /// What a contributor pressed. There is no third variant, and adding one
 /// that sends anything would violate the shared spec.
@@ -33,14 +37,28 @@ pub enum Action {
 /// surfacing: the window is the primary surface on this platform, and it is
 /// still there.
 pub fn post(summary: &str, body: &str) -> Option<Action> {
-    let handle = notify_rust::Notification::new()
+    let mut notification = notify_rust::Notification::new();
+    notification
         .summary(summary)
         .body(body)
         .appname(crate::copy::APP_NAME)
         .action("review", crate::copy::NOTIFY_REVIEW)
-        .action("not-now", crate::copy::NOTIFY_NOT_NOW)
-        .show()
-        .ok()?;
+        .action("not-now", crate::copy::NOT_NOW);
+
+    // The mark, in its framed variant: the notification is one of the frames
+    // the adopted mark is carried in, alongside the window chrome and the
+    // tray. It goes on as an absolute path rather than a name, because the
+    // notification daemon is a separate process that searches its own icon
+    // themes and will never find ours. `tray.rs` owns the file because it is
+    // the module that had to write one anyway; a daemon that cannot render
+    // an SVG, or a run where the write failed, gets a notification with no
+    // icon, which is what it got before the mark existed.
+    let icon_path = crate::tray::icons().map(|icons| icons.app_icon.to_string_lossy().into_owned());
+    if let Some(path) = icon_path.as_deref() {
+        notification.icon(path);
+    }
+
+    let handle = notification.show().ok()?;
 
     let mut pressed = None;
     handle.wait_for_action(|id| {

@@ -187,7 +187,19 @@ use trace_commons_server::trace_score_attestation::{
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
-const MAX_INGEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Request-body ceiling. Derived from the shared envelope cap plus framing
+/// headroom (JSON wrapper, headers) so ingest always admits an envelope the
+/// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
+const MAX_INGEST_BODY_BYTES: usize =
+    trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Ingest must accept every envelope the contributor is willing to build.
+/// These were independent constants once and they drifted -- the client
+/// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
+/// client alone would only have moved the refusal to a 413. Compile-time, so
+/// the ordering cannot be broken by a later edit to either side.
+const _: () = assert!(
+    MAX_INGEST_BODY_BYTES >= trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES
+);
 const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
@@ -14217,7 +14229,20 @@ const ACCOUNT_TRACES_MAX_LIMIT: usize = 200;
 /// is buffered and decrypted in memory before this check, so a body above the
 /// ceiling cannot be returned at all — it collapses to a single generic error
 /// that carries no size signal (no partial/streamed response is ever emitted).
-const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+///
+/// Derived from the shared envelope cap with headroom, so a trace that was
+/// accepted at submission can always be read back by the contributor who
+/// submitted it; a fixed ceiling below that cap would strand large traces.
+const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize =
+    trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Read-back must be able to return what submission accepted: a stored
+/// envelope above this ceiling collapses to a generic error, which would
+/// leave a large trace accepted but permanently unreadable by the
+/// contributor who submitted it.
+const _: () = assert!(
+    ACCOUNT_TRACE_CONTENT_MAX_BYTES
+        >= trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES
+);
 
 /// Query string for `GET /v1/account/traces`. Keyset pagination only: no offset
 /// is accepted. `account_id` / `principal_ref` are NEVER client input — the

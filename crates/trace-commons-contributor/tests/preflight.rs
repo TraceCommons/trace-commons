@@ -138,7 +138,51 @@ fn spawn_http_counter() -> (
     Arc<AtomicBool>,
     std::thread::JoinHandle<()>,
 ) {
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
+
+    /// Read one complete HTTP request: headers, then exactly `content-length`
+    /// body bytes.
+    ///
+    /// A single `read` can return a partial request whenever the kernel splits
+    /// the write, which happens under parallel test load. Treating a truncated
+    /// body as "no spans detected" is indistinguishable from a privacy filter
+    /// that found nothing -- which is exactly the no-op-filter failure the
+    /// canary exists to detect -- so this reads to completion and returns
+    /// `None` rather than guessing.
+    fn read_full_http_request(stream: &mut std::net::TcpStream) -> Option<Vec<u8>> {
+        use std::io::Read as _;
+
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8 * 1024];
+
+        let headers_end = loop {
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => return None,
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..headers_end]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+
+        while buffer.len() < headers_end + content_length {
+            match stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => return None,
+            }
+        }
+
+        Some(buffer[headers_end..headers_end + content_length].to_vec())
+    }
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -153,21 +197,35 @@ fn spawn_http_counter() -> (
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     thread_requests.fetch_add(1, Ordering::SeqCst);
+                    // The listener is non-blocking so the accept loop can poll
+                    // the stop flag. On BSD-derived systems (macOS) the
+                    // accepted socket INHERITS O_NONBLOCK, so a read issued
+                    // before the client's bytes land returns `WouldBlock`
+                    // rather than waiting -- and `set_read_timeout` cannot
+                    // help a socket that never blocks. Put this connection
+                    // back into blocking mode so the timeout is what bounds
+                    // the read.
+                    stream.set_nonblocking(false).unwrap();
                     stream
-                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .set_read_timeout(Some(Duration::from_secs(10)))
                         .unwrap();
-                    let mut request = [0_u8; 16 * 1024];
-                    let request_len = stream.read(&mut request).unwrap_or(0);
-                    let request = &request[..request_len];
-                    let body_start = request
-                        .windows(4)
-                        .position(|window| window == b"\r\n\r\n")
-                        .map(|index| index + 4)
-                        .unwrap_or(request.len());
-                    let input = serde_json::from_slice::<serde_json::Value>(&request[body_start..])
-                        .ok()
+                    // Refuse rather than answering 200 with no spans. An empty
+                    // span list is a valid "filter found nothing" answer, so a
+                    // stub that degrades to it on a short read reports itself
+                    // healthy while behaving exactly like the broken filter the
+                    // canary is looking for.
+                    let input = match read_full_http_request(&mut stream)
+                        .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
                         .and_then(|body| body["input"].as_str().map(str::to_string))
-                        .unwrap_or_default();
+                    {
+                        Some(input) => input,
+                        None => {
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            );
+                            continue;
+                        }
+                    };
                     let targets: &[(&str, &str)] = &[
                         ("trace-canary.person@example.invalid", "private_email"),
                         ("tc_canary_secret_0123456789abcdef", "secret"),
@@ -204,6 +262,63 @@ fn spawn_http_counter() -> (
         }
     });
     (base_url, requests, stop, handle)
+}
+
+/// The stub privacy filter must read a whole request before answering.
+///
+/// TCP is a stream: a client's single logical write can arrive as several
+/// reads, and that is likelier under parallel test load. The stub used to do
+/// one `read` and, on a short read, fall through to an empty `input` and
+/// answer `200` with no spans.
+///
+/// That answer is indistinguishable from "the filter found nothing", which is
+/// exactly the no-op-filter condition `canary_self_test_async` exists to
+/// detect -- so a truncated read surfaced as `privacy-filter-canary-failed`
+/// and looked like a broken privacy filter rather than a broken test double.
+#[test]
+fn http_counter_reads_requests_split_across_packets() {
+    use std::io::{Read as _, Write as _};
+
+    let (base_url, _requests, stop, handle) = spawn_http_counter();
+    let address = base_url.trim_start_matches("http://").to_string();
+
+    let body = serde_json::json!({
+        "input": "contact trace-canary.person@example.invalid for details"
+    })
+    .to_string();
+    let head = format!(
+        "POST /v1/filter HTTP/1.1\r\nhost: {address}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    );
+
+    let mut stream = std::net::TcpStream::connect(&address).expect("connect to stub");
+    // Split mid-body and pause, so a single `read` cannot see the whole request.
+    let split = body.len() / 2;
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(&body.as_bytes()[..split]).unwrap();
+    stream.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    stream.write_all(&body.as_bytes()[split..]).unwrap();
+    stream.flush().unwrap();
+
+    let mut response = String::new();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.read_to_string(&mut response).expect("read response");
+
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "stub must answer the reassembled request: {response}"
+    );
+    assert!(
+        response.contains("private_email"),
+        "stub must detect the canary value in a split request, not report an \
+         empty span list: {response}"
+    );
 }
 
 fn run_preview_against_http_counter(
@@ -350,8 +465,11 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     // a handful of bytes above MAX_ENVELOPE_BYTES made the precondition break
     // on any change to serialized length, including a consent boolean
     // flipping between `true` and `false`.
-    let trajectory =
-        write_trajectory_with_source(fixture_dir.path(), &"x".repeat(1_499_000), "boundary-test");
+    let trajectory = write_trajectory_with_source(
+        fixture_dir.path(),
+        &"x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 8_000),
+        "boundary-test",
+    );
     let source = trace_commons_contributor::source::trajectory::TrajectorySource::new(trajectory);
     let session_ref = source.discover().unwrap().remove(0);
     let transcript = source.load(&session_ref).unwrap();
@@ -533,7 +651,10 @@ fn unenrolled_real_submit_still_requires_login() {
 #[test]
 fn refusal_reports_session_and_size_and_only_fails_real_submit() {
     let fixture_dir = tempfile::tempdir().unwrap();
-    let trajectory = write_trajectory(fixture_dir.path(), &"x".repeat(1_600_000));
+    // Sized off the cap, not a literal: a fixture pinned to a hardcoded byte
+    // count silently stops testing the refusal path the moment the cap moves.
+    let over_cap = trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 100_000;
+    let trajectory = write_trajectory(fixture_dir.path(), &"x".repeat(over_cap));
 
     let dry_config_dir = tempfile::tempdir().unwrap();
     let dry = run_submit(dry_config_dir.path(), &trajectory, false, true);
@@ -552,7 +673,13 @@ fn refusal_reports_session_and_size_and_only_fails_real_submit() {
         "stdout={dry_stdout}"
     );
     assert!(dry_stdout.contains("size="), "stdout={dry_stdout}");
-    assert!(dry_stdout.contains("limit=1500000"), "stdout={dry_stdout}");
+    assert!(
+        dry_stdout.contains(&format!(
+            "limit={}",
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )),
+        "stdout={dry_stdout}"
+    );
 
     let real_config_dir = tempfile::tempdir().unwrap();
     write_enrolled_config(real_config_dir.path());

@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>TraceCommons.App</RootNamespace>
+    <AssemblyName>TraceCommons</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWinUI>true</UseWinUI>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+
+    <!--
+      Unpackaged (WindowsPackageType=None) rather than MSIX for this slice.
+
+      MSIX is the right end state for shipping — it is how the macOS app's
+      bundle and the Linux shell's desktop entry are matched on Windows — but
+      it needs signing identity and a packaging project, neither of which
+      exists yet. Unpackaged builds and runs from CI with no certificate, so
+      the interop path can be proven on Windows before packaging work starts.
+    -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../TraceCommons.Interop/TraceCommons.Interop.csproj" />
+  </ItemGroup>
+
+  <!--
+    The Rust cdylib ships beside the executable.
+
+    TC_FFI_LIB_DIR points at a cargo output directory; it defaults to the
+    workspace release build, which is what a shipping app links. A missing DLL
+    is a BUILD failure, not a runtime one: an app that starts and only then
+    reports it cannot find its core is strictly worse than one that never
+    builds.
+  -->
+  <PropertyGroup>
+    <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
+    <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/release</TcFfiLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(TcFfiLibDir)/trace_commons_contributor_ffi.dll"
+          Condition="Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="VerifyFfiLibraryPresent" BeforeTargets="Build">
+    <Error Condition="!Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
+           Text="trace_commons_contributor_ffi.dll was not found in $(TcFfiLibDir). Build it first with: cargo build -p trace-commons-contributor-ffi --release  (or set TC_FFI_LIB_DIR to a directory containing it)." />
+  </Target>
+
+</Project>

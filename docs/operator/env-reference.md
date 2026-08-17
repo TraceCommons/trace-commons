@@ -159,6 +159,27 @@ procedure.
 | `TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS` | R for prod | `false` | Require keyset-managed EdDSA (not inline PEM). |
 | `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS` | R for prod | `false` | Require grant-row authorization on every read. |
 
+### 8a. Score attestation signing
+
+Set all three or none. With none set, attestation signing is disabled and
+both `/.well-known/trace-commons-attestation-keyset.json` and
+`/v1/contributors/me/score-attestation` fail closed with
+`503 attestation_signing_key_unconfigured` — correct, but indistinguishable
+from an outage to a contributor running `trace-commons-contributor attest`,
+so configure these wherever contributors attest. A partial configuration is
+an operator error and refuses at boot rather than silently disabling.
+
+Generate the keypair with `trace-commons-ingest --generate-attestation-keypair`;
+it reads no env and touches no database, so it works before the server is
+configured, and prints all three assignments in env-file format.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID` | R when attesting | (none) | Key id published in the keyset and stamped in the JWS header. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` | R when attesting | (none) | PKCS#8 v2 Ed25519 private key PEM. Operator secret; never commit. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_PUBLIC_KEY_PEM` | R when attesting | (none) | SPKI Ed25519 public key PEM. Published in the keyset endpoint. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_TTL_SECONDS` | optional | `86400` | Attestation lifetime. Must be positive. |
+
 ## 9. Analytics surface
 
 | Var | R? | Default | Description |

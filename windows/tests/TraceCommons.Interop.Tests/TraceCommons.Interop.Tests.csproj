@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>TraceCommons.Interop.Tests</AssemblyName>
+    <RootNamespace>TraceCommons.Interop.Tests</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
+  </ItemGroup>
+
+  <!--
+    Copy the Rust cdylib next to the test assembly so .NET's default probing
+    finds it without an NATIVE_DLL_SEARCH_DIRECTORIES dance.
+
+    TC_FFI_LIB_DIR overrides the location; it defaults to the workspace's
+    debug output, which is where `cargo build -p trace-commons-contributor-ffi`
+    puts it. All three platform decorations are listed because this test
+    project is expected to run on a developer's macOS machine as readily as on
+    the Windows CI runner — Condition keeps the missing ones from failing the
+    build.
+  -->
+  <PropertyGroup>
+    <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
+    <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/debug</TcFfiLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(TcFfiLibDir)/trace_commons_contributor_ffi.dll"
+          Condition="Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(TcFfiLibDir)/libtrace_commons_contributor_ffi.dylib"
+          Condition="Exists('$(TcFfiLibDir)/libtrace_commons_contributor_ffi.dylib')"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(TcFfiLibDir)/libtrace_commons_contributor_ffi.so"
+          Condition="Exists('$(TcFfiLibDir)/libtrace_commons_contributor_ffi.so')"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
