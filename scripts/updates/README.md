@@ -26,3 +26,14 @@ Clients pin the public key at build time, so rotating it means shipping a
 release signed by the old key that carries the new key, then switching. Do
 not rotate without that two-step, or every installed client stops seeing
 updates.
+
+## Sparkle appcast
+
+`generate-appcast.sh` writes `appcast.xml` for the macOS app. Sparkle's EdDSA
+key is separate from the manifest key above and lives in GCP Secret Manager as
+`sparkle-signing-key`. Generate it with Sparkle's `generate_keys` tool and
+store the public key in the app's Info.plist as `SUPublicEDKey`.
+
+Sparkle compares `sparkle:version` (CFBundleVersion), not the short version,
+so the appcast must carry the same monotonic build number the release
+workflow stamps into the bundle.
