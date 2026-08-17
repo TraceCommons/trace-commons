@@ -984,11 +984,29 @@ git commit -m "Publish signed update manifests when a release is cut"
 ### Task 6: Auto-bump the winget manifest on release
 
 **Files:**
-- Modify: `.github/workflows/release-apps.yml` (add a `winget-bump` job)
+- Modify: `.github/workflows/release-contributor.yml` (add a `winget-bump` job)
 
 **Interfaces:**
-- Consumes: `scripts/winget/generate-manifests.sh`, the `windows-zip` artifact.
+- Consumes: `scripts/winget/generate-manifests.sh`, invoked as
+  `generate-manifests.sh <version>` — TWO arguments at most, and normally one.
+  The script downloads the asset itself and computes the SHA-256 from the bytes
+  it fetched; a hash is never passed in.
 - Produces: a pull request against `microsoft/winget-pkgs`.
+
+**This job belongs in `release-contributor.yml`, not `release-apps.yml`.** The
+winget package tracks the CLI release line: `generate-manifests.sh` defaults to
+tag `contributor-v$VERSION` and asset
+`trace-commons-contributor-x86_64-pc-windows-msvc.zip`, both of which are
+produced by `release-contributor.yml` and neither of which `release-apps.yml`
+produces (it publishes `trace-commons-windows-x86_64-$V.zip` under `app-v*`).
+Putting the bump in the apps workflow would either 404 on download or publish a
+winget manifest pointing at the wrong artifact. `release-contributor.yml`
+already ends with an "Open a formula bump" step for Homebrew; this job sits
+beside it and mirrors its shape.
+
+The script writes directly to `manifests/t/TraceCommons/Contributor/<version>/`,
+which is already the partitioned path winget-pkgs expects, so the generated tree
+is copied across wholesale rather than file-by-file.
 
 Deferring to winget only helps contributors if winget actually learns about new versions. Without this, the Windows defer branch points at a package manager that never has the update, which is worse than no update path at all.
 
@@ -996,42 +1014,45 @@ Deferring to winget only helps contributors if winget actually learns about new 
 
 Append to `.github/workflows/release-apps.yml`:
 
+Add this job to `.github/workflows/release-contributor.yml`, beside the existing
+Homebrew formula bump. Match that job's `needs:` and `if:` conditions to
+whatever gates the existing publish job in that file — read it first rather
+than copying the values below blindly if they differ.
+
 ```yaml
   winget-bump:
     name: bump the winget manifest
-    needs: [version, windows, publish]
+    needs: [publish]
+    # Tag pushes only. The generator downloads the published release asset to
+    # compute its hash, so it cannot run before the release exists.
     if: >-
       ${{ always() && github.event_name == 'push' &&
-          needs.windows.result == 'success' && needs.publish.result == 'success' }}
-    runs-on: ubuntu-latest
+          needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: windows-zip
-          path: dist
-
-      # Opens a pull request rather than pushing, matching the homebrew cask
-      # bump above: winget-pkgs is a third-party repository with its own
-      # review, and a bad manifest reaches everyone who runs `winget upgrade`.
+      # Opens a pull request rather than pushing, matching the homebrew formula
+      # bump in this same workflow: winget-pkgs is a third-party repository with
+      # its own review, and a bad manifest reaches everyone who runs
+      # `winget upgrade`.
+      #
+      # No artifact download and no hash argument: generate-manifests.sh fetches
+      # the published asset itself and computes InstallerSha256 from the bytes it
+      # got. A hash passed in by hand is exactly the value that gets copied from
+      # the wrong release.
       - name: Generate and submit
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
-          SHORT_VERSION: ${{ needs.version.outputs.short }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          V="$SHORT_VERSION"
-          ZIP="dist/trace-commons-windows-x86_64-$V.zip"
-          SHA="$(sha256sum "$ZIP" | awk '{print $1}' | tr 'a-f' 'A-F')"
-          URL="https://github.com/$REPO/releases/download/app-v$V/trace-commons-windows-x86_64-$V.zip"
-          ./scripts/winget/generate-manifests.sh "$V" "$URL" "$SHA" > /dev/null
+          V="${GITHUB_REF_NAME#contributor-v}"
+          ./scripts/winget/generate-manifests.sh "$V"
           gh repo clone microsoft/winget-pkgs winget-pkgs -- --depth 1
-          DEST="winget-pkgs/manifests/t/TraceCommons/Contributor/$V"
-          mkdir -p "$DEST"
-          cp manifests/*.yaml "$DEST"/
+          # The generator already wrote the partitioned path winget-pkgs
+          # expects, so copy the tree across rather than individual files.
+          cp -R "manifests/t" "winget-pkgs/manifests/"
           cd winget-pkgs
           git switch -c "TraceCommons.Contributor-$V"
           git config user.name "trace-commons-release"
@@ -1042,10 +1063,16 @@ Append to `.github/workflows/release-apps.yml`:
           gh pr create --fill --repo microsoft/winget-pkgs
 ```
 
-- [ ] **Step 2: Confirm the generator's argument shape matches**
+- [ ] **Step 2: Verify the generator against a real published release**
 
-Run: `head -40 scripts/winget/generate-manifests.sh`
-Confirm the script takes version, URL, and SHA in that order and writes to `manifests/`. If it differs, adjust the invocation above to match the script rather than changing the script.
+Run: `./scripts/winget/generate-manifests.sh 0.1.1`
+Expected: it downloads the asset, computes the hash, and writes three files
+under `manifests/t/TraceCommons/Contributor/0.1.1/`. Confirm all three exist and
+that the installer manifest's `InstallerSha256` is 64 uppercase hex characters.
+
+If no such release is published yet, the download will fail with the script's
+own message. That is a correct refusal, not a defect: record it and move on
+without faking a hash. Do not commit any generated `manifests/` output.
 
 - [ ] **Step 3: Document the required secret**
 
