@@ -1073,6 +1073,9 @@ SUBCOMMANDS:
     --generate-attestation-keypair    Print a fresh Ed25519 keypair and kid for
                                       score attestations, as env-var
                                       assignments. Requires no configuration.
+    -V, --version                     Print the version, the commit this binary
+                                      was built from, and the build time. The
+                                      same identity is on GET /health.
     -h, --help                        Print this help text
 ";
 
@@ -1086,6 +1089,16 @@ async fn main() -> anyhow::Result<()> {
         Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
         Some("-h") | Some("--help") => {
             print!("{INGEST_HELP_TEXT}");
+            return Ok(());
+        }
+        Some("-V") | Some("--version") => {
+            println!(
+                "{}",
+                trace_commons_build_info::identity(
+                    env!("CARGO_BIN_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
             return Ok(());
         }
         Some(other) => {
@@ -10622,12 +10635,24 @@ fn insert_token_with_expiry(
 struct HealthResponse {
     status: &'static str,
     schema_version: &'static str,
+    /// The commit this binary was built from, or `unknown`. Additive: it makes
+    /// "what is deployed here?" a curl rather than an SSH session and a file
+    /// mtime, which is what it took the day this was added.
+    build_commit: &'static str,
+    /// When this binary was built, ISO-8601 in UTC.
+    build_time: &'static str,
+    /// The crate version. Reported alongside the commit, never instead of it:
+    /// it does not move when a deploy does.
+    build_version: &'static str,
 }
 
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
+        build_commit: trace_commons_build_info::COMMIT,
+        build_time: trace_commons_build_info::BUILD_TIME,
+        build_version: env!("CARGO_PKG_VERSION"),
     })
 }
 

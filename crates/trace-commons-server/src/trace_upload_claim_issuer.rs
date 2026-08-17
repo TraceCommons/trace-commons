@@ -1504,17 +1504,27 @@ async fn health_handler(
             })
         })
         .unwrap_or(false);
-    if healthy {
-        (
-            StatusCode::OK,
-            Json(json!({ "status": "ok", "checks": checks })),
-        )
+    // Build identity is additive and sits beside `checks` rather than inside
+    // it: `checks` is scanned for the "ok"/"configured" labels that decide the
+    // status code above, and an identity string is not a check. It is reported
+    // on the degraded response too -- knowing which build is broken is exactly
+    // what a degraded issuer is being asked.
+    let status = if healthy { "ok" } else { "degraded" };
+    let code = if healthy {
+        StatusCode::OK
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "degraded", "checks": checks })),
-        )
-    }
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(json!({
+            "status": status,
+            "checks": checks,
+            "build_commit": trace_commons_build_info::COMMIT,
+            "build_time": trace_commons_build_info::BUILD_TIME,
+            "build_version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
 }
 
 async fn keyset_handler(
@@ -4169,6 +4179,48 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["checks"]["signing_key"], "ok");
         assert_eq!(json["checks"]["workload_public_key"], "ok");
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_reports_build_identity_on_both_outcomes() {
+        // The point of the identity is that it survives a bad deploy, so it has
+        // to be on the degraded response as much as the healthy one.
+        for (config_state, expected_status) in [
+            (test_config().build_state().expect("state builds"), "ok"),
+            (
+                {
+                    let mut state =
+                        (*test_config().build_state().expect("state builds")).clone_for_test();
+                    state.workload_public_key_pem =
+                        "-----BEGIN PUBLIC KEY-----\nnot-base64\n-----END PUBLIC KEY-----\n"
+                            .to_string();
+                    Arc::new(state)
+                },
+                "degraded",
+            ),
+        ] {
+            let router = Router::new()
+                .route("/health", get(health_handler))
+                .with_state(config_state);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["status"], expected_status);
+            assert_eq!(json["build_commit"], trace_commons_build_info::COMMIT);
+            assert_eq!(json["build_time"], trace_commons_build_info::BUILD_TIME);
+            assert_eq!(json["build_version"], env!("CARGO_PKG_VERSION"));
+            // Additive only: the fields existing consumers read are untouched.
+            assert!(json["checks"].is_object());
+        }
     }
 
     #[tokio::test]

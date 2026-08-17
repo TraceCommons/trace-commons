@@ -7,6 +7,23 @@ use trace_commons_protocol::trace_contribution::{
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
 
+/// `/health` is the surface an operator curls to answer "what is deployed
+/// here?", so the build identity has to be on it, and the fields that were
+/// already there have to keep their names.
+#[tokio::test]
+async fn health_endpoint_reports_build_identity_additively() {
+    let Json(health) = health_handler().await;
+    let value = serde_json::to_value(&health).expect("health serialises");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(
+        value["schema_version"],
+        serde_json::json!(TRACE_CONTRIBUTION_SCHEMA_VERSION)
+    );
+    assert_eq!(value["build_commit"], trace_commons_build_info::COMMIT);
+    assert_eq!(value["build_time"], trace_commons_build_info::BUILD_TIME);
+    assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
+}
+
 fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }

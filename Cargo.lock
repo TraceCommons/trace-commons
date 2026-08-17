@@ -7260,6 +7260,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-build-info"
+version = "0.1.0"
+
+[[package]]
 name = "trace-commons-contributor"
 version = "0.2.0"
 dependencies = [
@@ -7280,6 +7284,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
+ "trace-commons-build-info",
  "trace-commons-operator-client",
  "trace-commons-protocol",
  "trace-commons-server",
@@ -7413,6 +7418,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "tower-http",
+ "trace-commons-build-info",
  "trace-commons-gate-enclave",
  "trace-commons-operator-client",
  "trace-commons-protocol",

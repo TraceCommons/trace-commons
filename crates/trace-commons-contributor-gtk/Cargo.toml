@@ -29,6 +29,9 @@ path = "src/bin/probe.rs"
 # sides are Rust, so the FFI layer would buy nothing and cost a marshalling
 # boundary. macOS and Windows keep using the C ABI.
 trace-commons-contributor = { path = "../trace-commons-contributor" }
+# Same commit stamp the server binaries carry, so a shell reported in a bug
+# can be identified without asking which build the reporter installed.
+trace-commons-build-info = { path = "../trace-commons-build-info" }
 
 adw = { package = "libadwaita", version = "0.5", features = ["v1_2"] }
 gtk = { package = "gtk4", version = "0.7" }

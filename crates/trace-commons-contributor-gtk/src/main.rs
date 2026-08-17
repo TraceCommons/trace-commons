@@ -13,6 +13,17 @@ use adw::prelude::*;
 use trace_commons_contributor_gtk::{ui, worker::Worker};
 
 fn main() -> anyhow::Result<()> {
+    // Answered before anything is initialised, so a person can identify the
+    // build they installed without a display or a daemon. Same ad hoc argument
+    // idiom as the flags below.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!(
+            "{}",
+            trace_commons_build_info::identity(env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     let exit_after_realize = std::env::args().any(|a| a == "--exit-after-realize");
     // How long to stay up before quitting, so a headless run has time to be
     // photographed before the process leaves.
