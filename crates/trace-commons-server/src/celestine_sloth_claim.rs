@@ -552,8 +552,17 @@ fn celestine_sloth_cors_layer() -> tower_http::cors::CorsLayer {
         .filter_map(|o| HeaderValue::from_str(o).ok())
         .collect();
 
+    // `AllowOrigin::list` panics on a wildcard entry, and `*` is the most
+    // natural thing an operator writes for "allow everything". Map it rather
+    // than crash router construction at startup.
+    let allow_origin = if configured.split(',').any(|o| o.trim() == "*") {
+        tower_http::cors::AllowOrigin::any()
+    } else {
+        tower_http::cors::AllowOrigin::list(origins)
+    };
+
     tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+        .allow_origin(allow_origin)
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([ACCEPT, CONTENT_TYPE])
         .max_age(std::time::Duration::from_secs(600))
