@@ -37,7 +37,12 @@ use crate::source::{
 
 /// Envelopes larger than this are refused before submission (label-only
 /// refusal; the oversized content itself is never logged).
-pub const MAX_ENVELOPE_BYTES: usize = 1_500_000;
+///
+/// Re-exported from the protocol crate rather than defined here: ingest's
+/// body limit and account read-back ceiling derive from the same constant,
+/// so the client cannot refuse at a size the server would have accepted (or
+/// the reverse).
+pub use trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES as MAX_ENVELOPE_BYTES;
 
 /// NEAR AI privacy-filter backend settings. Constructed from env by
 /// `near_ai_settings_from_env`, or injected directly by callers/tests so
@@ -576,6 +581,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 
@@ -800,6 +808,41 @@ mod tests {
                 .unwrap();
         let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         assert!(envelope_size_ok(&envelope).is_err());
+    }
+
+    /// A whole hackathon-scale coding session must submit. Sized from the
+    /// real refusal that motivated the raise: a 42 MB session redacted to a
+    /// 2.8 MB envelope and was refused against a 1.5 MB cap. 4 MB of event
+    /// content stands in for that envelope -- comfortably over the old cap,
+    /// comfortably under the new one.
+    #[tokio::test]
+    async fn a_hackathon_scale_session_envelope_is_accepted() {
+        const HACKATHON_ENVELOPE_CONTENT_BYTES: usize = 4_000_000;
+        // Compile-time: the fixture must sit under the cap, or this would
+        // silently become a second copy of the refusal test.
+        const _: () = assert!(HACKATHON_ENVELOPE_CONTENT_BYTES < MAX_ENVELOPE_BYTES);
+        let mut t = fixture_transcript();
+        t.events.push(crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("x".repeat(HACKATHON_ENVELOPE_CONTENT_BYTES)),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        });
+        let cfg = test_config();
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        assert!(
+            raw_contribution_size_ok(&raw).is_ok(),
+            "pre-redaction guard must not refuse a hackathon-scale session"
+        );
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        let size = envelope_size_ok(&envelope)
+            .expect("a hackathon-scale session envelope must be accepted");
+        assert!(size > 1_500_000, "fixture must exceed the pre-raise cap");
     }
 
     #[test]

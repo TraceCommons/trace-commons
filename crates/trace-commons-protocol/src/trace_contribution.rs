@@ -41,14 +41,62 @@ pub enum PrivacyFilterBackendTag {
     Sidecar,
     NearAi,
 }
+
+impl PrivacyFilterBackendTag {
+    /// Stable operational label. Reaches boot logs and stored envelope
+    /// summaries, so it is a contract rather than a debug rendering.
+    pub fn label(self) -> &'static str {
+        match self {
+            PrivacyFilterBackendTag::None => "none",
+            PrivacyFilterBackendTag::Sidecar => "sidecar",
+            PrivacyFilterBackendTag::NearAi => "near_ai",
+        }
+    }
+}
 /// v2 alongside the deterministic pipeline bump above: the server re-scrub
 /// runs the same detector, so its stamp has to move with it.
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
 #[cfg(feature = "near-ai-privacy-filter")]
 pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// Largest serialized contribution envelope the platform accepts, and the
+/// single source of truth for that number.
+///
+/// It lives here rather than in the client because both ends have to agree:
+/// the contributor refuses an oversized envelope before upload, ingest caps
+/// the request body, and account read-back caps what it will return. When
+/// those were three independent constants they drifted -- the client refused
+/// at 1.5 MB while ingest accepted 2 MiB -- so a client raise alone silently
+/// bought nothing. Everything downstream is now derived from this value with
+/// explicit headroom, and tests assert the ordering holds.
+///
+/// Sized for whole agent coding sessions: a 42 MB raw session redacts to
+/// roughly 2.8 MB of envelope, so this clears the observed worst case by a
+/// wide margin. Scoring cost does not scale with it -- the gate chunk cap
+/// bounds how much of a trace is ever scored.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 16_000_000;
+/// Largest single field text an external privacy filter will accept.
+///
+/// Tied to the envelope cap, because any one event could in principle carry
+/// most of an envelope -- an agent pasting a whole file into one message is
+/// the ordinary case. A smaller per-field cap does not bound the work: the
+/// NEAR AI adapter classifies in fixed `CLASSIFY_CHUNK_BYTES` windows, so a
+/// given quantity of text costs the same whether it arrives as one field or
+/// a hundred, and the envelope cap already bounds the total. All a lower
+/// per-field cap bought was a failure mode -- the external-filter pass
+/// propagates with `?`, so one oversized event failed the whole submission.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = MAX_TRACE_ENVELOPE_BYTES;
+/// Sidecar stdout carries the REDACTED TEXT back, so it has to scale with
+/// the input cap or the refusal simply moves from the input guard to the
+/// output guard. Doubled because replacement placeholders can be longer
+/// than what they replace and JSON escaping expands control characters.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize =
+    2 * PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES;
+const _: () = assert!(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES >= MAX_TRACE_ENVELOPE_BYTES);
+const _: () = assert!(
+    PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES
+        >= PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
+);
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
 pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -855,6 +903,163 @@ pub fn estimate_initial_credit(envelope: &TraceContributionEnvelope) -> CreditEs
     }
 }
 
+/// Field names an emitter may use to carry the arguments a tool call was
+/// issued with. `arguments` is what this crate's own envelope builder writes;
+/// the rest are the spellings the upstream source adapters encounter.
+const REPLAY_ARGUMENT_KEYS: &[&str] = &["arguments", "args", "parameters", "params", "input"];
+
+/// Field names an emitter may use to carry what a tool returned.
+const REPLAY_RESULT_KEYS: &[&str] = &["result", "results", "output", "response", "content"];
+
+/// A marker flag is not a payload. `{"has_result": true}` says a result
+/// existed somewhere upstream; it does not carry the result, and a consumer
+/// cannot grade against it. Booleans and nulls therefore never count as
+/// populated, which is what keeps this measure from being satisfied by the
+/// same metadata that satisfied the boolean it replaces.
+fn replay_value_is_populated(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn payload_carries_any(payload: &Value, keys: &[&str]) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    keys.iter()
+        .any(|key| object.get(*key).is_some_and(replay_value_is_populated))
+}
+
+fn has_text(content: Option<&String>) -> bool {
+    content.is_some_and(|text| !text.trim().is_empty())
+}
+
+fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+}
+
+fn event_carries_result(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+/// Whether an event carries anything a consumer could read, as opposed to
+/// metadata about an event that once carried something.
+fn event_carries_content(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+fn replay_call_id(event: &TraceContributionEvent) -> Option<&str> {
+    event.tool_call_id.as_deref().or_else(|| {
+        event
+            .structured_payload
+            .as_object()
+            .and_then(|object| object.get("tool_call_id"))
+            .and_then(Value::as_str)
+    })
+}
+
+/// What a downstream consumer needs to rebuild a trace as a runnable task:
+/// a prompt to issue, arguments to issue each tool call with, and a result
+/// per call to grade against.
+///
+/// This exists because `replayability` used to be `replay.replayable`
+/// restated. That field is set by the emitter and was `true` on every
+/// envelope in the pilot corpus, including the ones carrying nothing but
+/// tool names, so the score could not fail and the corpus reported itself
+/// healthy indefinitely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReplaySufficiency {
+    pub has_initial_prompt: bool,
+    pub tool_calls: usize,
+    pub tool_calls_with_arguments: usize,
+    pub tool_calls_with_results: usize,
+}
+
+impl ReplaySufficiency {
+    /// Equal thirds, because a replay needs all three and any one of them
+    /// missing leaves a consumer unable to build a benchmark item. Partial
+    /// tool coverage earns partial credit: a corpus where half the calls are
+    /// seedable is genuinely worth more than one where none are.
+    pub fn score(&self) -> f32 {
+        let prompt = if self.has_initial_prompt { 1.0 } else { 0.0 };
+        if self.tool_calls == 0 {
+            // Nothing to seed beyond the prompt, so the prompt is the whole
+            // of what replay needs. Guards the division below.
+            return prompt;
+        }
+        let calls = self.tool_calls as f32;
+        let arguments = self.tool_calls_with_arguments as f32 / calls;
+        let results = self.tool_calls_with_results as f32 / calls;
+        ((prompt + arguments + results) / 3.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Measure what of a replay actually survived into the envelope.
+pub fn replay_sufficiency(envelope: &TraceContributionEnvelope) -> ReplaySufficiency {
+    let has_initial_prompt = envelope
+        .events
+        .iter()
+        .find(|event| event.event_type == TraceContributionEventType::UserMessage)
+        .is_some_and(event_carries_content);
+
+    // Results are matched to calls by `tool_call_id` where both sides carry
+    // one, and otherwise drawn in order from a pool of unkeyed results. The
+    // fallback matters because no emitter on the pilot path sets the id.
+    let mut keyed_results: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unkeyed_results = 0usize;
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolResult {
+            continue;
+        }
+        if !event_carries_result(event) {
+            continue;
+        }
+        match replay_call_id(event) {
+            Some(call_id) => *keyed_results.entry(call_id).or_default() += 1,
+            None => unkeyed_results += 1,
+        }
+    }
+
+    let mut sufficiency = ReplaySufficiency {
+        has_initial_prompt,
+        ..ReplaySufficiency::default()
+    };
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolCall {
+            continue;
+        }
+        sufficiency.tool_calls += 1;
+        if event_carries_arguments(event) {
+            sufficiency.tool_calls_with_arguments += 1;
+        }
+        let matched_by_id = replay_call_id(event)
+            .and_then(|call_id| keyed_results.get_mut(call_id))
+            .is_some_and(|remaining| {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            });
+        if matched_by_id {
+            sufficiency.tool_calls_with_results += 1;
+        } else if unkeyed_results > 0 {
+            unkeyed_results -= 1;
+            sufficiency.tool_calls_with_results += 1;
+        }
+    }
+    sufficiency
+}
+
 pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceValueScorecard {
     let schema_validity = if envelope.schema_version == TRACE_CONTRIBUTION_SCHEMA_VERSION {
         1.0
@@ -864,8 +1069,30 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     let privacy_risk = privacy_risk_score(envelope.privacy.residual_pii_risk);
     let gate = privacy_gate(envelope.privacy.residual_pii_risk);
     let event_count = envelope.events.len() as f32;
-    let quality = (event_count / 8.0).clamp(0.15, 1.0);
-    let replayability = if envelope.replay.replayable { 1.0 } else { 0.0 };
+    // Length alone used to be the whole of `quality`, which meant redaction
+    // raised a trace's score: stripping content leaves the event count
+    // untouched. Weight length by the share of events that actually carry
+    // something, so padding an envelope with contentless events cannot pay.
+    let substantive_events = envelope
+        .events
+        .iter()
+        .filter(|event| event_carries_content(event))
+        .count() as f32;
+    let content_share = if event_count == 0.0 {
+        0.0
+    } else {
+        substantive_events / event_count
+    };
+    let quality = ((event_count / 8.0).clamp(0.0, 1.0) * content_share).clamp(0.15, 1.0);
+    let sufficiency = replay_sufficiency(envelope);
+    // Sufficiency can only lower the score: an emitter that declares a trace
+    // unreplayable keeps the last word, but one that declares it replayable
+    // now has to have shipped the inputs that claim requires.
+    let replayability = if envelope.replay.replayable {
+        sufficiency.score()
+    } else {
+        0.0
+    };
     let novelty = envelope
         .embedding_analysis
         .as_ref()
@@ -904,6 +1131,16 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .and_then(|labels| labels.overall_score)
         .map(|score| score.clamp(0.0, 1.0));
 
+    // Residual privacy risk is charged ONCE, as the multiplicative `gate`.
+    // There used to be a `- 0.60 * privacy_risk` term here as well, which
+    // charged it twice: `privacy_gate` and `privacy_risk_score` are
+    // complementary functions of the same enum (they sum to 1.0 for every
+    // band — pinned by a test), so the subtraction re-applied the gate. The
+    // effect fell entirely on the medium band, where a 0.5 gate plus a flat
+    // -0.30 put every realistic score at or below zero: accepted work that
+    // could never earn anything. Low risk was unaffected either way, since
+    // `privacy_risk_score(Low)` is 0.0, and high risk is zeroed by the gate
+    // and again by the explicit `High` check below.
     let raw = gate
         * schema_validity
         * (0.25 * quality
@@ -912,8 +1149,7 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        - 0.40 * duplicate_penalty
-        - 0.60 * privacy_risk;
+        - 0.40 * duplicate_penalty;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
         if matches!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::High) {
@@ -932,7 +1168,29 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         explanation.push("Residual privacy risk is high; credit is held for review.".to_string());
     }
     if envelope.replay.replayable {
-        explanation.push("Replay metadata is present.".to_string());
+        // Name what is missing rather than asserting the block exists. A
+        // consumer who cannot replay a trace needs to know which of the three
+        // inputs did not survive, and "Replay metadata is present." told them
+        // nothing at all.
+        if sufficiency.tool_calls == 0 {
+            explanation.push(if sufficiency.has_initial_prompt {
+                "Replay inputs present: an initial prompt, and no tool calls to seed.".to_string()
+            } else {
+                "Replay is blocked: no initial prompt to re-issue.".to_string()
+            });
+        } else {
+            explanation.push(format!(
+                "Replay inputs: initial prompt {}, arguments on {} of {} tool call(s), results on {}.",
+                if sufficiency.has_initial_prompt {
+                    "present"
+                } else {
+                    "missing"
+                },
+                sufficiency.tool_calls_with_arguments,
+                sufficiency.tool_calls,
+                sufficiency.tool_calls_with_results,
+            ));
+        }
     }
     if !envelope.replay.required_tools.is_empty() {
         explanation.push(format!(
@@ -1882,6 +2140,26 @@ pub fn privacy_filter_adapter_from_env() -> Result<
     }
 }
 
+/// Resolve which privacy-filter backend the environment configures, without
+/// keeping the adapter.
+///
+/// Callers use this at boot to report the live backend and to refuse to start
+/// when a deployment requires one. It exists because the absence of a filter
+/// is otherwise invisible: [`privacy_filter_adapter_from_env`] returns
+/// `Ok(None)` for an unset backend, the redactor built from it performs no
+/// prose-PII filtering, and a runtime filter failure falls back to the
+/// unfiltered text. None of those paths distinguish "filtered and found
+/// nothing" from "never filtered".
+///
+/// A backend named without its credentials is an error here, so that
+/// misconfiguration surfaces once at startup rather than on every submission.
+pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, PrivacyFilterConfigError>
+{
+    Ok(privacy_filter_adapter_from_env()?
+        .map(|(_adapter, tag)| tag)
+        .unwrap_or(PrivacyFilterBackendTag::None))
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",
@@ -2023,11 +2301,7 @@ pub(crate) fn reset_legacy_privacy_env_warning_for_tests() {
 }
 
 fn privacy_filter_backend_label(backend: PrivacyFilterBackendTag) -> &'static str {
-    match backend {
-        PrivacyFilterBackendTag::None => "none",
-        PrivacyFilterBackendTag::Sidecar => "sidecar",
-        PrivacyFilterBackendTag::NearAi => "near_ai",
-    }
+    backend.label()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5668,16 +5942,27 @@ mod tests {
         assert!(rep.blocked_secret_detected);
     }
 
+    /// Payload size for the contextual-entropy tripwires below.
+    ///
+    /// Deliberately its own number rather than the deployed input cap. These
+    /// guard against superlinear cost, and a megabyte exposes that just as
+    /// well as sixteen -- a quadratic pass at this size already blows the
+    /// bound by orders of magnitude. Sizing them off the cap instead meant a
+    /// cap change silently made each tripwire 16x slower and pushed them
+    /// against their wall-clock bounds for reasons unrelated to the property
+    /// under test.
+    const ENTROPY_TRIPWIRE_PAYLOAD_BYTES: usize = 1024 * 1024;
+
     #[test]
     fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
-        // Thousands of separate glued assignments, at the sidecar input limit.
+        // Thousands of separate glued assignments, at the tripwire size.
         // Each one contributes a range, and comparing every new range against
         // every accumulated range was quadratic: a megabyte produced tens of
         // thousands of ranges and on the order of a billion comparisons.
         let unit = "api_key=Zx9Qk2Lm7Pv4Rt8Wy1 ";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -5720,21 +6005,18 @@ mod tests {
         // Every `=` in the input starts another reading in
         // `contextual_entropy_secret_ranges`, and the regex class
         // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
-        // spanning nearly the whole input, so a payload at the sidecar's 1
-        // MiB input limit produces on the order of half a million readings.
+        // spanning nearly the whole input, so a megabyte of them produces on
+        // the order of half a million readings.
         // There is no cue word anywhere in "x=", so `is_cued_secret` must
         // reject every one of them on the cheap length/cue/allowlist checks
         // BEFORE computing entropy: computing entropy first, even a bounded
         // sample, on every one of half a million readings is the CPU
         // denial-of-service this test guards against. 1024 repetitions (the
         // test above) is far too small to show the difference; this uses the
-        // real accepted maximum.
+        // full tripwire payload.
         let unit = "x=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
-        assert_eq!(
-            payload.len(),
-            PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
-        );
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
+        assert_eq!(payload.len(), ENTROPY_TRIPWIRE_PAYLOAD_BYTES);
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -5771,7 +6053,7 @@ mod tests {
         // reusing one per-candidate entropy profile across every reading
         // instead of rebuilding it per `=`.
         let unit = "api_key=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -7121,6 +7403,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn privacy_gate_and_risk_score_are_the_same_signal() {
         use super::*;
         // The reason the subtractive term was redundant: these are
@@ -7139,6 +7422,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn medium_risk_work_can_earn_credit() {
         use super::*;
         // Every medium-risk submission in the pilot corpus scored exactly
@@ -7153,6 +7437,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dropping_the_double_penalty_leaves_low_risk_untouched() {
         use super::*;
         // The change is confined to the medium band, and this is why rather
@@ -7173,6 +7458,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn risk_bands_stay_ordered_and_high_earns_nothing() {
         use super::*;
         let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
@@ -7304,5 +7590,408 @@ mod tests {
             ResidualPiiRisk::Medium,
             "successful secret scrub must land Medium (quarantine-with-override), not High"
         );
+    }
+
+    /// A single large event -- an agent pasting a whole file, say -- must
+    /// reach the sidecar rather than being refused for length before it is
+    /// ever spawned. The guard used to sit at 1 MiB while a whole envelope
+    /// could be many times that, so one big event failed the entire
+    /// submission (the external-filter pass propagates with `?`, so there is
+    /// no partial success to fall back on).
+    ///
+    /// The adapter points at a command that does not exist, so the call
+    /// cannot succeed; what this asserts is WHICH failure comes back. Past
+    /// the guard means the spawn was attempted.
+    #[tokio::test]
+    async fn sidecar_input_guard_admits_a_field_the_envelope_cap_allows() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let at_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES);
+        let error = adapter
+            .redact_text(&at_cap)
+            .await
+            .expect_err("no such command, so this cannot succeed");
+        let reason = format!("{error:?}");
+        assert!(
+            !reason.contains("input exceeded limit"),
+            "a field the envelope cap allows must reach the sidecar: {reason}"
+        );
+        assert!(
+            reason.contains("failed to spawn"),
+            "expected the spawn failure that proves the guard was passed: {reason}"
+        );
+    }
+
+    /// The other direction: above the cap it is still a clean, label-only
+    /// length refusal, not a spawn of a doomed subprocess.
+    #[tokio::test]
+    async fn sidecar_input_guard_still_refuses_above_the_cap() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let over_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES + 1);
+        let error = adapter
+            .redact_text(&over_cap)
+            .await
+            .expect_err("above the cap must refuse");
+        assert!(
+            format!("{error:?}").contains("input exceeded limit"),
+            "expected the length refusal: {error:?}"
+        );
+    }
+
+    // --- Replay sufficiency -------------------------------------------
+    //
+    // A downstream consumer measured 330 pilot envelopes and found every one
+    // scoring `replayability: 1.0` while none could be turned back into a
+    // runnable task. The old formula restated `replay.replayable`, an
+    // emitter-set boolean, so it could not fail. These pin the properties a
+    // replay score has to have instead: a task to issue, arguments to issue
+    // it with, and an answer to grade against.
+
+    fn replay_event(
+        event_type: super::TraceContributionEventType,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        content: Option<&str>,
+        payload: super::Value,
+    ) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type,
+            timestamp: Utc::now(),
+            redacted_content: content.map(str::to_string),
+            structured_payload: payload,
+            tool_name: tool_name.map(str::to_string),
+            tool_category: None,
+            tool_call_id: tool_call_id.map(str::to_string),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
+    /// The shape the web-history capture path actually emits: tool names and
+    /// nothing else, with `replayable` asserted true.
+    fn web_history_shaped_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                None,
+                serde_json::json!({"state": "Completed"}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                None,
+                None,
+                serde_json::json!({"has_result": true, "has_error": false}),
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                None,
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    /// The shape a benchmark item needs: a prompt, arguments on the call, and
+    /// a result carrying what the agent observed.
+    fn seedable_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                Some("summarise my unread mail"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                None,
+                serde_json::json!({"arguments": {"label": "UNREAD"}}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolResult,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                Some("2 unread threads"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                Some("you have 2 unread threads"),
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    #[test]
+    fn replayability_is_zero_when_nothing_replayable_survived_redaction() {
+        use super::*;
+        // The exact corpus finding: `replayable: true`, tool names recorded,
+        // no prompt, no arguments, no results. Nothing here can be replayed,
+        // so nothing here may score as replayable.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        assert_eq!(
+            scored.replayability, 0.0,
+            "a trace with no prompt, arguments or results is not replayable"
+        );
+    }
+
+    #[test]
+    fn replayability_is_one_for_a_seedable_trace() {
+        use super::*;
+        let scored = compute_value_scorecard(&seedable_envelope());
+        assert_eq!(
+            scored.replayability, 1.0,
+            "prompt + arguments + a result per call is everything replay needs"
+        );
+    }
+
+    #[test]
+    fn replayability_beats_the_metadata_only_shape() {
+        use super::*;
+        // The property that matters more than either endpoint: the metric has
+        // to separate these two at all. The old one scored them equal.
+        let seedable = compute_value_scorecard(&seedable_envelope());
+        let metadata_only = compute_value_scorecard(&web_history_shaped_envelope());
+        assert!(
+            seedable.replayability > metadata_only.replayability,
+            "seedable {} must out-score metadata-only {}",
+            seedable.replayability,
+            metadata_only.replayability
+        );
+    }
+
+    #[test]
+    fn replayability_degrades_when_only_some_calls_carry_arguments() {
+        use super::*;
+        // Partial coverage is partial credit, not all-or-nothing: a trace half
+        // of whose calls are seedable is worth more than one with none and
+        // less than one that is fully seedable.
+        let mut envelope = seedable_envelope();
+        envelope.events.push(replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("slack__post_message"),
+            Some("call-2"),
+            None,
+            serde_json::json!({"has_result": true}),
+        ));
+        let partial = compute_value_scorecard(&envelope).replayability;
+        let full = compute_value_scorecard(&seedable_envelope()).replayability;
+        assert!(
+            partial > 0.0 && partial < full,
+            "partial coverage must land strictly between: {partial} vs {full}"
+        );
+    }
+
+    #[test]
+    fn an_emitter_declaring_a_trace_unreplayable_is_still_believed() {
+        use super::*;
+        // Sufficiency can only ever lower the score. An emitter that knows the
+        // trace cannot be replayed keeps the last word.
+        let mut envelope = seedable_envelope();
+        envelope.replay.replayable = false;
+        assert_eq!(
+            compute_value_scorecard(&envelope).replayability,
+            0.0,
+            "replayable: false is authoritative"
+        );
+    }
+
+    #[test]
+    fn a_trace_with_no_tool_calls_needs_only_a_prompt() {
+        use super::*;
+        // The tool-free traces in the corpus: there are no calls to carry
+        // arguments, so the prompt is the whole of what replay needs. Absent
+        // guarding, dividing by zero calls would score them 0 or NaN.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = Vec::new();
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::UserMessage,
+            None,
+            None,
+            Some("what is the capital of France"),
+            Value::Null,
+        )];
+        let scored = compute_value_scorecard(&envelope);
+        assert!(
+            scored.replayability.is_finite(),
+            "a tool-free trace must not divide by zero calls"
+        );
+        assert_eq!(
+            scored.replayability, 1.0,
+            "a prompt is all a tool-free trace needs to be re-issued"
+        );
+    }
+
+    #[test]
+    fn quality_does_not_reward_redacted_length() {
+        use super::*;
+        // `quality` was `event_count / 8.0`, so the more content redaction
+        // stripped, the higher a trace scored. Forty empty events must not
+        // out-score four that carry what they claim to.
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        while padded.events.len() < 40 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        let substantive_quality = compute_value_scorecard(&seedable_envelope()).quality;
+        assert!(
+            substantive_quality > padded_quality,
+            "content must out-score length: {substantive_quality} vs {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn padding_a_trace_with_empty_events_cannot_raise_its_score() {
+        use super::*;
+        // The sharper form of the same property: appending contentless events
+        // is the cheapest thing an emitter can do, so it must never pay. This
+        // is what carried the pilot corpus to a 0.813 mean.
+        let base = compute_value_scorecard(&web_history_shaped_envelope()).quality;
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        for _ in 0..30 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        assert!(
+            padded_quality <= base,
+            "padding raised quality from {base} to {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn the_scorecard_explains_which_replay_inputs_are_missing() {
+        use super::*;
+        // The consumer's complaint was not only the number but that "Replay
+        // metadata is present." told them nothing. Make the explanation name
+        // what is absent.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        let explanation = scored.explanation.join(" ");
+        assert!(
+            explanation.contains("argument"),
+            "explanation must name the missing replay inputs, got: {explanation}"
+        );
+    }
+
+    // --- Privacy filter observability ---------------------------------
+    //
+    // An unset backend resolves to `Ok(None)` and builds a redactor that
+    // silently performs no prose-PII filtering. That is indistinguishable at
+    // runtime from a filter that ran and found nothing, and nothing anywhere
+    // reports which backend is live. These pin the two properties that make
+    // the difference observable: the backend can be asked for by name, and a
+    // deployment can demand that one exists.
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_none_when_unset() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        let backend = privacy_filter_backend_from_env().expect("unset is not an error");
+        assert_eq!(
+            backend,
+            PrivacyFilterBackendTag::None,
+            "an unset backend must be reportable as None rather than invisible"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_the_configured_backend() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        // Sidecar rather than near-ai: the near-ai adapter is behind an
+        // optional cargo feature that this crate's own test build does not
+        // enable, and the property under test is backend reporting, not which
+        // backend. The server crate compiles the near-ai feature in
+        // unconditionally.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::set_var("TRACE_PRIVACY_FILTER_COMMAND", "/bin/true");
+        }
+        let backend = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        assert_eq!(
+            backend.expect("configured backend must resolve"),
+            PrivacyFilterBackendTag::Sidecar,
+            "a configured backend must be reportable by name"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_surfaces_a_misconfigured_backend() {
+        use super::privacy_filter_backend_from_env;
+        // A backend named without its required configuration is the one
+        // combination that must never resolve quietly. Before this, it
+        // surfaced per-submission instead of at boot, which is how a filter
+        // stays broken unnoticed.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+            std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        let result = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(
+            result.is_err(),
+            "a backend named without its configuration must be an error, not a silent None"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_labels_are_stable() {
+        use super::PrivacyFilterBackendTag;
+        // These labels reach operational surfaces and stored envelope
+        // summaries, so they are a contract rather than a debug string.
+        assert_eq!(PrivacyFilterBackendTag::None.label(), "none");
+        assert_eq!(PrivacyFilterBackendTag::Sidecar.label(), "sidecar");
+        assert_eq!(PrivacyFilterBackendTag::NearAi.label(), "near_ai");
     }
 }

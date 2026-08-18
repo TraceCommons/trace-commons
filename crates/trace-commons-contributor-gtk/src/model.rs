@@ -219,6 +219,14 @@ pub struct Project {
 /// `list_history`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HistoryRecord {
+    /// The server's id for this submission, and the only handle `withdraw`
+    /// takes. Not an identity and not a path -- an opaque uuid the daemon
+    /// already put on the wire. `#[serde(default)]` like every other field
+    /// here, so a daemon that stopped sending it degrades to "this row has
+    /// no withdraw button" rather than to a history screen that will not
+    /// parse.
+    #[serde(default)]
+    pub submission_id: String,
     #[serde(default)]
     pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]

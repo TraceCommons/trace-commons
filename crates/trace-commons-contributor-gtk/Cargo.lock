@@ -2667,8 +2667,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
-name = "trace-commons-contributor"
+name = "trace-commons-build-info"
 version = "0.1.0"
+
+[[package]]
+name = "trace-commons-contributor"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2683,6 +2687,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "trace-commons-build-info",
  "trace-commons-operator-client",
  "trace-commons-protocol",
  "tracing",
@@ -2692,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-gtk"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2705,6 +2710,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "trace-commons-build-info",
  "trace-commons-contributor",
  "uuid",
  "zbus",

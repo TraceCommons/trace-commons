@@ -64,6 +64,9 @@ SUBCOMMANDS:
                                  handing the codes out. The raw code is never
                                  stored or logged; only its hash reaches the
                                  database.
+    -V, --version                Print the version, the commit this binary was
+                                 built from, and the build time. The same
+                                 identity is on GET /health.
     -h, --help                   Print this help text
 
 Environment variables are documented in docs/upload-claim-issuer.md.
@@ -79,6 +82,16 @@ fn main() -> anyhow::Result<()> {
     match subcommand {
         Some("-h") | Some("--help") => {
             print!("{HELP_TEXT}");
+            Ok(())
+        }
+        Some("-V") | Some("--version") => {
+            println!(
+                "{}",
+                trace_commons_build_info::identity(
+                    env!("CARGO_BIN_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
             Ok(())
         }
         Some("--generate-keypair") => run_generate_keypair(),

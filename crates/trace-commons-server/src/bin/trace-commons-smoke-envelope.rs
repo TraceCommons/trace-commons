@@ -25,7 +25,10 @@ use trace_commons_protocol::trace_contribution::{
 #[derive(Parser, Debug)]
 #[command(
     name = "trace-commons-smoke-envelope",
-    about = "Build + POST a smoke envelope to /v1/traces"
+    about = "Build + POST a smoke envelope to /v1/traces",
+    // The semver does not move when a deploy does, so --version carries the
+    // commit the binary was built from as well.
+    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 struct Args {
     /// Base URL of the running ingest (no trailing slash). Reads from

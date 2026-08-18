@@ -11,6 +11,17 @@ import SwiftUI
 struct TraceCommonsShell: App {
     @StateObject private var model = AppModel()
 
+    init() {
+        // Earlier builds wrote the preview sheet's recent-search list to
+        // UserDefaults. That list is the contributor's own record of what
+        // they were checking for -- client names, employers, unreleased
+        // products -- so it is removed here rather than only when a preview
+        // sheet next happens to open. An upgraded install where nobody opens
+        // a preview again would otherwise keep those terms forever, with no
+        // surface left in the app that could clear them.
+        RecentSearches.purgeLegacyStore()
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuBarContent()

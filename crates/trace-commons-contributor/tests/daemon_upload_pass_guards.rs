@@ -115,6 +115,9 @@ impl Harness {
                 consent_scopes: vec!["debugging_evaluation".into()],
                 pii_filter: broken_filter.then(|| "near-ai".to_string()),
                 allowed_hosts: Some("127.0.0.1".into()),
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
             })
             .unwrap();
 
@@ -421,6 +424,9 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: Some("127.0.0.1".into()),
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         })
         .unwrap();
     let claude_root = dir.path().join("projects");

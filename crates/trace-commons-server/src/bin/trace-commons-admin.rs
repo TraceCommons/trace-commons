@@ -25,7 +25,9 @@ const DEFAULT_BEARER_ENV: &str = "TRACE_COMMONS_ADMIN_BEARER";
 #[command(
     name = "trace-commons-admin",
     about = "Admin-audience CLI for trace-commons-server.",
-    version
+    // The semver does not move when a deploy does, so --version carries the
+    // commit the binary was built from as well.
+    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 pub(crate) struct Cli {
     #[arg(long, env = "TRACE_COMMONS_ENDPOINT")]

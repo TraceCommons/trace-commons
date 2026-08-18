@@ -15,27 +15,45 @@
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
 
     <!--
-      MSIX, via single-project packaging rather than a separate .wapproj.
+      Unpackaged (WindowsPackageType=None) BY DEFAULT, MSIX only on request.
 
-      Package identity is not a preference here: every App Installer API the
-      update flow uses (Package.CheckUpdateAvailabilityAsync and
+      The shipping artifact is the self-contained unpackaged publish tree,
+      zipped: it needs no prerequisites on a contributor's machine, it installs
+      per user without administrator rights, and it builds in CI with no
+      certificate at all — which is what lets the `windows contributor app` job
+      verify the XAML and the Windows App SDK wiring on every pull request.
+
+      TcPackaged=true switches this project to MSIX. It is opt-in rather than
+      the default because the packaged flavour is NOT a superset: it needs
+      Windows 10 2004 (the manifest disables write virtualization, which is a
+      2004 feature and a restricted capability), and it cannot be signed
+      without the release identity. See windows/packaging/README.md. Nothing
+      builds with it set except windows/scripts/make-msix.ps1.
+
+      AUTO-UPDATE DEPENDS ON THAT SWITCH. Package identity is not a
+      preference for the update flow: every App Installer API it uses
+      (Package.CheckUpdateAvailabilityAsync and
       PackageManager.RequestAddPackageByAppInstallerFileAsync) refuses
-      without it, so an unpackaged build has no update path at all.
+      without it, so the unpackaged zip has no update path at all. The
+      updater is written to be inert rather than broken in that flavour
+      (see UpdateProtocol), and turning updates on for contributors is
+      therefore the same decision as shipping the packaged build, not a
+      separate one.
 
-      Single-project rather than a Windows Application Packaging Project
-      because its one real limitation is a single executable per package,
-      and this app ships exactly one. A .wapproj would add a fourth project
-      to the solution carrying a duplicate of the version, the manifest and
-      the platform matrix.
+      Single-project packaging rather than a separate .wapproj: its one real
+      limitation is a single executable per package and this app ships
+      exactly one, whereas a .wapproj would add a fourth project to the
+      solution carrying a duplicate of the version, the manifest and the
+      platform matrix.
     -->
-    <WindowsPackageType>MSIX</WindowsPackageType>
-    <EnableMsixTooling>true</EnableMsixTooling>
+    <TcPackaged Condition="'$(TcPackaged)' == ''">false</TcPackaged>
 
     <!--
-      Self-contained stays on under MSIX. It keeps the Windows App Runtime
-      out of the package's Dependencies, which keeps it out of the
-      .appinstaller feed: a framework reference there is one more artifact
-      the deployment service must reach, on a host we do not control.
+      Self-contained stays on in both flavours. Under MSIX it keeps the
+      Windows App Runtime out of the package's Dependencies, and so out of
+      the .appinstaller feed: a framework reference there is one more
+      artifact the deployment service must reach, on a host we do not
+      control.
     -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
@@ -60,6 +78,36 @@
 
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TcPackaged)' != 'true'">
+    <WindowsPackageType>None</WindowsPackageType>
+  </PropertyGroup>
+
+  <!--
+    The packaged flavour. AppxPackageSigningEnabled is false on purpose: this
+    repository has no PFX and never will — signing is Azure Trusted Signing,
+    performed by signtool after packaging, against the same identity the
+    Authenticode pass uses. A build that tried to sign here would fail looking
+    for a certificate store.
+  -->
+  <PropertyGroup Condition="'$(TcPackaged)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TcPackaged)' == 'true'">
+    <AppxManifest Include="$(MSBuildThisFileDirectory)../../packaging/Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="$(MSBuildThisFileDirectory)../../packaging/Assets/*.png">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />

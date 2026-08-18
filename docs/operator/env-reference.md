@@ -159,6 +159,27 @@ procedure.
 | `TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS` | R for prod | `false` | Require keyset-managed EdDSA (not inline PEM). |
 | `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS` | R for prod | `false` | Require grant-row authorization on every read. |
 
+### 8a. Score attestation signing
+
+Set all three or none. With none set, attestation signing is disabled and
+both `/.well-known/trace-commons-attestation-keyset.json` and
+`/v1/contributors/me/score-attestation` fail closed with
+`503 attestation_signing_key_unconfigured` — correct, but indistinguishable
+from an outage to a contributor running `trace-commons-contributor attest`,
+so configure these wherever contributors attest. A partial configuration is
+an operator error and refuses at boot rather than silently disabling.
+
+Generate the keypair with `trace-commons-ingest --generate-attestation-keypair`;
+it reads no env and touches no database, so it works before the server is
+configured, and prints all three assignments in env-file format.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID` | R when attesting | (none) | Key id published in the keyset and stamped in the JWS header. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` | R when attesting | (none) | PKCS#8 v2 Ed25519 private key PEM. Operator secret; never commit. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_PUBLIC_KEY_PEM` | R when attesting | (none) | SPKI Ed25519 public key PEM. Published in the keyset endpoint. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_TTL_SECONDS` | optional | `86400` | Attestation lifetime. Must be positive. |
+
 ## 9. Analytics surface
 
 | Var | R? | Default | Description |
@@ -397,7 +418,23 @@ the driver database URL or the API key refuses at boot.
 The privacy filter backend is selected explicitly — there is no auto-fallback.
 Unknown values for `TRACE_PRIVACY_FILTER_BACKEND` are refused at startup so
 misconfigurations surface immediately rather than silently degrading to a
-weaker path.
+weaker path. A backend named without the configuration it needs (`near-ai`
+without its API key, `sidecar` without its command) is refused at startup too,
+rather than surfacing on each submission.
+
+`trace-commons-ingest` logs the resolved backend once at startup:
+
+```
+Trace Commons privacy filter backend resolved  privacy_filter_backend=near_ai
+```
+
+A value of `none` there means deterministic-only redaction. That line is the
+only signal distinguishing a filter that ran from one that was never
+configured — an unset backend is not an error, and a runtime filter failure
+falls back to the unfiltered text with a `privacy_filter:<backend>_failure`
+counter. Deployments that require prose-PII filtering should set
+`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` so an absent backend refuses the boot
+instead.
 
 The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
 pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
@@ -407,6 +444,7 @@ audit-relevant and is included in gate version hash derivation.
 | Var | R? | Default | Description |
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
 | `TRACE_PRIVACY_FILTER_TIMEOUT_MS` | optional | `10000` | Sidecar timeout. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS`. |

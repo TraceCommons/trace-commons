@@ -99,10 +99,22 @@ $asset = "trace-commons-contributor-$target.exe"
 # GitHub's "latest release" is whichever was cut most recently and may hold no
 # CLI assets at all. Resolve the newest contributor-v* tag explicitly.
 if ($Version -eq 'latest') {
+    # Send a token when the environment already has one. Anonymous
+    # api.github.com is rate-limited per source IP, which is generous for one
+    # person on a home connection and hopeless from a shared one -- a CI
+    # runner, an office NAT, a VPN exit. GitHub Actions sets GITHUB_TOKEN, so
+    # this is the difference between the release lookup working there and
+    # failing on most runs. A token is never required and never requested:
+    # without one this is the same anonymous request it always was.
+    $headers = @{ 'Accept' = 'application/vnd.github+json' }
+    $token = $env:GH_TOKEN
+    if (-not $token) { $token = $env:GITHUB_TOKEN }
+    if ($token) { $headers['Authorization'] = "Bearer $token" }
+
     try {
         $releases = Invoke-RestMethod -UseBasicParsing `
             -Uri "https://api.github.com/repos/$Repo/releases?per_page=50" `
-            -Headers @{ 'Accept' = 'application/vnd.github+json' }
+            -Headers $headers
     } catch {
         Die @"
 could not reach the GitHub API to work out the latest CLI release.
@@ -111,29 +123,36 @@ It may be rate-limiting you. Pass a version explicitly instead:
 "@
     }
     # Check the SHAPE before reading it. A rate-limited GitHub returns a JSON
-    # object -- {message, documentation_url} -- rather than an array of
-    # releases, and under `Set-StrictMode -Version Latest` reading .tag_name off
-    # that dies with "The property 'tag_name' cannot be found on this object".
-    # That is a true statement and a useless one: it sends the reader looking
-    # for a malformed release instead of telling them they were throttled. The
-    # unauthenticated limit is 60 requests/hour PER IP, so anyone behind a
-    # shared address can hit it without having run this script before.
+    # object, {message, documentation_url}, rather than an array of releases,
+    # so nothing in it carries tag_name. Reporting that as "no release found"
+    # would send the reader looking for a missing release instead of telling
+    # them they were throttled. The unauthenticated limit is 60 requests/hour
+    # PER IP, so anyone behind a shared address can hit it without having run
+    # this script before.
     $usable = @($releases | Where-Object { $_.PSObject.Properties.Name -contains 'tag_name' })
     if ($usable.Count -eq 0) {
         Die @"
-GitHub did not return a release list. It is most likely rate-limiting you --
-the unauthenticated limit is 60 requests/hour for everyone sharing your IP
+GitHub did not return a release list. It is most likely rate-limiting you.
+The unauthenticated limit is 60 requests/hour for everyone sharing your IP
 address. Pass a version explicitly to skip this lookup entirely:
-  .\install.ps1 -Version 0.1.0
+  .\install.ps1 -Version 0.2.0
 "@
     }
 
-    $tag = ($usable |
+    # Bind the matched release before reading anything off it. Under
+    # `Set-StrictMode -Version Latest` a pipeline that matches nothing yields
+    # $null, and `$null.tag_name` throws "The property 'tag_name' cannot be
+    # found on this object" before the guard below can report it, replacing a
+    # plain explanation with a stack trace about a property name. The shape
+    # check above cannot stand in for this: a well-formed list with no
+    # contributor-v* release in it is exactly the case this catches.
+    $release = $usable |
         Where-Object { $_.tag_name -like 'contributor-v*' } |
-        Select-Object -First 1).tag_name
-    if (-not $tag) {
+        Select-Object -First 1
+    if (-not $release) {
         Die "found no contributor-v* release. Pass a version explicitly: .\install.ps1 -Version 0.1.0"
     }
+    $tag = $release.tag_name
 } else {
     $tag = "contributor-v$Version"
 }

@@ -62,6 +62,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var consentScopes: [ConsentScope] = []
     @Published private(set) var daemonSettings: DaemonSettingsView?
     @Published private(set) var outcomeCounts: [String: Int] = [:]
+    @Published private(set) var audit: [AuditEntry] = []
     @Published var undo: Undo?
     @Published var lastActionError: String?
 
@@ -219,6 +220,18 @@ final class AppModel: ObservableObject {
         refreshSettings()
         refreshConsentOptions()
         refreshOutcomeCounts()
+        refreshAudit()
+        refreshPublicProfile()
+    }
+
+    /// The local change log. Refreshed alongside everything else at launch,
+    /// and again after each call that APPENDS to it -- arming a project,
+    /// changing consent scopes, acknowledging the NEAR AI notice -- because
+    /// the daemon publishes no event for an audit append, so a list fetched
+    /// once would show a contributor everything except the change they just
+    /// made.
+    func refreshAudit() {
+        perform("list_audit", work: { try $0.listAudit() }, onSuccess: { self.audit = $0 })
     }
 
     func refreshStatus() {
@@ -260,6 +273,9 @@ final class AppModel: ObservableObject {
             work: { try $0.setProjectMode(projectKey: project.projectLabel, mode: mode) }
         ) { _ in
             self.refreshProjects()
+            // Arming or disarming a project is one of the changes the daemon
+            // records; see `refreshAudit`.
+            self.refreshAudit()
         }
     }
 
@@ -306,6 +322,7 @@ final class AppModel: ObservableObject {
         ) { _ in
             self.refreshSettings()
             self.refreshStatus()
+            self.refreshAudit()
         }
     }
 
@@ -342,6 +359,7 @@ final class AppModel: ObservableObject {
         }.value
         if case .succeeded = outcome {
             refreshStatus()
+            refreshAudit()
         }
         return outcome
     }
@@ -472,6 +490,116 @@ final class AppModel: ObservableObject {
             self.refreshQueue()
             self.refreshOutcomeCounts()
         }
+    }
+
+    // MARK: - Public profile
+
+    /// What the last claim or withdrawal did.
+    ///
+    /// `published` and `left` both carry `cached`, which is the daemon's
+    /// `handle_persisted` and is **not** whether the call worked. By the
+    /// time that flag exists the server has already accepted the change, so
+    /// both of those cases are successes; `cached == false` only means this
+    /// device failed to write its local copy, and the sentence for it says
+    /// so without retracting the public fact. Reporting that as `refused`
+    /// would tell a contributor their handle is private when it is public.
+    enum ProfileOutcome: Equatable {
+        case published(cached: Bool)
+        case left(cached: Bool)
+        /// The daemon or the server refused. Carries the daemon's fixed
+        /// label, which by contract is never a path, a token, or a response
+        /// body.
+        case refused(String)
+        /// A refused withdrawal, which needs its own sentence: after one,
+        /// the handle is still published.
+        case leaveRefused(String)
+    }
+
+    /// The cached profile, or `nil` for "not on the roster". `nil` is also
+    /// what an unenrolled device gets, which is correct: it has claimed
+    /// nothing.
+    @Published private(set) var publicProfile: DaemonClient.PublicProfile?
+    @Published private(set) var profileOutcome: ProfileOutcome?
+    @Published private(set) var profileBusy = false
+
+    func refreshPublicProfile() {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let outcome = try? client.publicProfile()
+            await MainActor.run {
+                // A failure -- `not-logged-in` above all -- is the
+                // off-the-roster state, not an error worth a banner.
+                self.publicProfile = (outcome?.onRoster ?? false) ? outcome : nil
+            }
+        }
+    }
+
+    /// Claims or updates the public handle.
+    ///
+    /// Bypasses `perform` for the same reason `withdraw` does: that helper
+    /// funnels every failure into `lastActionError` as a bare label, and a
+    /// label is not a sentence a contributor can act on when the thing that
+    /// was refused is the handle they just typed.
+    ///
+    /// The profile is taken from the daemon's own answer rather than from
+    /// what was sent: the handle it stored is the validated display form,
+    /// which is trimmed, and the roster date is the server's.
+    func claimHandle(_ handle: String, bio: String) {
+        guard let client, !profileBusy else { return }
+        profileBusy = true
+        profileOutcome = nil
+        let trimmedBio = bio.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty box means "no bio", explicitly. The PUT replaces the
+        // whole profile, so there is no "leave it alone" to express.
+        let bioParam: String? = trimmedBio.isEmpty ? nil : trimmedBio
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.setPublicProfile(handle: handle, bio: bioParam) }
+            await MainActor.run {
+                self.profileBusy = false
+                switch result {
+                case .success(let profile):
+                    self.publicProfile = profile.onRoster ? profile : nil
+                    // A build that did not report the flag is treated as
+                    // having persisted: the alternative is warning about a
+                    // cache miss that may not have happened, on a profile
+                    // that is public either way.
+                    self.profileOutcome = .published(cached: profile.handlePersisted ?? true)
+                    self.refreshStatus()
+                    self.refreshAudit()
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message ?? "profile-update-failed"
+                    self.profileOutcome = .refused(label)
+                }
+            }
+        }
+    }
+
+    /// Withdraws the public handle from the roster.
+    func leaveRoster() {
+        guard let client, !profileBusy else { return }
+        profileBusy = true
+        profileOutcome = nil
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try client.clearPublicProfile() }
+            await MainActor.run {
+                self.profileBusy = false
+                switch result {
+                case .success(let profile):
+                    self.publicProfile = profile.onRoster ? profile : nil
+                    self.profileOutcome = .left(cached: profile.handlePersisted ?? true)
+                    self.refreshStatus()
+                    self.refreshAudit()
+                case .failure(let error):
+                    let label = (error as? DaemonClient.Failure)?.message
+                        ?? "profile-withdraw-failed"
+                    self.profileOutcome = .leaveRefused(label)
+                }
+            }
+        }
+    }
+
+    func clearProfileOutcome() {
+        profileOutcome = nil
     }
 
     // MARK: - Withdrawal
