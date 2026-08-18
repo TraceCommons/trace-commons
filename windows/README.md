@@ -177,14 +177,25 @@ registration when packaged. A packaged build declares startup with a
 and `RunAtLogin.IsSupported` reports false, which drops the item from the tray
 menu rather than drawing a toggle that cannot work.
 
-### What only Windows can confirm
+### What the tests cover, and what the VM confirmed
 
 The mark's rasterization, the tooltip and digest wording, the icon-state
 precedence, the cadence, and the Run-key value and quoting are all unit-tested
-off Windows in `tests/TraceCommons.Interop.Tests/TrayTests.cs`. What those
-tests cannot reach: that `Shell_NotifyIcon` accepts the struct, that the shell
-draws the bitmap, that `TrackPopupMenu` dismisses correctly, that the balloon
-appears, and that the registry entry actually starts the app at sign-in.
+off Windows in `tests/TraceCommons.Interop.Tests/TrayTests.cs`.
+
+The rest was confirmed on the dev VM (`docs/dev-vm.md`), because none of it is
+reachable from a unit test: `Shell_NotifyIcon` accepted the icon in an
+interactive session, all four icon states rendered through
+`CreateIconIndirect`, the mark reads correctly at 16px with the attention dot
+in the corner both brackets leave empty, `TrackPopupMenuEx` drew the menu and
+returned cleanly on dismissal, and the digest arrived with the shared spec's
+wording. Writing the Run key made Windows raise its own "now configured to run
+when you log in" notification, which is the shell agreeing the entry is a real
+startup registration rather than an inert key.
+
+Still unconfirmed: that the entry actually launches the app across a real
+sign-in, and how any of this behaves under MSIX, where run-at-login is
+deliberately inert.
 
 ## The read gate
 
