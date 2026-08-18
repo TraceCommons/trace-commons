@@ -418,7 +418,23 @@ the driver database URL or the API key refuses at boot.
 The privacy filter backend is selected explicitly — there is no auto-fallback.
 Unknown values for `TRACE_PRIVACY_FILTER_BACKEND` are refused at startup so
 misconfigurations surface immediately rather than silently degrading to a
-weaker path.
+weaker path. A backend named without the configuration it needs (`near-ai`
+without its API key, `sidecar` without its command) is refused at startup too,
+rather than surfacing on each submission.
+
+`trace-commons-ingest` logs the resolved backend once at startup:
+
+```
+Trace Commons privacy filter backend resolved  privacy_filter_backend=near_ai
+```
+
+A value of `none` there means deterministic-only redaction. That line is the
+only signal distinguishing a filter that ran from one that was never
+configured — an unset backend is not an error, and a runtime filter failure
+falls back to the unfiltered text with a `privacy_filter:<backend>_failure`
+counter. Deployments that require prose-PII filtering should set
+`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` so an absent backend refuses the boot
+instead.
 
 The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
 pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
@@ -428,6 +444,7 @@ audit-relevant and is included in gate version hash derivation.
 | Var | R? | Default | Description |
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
 | `TRACE_PRIVACY_FILTER_TIMEOUT_MS` | optional | `10000` | Sidecar timeout. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS`. |

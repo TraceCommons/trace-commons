@@ -590,11 +590,108 @@ pub const GO_PUBLIC_ACKNOWLEDGEMENT: &str = "I understand my handle and aggregat
 pub const GO_PUBLIC_CONFIRM: &str = "Go public";
 pub const GO_PUBLIC_FOOTNOTE: &str = "Nothing is pre-checked, and Go public stays off until the \
      acknowledgement is on. This changes attribution only -- it grants no data use.";
-/// Said when the confirm lands and there is nowhere for it to go. The
-/// contract has no public-profile method, so the true sentence is that this
-/// window cannot do it yet -- and that nothing changed.
-pub const ROSTER_UNREACHABLE: &str =
-    "This window can't put you on the roster yet. Nothing changed.";
+/// The handle field inside the dialog. The panel's `HANDLE_LABEL` names
+/// the same thing, so the same constant would do -- except that here the
+/// field is empty and has to say what to put in it, and "Handle" over an
+/// empty box does not.
+pub const GO_PUBLIC_HANDLE_LABEL: &str = "The handle to publish";
+/// The optional bio, said as optional. `BIO_LABEL` carries the budget and
+/// the format; what it cannot carry is that leaving this empty is a
+/// complete answer rather than an unfinished form.
+pub const GO_PUBLIC_BIO_LABEL: &str = "Bio, if you want one -- 280 bytes, plaintext, no HTML";
+
+// --- What claiming and leaving actually did, §5.6 ------------------------
+//
+// Every sentence below states what is true of the *public* surface first,
+// because that is the thing the contributor just changed and the thing
+// they cannot inspect from this window. What this device managed to write
+// down about it is a second, lesser fact and is worded as one.
+
+/// A claim the server accepted.
+pub const PROFILE_PUBLISHED: &str =
+    "You're on the roster. Your handle and aggregate counts are public now.";
+
+/// A claim the server accepted and this device then failed to write down.
+///
+/// This is what `handle_persisted: false` means, and it is emphatically
+/// not a failed claim: the server has taken the handle, so the profile is
+/// public whatever happened on this machine afterwards. Telling a
+/// contributor their handle did not go up when it did is the one error
+/// this surface must never make -- it is a false statement about a public,
+/// outward-facing act, and they would walk away believing they are
+/// unlisted. So the sentence leads with the publication, and describes the
+/// local loss for exactly what it is: this window will misreport the state
+/// until the next successful save, and nothing public changes either way.
+pub const PROFILE_PUBLISHED_NOT_CACHED: &str = "You're on the roster -- your handle and aggregate counts are public now. This device \
+     couldn't keep its own copy of the profile, so this window will show you as unlisted again \
+     until you save it once more. That doesn't change anything about what is public.";
+
+/// A withdrawal the server accepted.
+pub const PROFILE_LEFT_ROSTER: &str = "You've left the roster. Your handle isn't published any \
+     more, and future snapshots won't include you.";
+
+/// A withdrawal the server accepted and this device then failed to write
+/// down. The mirror of `PROFILE_PUBLISHED_NOT_CACHED`, and stated for the
+/// same reason: the row is gone from the server regardless, so the
+/// withdrawal is not in doubt -- only what this window will show next.
+pub const PROFILE_LEFT_ROSTER_NOT_CACHED: &str = "You've left the roster -- your handle isn't published any more, and future snapshots won't \
+     include you. This device couldn't clear its own copy of the profile, so this window may show \
+     the old handle again until it can.";
+
+/// A claim the server or the daemon refused, from the daemon's fixed
+/// label.
+///
+/// Every branch says that nothing was published, because in every one of
+/// them nothing was: the refusal happens before or instead of the `PUT`.
+/// The rules themselves are not re-implemented here -- the daemon and the
+/// server share one copy of them in `community_handle`, and a second copy
+/// in this window is how a handle this shell accepts becomes a handle the
+/// server refuses. These sentences only translate the verdict.
+pub fn profile_failure_sentence(label: &str) -> String {
+    let reason = match label {
+        "handle-required" => "There's no handle in the box yet.",
+        "handle-too-short" => "That handle is too short -- it needs at least 3 characters.",
+        "handle-too-long" => "That handle is too long -- 32 characters at most.",
+        "handle-invalid-character" => {
+            "A handle can only use letters, numbers, hyphens and underscores."
+        }
+        "handle-invalid-boundary" => "A handle has to start and end with a letter or a number.",
+        "handle-consecutive-separators" => {
+            "A handle can't have two hyphens or underscores in a row."
+        }
+        "handle-reserved" => "That handle is reserved and can't be claimed.",
+        "bio-too-long" => "That bio is over the 280-byte budget.",
+        "bio-invalid-character" => "That bio has a character the roster doesn't take.",
+        // Not reachable from this window -- it always sends a bio key, null
+        // or a string -- and handled anyway, so a contract change surfaces
+        // as a sentence rather than as the fallback below.
+        "bio-required-or-null" | "bio-invalid" => "The bio wasn't sent in a form the roster takes.",
+        "not-logged-in" => "This device isn't connected to Trace Commons.",
+        // The underlying failure is never forwarded by the daemon -- it can
+        // carry a server response body or a URL -- so there is nothing more
+        // specific to say than that it did not go through.
+        "profile-update-failed" | "profile-withdraw-failed" | "daemon-not-running" => {
+            "The request didn't go through."
+        }
+        _ => "The request didn't go through.",
+    };
+    format!("{reason} Nothing was published and nothing changed. You can try again.")
+}
+
+/// The same, for a withdrawal: "nothing was published" is the wrong second
+/// clause when what failed was an attempt to *un*-publish, and a
+/// contributor who read it could conclude they had been taken off the
+/// roster when they are still on it.
+pub fn roster_leave_failure_sentence(label: &str) -> String {
+    let reason = match label {
+        "not-logged-in" => "This device isn't connected to Trace Commons.",
+        _ => "The request didn't go through.",
+    };
+    format!(
+        "{reason} You're still on the roster and your handle is still published. You can try \
+             again."
+    )
+}
 
 // --- Declining -----------------------------------------------------------
 
@@ -1190,5 +1287,104 @@ mod tests {
         assert!(lower.starts_with("asked"));
         assert!(!lower.contains("updated"));
         assert!(!lower.contains("refreshed"));
+    }
+
+    #[test]
+    fn a_profile_that_was_published_never_reads_as_one_that_was_not() {
+        // `handle_persisted: false` is a failed *local cache write*, not a
+        // failed claim: the server has already taken the handle. Both
+        // sentences must therefore open by saying the contributor is on the
+        // roster, and neither may contain the vocabulary of a refusal.
+        for sentence in [PROFILE_PUBLISHED, PROFILE_PUBLISHED_NOT_CACHED] {
+            assert!(
+                sentence.starts_with("You're on the roster"),
+                "a published profile must be reported as published: {sentence}"
+            );
+            let lower = sentence.to_lowercase();
+            for forbidden in [
+                "couldn't publish",
+                "failed",
+                "wasn't published",
+                "nothing changed",
+            ] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "a published profile must not read as a failure ({forbidden}): {sentence}"
+                );
+            }
+        }
+        // And the uncached one still says the weaker true thing, rather
+        // than being the same sentence twice.
+        assert_ne!(PROFILE_PUBLISHED, PROFILE_PUBLISHED_NOT_CACHED);
+        assert!(PROFILE_PUBLISHED_NOT_CACHED.contains("until you save it once more"));
+    }
+
+    #[test]
+    fn a_withdrawal_that_happened_never_reads_as_one_that_did_not() {
+        // The mirror rule. The row is gone from the server whether or not
+        // the local clear stuck, so neither sentence may leave a
+        // contributor thinking they are still listed.
+        for sentence in [PROFILE_LEFT_ROSTER, PROFILE_LEFT_ROSTER_NOT_CACHED] {
+            assert!(
+                sentence.starts_with("You've left the roster"),
+                "a completed withdrawal must be reported as completed: {sentence}"
+            );
+            assert!(sentence.to_lowercase().contains("isn't published any more"));
+        }
+    }
+
+    #[test]
+    fn every_refusal_says_nothing_was_published() {
+        // A refusal happens before or instead of the PUT, so in every one
+        // of these cases the handle did not go up -- and the contributor
+        // has to be able to tell this apart from the published-but-uncached
+        // case above.
+        for label in [
+            "handle-required",
+            "handle-too-short",
+            "handle-too-long",
+            "handle-invalid-character",
+            "handle-invalid-boundary",
+            "handle-consecutive-separators",
+            "handle-reserved",
+            "bio-too-long",
+            "bio-invalid-character",
+            "bio-required-or-null",
+            "not-logged-in",
+            "profile-update-failed",
+            "a-label-nobody-has-written-yet",
+        ] {
+            let sentence = profile_failure_sentence(label);
+            assert!(
+                sentence.contains("Nothing was published"),
+                "{label} does not say the handle stayed private: {sentence}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_withdrawal_never_borrows_the_claim_sentence() {
+        // "Nothing was published" is false comfort after a failed
+        // withdrawal: the handle is published, which is precisely the
+        // problem. This one has to say the contributor is still listed.
+        for label in ["not-logged-in", "profile-withdraw-failed"] {
+            let sentence = roster_leave_failure_sentence(label);
+            assert!(!sentence.contains("Nothing was published"));
+            assert!(
+                sentence.contains("still on the roster"),
+                "{label} does not say the listing survived: {sentence}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_profile_sentence_echoes_a_server_error() {
+        // The daemon never forwards the underlying error -- it can carry a
+        // response body or a URL -- and this mapping must not invent a
+        // place to put one either. Every branch is a fixed sentence, so
+        // an unknown label reads as the generic failure and nothing else.
+        let unknown = profile_failure_sentence("https://ingest.example/v1/community/profile");
+        assert!(!unknown.contains("https://"));
+        assert_eq!(unknown, profile_failure_sentence("something-else"));
     }
 }
