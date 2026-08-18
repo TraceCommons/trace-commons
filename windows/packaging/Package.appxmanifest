@@ -96,6 +96,14 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
+
+    <!--
+      PackageManager.RequestAddPackageByAppInstallerFileAsync requires this
+      capability. Without it the in-app "Update and restart" action is denied,
+      leaving only Windows' scheduled App Installer checks.
+    -->
+    <rescap:Capability Name="packageManagement" />
+
     <rescap:Capability Name="unvirtualizedResources" />
   </Capabilities>
 

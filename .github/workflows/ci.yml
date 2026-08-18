@@ -685,8 +685,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           ./windows/scripts/make-appinstaller.ps1 `
-            -PackageName ai.tracecommons.Contributor `
-            -Publisher "CN=TraceCommons Development, O=TraceCommons, C=US" `
+            -PackageName Iqlusion.TraceCommons `
+            -Publisher "CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US" `
             -Version 0.0.1.0 -ProcessorArchitecture x64 `
             -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
             -PackageFileName probe.msix `
@@ -702,7 +702,7 @@ jobs:
             throw "the feed allows downgrades, which this project forbids"
           }
           $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
-          [xml]$manifest = Get-Content windows\src\TraceCommons.App\Package.appxmanifest
+          [xml]$manifest = Get-Content windows\packaging\Package.appxmanifest
           if ($main.Name -ne $manifest.Package.Identity.Name) {
             throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
           }

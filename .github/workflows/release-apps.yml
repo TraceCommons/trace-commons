@@ -691,7 +691,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $quad = & windows\scripts\stamp-package-identity.ps1 `
-            -ManifestPath windows\src\TraceCommons.App\Package.appxmanifest `
+            -ManifestPath windows\packaging\Package.appxmanifest `
             -Version $env:SHORT_VERSION -Publisher $env:CERT_SUBJECT
           "quad=$quad" >> $env:GITHUB_OUTPUT
 
@@ -699,7 +699,7 @@ jobs:
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+        run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
 
       # Exactly one, asserted rather than assumed -- the same shape as the
       # CLI job's staging check. A second .msix in the output directory means
@@ -739,7 +739,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Add-AppxPackage -Path $env:PKG
-          $installed = Get-AppxPackage -Name ai.tracecommons.Contributor
+          $installed = Get-AppxPackage -Name Iqlusion.TraceCommons
           if (-not $installed) { throw "the package did not register" }
           if ($installed.Version -ne $env:QUAD) {
             throw "installed version $($installed.Version) does not match the stamped $env:QUAD"
@@ -756,13 +756,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $pkg = Get-AppxPackage -Name ai.tracecommons.Contributor
+          $pkg = Get-AppxPackage -Name Iqlusion.TraceCommons
           $dir = Join-Path $env:LOCALAPPDATA 'trace-commons'
           $probe = Join-Path $dir 'msix-virtualization-probe.txt'
           if (Test-Path $probe) { Remove-Item $probe -Force }
           $inner = "New-Item -ItemType Directory -Force -Path '$dir' | Out-Null; Set-Content -Path '$probe' -Value ok"
           Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName `
-            -AppId TraceCommons `
+            -AppId App `
             -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -Args "-NoProfile -NonInteractive -Command `"$inner`""
           $deadline = (Get-Date).AddSeconds(60)
@@ -786,7 +786,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "${{ steps.pkg.outputs.path }}" "dist\$env:PKG_NAME" -Force
           ./windows/scripts/make-appinstaller.ps1 `
-            -PackageName ai.tracecommons.Contributor `
+            -PackageName Iqlusion.TraceCommons `
             -Publisher $env:CERT_SUBJECT `
             -Version $env:QUAD `
             -ProcessorArchitecture x64 `

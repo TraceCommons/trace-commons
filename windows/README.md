@@ -93,7 +93,7 @@ through a `.appinstaller` feed that Windows polls on its own schedule.
 # From windows/. Packaging is off by default; a plain msbuild is a compile
 # check. dist/msix/ is the output directory.
 msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore `
-  -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+  -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true
 ```
 
 The package is deliberately unsigned at build time. `AppxPackageSigningEnabled`
@@ -102,8 +102,8 @@ applied afterwards by `signtool` against a short-lived certificate issued to
 the release job's OIDC token. There is no `.pfx` in this repository and there
 must never be one.
 
-Package identity is `ai.tracecommons.Contributor`, application id
-`TraceCommons`. Both are permanent: changing either produces a different app
+Package identity is `Iqlusion.TraceCommons`, application id `App`. Both are
+permanent: changing either produces a different app
 that installs alongside the old one instead of updating it.
 
 ### Distribution
@@ -112,7 +112,7 @@ The release job publishes two objects to the public bucket:
 
 | Object | Content type | Cache-Control |
 | --- | --- | --- |
-| `windows/ai.tracecommons.Contributor_<version>_x64.msix` | `application/msix` | `public, max-age=31536000, immutable` |
+| `windows/<MSBuild-produced package filename>.msix` | `application/msix` | `public, max-age=31536000, immutable` |
 | `windows/TraceCommons.appinstaller` | `application/appinstaller` | `no-cache, max-age=0` |
 
 The package is uploaded before the feed, so there is never a window in which

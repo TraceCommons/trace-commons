@@ -1248,7 +1248,7 @@ fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
 /// The MSIX build's own layout puts the package one directory deeper and
 /// under the MSBuild project's name, not the packaging identity -- so the
 /// filename discovered on disk is NOT assumed to be
-/// `ai.tracecommons.Contributor_<quad>_x64.msix`. If the job published under
+/// `Iqlusion.TraceCommons_<quad>_x64.msix`. If the job published under
 /// a name it invented (or a hardcoded one) while the feed's MainPackage@Uri
 /// named something else, every client would resolve the feed successfully
 /// and then 404 fetching the package -- a silent no-op with no error surface
@@ -1265,14 +1265,14 @@ fn windows_msix_publish_name_matches_appinstaller_feed_name() {
     let job = extract_job(&workflow, "windows-app");
 
     // The package name is discovered from disk, never spelled out as a
-    // literal `ai.tracecommons.Contributor_...msix` anywhere in the job.
+    // literal `Iqlusion.TraceCommons_...msix` anywhere in the job.
     assert!(
         job.contains("Get-ChildItem -Recurse -Filter *.msix -Path windows\\dist\\msix"),
         "the job must discover the built package's name by globbing the \
          real output directory rather than assuming a filename"
     );
     assert!(
-        !job.contains("ai.tracecommons.Contributor_"),
+        !job.contains("Iqlusion.TraceCommons_"),
         "the job must never hardcode a package filename derived from the \
          packaging identity -- MSBuild's Test-layout output is named after \
          the project, not the identity, and the two can diverge"
@@ -1449,4 +1449,44 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
         "CI must assert the feed's MainPackage name matches \
          Package.appxmanifest's Identity/@Name"
     );
+
+    let project = read("windows/src/TraceCommons.App/TraceCommons.App.csproj");
+    assert_eq!(
+        project.matches("<AppxManifest Include=").count(),
+        1,
+        "the WinUI project must register exactly one package manifest"
+    );
+    assert!(
+        project.contains("../../packaging/Package.appxmanifest"),
+        "the WinUI project must use the canonical packaging manifest"
+    );
+    assert!(
+        project.contains("<TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>"),
+        "MSIX's 19041 floor must not narrow the default unpackaged build's support"
+    );
+
+    let manifest = read("windows/packaging/Package.appxmanifest");
+    assert!(
+        manifest.contains("Name=\"Iqlusion.TraceCommons\""),
+        "the canonical manifest must retain the established package identity"
+    );
+    assert!(
+        manifest.contains("<rescap:Capability Name=\"packageManagement\" />"),
+        "the packaged app needs packageManagement to apply updates on demand"
+    );
+
+    let release = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&release, "windows-app");
+    for expected in [
+        "-ManifestPath windows\\packaging\\Package.appxmanifest",
+        "-p:TcPackaged=true",
+        "Get-AppxPackage -Name Iqlusion.TraceCommons",
+        "-AppId App",
+        "-PackageName Iqlusion.TraceCommons",
+    ] {
+        assert!(
+            job.contains(expected),
+            "the Windows release job must consistently use the canonical MSIX identity: {expected}"
+        );
+    }
 }
