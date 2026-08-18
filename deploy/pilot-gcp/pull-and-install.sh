@@ -10,22 +10,49 @@
 # restarts and fetches it.
 #
 # Usage (on tc-pilot-host):
-#   deploy/pilot-gcp/pull-and-install.sh            # both binaries (default)
-#   deploy/pilot-gcp/pull-and-install.sh ingest     # just ingest
-#   deploy/pilot-gcp/pull-and-install.sh issuer     # just the issuer
+#   deploy/pilot-gcp/pull-and-install.sh                    # both binaries (default)
+#   deploy/pilot-gcp/pull-and-install.sh ingest             # just ingest
+#   deploy/pilot-gcp/pull-and-install.sh issuer             # just the issuer
+#   deploy/pilot-gcp/pull-and-install.sh ingest 4655cf45    # refuse unless latest.txt is that build
+#   TC_EXPECT_TAG=4655cf45 deploy/pilot-gcp/pull-and-install.sh   # same, for `both`
 #
 # Each install verifies the sha256 sidecar, backs up the running binary, installs,
 # and restarts the service. Reads the per-binary `latest.txt` pointer the build
 # publishes.
+#
+# ALWAYS pass the expected tag when deploying a specific build. `latest.txt`
+# names the last build that *published*, so running this while your build is
+# still in flight reinstalls the previous binary, restarts the service, and
+# prints "done." — a successful-looking no-op. The tag is now echoed on every
+# run whether or not you pass one.
 set -euo pipefail
 
 BUCKET="${TC_ARTIFACT_BUCKET:-tc-pilot-artifacts-20260518}"
+# Optional: the build tag this run is meant to install, e.g. the short SHA
+# passed to `gcloud builds submit --substitutions _TAG=...`. When set, a
+# mismatch against `latest.txt` refuses the install instead of quietly
+# deploying whatever was published last.
+EXPECT_TAG="${TC_EXPECT_TAG:-${2:-}}"
 
 install_one() {
   local bin="$1" svc="$2"
   local latest="gs://${BUCKET}/binaries/${bin}/latest.txt"
   local src
   src="$(gcloud storage cat "$latest")"
+
+  # `latest.txt` points at the most recently *published* build, which is not
+  # necessarily the build you just submitted: a run against an in-flight build
+  # silently reinstalls the previous binary and still reports success. Name the
+  # tag on every run, and refuse when it is not the one asked for.
+  local tag
+  tag="$(basename "$(dirname "$src")")"
+  echo "[$bin] latest.txt tag: $tag"
+  if [ -n "$EXPECT_TAG" ] && [ "$tag" != "$EXPECT_TAG" ]; then
+    echo "[$bin] REFUSING: expected tag '$EXPECT_TAG' but latest.txt points at '$tag'." >&2
+    echo "[$bin] The build for '$EXPECT_TAG' has probably not published yet." >&2
+    echo "[$bin] Check: gcloud builds list --project tracecommons-pilot-2026 --limit 3" >&2
+    return 1
+  fi
   echo "[$bin] pulling: $src"
 
   local tmp
