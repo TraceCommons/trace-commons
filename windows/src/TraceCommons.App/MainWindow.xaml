@@ -405,7 +405,7 @@
                     same clipped sentence by a different route.
                 -->
                 <Grid Grid.Row="0"
-                      ColumnDefinitions="2*,*,Auto"
+                      ColumnDefinitions="2*,*,Auto,Auto"
                       ColumnSpacing="12"
                       Padding="20,9"
                       BorderBrush="{ThemeResource TcHairlineDividerBrush}"
@@ -425,8 +425,9 @@
                         chip carries the daemon's own status line instead: the
                         same fact, sourced rather than claimed. It drops the eye
                         glyph, which would assert it again in a second voice.
-                        The Pause split-button beside it in the design is
-                        omitted: nothing in the view model can pause anything.
+                        The pause control beside it calls the daemon, so a
+                        timed pause survives this process closing and resumes
+                        on the same deadline every other shell uses.
                     -->
                     <Border Grid.Column="1"
                             BorderBrush="{ThemeResource TcHairlineBrush}"
@@ -442,6 +443,32 @@
                                    TextTrimming="CharacterEllipsis" />
                     </Border>
 
+                    <Button Grid.Column="2"
+                            Style="{StaticResource TcSecondaryButtonStyle}"
+                            Content="Pause"
+                            Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                            VerticalAlignment="Center"
+                            AutomationProperties.Name="Pause watching">
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="For 1 hour" Click="OnPauseForHour" />
+                                <MenuFlyoutItem Text="Until tomorrow morning"
+                                                Click="OnPauseUntilTomorrow" />
+                                <MenuFlyoutItem Text="Until I turn it back on"
+                                                Click="OnPauseUntilResumed" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                    </Button>
+
+                    <Button Grid.Column="2"
+                            Style="{StaticResource TcSecondaryButtonStyle}"
+                            Content="Resume watching"
+                            Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
+                            IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                            Click="OnResumeWatching"
+                            VerticalAlignment="Center" />
+
                     <!-- The Refresh button keeps an Auto column: it is a
                          control with a fixed label, and a squeezed button with
                          an ellipsised caption is not a thing worth having.
@@ -450,7 +477,7 @@
                          the case where a contributor wants to confirm the view
                          is current, which is a reasonable thing to want from
                          something that uploads on their behalf. -->
-                    <Button Grid.Column="2"
+                    <Button Grid.Column="3"
                             Style="{StaticResource TcSecondaryButtonStyle}"
                             Click="OnRefreshClick"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"

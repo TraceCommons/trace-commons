@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -34,6 +35,11 @@ public sealed partial class MainWindow : Window
     /// shell gates this a second time when the daemon already does.
     /// </summary>
     private readonly DigestCadence _digestCadence = new();
+
+    private readonly SemaphoreSlim _trayRefreshGate = new(1, 1);
+    private IReadOnlyList<QueueEntry> _trayPending = Array.Empty<QueueEntry>();
+    private IReadOnlyList<ProjectSetting> _trayProjects = Array.Empty<ProjectSetting>();
+    private HistoryRollup _trayRollup = new();
 
     private bool _quitConfirmed;
 
@@ -74,6 +80,10 @@ public sealed partial class MainWindow : Window
         _host.StatusChanged += OnTrayWorthyChange;
         _host.DigestDue += OnDigestDue;
         _tray.OpenRequested += OnTrayOpenRequested;
+        _tray.ReviewRequested += OnTrayReviewRequested;
+        _tray.SettingsRequested += OnTraySettingsRequested;
+        _tray.PauseRequested += OnTrayPauseRequested;
+        _tray.ResumeRequested += OnTrayResumeRequested;
         _tray.QuitRequested += OnTrayQuitRequested;
 
         AppWindow.Closing += OnAppWindowClosing;
@@ -215,15 +225,14 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Re-reads the one status object the tray needs and hands it over.
+    /// Re-reads the daemon projections the complete tray needs and hands over
+    /// one reduced, path-free menu model.
     /// </summary>
     /// <remarks>
-    /// <c>status</c> is described in <c>ipc.rs</c> as "the tray's whole world
-    /// in one object", and this takes it at its word rather than assembling
-    /// the same three facts from the queue the window happens to be showing.
-    /// An error frame leaves the tray as it was: a momentarily stale
-    /// indicator is better than one that flips to "nothing waiting" because a
-    /// call failed.
+    /// The status remains authoritative for icon state and decisions owed.
+    /// The other calls only fill the menu's per-project, week, and armed
+    /// readouts. A failed ancillary read keeps its previous value rather than
+    /// replacing a real contribution count with zero.
     /// </remarks>
     private async Task RefreshTrayAsync()
     {
@@ -232,16 +241,49 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        DaemonResponse response = await _host
-            .CallAsync(DaemonProtocol.Methods.Status)
-            .ConfigureAwait(true);
+        await _trayRefreshGate.WaitAsync().ConfigureAwait(true);
 
-        if (response.ResultAs<DaemonStatus>() is not DaemonStatus status)
+        try
         {
-            return;
-        }
+            Task<DaemonResponse> statusTask = _host.CallAsync(DaemonProtocol.Methods.Status);
+            Task<DaemonResponse> pendingTask = _host.CallAsync(DaemonProtocol.Methods.ListPending);
+            Task<DaemonResponse> rollupTask = _host.CallAsync(DaemonProtocol.Methods.HistoryRollup);
+            Task<DaemonResponse> projectsTask = _host.CallAsync(DaemonProtocol.Methods.ListProjects);
 
-        _tray.Update(status.QueueDepth, status.Paused, status.IsHealthy);
+            await Task.WhenAll(statusTask, pendingTask, rollupTask, projectsTask)
+                .ConfigureAwait(true);
+
+            if (statusTask.Result.ResultAs<DaemonStatus>() is not DaemonStatus status)
+            {
+                return;
+            }
+
+            if (pendingTask.Result.ResultAs<PendingList>() is { } pending)
+            {
+                _trayPending = pending.Pending;
+            }
+
+            if (rollupTask.Result.ResultAs<HistoryRollup>() is { } rollup)
+            {
+                _trayRollup = rollup;
+            }
+
+            if (projectsTask.Result.ResultAs<ProjectSettingsPayload>() is { } projects)
+            {
+                _trayProjects = projects.Projects;
+            }
+
+            TrayMenuModel menu = TrayMenuModel.Compute(
+                status,
+                _trayPending,
+                _trayRollup,
+                _trayProjects);
+            _tray.Update(menu, status.IsHealthy);
+        }
+        finally
+        {
+            _trayRefreshGate.Release();
+        }
     }
 
     private async void OnTrayWorthyChange()
@@ -303,9 +345,42 @@ public sealed partial class MainWindow : Window
         // whichever thread pumped its message, which is not this one.
         _host.Dispatcher.TryEnqueue(() =>
         {
-            AppWindow.Show();
-            Activate();
+            BringForward();
         });
+    }
+
+    private void OnTrayReviewRequested()
+    {
+        _host.Dispatcher.TryEnqueue(() =>
+        {
+            ViewModel.ShowQueue();
+            BringForward();
+        });
+    }
+
+    private void OnTraySettingsRequested()
+    {
+        _host.Dispatcher.TryEnqueue(() =>
+        {
+            ShowSettingsPane();
+            BringForward();
+        });
+    }
+
+    private void OnTrayPauseRequested(PauseDuration duration)
+    {
+        _host.Dispatcher.TryEnqueue(async () => await ViewModel.PauseAsync(duration));
+    }
+
+    private void OnTrayResumeRequested()
+    {
+        _host.Dispatcher.TryEnqueue(async () => await ViewModel.ResumeAsync());
+    }
+
+    private void BringForward()
+    {
+        AppWindow.Show();
+        Activate();
     }
 
     private void OnTrayQuitRequested()
@@ -390,6 +465,26 @@ public sealed partial class MainWindow : Window
         await ViewModel.RefreshAsync();
     }
 
+    private async void OnPauseForHour(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.PauseAsync(PauseDuration.OneHour);
+    }
+
+    private async void OnPauseUntilTomorrow(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.PauseAsync(PauseDuration.TomorrowMorning);
+    }
+
+    private async void OnPauseUntilResumed(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.PauseAsync(PauseDuration.UntilResumed);
+    }
+
+    private async void OnResumeWatching(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.ResumeAsync();
+    }
+
     private void OnShowQueue(object sender, RoutedEventArgs e) => ViewModel.ShowQueue();
 
     /// <summary>
@@ -457,6 +552,11 @@ public sealed partial class MainWindow : Window
     /// Settings should not pay for that at launch.
     /// </remarks>
     private void OnShowSettings(object sender, RoutedEventArgs e)
+    {
+        ShowSettingsPane();
+    }
+
+    private void ShowSettingsPane()
     {
         SettingsPane.Content ??= new SettingsView(_host);
         ViewModel.ShowSettings();

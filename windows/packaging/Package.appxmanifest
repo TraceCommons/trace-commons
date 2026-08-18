@@ -4,7 +4,8 @@
 
   This manifest is NOT used by the default build. windows/src/TraceCommons.App
   still builds unpackaged (WindowsPackageType=None) unless TcPackaged=true is
-  passed, and the shipping artifact is still the self-contained zip. See
+  passed. Releases use the packaged flavour while the portable build remains
+  useful for compile checks and older Windows versions. See
   windows/packaging/README.md for why, and for the evidence behind the
   Publisher string below. It is not a guess, and it must not be edited
   casually: a Publisher that does not match the signing certificate's subject
@@ -17,8 +18,9 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
-  IgnorableNamespaces="uap rescap desktop6">
+  IgnorableNamespaces="uap rescap desktop desktop6">
 
   <Identity
     Name="Iqlusion.TraceCommons"
@@ -90,6 +92,22 @@
             <uap:DisplayName>Trace Commons invite</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
+
+        <!--
+          Packaged run-at-login. The app retrieves this exact TaskId through
+          Windows.ApplicationModel.StartupTask; it never writes the Run key
+          while package identity is present. Enabled=false keeps startup an
+          explicit contributor choice in Settings.
+        -->
+        <desktop:Extension
+          Category="windows.startupTask"
+          Executable="TraceCommons.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+            TaskId="TraceCommonsStartup"
+            Enabled="false"
+            DisplayName="Trace Commons" />
+        </desktop:Extension>
       </Extensions>
     </Application>
   </Applications>

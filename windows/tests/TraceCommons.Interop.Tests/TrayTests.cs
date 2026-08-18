@@ -1,9 +1,53 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
 
 namespace TraceCommons.Interop.Tests;
+
+public class PauseRequestTests
+{
+    private static readonly DateTimeOffset Now =
+        new(2026, 8, 18, 10, 30, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void OneHourIsAnAbsoluteDaemonDeadline()
+    {
+        using JsonDocument json = JsonDocument.Parse(
+            PauseRequest.Serialize(PauseDuration.OneHour, Now));
+
+        Assert.Equal(
+            Now.AddHours(1),
+            DateTimeOffset.Parse(json.RootElement.GetProperty("until").GetString()!));
+    }
+
+    [Fact]
+    public void TomorrowMorningMeansNineInTheRequestedLocalZone()
+    {
+        TimeZoneInfo zone = TimeZoneInfo.CreateCustomTimeZone(
+            "preview-test-zone",
+            TimeSpan.FromHours(2),
+            "preview-test-zone",
+            "preview-test-zone");
+
+        using JsonDocument json = JsonDocument.Parse(
+            PauseRequest.Serialize(PauseDuration.TomorrowMorning, Now, zone));
+
+        Assert.Equal(
+            new DateTimeOffset(2026, 8, 19, 9, 0, 0, TimeSpan.FromHours(2)),
+            DateTimeOffset.Parse(json.RootElement.GetProperty("until").GetString()!));
+    }
+
+    [Fact]
+    public void UntilResumedHasNoInventedDeadline()
+    {
+        using JsonDocument json = JsonDocument.Parse(
+            PauseRequest.Serialize(PauseDuration.UntilResumed, Now));
+
+        Assert.False(json.RootElement.TryGetProperty("until", out _));
+    }
+}
 
 /// <summary>
 /// The tray's decisions, the digest's cadence, its wording, and the mark it
@@ -253,6 +297,52 @@ public class TrayModelTests
                 }
             }
         }
+    }
+}
+
+public class TrayMenuModelTests
+{
+    [Fact]
+    public void WaitingRowsAreGroupedAndSortedWithoutPaths()
+    {
+        var status = new DaemonStatus { QueueDepth = 3 };
+        var pending = new[]
+        {
+            new QueueEntry { ProjectLabel = "zeta", SizeBytes = 1024 },
+            new QueueEntry { ProjectLabel = "alpha", SizeBytes = 512 },
+            new QueueEntry { ProjectLabel = "zeta", SizeBytes = 2048 },
+        };
+
+        TrayMenuModel menu = TrayMenuModel.Compute(
+            status,
+            pending,
+            new HistoryRollup(),
+            Array.Empty<ProjectSetting>());
+
+        Assert.Equal(2, menu.Waiting.Count);
+        Assert.Equal("alpha — 1 · 512 B", menu.Waiting[0].Text);
+        Assert.Equal("zeta — 2 · 3 KB", menu.Waiting[1].Text);
+    }
+
+    [Fact]
+    public void WeekAndArmedProjectsComeFromDaemonModels()
+    {
+        var status = new DaemonStatus { Paused = true, QueueDepth = 1 };
+        var rollup = new HistoryRollup
+        {
+            Week = new HistoryCounts { Submitted = 4, Quarantined = 2 },
+        };
+        var projects = new[]
+        {
+            new ProjectSetting { ProjectLabel = "ask", Mode = "ask" },
+            new ProjectSetting { ProjectLabel = "armed", Mode = "auto_upload" },
+        };
+
+        TrayMenuModel menu = TrayMenuModel.Compute(status, Array.Empty<QueueEntry>(), rollup, projects);
+
+        Assert.True(menu.IsPaused);
+        Assert.Equal("This week: 4 contributed, 2 held for privacy review", menu.WeekText);
+        Assert.Equal(new[] { "armed" }, menu.ArmedProjects);
     }
 }
 

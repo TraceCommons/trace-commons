@@ -207,6 +207,11 @@ public sealed class NativeRoundTripTests : IDisposable
                      DaemonProtocol.Methods.ListPending,
                      DaemonProtocol.Methods.Pause,
                      DaemonProtocol.Methods.Resume,
+                     DaemonProtocol.Methods.GetSettings,
+                     DaemonProtocol.Methods.SetSettings,
+                     DaemonProtocol.Methods.ListProjects,
+                     DaemonProtocol.Methods.SetProjectMode,
+                     DaemonProtocol.Methods.ListAudit,
                      DaemonProtocol.Methods.Approve,
                      DaemonProtocol.Methods.Dismiss,
                      DaemonProtocol.Methods.Cancel,
@@ -254,6 +259,69 @@ public sealed class NativeRoundTripTests : IDisposable
         // assertion that matters is that the envelope and payload deserialize
         // into the shapes the UI binds to.
         Assert.NotNull(pending!.Pending);
+    }
+
+    [Fact]
+    public void PauseDeadlineAndResumeRoundTripThroughTheNativeBinding()
+    {
+        using TcDaemon daemon = StartDaemon();
+        string pause = PauseRequest.Serialize(
+            PauseDuration.OneHour,
+            DateTimeOffset.UtcNow);
+
+        DaemonResponse paused = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Pause, pause));
+        Assert.False(paused.IsError);
+        Assert.True(Status(daemon).Paused);
+
+        DaemonResponse resumed = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Resume));
+        Assert.False(resumed.IsError);
+        Assert.False(Status(daemon).Paused);
+    }
+
+    [Fact]
+    public void ProjectSettingsUseTheDaemonsOpaqueIdAndLabel()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        ProjectSettingsPayload? payload = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListProjects))
+            .ResultAs<ProjectSettingsPayload>();
+
+        ProjectSetting project = Assert.Single(payload!.Projects);
+        Assert.False(string.IsNullOrWhiteSpace(project.ProjectId));
+        Assert.Equal("windows-preview", project.ProjectLabel);
+        Assert.DoesNotContain('/', project.ProjectId);
+        Assert.DoesNotContain('\\', project.ProjectId);
+    }
+
+    [Fact]
+    public void BehaviorSettingAndAuditRoundTripThroughTheNativeBinding()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        DaemonResponse changed = DaemonResponse.Parse(
+            daemon.Call(
+                DaemonProtocol.Methods.SetSettings,
+                BehaviorSettingsRequest.Serialize(BehaviorSetting.QuiescenceMinutes, 12)));
+        Assert.False(changed.IsError);
+        Assert.Equal(
+            720UL,
+            changed.ResultAs<DaemonSettingsSnapshot>()!.QuiescenceSeconds);
+
+        DaemonResponse consent = DaemonResponse.Parse(
+            daemon.Call(
+                DaemonProtocol.Methods.SetConsentScopes,
+                "{\"scopes\":[\"debugging_evaluation\"]}"));
+        Assert.False(consent.IsError);
+
+        AuditSettingsPayload? audit = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListAudit, "{\"limit\":20}"))
+            .ResultAs<AuditSettingsPayload>();
+        Assert.Contains(audit!.Entries, entry => entry.Action == "consent-scopes-changed");
     }
 
     [Fact]
@@ -456,6 +524,14 @@ public sealed class NativeRoundTripTests : IDisposable
         TcException error =
             Assert.Throws<TcException>(() => daemon.OpenPreview("no-such-entry"));
         Assert.Contains("tc_preview_open", error.Message, StringComparison.Ordinal);
+    }
+
+    private static DaemonStatus Status(TcDaemon daemon)
+    {
+        DaemonStatus? status = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.Status))
+            .ResultAs<DaemonStatus>();
+        return Assert.IsType<DaemonStatus>(status);
     }
 
     [Fact]

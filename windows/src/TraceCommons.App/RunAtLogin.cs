@@ -17,15 +17,15 @@ namespace TraceCommons.App;
 /// remembers to start it is not watching.
 /// </para>
 /// <para>
-/// <b>Why HKCU\...\Run and nothing else.</b> The app ships unpackaged
+/// <b>Why HKCU\...\Run for the portable flavour.</b> That build is unpackaged
 /// (<c>WindowsPackageType=None</c>), self-contained, and installs per user.
-/// Every other run-at-login mechanism on Windows costs elevation or a
-/// package: a Scheduled Task with a logon trigger needs administrator rights
+/// Other run-at-login mechanisms on Windows cost elevation or a package: a
+/// Scheduled Task with a logon trigger needs administrator rights
 /// for anything but the plainest task and puts the app in a list contributors
 /// do not think to audit; a service is wrong for something with a UI and
 /// needs an installer running as SYSTEM; the MSIX
-/// <c>windows.startupTask</c> extension needs a package, and the packaged
-/// flavour is opt-in and is not what ships. HKCU\Run needs none of that --
+/// <c>windows.startupTask</c> extension needs package identity, while the
+/// portable build deliberately has none. HKCU\Run needs none of that --
 /// it is the current user's own hive, writable by that user without a
 /// prompt -- and it
 /// surfaces in Task Manager's Startup tab and in Settings -> Apps -> Startup,
@@ -57,11 +57,11 @@ namespace TraceCommons.App;
 /// (<c>TcPackaged=true</c>) disables registry virtualization, so this write
 /// would be real and would record a path inside <c>WindowsApps</c> -- the
 /// same reason <c>UrlSchemeRegistration</c> skips its own registration when
-/// packaged. A packaged build declares startup with a
-/// <c>windows.startupTask</c> extension in the manifest instead. That
-/// extension is not there yet, so a packaged build simply has no
-/// run-at-login, and <see cref="IsSupported"/> says so rather than offering a
-/// toggle that writes something the package model would not honour. Two
+/// packaged. The packaged build declares startup with a
+/// <c>windows.startupTask</c> extension in the manifest instead, and
+/// <see cref="StartupRegistration"/> operates it through the package API.
+/// <see cref="IsSupported"/> therefore stays false here rather than offering
+/// a registry toggle the package model would not honour. Two
 /// mechanisms at once is how a contributor ends up with two copies starting,
 /// which is the failure mode <c>autostart.rs</c> documents at length for
 /// Linux.
