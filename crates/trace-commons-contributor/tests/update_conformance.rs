@@ -132,8 +132,12 @@ fn the_platform_verifier_refuses_an_unsigned_executable() {
     // Get-AuthenticodeSignature can reject a non-PE file before it produces a
     // signature status, whereas Cargo has just built this valid, unsigned PE.
     let path = std::env::current_exe().expect("current test executable");
-    assert!(matches!(
-        verify(&path).unwrap_err(),
-        AuthenticodeError::NotValid | AuthenticodeError::UnexpectedSigner
-    ));
+    let err = verify(&path).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AuthenticodeError::NotValid | AuthenticodeError::UnexpectedSigner
+        ),
+        "unexpected verifier error: {err:?}"
+    );
 }

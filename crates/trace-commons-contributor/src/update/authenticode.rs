@@ -55,6 +55,27 @@ pub fn interpret(status: &str, subject: &str) -> Result<(), AuthenticodeError> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+fn parse_verifier_output(bytes: &[u8]) -> Result<(), AuthenticodeError> {
+    let stdout =
+        std::str::from_utf8(bytes).map_err(|_| AuthenticodeError::MalformedVerifierOutput)?;
+    let mut status = None;
+    let mut subject = None;
+    for line in stdout.lines() {
+        // Windows PowerShell can prefix redirected output with a UTF-8 BOM.
+        let line = line.trim_start_matches('\u{feff}');
+        if let Some(rest) = line.strip_prefix("STATUS=") {
+            status = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("SUBJECT=") {
+            subject = Some(rest.trim());
+        }
+    }
+    match (status, subject) {
+        (Some(status), Some(subject)) => interpret(status, subject),
+        _ => Err(AuthenticodeError::MalformedVerifierOutput),
+    }
+}
+
 /// Verify the Authenticode signature on `path` using the platform verifier.
 #[cfg(windows)]
 pub fn verify(path: &std::path::Path) -> Result<(), AuthenticodeError> {
@@ -74,9 +95,13 @@ pub fn verify(path: &std::path::Path) -> Result<(), AuthenticodeError> {
     let script = format!(
         "$ErrorActionPreference='Stop'; \
          $s = Get-AuthenticodeSignature -LiteralPath {quoted}; \
-         Write-Output ('STATUS=' + $s.Status); \
-         if ($s.SignerCertificate) {{ Write-Output ('SUBJECT=' + $s.SignerCertificate.Subject) }} \
-         else {{ Write-Output 'SUBJECT=' }}"
+         $subject = if ($s.SignerCertificate) {{ $s.SignerCertificate.Subject }} else {{ '' }}; \
+         $nl = [Environment]::NewLine; \
+         $text = 'STATUS=' + $s.Status + $nl + 'SUBJECT=' + $subject + $nl; \
+         $bytes = [System.Text.Encoding]::UTF8.GetBytes($text); \
+         $stdout = [Console]::OpenStandardOutput(); \
+         $stdout.Write($bytes, 0, $bytes.Length); \
+         $stdout.Flush()"
     );
 
     let output = Command::new(&shell)
@@ -89,20 +114,7 @@ pub fn verify(path: &std::path::Path) -> Result<(), AuthenticodeError> {
         return Err(AuthenticodeError::VerifierUnavailable);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut status = None;
-    let mut subject = None;
-    for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("STATUS=") {
-            status = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("SUBJECT=") {
-            subject = Some(rest.trim().to_string());
-        }
-    }
-    match (status, subject) {
-        (Some(status), Some(subject)) => interpret(&status, &subject),
-        _ => Err(AuthenticodeError::MalformedVerifierOutput),
-    }
+    parse_verifier_output(&output.stdout)
 }
 
 #[cfg(test)]
@@ -126,6 +138,19 @@ mod tests {
             interpret("NotSigned", "").unwrap_err(),
             AuthenticodeError::NotValid
         ));
+    }
+
+    #[test]
+    fn verifier_output_accepts_utf8_with_or_without_a_bom() {
+        for output in [
+            b"STATUS=NotSigned\r\nSUBJECT=\r\n".as_slice(),
+            b"\xef\xbb\xbfSTATUS=NotSigned\r\nSUBJECT=\r\n".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_verifier_output(output).unwrap_err(),
+                AuthenticodeError::NotValid
+            ));
+        }
     }
 
     #[test]
