@@ -50,6 +50,16 @@ final class DaemonClient {
         _ = try rawResult("refresh_history")
     }
 
+    /// The local change log, newest first. `limit` defaults to 20 here
+    /// rather than the contract's 50 to match the Linux shell, which asks
+    /// for 20 on the same screen -- this is a "what did I change lately"
+    /// surface, not an archive, and the daemon caps the log independently
+    /// of what any client asks for.
+    func listAudit(limit: Int = 20) throws -> [AuditEntry] {
+        struct Wrapper: Decodable { let entries: [AuditEntry] }
+        return try call("list_audit", params: ["limit": limit], as: Wrapper.self).entries
+    }
+
     func consentOptions() throws -> [ConsentScope] {
         struct Wrapper: Decodable { let scopes: [ConsentScope] }
         return try call("consent_options", as: Wrapper.self).scopes
