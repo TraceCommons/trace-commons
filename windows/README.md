@@ -98,8 +98,15 @@ Deliberately absent, and each is its own piece of work:
 - Settings. The rail now has two rows; the spec's third belongs there when the
   view does, not drawn disabled ahead of it.
 - System tray presence and run-at-login.
-- MSIX packaging and signing. The app builds unpackaged so that CI can verify
-  it without a certificate.
+- MSIX packaging and signing, *as a shipping artifact*. The manifest, the
+  packaging script and the signing path now exist under `packaging/` and
+  `scripts/make-msix.ps1`, but none of it has ever been built: it is opt-in
+  (`TcPackaged=true`), reachable only from a `workflow_dispatch` on
+  `release-apps.yml`, and it needs a real icon before anyone should install it.
+  The app still builds unpackaged by default so that CI can verify it without a
+  certificate, and the shipping artifact is still the zip. Read
+  `packaging/README.md` before touching any of it — particularly the part about
+  the publisher string and about what packaging does to the state directory.
 - The rest of the queue frame the design specifies: the health banner and the
   week band. Both need daemon state the app does not read yet, so neither is
   drawn.

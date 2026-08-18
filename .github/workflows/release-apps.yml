@@ -24,6 +24,15 @@ on:
         description: Version to stamp when running without a tag (e.g. 1.2.3)
         type: string
         required: true
+      # MSIX has never been built. It is opt-in, and reachable ONLY from a
+      # dispatch, so the first attempt cannot take a tagged release down with
+      # it: a tag push runs the zip path exactly as before and never touches
+      # these steps. Flip this on a dispatch to prove the packaging and the
+      # signing publisher, then decide whether it becomes part of a release.
+      msix:
+        description: Also build and sign an MSIX (unproven; never runs on a tag push)
+        type: boolean
+        default: false
 
 concurrency:
   group: release-apps-${{ github.ref }}
@@ -524,9 +533,98 @@ jobs:
           "$hash  $(Split-Path -Leaf $zip)" |
             Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
+      # ---- MSIX, opt-in and unproven -------------------------------------
+      #
+      # Everything above this line is the shipping path and is unchanged. These
+      # steps run only on a workflow_dispatch with msix=true, so a tag push
+      # produces exactly the two zips it always did.
+      #
+      # They come AFTER the zip is packaged, deliberately. The MSIX build is a
+      # second, independent MSBuild invocation with TcPackaged=true; running it
+      # last means it cannot perturb the publish tree the shipping artifact was
+      # made from, even if it fails.
+      - name: Build the MSIX (unsigned)
+        if: inputs.msix
+        shell: pwsh
+        id: msix
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signList = Join-Path $env:RUNNER_TEMP "msix-sign-list.txt"
+          ./windows/scripts/make-msix.ps1 `
+            -Version $env:SHORT_VERSION `
+            -OutputDir "$env:GITHUB_WORKSPACE/dist" `
+            -SignListPath $signList
+          "msix_sign_list=$signList" >> $env:GITHUB_OUTPUT
+
+      # Same shape as the app-binary signing pass: driven by the list file the
+      # build step wrote, count asserted, never a glob over a directory. The
+      # MSIX is one file, so the assertion is one entry -- but it is still an
+      # assertion, and it still reads a list rather than scanning dist\.
+      #
+      # /fd SHA256 and the RFC3161 countersignature for the same reason as the
+      # Authenticode pass: a Trusted Signing certificate lives about three days
+      # and the timestamp is the only thing that outlives it. Note that
+      # signtool signs an MSIX in place and REWRITES the file, so the checksum
+      # below is computed afterwards.
+      - name: Sign the MSIX
+        if: inputs.msix
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          TS_DLIB: ${{ steps.ts.outputs.dlib }}
+          TS_METADATA: ${{ steps.ts.outputs.metadata }}
+          MSIX_SIGN_LIST: ${{ steps.msix.outputs.msix_sign_list }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $paths = @(Get-Content -Path $env:MSIX_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
+          if ($paths.Count -ne 1) {
+            throw "expected exactly 1 MSIX staged for signing, found $($paths.Count): $($paths -join ', ')"
+          }
+          foreach ($p in $paths) {
+            if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
+            & "$env:TS_SIGNTOOL" sign /v /fd SHA256 `
+              /tr http://timestamp.acs.microsoft.com /td SHA256 `
+              /dlib "$env:TS_DLIB" `
+              /dmdf "$env:TS_METADATA" `
+              $p
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSIX signing failed for $p. If this reports a publisher mismatch, the Identity Publisher in windows/packaging/Package.appxmanifest does not match the certificate subject -- see windows/packaging/README.md."
+            }
+          }
+
+      - name: Verify the MSIX signature
+        if: inputs.msix
+        shell: pwsh
+        env:
+          TS_SIGNTOOL: ${{ steps.ts.outputs.signtool }}
+          MSIX_SIGN_LIST: ${{ steps.msix.outputs.msix_sign_list }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-Content -Path $env:MSIX_SIGN_LIST | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
+            & "$env:TS_SIGNTOOL" verify /pa /v $_
+            if ($LASTEXITCODE -ne 0) { throw "MSIX signature verification failed for $_" }
+            $hash = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $_)" |
+              Out-File "$_.sha256" -Encoding ascii -NoNewline
+          }
+
+      # After signing, so the provenance covers the bytes signtool wrote. An
+      # MSIX is a signed container rather than a tree of separately signed
+      # files, so unlike the publish tree above there is exactly one subject.
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        if: inputs.msix
+        with:
+          subject-path: dist/*.msix
+
       # Both Windows zips ride in the one artifact, so the publish job's
       # existing download pattern and its `dist/*/*` upload glob pick the app up
-      # with no further wiring.
+      # with no further wiring. An MSIX, when one was built, rides along here
+      # too -- but only on a dispatch, and the publish job runs on tag pushes
+      # only, so it is never attached to a release without that being a
+      # separate, deliberate change.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-zip
