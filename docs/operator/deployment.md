@@ -285,11 +285,35 @@ Set these additional env vars before starting the binary:
 # --- Privacy filter (NEAR AI hosted backend) ---
 export TRACE_PRIVACY_FILTER_BACKEND=near-ai
 export TRACE_NEAR_AI_PRIVACY_API_KEY=<near-ai-bearer-token>   # never logged; rotate by restart
+export TRACE_COMMONS_REQUIRE_PRIVACY_FILTER=1                 # refuse to boot without a backend
 # Optional overrides — defaults are production-safe:
 # export TRACE_NEAR_AI_PRIVACY_BASE_URL=https://privacy-filter.completions.near.ai/v1
 # export TRACE_NEAR_AI_PRIVACY_MODEL=openai/privacy-filter
 # export TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS=10000
 ```
+
+Set `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` on any deployment where prose-PII
+filtering is part of the controls. Without it an unset backend is not an
+error: the service starts, submissions succeed, and redaction quietly falls
+back to deterministic-only. With it, a missing backend refuses the boot.
+
+Confirm which backend actually resolved — the service announces it once at
+startup:
+
+```sh
+sudo grep "privacy filter backend resolved" /var/log/tracecommons/ingest.log | tail -1
+# Trace Commons privacy filter backend resolved privacy_filter_backend="near_ai"
+```
+
+`near_ai` (or `sidecar`) means the filter constructed. `none` means
+deterministic-only redaction, whatever the config file says.
+
+Two traps when checking this on the pilot host. Application logs go to
+`/var/log/tracecommons/ingest.log`, **not** the journal — `journalctl -u
+trace-commons-ingest` shows only systemd lifecycle lines, so a clean journal
+is not evidence of anything. And the backend resolving at boot proves the
+adapter was built, not that it successfully scrubs; for that, see the canary
+check below.
 
 Before admitting real traces, the privacy-filter canary must report healthy.
 The canary submits a synthetic PII smoke payload and verifies the filter
@@ -350,6 +374,69 @@ common first-deploy failures are listed in
 
 If any of the above is missing or stalls, see
 [`troubleshooting.md`](troubleshooting.md).
+
+## Redeploying the binary
+
+The pilot host has no Rust toolchain; binaries are built by Cloud Build and
+pulled from GCS. From a clean checkout at the commit you intend to ship:
+
+```sh
+gcloud builds submit --config cloudbuild.yaml \
+  --project tracecommons-pilot-2026 \
+  --substitutions _TAG=$(git rev-parse --short HEAD)
+```
+
+Roughly 6 minutes on `E2_HIGHCPU_32`. **Wait for `SUCCESS` before installing:**
+
+```sh
+gcloud builds list --project tracecommons-pilot-2026 --limit 3
+```
+
+Then on the host, naming the tag you expect:
+
+```sh
+deploy/pilot-gcp/pull-and-install.sh ingest <short-sha>
+```
+
+Pass the tag. `latest.txt` points at the last build that *published*, so
+installing while your build is still in flight silently reinstalls the previous
+binary, restarts the service, and prints `done.` — a successful-looking no-op
+that has happened in practice. With the tag, a mismatch refuses instead.
+
+Deploy `ingest` alone unless the issuer also changed: ingest fetches the
+issuer's JWKS at boot and fail-closes without it, so leaving the issuer running
+keeps that dependency out of the deploy. `both` installs the issuer first for
+exactly this reason.
+
+The script backs the running binary up to `<path>.bak-<timestamp>` and prints
+its own rollback command. Keep that line — the backup from a *premature* run is
+a copy of the old binary, not a pre-deploy snapshot, so identify the rollback
+point by the run that actually installed the tag you wanted.
+
+Verify all three after the restart:
+
+```sh
+curl -s http://127.0.0.1:3907/health                     # build_commit == your tag
+sudo grep "privacy filter backend resolved" /var/log/tracecommons/ingest.log | tail -1
+systemctl is-active trace-commons-ingest
+```
+
+With `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER=1` set, `active` also proves a
+privacy backend resolved — the service refuses to start otherwise.
+
+### Log rotation
+
+The units append to `/var/log/tracecommons/*.log`; nothing rotates them by
+default, and `ingest.log` reached ~174MB before this was noticed. Install the
+provided config once per host:
+
+```sh
+sudo install -o root -g root -m 0644 \
+  deploy/pilot-gcp/logrotate-tracecommons.conf /etc/logrotate.d/tracecommons
+sudo logrotate --debug /etc/logrotate.d/tracecommons   # dry run
+```
+
+It uses `copytruncate` deliberately; see the comments in that file.
 
 ## Identifying what is deployed
 
