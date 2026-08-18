@@ -81,6 +81,28 @@ public static class DaemonProtocol
         /// contributor rather than leaving the affordance silently missing.
         /// </summary>
         public const string Withdraw = "withdraw";
+
+        // The public roster profile. Like the two blocks above, every one of
+        // these was already in the daemon's pinned METHODS array before this
+        // app could call any of them -- the gap on Windows was never protocol,
+        // only that nothing here asked. Adding a name that is NOT in that
+        // array would break
+        // `hello_advertises_exactly_the_documented_method_set`.
+        public const string GetPublicProfile = "get_public_profile";
+
+        /// <summary>
+        /// Claims or re-publishes a handle.
+        /// </summary>
+        /// <remarks>
+        /// The whole profile, every time: the server upserts with
+        /// <c>bio = excluded.bio</c>, so there is no partial update to
+        /// express and the daemon refuses an omitted <c>bio</c> rather than
+        /// guessing. <see cref="PublicProfileRequest.Serialize"/> is what
+        /// builds the parameters, and it always sends the key.
+        /// </remarks>
+        public const string SetPublicProfile = "set_public_profile";
+
+        public const string ClearPublicProfile = "clear_public_profile";
     }
 
     public static class Events

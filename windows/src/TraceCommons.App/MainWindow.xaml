@@ -83,11 +83,13 @@
             <!--
                 Nav rail.
 
-                Two destinations now that there are two views. The spec's
-                Settings row is still deliberately absent rather than drawn
-                disabled: a rail is a promise about where the app can go, and
-                a row that leads nowhere would be the window's first untrue
-                statement. It belongs here when that view does.
+                Three destinations now that there are three views. Settings
+                carries only the public profile panel so far; the rest of what
+                the spec puts on that screen is absent from the screen rather
+                than drawn disabled, for the same reason the row itself was
+                absent until now. A rail is a promise about where the app can
+                go, and a row that leads nowhere would be the window's first
+                untrue statement.
 
                 Each row is a Button with its chrome removed rather than a
                 Border with a tapped handler. The rail is the app's primary
@@ -176,6 +178,59 @@
                             </StackPanel>
 
                             <Rectangle Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Margin="0,8,0,8"
+                                       RadiusX="2" RadiusY="2"
+                                       Fill="{ThemeResource TcGreenFillBrush}" />
+                        </Grid>
+                    </Button>
+
+                    <Button HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Click="OnShowSettings">
+                        <Grid>
+                            <Border Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}"
+                                    Background="{ThemeResource TcSurfaceScrimBrush}"
+                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
+                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
+                                <!-- Sliders, on the same 16 unit grid as the
+                                     two above and at the same stroke width.
+                                     Settings is a set of positions rather
+                                     than a moment. The knobs are filled with
+                                     the rail's own ground so each one reads
+                                     as sitting on its track. -->
+                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Data="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"
+                                              Stroke="{ThemeResource TcGreenTextBrush}"
+                                              StrokeThickness="1.5" />
+                                        <Ellipse Canvas.Left="8.5" Canvas.Top="3"
+                                                 Width="3" Height="3"
+                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
+                                                 Stroke="{ThemeResource TcGreenTextBrush}"
+                                                 StrokeThickness="1.5" />
+                                        <Ellipse Canvas.Left="4" Canvas.Top="6.5"
+                                                 Width="3" Height="3"
+                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
+                                                 Stroke="{ThemeResource TcGreenTextBrush}"
+                                                 StrokeThickness="1.5" />
+                                        <Ellipse Canvas.Left="9.5" Canvas.Top="10"
+                                                 Width="3" Height="3"
+                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
+                                                 Stroke="{ThemeResource TcGreenTextBrush}"
+                                                 StrokeThickness="1.5" />
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="Settings"
+                                           Style="{StaticResource TcNavLabelTextStyle}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <Rectangle Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}"
                                        Width="3"
                                        HorizontalAlignment="Left"
                                        Margin="0,8,0,8"
@@ -277,6 +332,20 @@
                               Grid.Row="1"
                               Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
+
+            <!--
+                The Settings pane, created once and kept for the same reason
+                History is: it holds the handle and bio boxes as the
+                contributor has edited them, and rebuilding it on every nav
+                click would silently discard an unsaved edit. It also holds
+                the sentence saying what the last claim or withdrawal actually
+                did, and that sentence is the only report of an outward facing
+                act this window ever gives.
+            -->
+            <ContentPresenter x:Name="SettingsPane"
+                              Grid.Row="1"
+                              Grid.Column="1"
+                              Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}" />
 
             <!-- Header, queue, recovery bar, decision notice, caveat, week
                  band, progress. -->

@@ -346,6 +346,28 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Switches to Settings, creating the view the first time and keeping it
+    /// thereafter.
+    /// </summary>
+    /// <remarks>
+    /// Kept rather than rebuilt for the same reason History is, and for one
+    /// more: the handle and bio boxes hold what the contributor has typed and
+    /// not yet saved, and a rebuilt pane would discard that edit without
+    /// saying so. It also carries the sentence reporting what the last claim
+    /// or withdrawal did -- the only report of an outward-facing act this
+    /// window gives -- and a nav click is not a reason to take it away.
+    ///
+    /// Created lazily rather than in the constructor because it reads the
+    /// profile as soon as it loads, and a contributor who never opens
+    /// Settings should not pay for that at launch.
+    /// </remarks>
+    private void OnShowSettings(object sender, RoutedEventArgs e)
+    {
+        SettingsPane.Content ??= new SettingsView(_host);
+        ViewModel.ShowSettings();
+    }
+
+    /// <summary>
     /// The health banner's action, for the two conditions that have one.
     /// </summary>
     /// <remarks>
@@ -368,8 +390,7 @@ public sealed partial class MainWindow : Window
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var onboarding = new OnboardingWindow(_host, OnboardingState.Default());
-        onboarding.Activate();
-    }
+        onboarding.Activate();    }
 
     /// <summary>
     /// Opens the preview sheet for a row.
