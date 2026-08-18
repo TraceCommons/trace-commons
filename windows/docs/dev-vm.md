@@ -37,7 +37,10 @@ few days, delete them too:
 gcloud compute routers delete tc-win-dev-router --region us-central1 --project tracecommons-pilot-2026
 ```
 
-`provision-dev-vm.sh create` recreates both, so nothing is lost.
+`provision-dev-vm.sh create` recreates both, so the *resources* are not
+lost. The instance's internet is, until you run it — and the one-command
+fix for that is not an external IP. Read the next two sections before
+reaching for one.
 
 ### Deleting the NAT takes the instance's internet with it
 
@@ -75,9 +78,10 @@ gcloud compute routers describe tc-win-dev-router --region us-central1 \
 ## The security model
 
 The instance has **no external IP** (`--no-address`), and that is not
-incidental. This project carries two `default-allow-*` firewall rules that
-permit tcp:3389 and tcp:22 from `0.0.0.0/0` with **no target tags**, so both
-apply to every instance in the network. Firewall rules are additive-allow: a
+incidental. This project carries two firewall rules,
+`default-allow-rdp` (tcp:3389) and `default-allow-ssh` (tcp:22), each
+permitting `0.0.0.0/0` with **no target tags**, so both apply to every instance
+in the network. Firewall rules are additive-allow: a
 narrower rule cannot cancel them, and the tagged `allow-iap-rdp` /
 `allow-iap-ssh-win` rules alongside them narrow nothing. The only reliable
 defence is having no external address to reach.
