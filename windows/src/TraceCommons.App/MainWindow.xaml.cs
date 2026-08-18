@@ -346,6 +346,32 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The health banner's action, for the two conditions that have one.
+    /// </summary>
+    /// <remarks>
+    /// Both resolve on the same screen, which is why one handler serves both.
+    /// <c>not-logged-in</c> is answered by the Connect step, and
+    /// <c>near-ai-notice-not-acknowledged</c> by the privacy step, whose
+    /// choice is the only thing in this app that calls
+    /// <c>acknowledge_near_ai_notice</c> -- without that call the daemon
+    /// refuses the filter forever and the contributor experiences unexplained
+    /// paralysis, which is precisely the state this banner is reporting.
+    ///
+    /// Onboarding is opened directly rather than through
+    /// <see cref="ShowOnboardingIfNeededAsync"/>: that method's job is to
+    /// decide whether to interrupt someone at launch, and its "already
+    /// complete, do nothing" answer is the right one there and the wrong one
+    /// here. A contributor who has just clicked the banner's only button has
+    /// asked for the screen, and returning them silently to the queue would
+    /// make it the dead button this banner must never have.
+    /// </remarks>
+    private void OnHealthAction(object sender, RoutedEventArgs e)
+    {
+        var onboarding = new OnboardingWindow(_host, OnboardingState.Default());
+        onboarding.Activate();
+    }
+
+    /// <summary>
     /// Opens the preview sheet for a row.
     /// </summary>
     /// <remarks>

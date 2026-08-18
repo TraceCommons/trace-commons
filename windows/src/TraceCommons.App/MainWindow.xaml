@@ -6,11 +6,12 @@
     Where the design shows a field this app cannot yet fill, the element is
     left out rather than filled with the mockup's sample text. The mockup's
     session names, byte counts and match counts are fixtures; its labels,
-    headings and disclaimers are product copy and appear here verbatim. The
-    parts of the frame that are missing entirely (the health banner, the undo
-    bar, the week band, the per-row actions) are missing because nothing in the
-    view model can back them, and each is listed in windows/README.md as work
-    of its own.
+    headings and disclaimers are product copy and appear here verbatim.
+
+    The frame is now drawn in full: header, health banner, session cards with
+    their manifest strip and per row actions, the recovery bar, the standing
+    disclaimer and the week band. What each piece is still missing, and why,
+    is recorded beside that piece rather than here.
 
     XML comments cannot contain a double hyphen, so the prose here uses commas
     and parentheses where the C# files use dashes.
@@ -72,7 +73,12 @@
                        VerticalAlignment="Center" />
         </Grid>
 
-        <Grid Grid.Row="1" ColumnDefinitions="184,*">
+        <!--
+            The rail spans both rows; the content column is split so the health
+            banner can sit above whichever pane is showing. See the banner
+            itself for why it lives here rather than inside the queue.
+        -->
+        <Grid Grid.Row="1" ColumnDefinitions="184,*" RowDefinitions="Auto,*">
 
             <!--
                 Nav rail.
@@ -90,6 +96,7 @@
                 that merely looks like one carries none of it.
             -->
             <Border Grid.Column="0"
+                    Grid.RowSpan="2"
                     Padding="8,10"
                     Background="{ThemeResource TcChromeBackgroundBrush}">
                 <StackPanel VerticalAlignment="Top" Spacing="4">
@@ -180,6 +187,80 @@
             </Border>
 
             <!--
+                The health banner.
+
+                It sits above both panes rather than inside the queue, so a
+                contributor reading History still learns that contributions
+                are held up, and so it is drawn once rather than once per
+                screen. The design draws it on the queue (section 5.1 item 3)
+                because the queue is the only screen that frame draws; the
+                Linux shell moved it above its view stack for this reason and
+                records the same note, and the two shells should not disagree
+                about where a blocking condition is announced.
+
+                Its whole content is the daemon's own health label, rendered
+                through TraceCommons.Interop.HealthCopy. Nothing here ranks or
+                combines conditions: last_error_label carries exactly one
+                label, already resolved by the daemon's precedence order, and
+                a client that rebuilt that order would eventually disagree
+                with the tray about what is wrong.
+            -->
+            <Border Grid.Row="0"
+                    Grid.Column="1"
+                    Visibility="{x:Bind ViewModel.HasHealthBanner, Mode=OneWay}"
+                    Margin="22,16,22,0"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                    <!-- The warning triangle from the spec's 1a inventory, on
+                         its own 16 unit grid. It is what carries "weigh this"
+                         into greyscale; the gold border is the colour half of
+                         the same statement, and neither is load bearing on
+                         its own. -->
+                    <Viewbox Grid.Column="0"
+                             Width="14" Height="14"
+                             VerticalAlignment="Top"
+                             Margin="0,2,0,0">
+                        <Canvas Width="16" Height="16">
+                            <Path Data="M8 2.2 14.6 13.4H1.4Z"
+                                  Stroke="{ThemeResource TcGoldTextBrush}"
+                                  StrokeThickness="1.4" />
+                            <Path Data="M8 6.6v3"
+                                  Stroke="{ThemeResource TcGoldTextBrush}"
+                                  StrokeThickness="1.4" />
+                            <Ellipse Canvas.Left="7.5" Canvas.Top="11.2"
+                                     Width="1" Height="1"
+                                     Fill="{ThemeResource TcGoldTextBrush}" />
+                        </Canvas>
+                    </Viewbox>
+
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock Text="{x:Bind ViewModel.HealthTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.HealthDetail, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <!-- Only the two labels the design gives an action get a
+                         button. Every other condition clears on its own, and
+                         a button that cannot change what it sits beside
+                         teaches people that the buttons in this app do
+                         nothing. -->
+                    <Button Grid.Column="2"
+                            Visibility="{x:Bind ViewModel.HasHealthAction, Mode=OneWay}"
+                            Style="{StaticResource TcSecondaryButtonStyle}"
+                            Content="{x:Bind ViewModel.HealthActionLabel, Mode=OneWay}"
+                            VerticalAlignment="Center"
+                            Click="OnHealthAction" />
+                </Grid>
+            </Border>
+
+            <!--
                 The History pane.
 
                 It is created once and kept rather than rebuilt on each nav
@@ -193,13 +274,16 @@
                 navigation.
             -->
             <ContentPresenter x:Name="HistoryPane"
+                              Grid.Row="1"
                               Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
 
-            <!-- Header, queue, recovery bar, decision notice, caveat, progress. -->
-            <Grid Grid.Column="1"
+            <!-- Header, queue, recovery bar, decision notice, caveat, week
+                 band, progress. -->
+            <Grid Grid.Row="1"
+                  Grid.Column="1"
                   Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto">
+                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto">
 
                 <!--
                     Content header.
@@ -569,7 +653,95 @@
                            TextWrapping="Wrap"
                            Padding="22,10,22,14" />
 
-                <ProgressBar Grid.Row="5"
+                <!--
+                    The week band, section 5.1 item 9: an eyebrow and a rule,
+                    then three equal stat cards.
+
+                    Its figures come from history_rollup, which History
+                    already reads. The queue asks for it in its own refresh
+                    rather than taking it from the History screen, so the band
+                    is filled whether or not History has ever been opened.
+                    That is one extra read of counters the daemon already
+                    holds, and it is the same choice the Linux shell records
+                    in App::refresh.
+
+                    Two of the three labels are HistoryCopy's own constants
+                    rather than restatements: a contributor who reads "Held
+                    for privacy review" here and something else on the next
+                    screen has been told two different things about one state.
+
+                    The cards are built like History's three, not like the
+                    design's: this shell's stat card carries its tone in the
+                    border rather than in an icon, and one screen introducing
+                    glyphs the sibling screen does not have would read as two
+                    designs rather than one.
+                -->
+                <StackPanel Grid.Row="5" Padding="22,4,22,16" Spacing="8">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                        <TextBlock Grid.Column="0"
+                                   Text="{x:Bind ViewModel.ThisWeekLabel}"
+                                   Style="{StaticResource TcEyebrowTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   VerticalAlignment="Center" />
+                        <Rectangle Grid.Column="1"
+                                   Height="1"
+                                   VerticalAlignment="Center"
+                                   Fill="{ThemeResource TcHairlineBrush}" />
+                    </Grid>
+
+                    <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
+                        <Border Grid.Column="0"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}"
+                                Padding="14,12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{x:Bind ViewModel.ContributedLabel}"
+                                           Style="{StaticResource TcEyebrowTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.ContributedCountText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoFigureTextStyle}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Held takes the gold border, exactly as it does on
+                             History. It is not a failure and is never drawn as
+                             one; it is the one figure here that is waiting on
+                             a person. -->
+                        <Border Grid.Column="1"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}"
+                                Padding="14,12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{x:Bind ViewModel.HeldLabel}"
+                                           Style="{StaticResource TcEyebrowTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.HeldCountText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoFigureTextStyle}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Grid.Column="2"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}"
+                                Padding="14,12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{x:Bind ViewModel.InTheCommonsLabel}"
+                                           Style="{StaticResource TcEyebrowTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.InTheCommonsCountText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoFigureTextStyle}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </StackPanel>
+
+                <ProgressBar Grid.Row="6"
                              IsIndeterminate="True"
                              Foreground="{ThemeResource TcGreenFillBrush}"
                              Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
