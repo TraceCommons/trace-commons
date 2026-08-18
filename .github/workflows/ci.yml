@@ -542,21 +542,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # The MSIX manifest is checked but NOT built here, and that is a
-      # deliberate limitation rather than an oversight.
-      #
-      # Packaging a WinUI 3 project produces an .msix that must be signed, and
-      # this job has no signing identity -- pull requests do not get one, by
-      # design. An unsigned package cannot be installed or meaningfully
-      # verified, so building one here would cost several minutes to prove
-      # almost nothing, and would put an unproven packaging path in front of
-      # every pull request. The MSIX build lives behind an opt-in
-      # workflow_dispatch input on release-apps.yml instead.
-      #
-      # What IS worth asserting on every pull request is that the shipping
-      # build did not quietly become the packaged one. The zip is the artifact
-      # contributors get; MSIX is additive. If TcPackaged ever defaults to true
-      # that is a change to what ships, and it should not arrive unannounced.
+      # The project defaults to its unpackaged flavour, and that remains worth
+      # asserting because changing the default changes what contributors get.
+      # Later in this job CI explicitly opts into the packaged flavour so the
+      # manifest, assets and App Installer feed are exercised too. The package
+      # stays unsigned and is never installed: pull-request runners hold no
+      # signing authority.
       - name: Check the MSIX manifest and that the default build is still unpackaged
         shell: pwsh
         run: |
@@ -673,7 +664,7 @@ jobs:
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
 
       - name: Confirm exactly one package was produced
         working-directory: windows

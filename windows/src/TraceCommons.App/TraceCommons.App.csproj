@@ -27,8 +27,9 @@
       the default because the packaged flavour is NOT a superset: it needs
       Windows 10 2004 (the manifest disables write virtualization, which is a
       2004 feature and a restricted capability), and it cannot be signed
-      without the release identity. See windows/packaging/README.md. Nothing
-      builds with it set except windows/scripts/make-msix.ps1.
+      without the release identity. See windows/packaging/README.md. Only
+      windows/scripts/make-msix.ps1 and the CI packaging step build with it
+      set.
 
       AUTO-UPDATE DEPENDS ON THAT SWITCH. Package identity is not a
       preference for the update flow: every App Installer API it uses
@@ -60,7 +61,7 @@
 
     <!--
       Packaging is OFF by default and turned on from the command line with
-      -p:GenerateAppxPackageOnBuild=true. A plain `msbuild` stays a fast
+      -p:TcPackaged=true. A plain `msbuild` stays a fast
       compile check; only the release job and the CI packaging step pay for
       MakeAppx and MakePri.
 

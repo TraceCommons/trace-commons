@@ -1423,6 +1423,11 @@ fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
 fn ci_packages_and_validates_the_windows_app_feed_identity() {
     let ci = read(".github/workflows/ci.yml");
     assert!(
+        ci.contains("-p:TcPackaged=true"),
+        "CI must opt into the packaged WinUI flavour; setting only \
+         GenerateAppxPackageOnBuild cannot override WindowsPackageType=None"
+    );
+    assert!(
         ci.contains("-p:GenerateAppxPackageOnBuild=true"),
         "CI must build a real package (not just compile) so \
          Package.appxmanifest, MakePri and the visual assets are exercised \
