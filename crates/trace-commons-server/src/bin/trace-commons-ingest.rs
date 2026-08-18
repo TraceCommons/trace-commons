@@ -1255,6 +1255,12 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    /// Which privacy-filter backend resolved at boot. Reported on
+    /// `config-status` because an absent filter is otherwise invisible:
+    /// redaction silently degrades to deterministic-only and every other
+    /// signal still looks healthy.
+    privacy_filter_backend: PrivacyFilterBackendTag,
+    require_privacy_filter: bool,
     community_leaderboard_enabled: bool,
     /// How often to recompute the community snapshot in-process. `None`
     /// leaves recompute admin-triggered only, which is the behaviour
@@ -3224,10 +3230,8 @@ impl AppState {
         // nothing else distinguishes a filter that ran from one that was never
         // configured.
         let privacy_filter_backend = resolve_privacy_filter_backend()?;
-        validate_privacy_filter_config(
-            env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER),
-            privacy_filter_backend,
-        )?;
+        let require_privacy_filter = env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER);
+        validate_privacy_filter_config(require_privacy_filter, privacy_filter_backend)?;
         tracing::info!(
             privacy_filter_backend = privacy_filter_backend.label(),
             "Trace Commons privacy filter backend resolved"
@@ -3674,6 +3678,8 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            privacy_filter_backend,
+            require_privacy_filter,
             community_leaderboard_enabled,
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             community_analytics_publication_basis:
@@ -5274,8 +5280,13 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
         timeout: StdDuration::from_secs(timeout_seconds),
     };
-    let scorer =
-        NearAiPerplexityScorer::try_new(scorer_cfg).context("NearAiPerplexityScorerInitFailed")?;
+    // reqwest's blocking client owns an internal Tokio runtime and must not be
+    // constructed from this async startup task. Build it on the blocking pool,
+    // which is also where synchronous gate evaluation runs below.
+    let scorer = tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_cfg))
+        .await
+        .context("NearAiPerplexityScorerInitJoinFailed")?
+        .context("NearAiPerplexityScorerInitFailed")?;
 
     // fastembed-rs embedder — same configuration surface as the local-GPU
     // path. Runs locally on CPU; no GPU required.
@@ -10916,6 +10927,11 @@ struct TraceCommonsConfigStatusResponse {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    /// Label of the resolved privacy-filter backend: `near_ai`, `sidecar`, or
+    /// `none`. Always present — `none` is the answer an operator most needs
+    /// and an omitted field would read as healthy.
+    privacy_filter_backend: &'static str,
+    require_privacy_filter: bool,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
@@ -11218,6 +11234,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         object_primary_derived_exports: state.object_primary_derived_exports,
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
+        privacy_filter_backend: state.privacy_filter_backend.label(),
+        require_privacy_filter: state.require_privacy_filter,
         tenant_rollout_gate_counts: state.tenant_rollout_gates.status_counts(),
         max_export_items_per_request: state.max_export_items_per_request,
         analytics_min_cell_count: state.analytics_min_cell_count,
@@ -48660,12 +48678,20 @@ async fn evaluate_and_record_gate(
     // make the gate service's KekContext disagree with the wrapped DEK's
     // context binding → KekContextMismatch on every real-deployment evaluation.
     let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
-    let decision = state.gate_service.evaluate_trace(
-        &tenant_ctx,
-        &ciphertext,
-        &wrapped_dek,
-        TraceArtifactKind::ContributionEnvelope,
-    )?;
+    // Both real scorer backends are synchronous. In particular, the NEAR AI
+    // scorer uses reqwest's blocking client, which must not run inside a Tokio
+    // async worker. Keep model inference and network waits on the blocking pool.
+    let gate_service = Arc::clone(&state.gate_service);
+    let decision = tokio::task::spawn_blocking(move || {
+        gate_service.evaluate_trace(
+            &tenant_ctx,
+            &ciphertext,
+            &wrapped_dek,
+            TraceArtifactKind::ContributionEnvelope,
+        )
+    })
+    .await
+    .context("TraceGateEvaluationJoinFailed")??;
 
     let decision_id = Uuid::new_v4();
     let row = StorageTraceGateDecisionRow {
@@ -50979,6 +51005,18 @@ fn validate_envelope(envelope: &TraceContributionEnvelope) -> ApiResult<()> {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "trace contribution requires a pseudonymous contributor id",
+        ));
+    }
+    // Contributor-supplied confidence aggregates. They already reach a tag on
+    // the corpus, so an out-of-range value would propagate rather than sit
+    // inert; reject at the boundary instead of teaching every later consumer
+    // to distrust the range.
+    if let Some(training_dynamics) = &envelope.training_dynamics
+        && let Some(field) = training_dynamics.validation_error()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("trace contribution training dynamics {field} must be between 0.0 and 1.0"),
         ));
     }
     Ok(())

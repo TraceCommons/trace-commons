@@ -4707,6 +4707,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         object_primary_derived_exports: false,
         require_db_reconciliation_clean: false,
         require_export_guardrails,
+        privacy_filter_backend: PrivacyFilterBackendTag::None,
+        require_privacy_filter: false,
         community_leaderboard_enabled: false,
         community_snapshot_interval: None,
         community_analytics_publication_basis:
@@ -5502,6 +5504,59 @@ fn set_metadata_only_tool_name(envelope: &mut TraceContributionEnvelope, name: &
 
 fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
     envelope.schema_version = "invalid.test.schema".to_string();
+}
+
+/// Confidence aggregates are contributor-supplied and already reach a corpus
+/// tag, so an out-of-range value would propagate rather than sit inert. The
+/// boundary is where that stops.
+#[tokio::test]
+async fn submit_rejects_out_of_range_training_dynamics() {
+    use trace_commons_protocol::trace_contribution::TrainingDynamicsSignals;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.training_dynamics = Some(TrainingDynamicsSignals {
+        mean_confidence: Some(42.0),
+        ..Default::default()
+    });
+
+    let (status, _) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await
+    .expect_err("out-of-range mean_confidence must be rejected");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The reduction's own output must pass the gate the server applies, or we
+/// have shipped a producer that fails our own validation.
+#[tokio::test]
+async fn submit_accepts_reduced_training_dynamics() {
+    use trace_commons_protocol::trace_contribution::reduce_token_confidences;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.training_dynamics = Some(reduce_token_confidences(&[0.9, 0.2, 0.7, 0.55]));
+
+    let result = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
+        Json(envelope),
+    )
+    .await;
+    if let Err((status, _)) = &result {
+        assert_ne!(
+            *status,
+            StatusCode::BAD_REQUEST,
+            "reduced signals were rejected by envelope validation"
+        );
+    }
 }
 
 fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
@@ -25464,6 +25519,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         object_primary_derived_exports: false,
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
+        privacy_filter_backend: PrivacyFilterBackendTag::None,
+        require_privacy_filter: false,
         community_leaderboard_enabled: false,
         community_snapshot_interval: None,
         community_analytics_publication_basis:
@@ -83761,4 +83818,57 @@ fn a_deployment_not_requiring_a_privacy_filter_still_starts_without_one() {
     // config change everywhere.
     validate_privacy_filter_config(false, PrivacyFilterBackendTag::None)
         .expect("an unset requirement must not change existing boot behaviour");
+}
+
+// --- Privacy filter on config-status ----------------------------------
+//
+// The deployment walkthrough told operators to gate live contributor traffic
+// on a `privacy_filter_canary_status.healthy` field of this endpoint. That
+// field never existed: the string appeared only in the docs. An operator
+// following the runbook found nothing to check, and the deployment that
+// prompted this ran for months with no prose-PII filter at all.
+//
+// The backend label is the cheap half of that promise and needs no network
+// call, so it can be reported unconditionally and truthfully.
+
+#[tokio::test]
+async fn admin_config_status_reports_the_privacy_filter_backend() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    {
+        let state = Arc::make_mut(&mut state);
+        state.privacy_filter_backend = PrivacyFilterBackendTag::NearAi;
+        state.require_privacy_filter = true;
+    }
+
+    let Json(response) = config_status_handler(State(state), auth_headers("admin-token-a"))
+        .await
+        .expect("admin config status");
+
+    assert_eq!(
+        response.privacy_filter_backend, "near_ai",
+        "config-status must name the resolved privacy filter backend"
+    );
+    assert!(
+        response.require_privacy_filter,
+        "config-status must report whether a filter is required"
+    );
+}
+
+#[tokio::test]
+async fn admin_config_status_reports_an_absent_privacy_filter_as_none() {
+    // The state this endpoint exists to make visible: no backend resolved, so
+    // redaction is deterministic-only. It must be reported, not omitted --
+    // an absent field reads as "fine" exactly like the absent filter did.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(response) = config_status_handler(State(state), auth_headers("admin-token-a"))
+        .await
+        .expect("admin config status");
+
+    assert_eq!(
+        response.privacy_filter_backend, "none",
+        "a missing filter must be visible as \"none\", never omitted"
+    );
 }

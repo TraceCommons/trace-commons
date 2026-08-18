@@ -295,6 +295,7 @@ impl App {
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
+        app.wire_health_action();
         app.wire_tray();
         queue::wire(&app);
         history::wire(&app);
@@ -314,6 +315,34 @@ impl App {
         settings::wire_background_probe(&app, portal_probe);
 
         app
+    }
+
+    /// The health banner's button, which until now was drawn and wired to
+    /// nothing.
+    ///
+    /// `render_health` gives it a label and shows it whenever the daemon
+    /// reports a label that carries an action, so it has always looked like
+    /// a control. Clicking it did nothing at all -- the worst kind of
+    /// affordance, because the banner it sits in exists to tell a
+    /// contributor that contributions are held up, and the button is the
+    /// only thing offering a way out.
+    ///
+    /// The label is read at click time rather than captured when the button
+    /// was labelled: the banner is re-rendered on every status change, and a
+    /// closure holding the label from three states ago would send someone to
+    /// the screen for a problem they no longer have.
+    fn wire_health_action(self: &Rc<Self>) {
+        let app = self.clone();
+        self.health_button.connect_clicked(move |_| {
+            let label = app
+                .status
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.health.last_error_label.clone());
+            if let Some(label) = label {
+                onboarding::present_for_health(&app, &label);
+            }
+        });
     }
 
     /// Drain worker results on the main loop and hand each to the closure
