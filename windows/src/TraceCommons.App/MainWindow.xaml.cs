@@ -158,21 +158,25 @@ public sealed partial class MainWindow : Window
             // whatever happens next; the only question was whether the
             // process survived to be closed again.
             //
-            // Which leaves the window closing silently-refused. That is not
-            // one sentence away from being fixed, and it is worth saying why:
-            // MainViewModel.Notice, the obvious home for the explanation,
-            // renders inside the QUEUE pane, and both dialogs that can land us
-            // here are reachable only from History and Settings. The pane that
-            // would carry the message is by definition not the pane on screen.
+            // The window then refuses to close without saying so, and that
+            // is right rather than merely tolerable. This runs precisely
+            // BECAUSE a dialog is already up, so at the moment of failure the
+            // explanation is already on screen and is the thing the
+            // contributor has to deal with. Clicking the owner window while a
+            // modal is open doing nothing is the platform's own convention,
+            // not a missing message.
             //
-            // The health banner IS above all three panes and would be seen.
-            // It is still the wrong surface: it is bound to the daemon's own
-            // health label through HealthCopy, so everything it says is a
-            // statement about the daemon, and borrowing it to report a
-            // transient UI collision would make "contributions are on hold"
-            // and "you have a dialog open" the same kind of sentence. Saying
-            // this properly needs its own surface, which is a different
-            // change from stopping a crash.
+            // Recorded because both obvious places to add one are wrong, and
+            // that is not obvious. MainViewModel.Notice renders inside the
+            // QUEUE pane, while the two dialogs that can land us here are
+            // reachable only from History and Settings -- so the pane
+            // carrying the message would never be the pane on screen. The
+            // health banner is above all three panes and would be seen, but
+            // it is single-writer over the daemon's own health label, and
+            // every sentence in it states what happened to the data; a
+            // transient UI collision is neither, and an unrecognised label
+            // there renders "Contributions are on hold.", which would be
+            // false in the direction that makes people quit.
             return;
         }
         finally
