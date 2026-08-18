@@ -419,6 +419,65 @@ async fn failure_above_5pct_aborts_candidate() {
     assert_eq!(failed.dropped_paraphrase_rows, Some(2));
 }
 
+/// Succeeds for the first `primary_calls` scoring calls, then fails every
+/// call after. `run_candidate_eval` runs the primary novel / duplicate /
+/// paraphrase pass in full before the determinism replay, so this lets every
+/// primary call succeed while every replay call fails.
+struct ReplayFailingScorer {
+    inner: MockPerplexityScorer,
+    calls: AtomicU64,
+    primary_calls: u64,
+}
+
+impl PerplexityScorer for ReplayFailingScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n >= self.primary_calls {
+            anyhow::bail!("ReplayFailingScorerInjectedFailure");
+        }
+        self.inner.score(plaintext)
+    }
+}
+
+#[tokio::test]
+async fn determinism_gate_fails_closed_when_every_replay_sample_fails() {
+    // Regression for #206: the replay pass is separate from the pooled
+    // failure-rate gate, so a scorer that succeeds on every primary call and
+    // fails on every replay call passed the failure-rate gate. Substituting
+    // 0.0 for each failed replay then made `determinism_stddev` exactly 0.0
+    // and the determinism gate pass on no successful replay sample.
+    let corpus = synth_corpus();
+    // The primary pass scores every novel and duplicate entry once and each
+    // paraphrase pair twice, before the determinism replay starts.
+    let primary_calls =
+        (corpus.novel.len() + corpus.duplicate.len() + 2 * corpus.paraphrase.len()) as u64;
+    let scorer = ReplayFailingScorer {
+        inner: MockPerplexityScorer::new(),
+        calls: AtomicU64::new(0),
+        primary_calls,
+    };
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&scorer),
+        &synth_candidate(),
+        &corpus,
+        2,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("every primary call succeeds, so the failure-rate gate must not abort");
+
+    // No primary failures: the pooled failure-rate gate sees a clean run.
+    assert_eq!(result.dropped_novel_rows, Some(0));
+    assert_eq!(result.dropped_duplicate_rows, Some(0));
+    // But every determinism replay sample failed. The gate must fail closed
+    // rather than pass on a substituted 0.0.
+    assert!(
+        !result.passed_determinism_gate,
+        "determinism gate must fail closed when no replay sample succeeded"
+    );
+}
+
 #[tokio::test]
 async fn missing_params_b_defaults_to_zero_without_panicking() {
     // No manifest params_b, path doesn't exist on disk — inference returns
