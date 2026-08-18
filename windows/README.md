@@ -103,8 +103,15 @@ Deliberately absent, and each is its own piece of work:
   week summary, the per-project list of what is waiting, settings — is not,
   because none of those surfaces exist anywhere in this app yet and a menu
   item that opens nothing is worse than an absent one.
-- MSIX packaging and signing. The app builds unpackaged so that CI can verify
-  it without a certificate.
+- MSIX packaging and signing, *as a shipping artifact*. The manifest, the
+  packaging script and the signing path now exist under `packaging/` and
+  `scripts/make-msix.ps1`, but none of it has ever been built: it is opt-in
+  (`TcPackaged=true`), reachable only from a `workflow_dispatch` on
+  `release-apps.yml`, and it needs a real icon before anyone should install it.
+  The app still builds unpackaged by default so that CI can verify it without a
+  certificate, and the shipping artifact is still the zip. Read
+  `packaging/README.md` before touching any of it — particularly the part about
+  the publisher string and about what packaging does to the state directory.
 - The rest of the queue frame the design specifies: the health banner and the
   week band. Both need daemon state the app does not read yet, so neither is
   drawn.
@@ -160,6 +167,15 @@ MSIX `windows.startupTask` extension. Same hive and same reasoning as
 `UrlSchemeRegistration`. The entry appears in Task Manager's Startup tab,
 which is where a contributor audits what starts with their machine; Windows
 can disable it there, and this class does not fight that.
+
+Inert under MSIX. The packaged flavour (`TcPackaged=true`) disables registry
+virtualization, so the write would be real and would record a path inside
+`WindowsApps` — the same reason `UrlSchemeRegistration` skips its own
+registration when packaged. A packaged build declares startup with a
+`windows.startupTask` manifest extension instead; that extension is not in
+`packaging/Package.appxmanifest` yet, so a packaged build has no run-at-login
+and `RunAtLogin.IsSupported` reports false, which drops the item from the tray
+menu rather than drawing a toggle that cannot work.
 
 ### What only Windows can confirm
 

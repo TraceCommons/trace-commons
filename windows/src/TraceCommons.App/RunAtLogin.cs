@@ -24,9 +24,10 @@ namespace TraceCommons.App;
 /// for anything but the plainest task and puts the app in a list contributors
 /// do not think to audit; a service is wrong for something with a UI and
 /// needs an installer running as SYSTEM; the MSIX
-/// <c>windows.startupTask</c> extension needs the package this app
-/// deliberately does not have yet. HKCU\Run needs none of that -- it is the
-/// current user's own hive, writable by that user without a prompt -- and it
+/// <c>windows.startupTask</c> extension needs a package, and the packaged
+/// flavour is opt-in and is not what ships. HKCU\Run needs none of that --
+/// it is the current user's own hive, writable by that user without a
+/// prompt -- and it
 /// surfaces in Task Manager's Startup tab and in Settings -> Apps -> Startup,
 /// which are exactly where someone goes to see what starts with their
 /// machine. Anything that runs at login without appearing there reads as
@@ -52,15 +53,32 @@ namespace TraceCommons.App;
 /// launch over it would trade a small loss for a total one.
 /// </para>
 /// <para>
-/// When MSIX packaging happens this class should be replaced by a
-/// <c>windows.startupTask</c> manifest declaration rather than kept alongside
-/// one -- two mechanisms is how a contributor ends up with two copies
-/// starting, which is the failure mode <c>autostart.rs</c> documents at
-/// length for Linux.
+/// <b>Inert under MSIX.</b> The packaged flavour
+/// (<c>TcPackaged=true</c>) disables registry virtualization, so this write
+/// would be real and would record a path inside <c>WindowsApps</c> -- the
+/// same reason <c>UrlSchemeRegistration</c> skips its own registration when
+/// packaged. A packaged build declares startup with a
+/// <c>windows.startupTask</c> extension in the manifest instead. That
+/// extension is not there yet, so a packaged build simply has no
+/// run-at-login, and <see cref="IsSupported"/> says so rather than offering a
+/// toggle that writes something the package model would not honour. Two
+/// mechanisms at once is how a contributor ends up with two copies starting,
+/// which is the failure mode <c>autostart.rs</c> documents at length for
+/// Linux.
 /// </para>
 /// </remarks>
 public static class RunAtLogin
 {
+    /// <summary>
+    /// Whether this build can offer run-at-login at all.
+    /// </summary>
+    /// <remarks>
+    /// False under MSIX package identity, where the mechanism belongs to the
+    /// manifest rather than to this class. Callers should hide the control
+    /// rather than show one that cannot work.
+    /// </remarks>
+    public static bool IsSupported => !PackageIdentity.IsPackaged();
+
     /// <summary>
     /// Whether this executable has an entry asking Windows to start it at
     /// login.
@@ -76,7 +94,7 @@ public static class RunAtLogin
         get
         {
             string? executable = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(executable))
+            if (!IsSupported || string.IsNullOrEmpty(executable))
             {
                 return false;
             }
@@ -108,7 +126,7 @@ public static class RunAtLogin
     public static bool Set(bool enabled)
     {
         string? executable = Environment.ProcessPath;
-        if (string.IsNullOrEmpty(executable))
+        if (!IsSupported || string.IsNullOrEmpty(executable))
         {
             return false;
         }

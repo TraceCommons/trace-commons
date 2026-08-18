@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX identity for the Windows contributor app.
+
+  This manifest is NOT used by the default build. windows/src/TraceCommons.App
+  still builds unpackaged (WindowsPackageType=None) unless TcPackaged=true is
+  passed, and the shipping artifact is still the self-contained zip. See
+  windows/packaging/README.md for why, and for the evidence behind the
+  Publisher string below. It is not a guess, and it must not be edited
+  casually: a Publisher that does not match the signing certificate's subject
+  produces a package that installs nowhere.
+
+  Version is a placeholder. windows/scripts/make-msix.ps1 stamps the real
+  four-part version at package time; nothing reads the value committed here.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  IgnorableNamespaces="uap rescap desktop6">
+
+  <Identity
+    Name="Iqlusion.TraceCommons"
+    Publisher="CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Trace Commons</DisplayName>
+    <PublisherDisplayName>Iqlusion Inc</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+
+    <!--
+      Both virtualizations off, deliberately, and this is the load-bearing
+      part of the file.
+
+      A packaged desktop app writing to %LOCALAPPDATA% has those writes
+      redirected into the package's private LocalCache, and HKCU writes into a
+      package-private hive. Neither is acceptable here:
+
+        * DaemonHost.DefaultConfigDir() is %LOCALAPPDATA%\trace-commons, and it
+          is the SAME directory the unpackaged contributor CLI uses. That is
+          the entire point of the app, which watches the contributor's real
+          session store. Redirected, the packaged app would start cleanly
+          against an empty private copy and show an empty queue, which is the
+          worst possible failure: silent and plausible.
+        * OnboardingState writes %LOCALAPPDATA%\TraceCommons\onboarded.json.
+          Redirected, a contributor who used the zip build would be walked
+          through onboarding again after installing the MSIX.
+
+      Disabling both requires the unvirtualizedResources restricted capability
+      declared below, and Windows 10 2004 (10.0.19041). That is why
+      TargetDeviceFamily's MinVersion is 19041 rather than the 17763 the
+      unpackaged build supports. The packaged flavour is therefore NOT a
+      superset of the zip; the zip remains the artifact with the wider reach.
+    -->
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="TraceCommons.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Trace Commons"
+        Description="Review and contribute agent traces from this machine."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+        <!--
+          The declared form of what UrlSchemeRegistration.cs writes at runtime
+          in the unpackaged build. Under MSIX the OS owns this registration and
+          the runtime HKCU write is the wrong mechanism, so
+          UrlSchemeRegistration.EnsureRegistered() returns early when the
+          process has package identity. Exactly one of the two paths is ever
+          live.
+        -->
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="tracecommons">
+            <uap:DisplayName>Trace Commons invite</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+</Package>

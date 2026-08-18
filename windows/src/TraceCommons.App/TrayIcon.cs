@@ -365,12 +365,21 @@ public sealed class TrayIcon : IDisposable
             AppendMenu(menu, MF_STRING | MF_DISABLED | MF_GRAYED, IntPtr.Zero, _model.MenuHeader);
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Trace Commons");
-            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
-            AppendMenu(
-                menu,
-                MF_STRING | (RunAtLogin.IsEnabled ? MF_CHECKED : MF_UNCHECKED),
-                MenuIdRunAtLogin,
-                "Start Trace Commons when I sign in");
+            // Omitted entirely under MSIX, where run-at-login belongs to the
+            // manifest and this toggle would write something the package
+            // model does not honour. Drawn disabled would be worse: a
+            // checkbox that cannot be ticked reads as a bug in the app rather
+            // than as a property of the build.
+            if (RunAtLogin.IsSupported)
+            {
+                AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+                AppendMenu(
+                    menu,
+                    MF_STRING | (RunAtLogin.IsEnabled ? MF_CHECKED : MF_UNCHECKED),
+                    MenuIdRunAtLogin,
+                    "Start Trace Commons when I sign in");
+            }
+
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit Trace Commons…");
 
