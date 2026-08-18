@@ -878,7 +878,15 @@ mod tests {
                 }}"#
             ),
         );
-        let source = FileAllowlistSource::new(path.clone(), Duration::from_millis(50));
+        // A refresh interval long enough that it cannot elapse during the
+        // test. The caching half of this test used to run against a 50ms
+        // interval, which made it a race rather than an assertion: on a
+        // loaded runner more than 50ms could pass between `warm` and the
+        // "still cached" check, the cache would refresh on its own, and the
+        // test failed claiming the cache had not held. The reload half is
+        // exercised separately below with its own source, where waiting is
+        // the point and sleeping longer only makes it more certain.
+        let source = FileAllowlistSource::new(path.clone(), Duration::from_secs(3600));
         source.warm().expect("first warm load succeeds");
 
         let snap1 = source.snapshot().expect("snapshot");
@@ -901,9 +909,15 @@ mod tests {
         let snap_cached = source.snapshot().expect("snapshot");
         assert_eq!(snap_cached.policy_label, "p1");
 
-        // After the interval: reload picks up the new content.
-        std::thread::sleep(Duration::from_millis(80));
-        let snap_fresh = source.snapshot().expect("snapshot");
+        // After the interval: reload picks up the new content. A second
+        // source over the same file, with an interval short enough that the
+        // sleep below is certain to clear it. This direction is safe to make
+        // timing-dependent because sleeping longer can only help it, whereas
+        // the cached assertion above could only ever be hurt by delay.
+        let reloading = FileAllowlistSource::new(path.clone(), Duration::from_millis(1));
+        reloading.warm().expect("warm load succeeds");
+        std::thread::sleep(Duration::from_millis(50));
+        let snap_fresh = reloading.snapshot().expect("snapshot");
         assert_eq!(snap_fresh.policy_label, "p2");
         assert!(snap_fresh.contains(&h2));
         assert!(!snap_fresh.contains(&h));

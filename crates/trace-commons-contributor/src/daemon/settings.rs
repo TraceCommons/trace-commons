@@ -39,6 +39,12 @@ const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
 const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
 const DEFAULT_MAX_QUEUE_ENTRIES: usize = 500;
 const DEFAULT_HISTORY_POLL_SECS: u64 = 1800;
+/// How often the public community roster is fetched. The server serves a
+/// pre-rendered snapshot and refuses to serve one older than fifteen minutes,
+/// so polling faster than that only re-fetches a body the server has not
+/// recomputed. Fifteen minutes is the roster's own cadence, and this follows
+/// it rather than inventing a second one.
+const DEFAULT_COMMUNITY_POLL_SECS: u64 = 900;
 /// A privacy-filter self-test from days ago proves nothing about the filter
 /// now, so a long-lived process re-checks on this interval.
 const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
@@ -74,6 +80,11 @@ pub struct DaemonSettings {
     pub max_bytes_per_day: u64,
     pub max_queue_entries: usize,
     pub history_poll_secs: u64,
+    /// How often the public community roster is fetched. `#[serde(default)]`
+    /// so a settings file written before this field existed loads with the
+    /// poll on its published cadence rather than failing to parse.
+    #[serde(default = "default_community_poll_secs")]
+    pub community_poll_secs: u64,
     pub canary_interval_secs: u64,
     /// How long after an approval the uploader must leave the entry alone,
     /// so the undo a client offers is real rather than a race against the
@@ -105,6 +116,10 @@ fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
 
+fn default_community_poll_secs() -> u64 {
+    DEFAULT_COMMUNITY_POLL_SECS
+}
+
 impl Default for DaemonSettings {
     fn default() -> Self {
         Self {
@@ -120,6 +135,7 @@ impl Default for DaemonSettings {
             max_bytes_per_day: DEFAULT_MAX_BYTES_PER_DAY,
             max_queue_entries: DEFAULT_MAX_QUEUE_ENTRIES,
             history_poll_secs: DEFAULT_HISTORY_POLL_SECS,
+            community_poll_secs: DEFAULT_COMMUNITY_POLL_SECS,
             canary_interval_secs: DEFAULT_CANARY_INTERVAL_SECS,
             approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,

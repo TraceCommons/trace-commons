@@ -37,6 +37,15 @@ steps:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
           | sh -s -- -y --default-toolchain stable --profile minimal
         . "$$HOME/.cargo/env"
+        # Stamp the build identity the binaries report on --version and
+        # /health. .gcloudignore excludes .git/, so this source tree has no git
+        # metadata and the build script cannot recover the commit on its own --
+        # this variable is the only thing standing between a deployed binary
+        # and an "unknown" identity. It is the same value the publish step
+        # names the GCS object with, resolved identically.
+        export TRACE_COMMONS_BUILD_COMMIT="${_TAG}"
+        [ "$$TRACE_COMMONS_BUILD_COMMIT" = "manual" ] \
+          && export TRACE_COMMONS_BUILD_COMMIT="${BUILD_ID}"
         cargo build --release --bin trace-commons-ingest \
           --features gcs-client,gcp-kms,near-ai-scorer
         # Reuses the deps compiled above; the issuer takes no features.

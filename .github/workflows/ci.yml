@@ -255,6 +255,71 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
 
+  windows-install-script:
+    name: install.ps1 against the real release
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # The installer resolves the newest contributor-v* tag through the GitHub
+    # API, and anonymous api.github.com is rate-limited per source IP. Actions
+    # runners share those IPs, so unauthenticated the lookup fails on most
+    # runs -- sometimes as a 403, sometimes as an empty release list -- and
+    # this job goes red for reasons that have nothing to do with the change
+    # under test. GITHUB_TOKEN is read by install.ps1 when present and is
+    # read-only here; a contributor running the script by hand still makes the
+    # same anonymous request.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      # This installer's whole claim is that it refuses to install what it
+      # cannot verify, and that claim is not testable by reading it. Both paths
+      # run here against the actually published release: the success path, and
+      # the refusal path with the expected signer changed so verification must
+      # fail. Asserting the refusal leaves ZERO files behind is the point --
+      # an installer that reports failure after writing the binary has already
+      # lost.
+      - name: It installs the real, verified binary
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
+          ./scripts/install.ps1 -Dir $dir
+          $exe = Join-Path $dir 'trace-commons-contributor.exe'
+          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
+          $v = & $exe --version
+          Write-Host "reported: $v"
+          if ($v -notmatch 'trace-commons-contributor') { throw "unexpected --version output: $v" }
+
+      - name: It refuses, and installs nothing, when the signer is wrong
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tc-refuse'
+          $bad = Join-Path $env:RUNNER_TEMP 'install-wrong-signer.ps1'
+          # Same script, one expectation changed: demand a publisher we are not.
+          (Get-Content -Raw ./scripts/install.ps1).
+            Replace("'O=Iqlusion Inc'", "'O=Somebody Else Entirely'") |
+            Set-Content -Path $bad -Encoding UTF8
+
+          $out = & pwsh -File $bad -Dir $dir 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+
+          if ($code -eq 0) { throw 'the installer exited 0 with a signer it should have rejected' }
+          if ($out -notmatch 'unexpected signing identity') {
+            throw 'it failed, but not on the signature check -- so this proves nothing'
+          }
+          $left = @(Get-ChildItem -Path $dir -Recurse -File -ErrorAction SilentlyContinue)
+          if ($left.Count -ne 0) {
+            throw "refused but left $($left.Count) file(s) behind: $($left.FullName -join ', ')"
+          }
+          Write-Host "refused correctly, and installed 0 files"
+          # The inner pwsh exited 1 -- correctly, that is what we asserted --
+          # and $LASTEXITCODE survives to the end of the step, where PowerShell
+          # hands it back as the step's own status. Without this the step fails
+          # precisely because the installer behaved.
+          exit 0
+
   linux-shell-desktop-integration:
     name: linux-shell desktop integration (weston + portal)
     runs-on: ubuntu-latest
@@ -363,3 +428,139 @@ jobs:
         run: cargo build --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
+
+  windows-contributor-app:
+    name: windows contributor app
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      # The MSIX manifest is checked but NOT built here, and that is a
+      # deliberate limitation rather than an oversight.
+      #
+      # Packaging a WinUI 3 project produces an .msix that must be signed, and
+      # this job has no signing identity -- pull requests do not get one, by
+      # design. An unsigned package cannot be installed or meaningfully
+      # verified, so building one here would cost several minutes to prove
+      # almost nothing, and would put an unproven packaging path in front of
+      # every pull request. The MSIX build lives behind an opt-in
+      # workflow_dispatch input on release-apps.yml instead.
+      #
+      # What IS worth asserting on every pull request is that the shipping
+      # build did not quietly become the packaged one. The zip is the artifact
+      # contributors get; MSIX is additive. If TcPackaged ever defaults to true
+      # that is a change to what ships, and it should not arrive unannounced.
+      - name: Check the MSIX manifest and that the default build is still unpackaged
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # XPath with local-name() throughout: the manifest is namespaced
+          # across four namespaces, and PowerShell's dotted XML adapter returns
+          # an XmlElement rather than a string for any element carrying
+          # attributes -- which would compare unequal in a way that reads like
+          # a content mismatch and is not one.
+          $manifest = "windows/packaging/Package.appxmanifest"
+          [xml] $xml = Get-Content -Path $manifest -Raw
+
+          $expectedPublisher = 'CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US'
+          $identity = $xml.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+          if (-not $identity) { throw "$manifest has no Identity element." }
+          $publisher = $identity.GetAttribute("Publisher")
+          if ($publisher -ne $expectedPublisher) {
+            throw "$manifest Publisher is '$publisher', expected '$expectedPublisher'. It must equal the signing certificate's subject exactly or the package installs nowhere -- see windows/packaging/README.md."
+          }
+
+          # Every logo the manifest names has to exist, or packaging fails on a
+          # release runner rather than here.
+          $visual = $xml.SelectSingleNode("//*[local-name()='VisualElements']")
+          $storeLogo = $xml.SelectSingleNode("//*[local-name()='Properties']/*[local-name()='Logo']")
+          if (-not $visual -or -not $storeLogo) { throw "$manifest is missing VisualElements or the store Logo." }
+          $logos = @(
+            $storeLogo.InnerText,
+            $visual.GetAttribute("Square150x150Logo"),
+            $visual.GetAttribute("Square44x44Logo")
+          )
+          foreach ($logo in $logos) {
+            if ([string]::IsNullOrWhiteSpace($logo)) { throw "$manifest names an empty logo path." }
+            $path = Join-Path "windows/packaging" ($logo -replace '\\', '/')
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "$manifest references '$logo' but $path does not exist."
+            }
+          }
+
+          $csproj = "windows/src/TraceCommons.App/TraceCommons.App.csproj"
+          [xml] $proj = Get-Content -Path $csproj -Raw
+          $node = $proj.SelectSingleNode("/Project/PropertyGroup/TcPackaged")
+          if (-not $node -or $node.InnerText.Trim() -ne "false") {
+            throw "$csproj no longer defaults TcPackaged to false. The shipping Windows artifact is the unpackaged zip; MSIX is additive and must stay opt-in."
+          }
+
+          Write-Host "manifest publisher, logo assets and unpackaged default all check out"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-app-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-app-
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The WinUI shell is C# over the same C ABI the macOS app uses, so the
+      # cdylib has to exist before anything managed builds. The app project
+      # fails its own build if the DLL is missing rather than deferring that to
+      # a runtime "core not found", so this step is a hard prerequisite.
+      - name: Build the contributor FFI cdylib
+        run: cargo build -p trace-commons-contributor-ffi --release
+
+      # The interop layer targets plain net8.0 and its tests drive a REAL
+      # daemon through the real cdylib: pointer ownership, UTF-8 marshalling,
+      # delegate rooting, and the unsubscribe barrier. These are the tests that
+      # would catch a binding defect, and they are also the ones that already
+      # run on a developer's macOS machine against the .dylib -- this job is
+      # what proves the same binding holds on Windows, where the daemon's
+      # transport is a named pipe rather than a unix socket.
+      #
+      # Both dotnet steps run from windows/ so that windows/global.json applies.
+      # MSBuild selects the NEWEST installed SDK regardless of what setup-dotnet
+      # put there, and GitHub's Windows image ships .NET 10, whose layout
+      # Windows App SDK 1.6 cannot build against.
+      - name: Run interop tests against the real cdylib
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Release
+
+      # Building the WinUI project is the only verification the XAML and the
+      # Windows App SDK wiring get: neither can be compiled anywhere but
+      # Windows, so a change that builds cleanly on a contributor's Mac can
+      # still be broken here. Warnings are errors in both projects, matching
+      # the RUSTFLAGS="-D warnings" discipline the Rust jobs apply.
+      #
+      # MSBuild FROM VISUAL STUDIO, not `dotnet build`, and that is not a
+      # preference.
+      #
+      # A WinUI 3 project invokes MSBuild tasks that live in
+      # Microsoft.Build.AppxPackage.dll and
+      # Microsoft.Build.Packaging.Pri.Tasks.dll. Those assemblies ship with
+      # Visual Studio's tooling and are NEVER part of the .NET SDK, so
+      # `dotnet build` fails with MSB4062 naming a path under the dotnet SDK
+      # directory -- which reads like a .NET version problem and is not one.
+      # Suppressing the first failing target only surfaces the next task from
+      # the same missing assembly set; this was confirmed by reproducing both
+      # failures on a clean Windows box.
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build the WinUI app
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64

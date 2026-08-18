@@ -113,6 +113,11 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             cwd,
             started_at,
             size_bytes: metadata.len(),
+            // Codex rollouts are peer files: `collect_rollout_files` recurses
+            // arbitrarily deep, but every match is its own session and no
+            // record links one to another. There is no group to describe.
+            group_modified_at: None,
+            group_member_count: 0,
         });
     }
 }
@@ -261,6 +266,8 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         started_at,
         session_hash: hash,
         events,
+        subagent_count: 0,
+        subagents_dropped: 0,
     })
 }
 

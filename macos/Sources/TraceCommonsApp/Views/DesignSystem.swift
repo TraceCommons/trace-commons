@@ -21,6 +21,22 @@ import SwiftUI
 /// otherwise quiet interface, and everything else is kept plain so it can
 /// carry.
 ///
+/// ## Where these values come from
+///
+/// The palette began as a transcription of the community site and has since
+/// been reconciled against the approved desktop mockups, recorded in
+/// `design-import/DESIGN-SPEC.md`. That document is now the target: every
+/// token below carries the spec's own name for it in its doc comment, so a
+/// value can be traced back to the frame it was measured in. Where the two
+/// sources disagreed, the mockups won, and the previous value is noted in a
+/// trailing comment rather than deleted from the record.
+///
+/// The spec also carries a SECOND palette -- the community brand, used on the
+/// public-facing surfaces (going public, the manifesto, the credit coin). That
+/// one is deliberately foreign: black 2px frames, Helvetica, mint. It is not
+/// defined here, because the seam between the two is the point. This file is
+/// the private tool.
+///
 /// ## Family resemblance to the community site
 ///
 /// `community/public/styles.css` is the other face of this product, and the
@@ -56,8 +72,8 @@ import SwiftUI
 ///
 /// - The site's ground (`#f6f7f4`) is not a neutral grey -- it is warm, with
 ///   a faint green cast. The dark ground keeps that cast at the other end of
-///   the scale (a warm near-black, `#15170F`-family) rather than the
-///   blue-black that a naive inversion produces.
+///   the scale (`#23251D`, a warm near-black) rather than the blue-black that
+///   a naive inversion produces.
 /// - Ground / surface / inset keep the same ORDER and roughly the same
 ///   perceptual spacing as `--bg` / `--surface` / `--surface-2`, so the same
 ///   layering reads in both appearances.
@@ -73,14 +89,56 @@ enum TC {
     /// is missing here, it is probably the wrong value.
     enum Space {
         static let hairline: CGFloat = 1
+        /// Spec `space.0.5`. A sidebar row's internal gap; label to value.
+        static let micro: CGFloat = 2
+        /// A 3pt step. The vertical padding on a status chip (§6.2) and on a
+        /// small secondary button (§6.1); the spec's own scale skips it, but
+        /// both components state it.
+        static let tiny: CGFloat = 3
+        /// Spec `space.1`. Segmented-control padding, chip icon gap.
         static let xxs: CGFloat = 4
+        /// A 5pt step, likewise absent from the spec's scale and likewise
+        /// stated by the components that need it: the vertical padding on
+        /// buttons (§6.1), tab items (§6.6) and search fields (§6.10).
+        static let control: CGFloat = 5
+        /// Spec `space.1.5`. Intra-group gaps, e.g. a checkbox stack.
         static let xs: CGFloat = 6
+        /// Spec `space.2`. Button gaps, inline metadata, card inner stacks.
         static let s: CGFloat = 8
+        /// Spec `space.2.5`. Section stacks and header gaps.
+        static let sm: CGFloat = 10
+        /// Spec `space.3`. Card grid gap, banner icon gap, compact padding.
         static let m: CGFloat = 12
+        /// Spec `space.3.5`. Content gap inside a queue row or brand panel.
+        static let md: CGFloat = 14
+        /// Spec `space.4`. Card padding-x; content-block gap in History.
         static let l: CGFloat = 16
+        /// Spec `space.4.5`. Sheet padding-x; gap between settings sections.
+        static let lg: CGFloat = 18
+        /// Spec `space.5`. Screen padding-x on brand panels and dialogs.
         static let xl: CGFloat = 20
+        /// Spec `space.5.5`. macOS content padding-x.
+        static let xlg: CGFloat = 22
+        /// Spec `space.6`. Gaps between metrics in a queue card's manifest.
+        static let xxlSmall: CGFloat = 24
+        /// Spec `space.7`. Sheet header field gap.
         static let xxl: CGFloat = 28
+        /// Spec `space.8`. Credit-card figure gap.
+        static let figure: CGFloat = 32
         static let xxxl: CGFloat = 36
+
+        /// The standard content region's padding on macOS: `18 22 22`.
+        enum Content {
+            static let top: CGFloat = 18
+            static let horizontal: CGFloat = 22
+            static let bottom: CGFloat = 22
+        }
+
+        /// A content header's padding: `9 20`.
+        enum Header {
+            static let vertical: CGFloat = 9
+            static let horizontal: CGFloat = 20
+        }
     }
 
     /// A reading column. Trust copy is read, not skimmed, and a sentence
@@ -101,10 +159,41 @@ enum TC {
         static let prose: CGFloat = 660
     }
 
-    /// The site's radii: 6 and 8, with 999 pills for badges.
+    /// The site's radii: 6 and 8, with 999 pills for badges. The macOS column
+    /// of the spec's radius table; Windows tightens controls to 4 and GNOME
+    /// widens the window to 12, neither of which this shell draws.
     enum Radius {
+        /// Spec `radius.card`. Cards, banners, segmented tracks, the
+        /// transcript panel.
         static let card: CGFloat = 8
+        /// Spec `radius.control.mac`. Buttons, inputs, sidebar rows, tabs.
         static let inset: CGFloat = 6
+        /// Spec `radius.control.mac`, under the spec's own name.
+        static let control: CGFloat = 6
+        /// Spec `radius.pill`. Status chips and count badges. `Capsule()` is
+        /// the idiomatic way to draw these; the number is here for the cases
+        /// that need a radius rather than a shape.
+        static let pill: CGFloat = 999
+        /// Spec `radius.chip.inline`. The search-term highlight.
+        static let chipInline: CGFloat = 2
+        /// Spec `radius.chip.redaction`. The redaction marker chip.
+        static let redactionChip: CGFloat = 3
+        /// Spec `radius.checkbox`. The read-gate checkbox, a 13x13 box.
+        static let checkbox: CGFloat = 3
+        /// Spec `radius.window.mac`. The window and its sheets.
+        static let window: CGFloat = 10
+        /// The last row of §4.2's table: zero, on every community brand
+        /// surface. Nothing inside a black-framed panel is ever rounded, and
+        /// the token exists so that rule is stated rather than implied by a
+        /// bare `Rectangle`.
+        static let brand: CGFloat = 0
+    }
+
+    /// Fixed control sizes the spacing scale has no step for, because they
+    /// size an object rather than a gap.
+    enum Control {
+        /// Spec §6.9. The read-gate checkbox is a 13pt square.
+        static let checkbox: CGFloat = 13
     }
 
     // MARK: - Type
@@ -117,27 +206,92 @@ enum TC {
     /// labels are heavy, uppercase and tracked, which is the site's
     /// `.eyebrow` / `th` / `.kpi .label` treatment (12px, weight 800,
     /// uppercase) rendered in SF instead of Inter.
+    /// Where a macOS text style's default size already equals the size the
+    /// mockups state, the text style is used, so the scale still answers to
+    /// Dynamic Type. macOS `title2` is 17, `title3` 15, `headline`/`body` 13,
+    /// `callout` 12, `subheadline` 11, `footnote`/`caption`/`caption2` 10.
+    /// Where the mockups ask for a size no text style carries -- 20, 18, 16,
+    /// 12.5, 10.5 -- an exact size is given instead.
     enum Font_ {
-        /// Screen titles. "2 sessions waiting for your decision".
+        /// Spec `title.screen`, 15/700. Content-header titles: "Waiting",
+        /// "History", "Settings".
         static let screenTitle = Font.title3.weight(.bold)
-        /// Onboarding headlines. The site's `h1` is very heavy; this is the
-        /// nearest honest equivalent that still sits inside a window.
+        /// Onboarding headlines. The community panels set display type at
+        /// landing scale; this is the nearest honest equivalent that still
+        /// sits inside a window.
         static let display = Font.title.weight(.heavy)
-        static let sectionTitle = Font.title3.weight(.bold)
-        /// The name of the thing a card is about.
+        /// Spec `title.section`, 17/700. "3 sessions waiting for your
+        /// decision". Was `title3.bold` (15pt).
+        static let sectionTitle = Font.title2.weight(.bold)
+        /// Spec `title.card`, 13/600. The name of the thing a card is about.
         static let cardTitle = Font.headline
-        /// The opening prompt -- the text that actually identifies a session
-        /// to the person who wrote it.
-        static let body = Font.callout
-        /// Attribution, timestamps, supporting sentences.
-        static let meta = Font.callout
-        /// Field labels on the manifest strip, and the site's eyebrows.
+        /// Spec `metric.value`, 20/700. Stat-card numbers.
+        static let metricValue = Font.system(size: 20, weight: .bold)
+        /// Spec `metric.value.mono`, 18/700 mono. Credit figures.
+        static let metricValueMono = Font.system(size: 18, weight: .bold, design: .monospaced)
+        /// Spec `heading.alert`, 16/700. "2 matches".
+        static let headingAlert = Font.system(size: 16, weight: .bold)
+        /// Spec `body`, 13/400. The opening prompt -- the text that actually
+        /// identifies a session to the person who wrote it. Was `callout`
+        /// (12pt).
+        static let body = Font.body
+        /// Spec `body.dense`, 12.5/600. The undo bar's headline.
+        static let bodyDense = Font.system(size: 12.5, weight: .semibold)
+        /// Spec `body.dense` at 400. Disclosure rows.
+        static let disclosure = Font.system(size: 12.5)
+        /// Spec `label.control`, 12/500. Secondary buttons.
+        static let labelControl = Font.system(size: 12, weight: .medium)
+        /// Spec `label.control.primary`, 12/600. Filled buttons.
+        static let labelControlPrimary = Font.system(size: 12, weight: .semibold)
+        /// Spec `caption`, 11/400. Attribution, timestamps, agent names,
+        /// supporting sentences. Was `callout` (12pt).
+        static let meta = Font.subheadline
+        /// Spec `caption`, 11/400, under the spec's own name.
+        static let caption = Font.subheadline
+        /// Spec `caption.small`, 10.5/400. The read-gate footnote.
+        static let captionSmall = Font.system(size: 10.5)
+        /// Spec `eyebrow`, 10/800 uppercase, tracked. Field labels on the
+        /// manifest strip. See `Tracking.eyebrow`.
         static let fieldLabel = Font.caption2.weight(.heavy)
-        /// Figures on the manifest strip, and anything else countable.
-        static let ledger = Font.system(.footnote, design: .monospaced)
+        /// Spec `mono.figure`, 12/500 mono. Figures on the manifest strip, and
+        /// anything else countable. Was `footnote`-sized mono (10pt).
+        static let ledger = Font.system(.callout, design: .monospaced)
             .weight(.medium)
+        /// Spec `mono.chip`, 11/500 mono. Status-pill text.
+        static let monoChip = Font.system(.subheadline, design: .monospaced)
+            .weight(.medium)
+        /// Spec `mono.badge`, 10/500 mono. Tab counts.
+        static let monoBadge = Font.system(.caption2, design: .monospaced)
+            .weight(.medium)
+        /// Spec `mono.code`, 11/400 mono. Search excerpts.
+        static let monoCode = Font.system(.subheadline, design: .monospaced)
+        /// Spec `mono.transcript`, 11/400 mono. The transcript renderer's
+        /// body. Set it with `LineHeight.transcript`.
+        static let monoTranscript = Font.system(.subheadline, design: .monospaced)
         /// Footnotes and disclosure text.
         static let footnote = Font.caption
+
+        /// Letter-spacing, in points. Only the eyebrow is tracked; macOS
+        /// widens it to 0.5, GNOME to 0.8.
+        enum Tracking {
+            static let eyebrow: CGFloat = 0.5
+        }
+
+        /// Line-height multiples from the mockups. SwiftUI's `lineSpacing` is
+        /// the gap ADDED between lines, not the line box, so a multiple has to
+        /// be converted against the size it applies to -- `spacing(for:_:)`
+        /// does that.
+        enum LineHeight {
+            static let body: CGFloat = 1.45
+            static let caption: CGFloat = 1.5
+            static let transcript: CGFloat = 1.7
+
+            /// Extra spacing to pass to `.lineSpacing()` for `size` type set
+            /// at `multiple`. Approximates the default line box as 1.2x.
+            static func spacing(for size: CGFloat, _ multiple: CGFloat) -> CGFloat {
+                max(0, size * (multiple - 1.2))
+            }
+        }
     }
 
     // MARK: - Palette
@@ -169,32 +323,112 @@ enum TC {
         }
     }()
 
-    private static func hex(_ value: UInt32) -> NSColor {
+    private static func hex(_ value: UInt32, alpha: Double = 1) -> NSColor {
         NSColor(
             srgbRed: Double((value >> 16) & 0xFF) / 255,
             green: Double((value >> 8) & 0xFF) / 255,
             blue: Double(value & 0xFF) / 255,
-            alpha: 1
+            alpha: alpha
         )
     }
 
-    /// Site `--bg`. The ground a person reads on. Warm, never neutral grey.
-    static let ground = dynamic(hex(0xF6F7F4), hex(0x15170F).blended(withFraction: 0.06, of: .white)!)
-    /// Site `--surface`. Card faces.
-    static let surface = dynamic(hex(0xFFFFFF), hex(0x21241E))
-    /// Site `--surface-2`. Recessed strips inside a card.
-    static let surfaceInset = dynamic(hex(0xEEF2F0), hex(0x2A2E27))
-    /// Site `--line`.
-    static let line = dynamic(hex(0xD9DFDC), hex(0x3B4038))
+    // MARK: Grounds and surfaces
 
-    /// Site `--green`. Primary. Good standing, and the app's accent.
+    /// Spec `bg.window`, site `--bg`. The ground a person reads on. Warm,
+    /// never neutral grey.
+    ///
+    /// The dark value used to be written as `#15170F` blended 6% toward white;
+    /// that expression resolves to exactly `#23251D`, which is the value the
+    /// mockups state, so it is now written literally.
+    static let ground = dynamic(hex(0xF6F7F4), hex(0x23251D))
+    /// Spec `bg.window` as the translucent content-header ground:
+    /// `rgba(246,247,244,.9)` light, `rgba(35,37,29,.92)` dark.
+    static let groundTranslucent = dynamic(hex(0xF6F7F4, alpha: 0.9), hex(0x23251D, alpha: 0.92))
+    /// Spec `bg.sidebar.macos`. The `NavigationSplitView` sidebar ground, for
+    /// the places the app draws its own sidebar fill instead of the system's.
+    static let sidebarGround = dynamic(hex(0xECEEE8), hex(0x262922))
+    /// Spec `bg.chrome.windows`. Recorded for palette completeness only -- the
+    /// macOS shell never draws Windows title-bar chrome.
+    static let chromeGroundWindows = dynamic(hex(0xF3F3F0), hex(0x2B2D28))
+    /// Spec `surface.card`, site `--surface`. Card faces, popovers, inputs.
+    static let surface = dynamic(hex(0xFFFFFF), hex(0x21241E))
+    /// Spec `surface.inset`, site `--surface-2`. Recessed strips inside a
+    /// card; segmented-control tracks.
+    static let surfaceInset = dynamic(hex(0xEEF2F0), hex(0x2A2E27))
+    /// Spec `surface.scrim`. A wash over whatever is behind it -- code blocks
+    /// inside search results, segmented tracks.
+    static let surfaceScrim = dynamic(hex(0x000000, alpha: 0.06), hex(0xFFFFFF, alpha: 0.08))
+    /// Spec `surface.selected.macos`. The selected sidebar row.
+    static let surfaceSelected = dynamic(hex(0x000000, alpha: 0.07), hex(0xFFFFFF, alpha: 0.10))
+
+    // MARK: Hairlines
+
+    /// Spec `hairline`, site `--line`. Card borders, input borders, section
+    /// rules, sheet dividers.
+    static let line = dynamic(hex(0xD9DFDC), hex(0x3B4038))
+    /// Spec `hairline.divider`. Structural edges rather than object edges: the
+    /// sidebar's right edge, the content header's bottom edge. A shade apart
+    /// from `line` on purpose, and only distinguishable side by side.
+    static let divider = dynamic(hex(0xDDDFD8), hex(0x373A33))
+
+    // MARK: Ink
+
+    /// Spec `ink.primary`. Body and title text.
+    static let inkPrimary = dynamic(hex(0x20241F), hex(0xE8EAE3))
+    /// Spec `ink.secondary`. Supporting prose, sub-labels, muted icons.
+    static let inkSecondary = dynamic(hex(0x5C635B), hex(0xA6AC9F))
+    /// Spec `ink.tertiary`. Timestamps, eyebrow labels, footnotes.
+    ///
+    /// The mockups state `#8A9086` light and `#82887C` dark, and both are
+    /// refused here. Every role the spec assigns this token is small text, and
+    /// the stated pair does not clear the 4.5:1 floor in any of the four
+    /// combinations it has to survive: 3.04:1 on `ground` and 3.27:1 on
+    /// `surface` in light, 4.26:1 and 4.31:1 in dark. What ships instead is the
+    /// nearest accessible twin on the same hue and saturation -- 4.58:1 and
+    /// 4.93:1 light, 4.55:1 and 4.61:1 dark -- which keeps the three-step ink
+    /// ramp the spec is after without setting a timestamp in a grey a person
+    /// cannot read.
+    ///
+    /// This is the same move the accents already make below, and for the same
+    /// reason: the palette is tuned for fills and borders, where 3:1 is the
+    /// bar, and small type needs a darkened twin. The Linux client refuses the
+    /// identical pair with the identical substitutes, so the two clients agree.
+    static let inkTertiary = dynamic(hex(0x6D7269), hex(0x878D81))
+
+    // MARK: Accents
+
+    /// Spec `green.brand`, site `--green`. Primary. Good standing, the app's
+    /// accent, and the mark's top-left bracket.
     static let green = dynamic(hex(0x178F70), hex(0x3FBE9A))
-    /// Site `--blue`. Secondary. Held, ranked, in progress.
+    /// Spec `blue.brand`, site `--blue`. Secondary. Held, ranked, in progress,
+    /// and the mark's bottom-right bracket.
+    ///
+    /// The mockups carry two blues one digit apart -- `#315FBA` on the mark and
+    /// chip borders, `#315FBB` on icon strokes and chip text. They are the same
+    /// intended colour; the whole app standardises on `#315FBA`, the mark blue.
     static let blue = dynamic(hex(0x315FBA), hex(0x7FA0EC))
-    /// Site `--gold`. Weigh this before deciding.
+    /// Spec `blue.icon`. The "held for privacy review" clock glyph and its
+    /// chip text. Light is `#315FBA`, not the mockups' `#315FBB` -- see `blue`.
+    static let blueIcon = dynamic(hex(0x315FBA), hex(0x9DB6F1))
+    /// Spec `gold.brand`, site `--gold`. Weigh this before deciding.
     static let gold = dynamic(hex(0xB9821F), hex(0xDCAA43))
-    /// Site `--coral`. Refused, withdrawn, cannot proceed.
+    /// Spec `gold.highlight`. The wash behind a matched search term inside
+    /// excerpt text. A fill, never a text colour.
+    static let goldHighlight = dynamic(hex(0xB9821F, alpha: 0.28), hex(0xDCAA43, alpha: 0.32))
+    /// Spec `coral.brand`, site `--coral`. Refused, withdrawn, cannot proceed.
+    /// The mockups never draw coral in dark; the dark value is derived here on
+    /// the same rule as the other accents.
     static let coral = dynamic(hex(0xD65D4F), hex(0xF2887A))
+
+    // MARK: Redaction chip
+
+    /// Spec `redaction.chip.bg` / `redaction.chip.fg`. The marker that stands
+    /// in the transcript where something was removed. Measured in the mockups
+    /// at 12.3:1 light and 9:1 dark, which is why this pair is stated rather
+    /// than composed from the gold ramp.
+    static let redactionChipBackground = dynamic(hex(0xF3E3C0), hex(0x4A3C18))
+    /// See `redactionChipBackground`.
+    static let redactionChipForeground = dynamic(hex(0x202426), hex(0xF0EBDD))
 
     // Fill-safe counterparts for a FILLED primary action.
     //
@@ -216,10 +450,15 @@ enum TC {
     // recognisably the accent) and dark flips the label instead of dulling
     // the mint, because the mint is what makes the dark scheme feel like the
     // same product.
-    /// Fill for a filled primary action. Not the same value as `green`.
+    /// Spec `green.fill`. Fill for a filled primary action. Not the same value
+    /// as `green`.
     static let primaryFill = dynamic(hex(0x137C61), hex(0x3FBE9A))
-    /// Label colour that sits on `primaryFill` at >= 4.5:1 in both schemes.
-    static let primaryLabel = dynamic(hex(0xFFFFFF), hex(0x0B1F19))
+    /// Spec `on.accent`. Label colour that sits on `primaryFill` at >= 4.5:1 in
+    /// both schemes. Light was `#FFFFFF`; the mockups state `#FEFEFE`.
+    static let primaryLabel = dynamic(hex(0xFEFEFE), hex(0x0B1F19))
+    /// Spec `on.accent`, under the spec's own name. Text or glyph on any
+    /// filled accent, not only the primary button.
+    static let onAccent = primaryLabel
 
     // Text-safe counterparts.
     //
@@ -231,10 +470,56 @@ enum TC {
     // strokes and borders keep the site's exact value. The hue is preserved;
     // only the lightness moves, so the family resemblance survives and the
     // text is legible.
+    /// Spec `green.text`.
     static let greenText = dynamic(hex(0x0F7256), hex(0x5CD3AF))
+    /// Spec `gold.text`.
     static let goldText = dynamic(hex(0x8A5F12), hex(0xE2B75C))
+    /// Spec `coral.text`. Dark is not drawn in the mockups; derived here.
     static let coralText = dynamic(hex(0xB8483B), hex(0xF79C8F))
+    /// Spec `blue.icon` in its text role. Same pair as `blueIcon`.
     static let blueText = dynamic(hex(0x315FBA), hex(0x9DB6F1))
+
+    // MARK: - Platform chrome
+
+    /// The macOS traffic lights, for the frames that draw their own window
+    /// chrome rather than taking the system's. 12 x 12pt circles, 8pt apart.
+    enum TrafficLight {
+        static let close = dynamic(hex(0xFF5F57), hex(0xFF5F57))
+        static let minimise = dynamic(hex(0xFEBC2E), hex(0xFEBC2E))
+        static let zoom = dynamic(hex(0x28C840), hex(0x28C840))
+        static let diameter: CGFloat = 12
+        static let gap: CGFloat = 8
+    }
+
+    // MARK: - Borders
+
+    /// Hairline weights and the alphas the mockups draw borders at.
+    ///
+    /// A status chip's border is not its status hue at full strength -- it is a
+    /// 45% wash of it, so the chip reads as a token rather than as a button.
+    /// Attention borders on cards and banners are drawn stronger, because a
+    /// card that wants weighing has to be findable down a scrolling column.
+    ///
+    /// Shadows are deliberately absent. Inside the window this app separates
+    /// things with hairlines; the mockups' `0 18px 44px` shadows describe the
+    /// elevation of the window frames in the design document, not in-app
+    /// elevation.
+    enum Border {
+        /// Every native hairline: 1pt.
+        static let hairline: CGFloat = 1
+        /// 1.5pt. Heavier than a hairline, and used where a border is the only
+        /// thing drawing an object rather than separating two of them: the
+        /// unchecked read-gate box of §6.9, whose outline IS the control.
+        static let medium: CGFloat = 1.5
+        /// Status-chip borders.
+        static let chipAlpha: Double = 0.45
+        /// Cards and banners asking to be weighed.
+        static let attentionAlpha: Double = 0.55
+        static let attentionAlphaDark: Double = 0.6
+        /// The selected tab in a segmented control.
+        static let activeTabAlpha: Double = 0.55
+        static let activeTabAlphaDark: Double = 0.6
+    }
 
     // MARK: - Colour roles
 
@@ -293,135 +578,9 @@ enum TC {
     }
 }
 
-// MARK: - The mark
-
-/// The TraceCommons mark, as pure geometry.
-///
-/// A direct transcription of `.brand-mark` in `community/public/styles.css`:
-/// a square on the surface colour with a hairline border, a green wedge cut
-/// from the top-left corner at 38% along the leading diagonal, and a blue
-/// field beyond 45% along the other. No asset, no bundled image, and it
-/// stays crisp at every size the app uses it at.
-///
-/// `monochrome` is the menu-bar variant, and it is a reduction rather than a
-/// desaturation. Filled flat in one tint the two wedges touch, merge, and
-/// cover most of the square -- a heavy dark blob in a menu bar full of light
-/// line art. So the monochrome build keeps the green wedge solid, drops the
-/// blue field to a wash, opens a hairline seam between them, and draws the
-/// square's border. The two-shape relationship survives; the weight does
-/// not. Everything is expressed in `.primary`, so the system tints it for a
-/// light or dark menu bar and inverts it while the menu is open.
-/// `reveal` drives the one piece of motion in the app -- see `BrandMarkIntro`.
-/// At `1` the mark is exactly the site's. Below that, each wedge is drawn
-/// back along its own diagonal, so the mark assembles from its own geometry
-/// rather than fading or sliding as a picture would.
-struct BrandMark: View {
-    var size: CGFloat = 28
-    var monochrome: Bool = false
-    var reveal: Double = 1
-
-    var body: some View {
-        ZStack {
-            BlueField(reveal: reveal)
-                .fill(monochrome ? Color.primary.opacity(0.35) : TC.blue)
-            GreenWedge(reveal: reveal, seam: monochrome ? 0.10 : 0)
-                .fill(monochrome ? Color.primary : TC.green)
-        }
-        .frame(width: size, height: size)
-        .background(monochrome ? Color.clear : TC.surface)
-        .overlay {
-            Rectangle().strokeBorder(
-                monochrome ? Color.primary.opacity(0.55) : TC.line,
-                lineWidth: TC.Space.hairline
-            )
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// Site: `linear-gradient(135deg, var(--green) 0 38%, transparent 38% 100%)`.
-/// The 38% stop along the leading diagonal puts the cut at `x + y = 0.76`.
-private struct GreenWedge: Shape {
-    var reveal: Double
-    var seam: CGFloat
-
-    var animatableData: Double {
-        get { reveal }
-        set { reveal = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let t = (0.76 - seam) * max(0, min(1, reveal))
-        var path = Path()
-        path.move(to: rect.origin)
-        path.addLine(to: CGPoint(x: rect.minX + t * rect.width, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + t * rect.height))
-        path.closeSubpath()
-        return path
-    }
-}
-
-/// Site: `linear-gradient(45deg, transparent 0 45%, var(--blue) 45% 100%)`.
-/// The 45% stop along the other diagonal puts the cut at `y = x + 0.1`.
-/// Revealing sweeps that cut in from the top-right corner.
-private struct BlueField: Shape {
-    var reveal: Double
-
-    var animatableData: Double {
-        get { reveal }
-        set { reveal = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let d = -1 + 1.1 * max(0, min(1, reveal))
-        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: rect.minX + x * rect.width, y: rect.minY + y * rect.height)
-        }
-        var path = Path()
-        if d <= 0 {
-            // The cut crosses the top and right edges.
-            path.move(to: point(-d, 0))
-            path.addLine(to: point(1, 0))
-            path.addLine(to: point(1, 1 + d))
-        } else {
-            // The cut has passed the corner and now crosses left and bottom.
-            path.move(to: point(0, d))
-            path.addLine(to: point(0, 0))
-            path.addLine(to: point(1, 0))
-            path.addLine(to: point(1, 1))
-            path.addLine(to: point(1 - d, 1))
-        }
-        path.closeSubpath()
-        return path
-    }
-}
-
-/// The mark, assembling itself once, on the first screen a contributor ever
-/// sees.
-///
-/// The community site has no motion at all -- there is not one `transition`,
-/// `@keyframes` or `requestAnimationFrame` in it -- so there was nothing to
-/// port. This is the one moment of motion in the app, and it is built from
-/// the only thing the brand actually owns: the mark's two diagonals. Each
-/// wedge draws in along its own axis and stops. There is no loop, no
-/// bounce, no ambient drift, and no second animated thing anywhere else in
-/// the product, because an app that asks to be trusted with somebody's
-/// source code should not fidget.
-///
-/// It respects Reduce Motion by rendering the finished mark immediately.
-struct BrandMarkIntro: View {
-    var size: CGFloat
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var reveal: Double = 0
-
-    var body: some View {
-        BrandMark(size: size, reveal: reduceMotion ? 1 : reveal)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeOut(duration: 0.85).delay(0.15)) { reveal = 1 }
-            }
-    }
-}
+// The mark used to be transcribed here as the site's `.brand-mark` gradient
+// square. That mark is superseded: the clients now carry "The Turn", drawn in
+// `BrandMark.swift` from the tokens above.
 
 // MARK: - Card
 
@@ -476,10 +635,14 @@ struct TCPrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            // Spec §6.1: primary is `label.control.primary` (12/600) padded
+            // `5px 12-14px`. It was 13/600 at `12x8`, which drew the filled
+            // action a step larger than the outlined buttons standing beside
+            // it in the same row -- an emphasis the palette already carries.
+            .font(TC.Font_.labelControlPrimary)
             .foregroundStyle(TC.primaryLabel)
             .padding(.horizontal, TC.Space.m)
-            .padding(.vertical, TC.Space.s)
+            .padding(.vertical, TC.Space.control)
             .background(
                 RoundedRectangle(cornerRadius: TC.Radius.inset, style: .continuous)
                     .fill(TC.primaryFill)
@@ -561,14 +724,52 @@ struct TCTag: View {
                 .imageScale(.small)
             Text(text)
         }
-        .font(TC.Font_.ledger)
+        // Spec §6.2: `mono.chip` at 11/500, padded `2px 8px`. It was set in
+        // `ledger` (12pt) at `8x3`, which made a status token the same size as
+        // the manifest figures it sits beside; the chip is an annotation on a
+        // row, not one of the row's facts.
+        .font(TC.Font_.monoChip)
         .foregroundStyle(tone.textColor)
         .padding(.horizontal, TC.Space.s)
-        .padding(.vertical, 3)
+        .padding(.vertical, TC.Space.micro)
         .overlay {
             Capsule().strokeBorder(tone.color.opacity(0.45), lineWidth: TC.Space.hairline)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The read gate's box, spec §6.9: a 13pt square at `radius.checkbox`, filled
+/// `green.brand` with a white tick when checked and outlined in `ink.tertiary`
+/// at 1.5pt when not.
+///
+/// It is drawn rather than taken from `Toggle(.checkbox)` because the read gate
+/// is not a control -- nothing here is clickable on its own. It is the app
+/// REPORTING a condition it has observed (the transcript tab was opened; the
+/// acknowledgement was given), and a system checkbox would invite a person to
+/// click the report instead of doing the thing it reports. The tick is what
+/// carries the state, not the fill, so it survives greyscale.
+///
+/// Accessibility-hidden on purpose: every call site combines it into a row
+/// whose label already says the condition in words.
+struct TCReadGateCheckbox: View {
+    var checked: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: TC.Radius.checkbox)
+            .fill(checked ? TC.green : Color.clear)
+            .overlay {
+                if checked {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(TC.onAccent)
+                } else {
+                    RoundedRectangle(cornerRadius: TC.Radius.checkbox)
+                        .strokeBorder(TC.inkTertiary, lineWidth: TC.Border.medium)
+                }
+            }
+            .frame(width: TC.Control.checkbox, height: TC.Control.checkbox)
+            .accessibilityHidden(true)
     }
 }
 

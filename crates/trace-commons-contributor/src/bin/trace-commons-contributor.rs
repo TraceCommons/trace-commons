@@ -6,7 +6,9 @@ use trace_commons_contributor::config::ConfigStore;
 #[derive(Parser)]
 #[command(
     name = "trace-commons-contributor",
-    version,
+    // The semver does not move when a deploy does, so --version carries the
+    // commit the binary was built from as well.
+    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")),
     about = "Submit local coding-agent traces to Trace Commons"
 )]
 struct Cli {

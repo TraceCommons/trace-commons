@@ -159,12 +159,65 @@ fn strip_volatile(value: &mut serde_json::Value) {
 /// version bump.
 pub const REDACTION_RULESET_VERSION: &str = "1";
 
+/// Contributor-config fields that are deliberately **not** fingerprinted,
+/// with the reason each one is out.
+///
+/// All three are this device's local cache of its public roster profile
+/// (`config::ContributorConfig::display_handle` and the two fields beside
+/// it). None of them reaches the envelope: `build_raw_contribution` never
+/// reads them, the server derives the roster principal from the
+/// authenticated request rather than from anything in a body, and a handle
+/// is public by construction -- so no consent decision a contributor made
+/// about a queued trace turns on any of them.
+///
+/// Fingerprinting them was actively harmful rather than merely redundant.
+/// The cache is rewritten on every `set_public_profile` and every
+/// `clear_public_profile`, and a moved fingerprint revokes **every** approved
+/// entry in the queue (the `REASON_INPUTS_CHANGED` guard in `uploader`). So
+/// claiming a handle silently re-asked the contributor to approve every
+/// upload they had already approved -- a consent prompt raised by an action
+/// with no consent content in it, which is how contributors learn to click
+/// through the prompt that does matter.
+///
+/// A field left off this list is fingerprinted, and that is the safe
+/// default: over-invalidating re-asks, under-invalidating sends something
+/// the contributor did not approve. Adding a field to `ContributorConfig`
+/// therefore needs no edit here to be *safe* -- but
+/// `every_config_field_is_a_deliberate_fingerprint_decision` pins the whole
+/// field set, so the addition fails that test until someone says which side
+/// of this line the new field falls on.
+const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "public_since"];
+
+/// The contributor config reduced to its envelope-determining fields, as
+/// canonical bytes for [`input_fingerprint`].
+///
+/// Serialized whole and then narrowed by name rather than rebuilt field by
+/// field: a field added to `ContributorConfig` later is covered without
+/// anyone remembering to come back here, and dropping one out of the
+/// fingerprint takes a deliberate entry in `NON_ENVELOPE_CONFIG_FIELDS`.
+///
+/// `serde_json::Value`'s map is a `BTreeMap` under this crate's feature set,
+/// so the re-serialization is key-ordered and these bytes are stable for a
+/// given config.
+fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
+    let Ok(mut value) = serde_json::to_value(cfg) else {
+        return Vec::new();
+    };
+    if let Some(map) = value.as_object_mut() {
+        for field in NON_ENVELOPE_CONFIG_FIELDS {
+            map.remove(*field);
+        }
+    }
+    serde_json::to_vec(&value).unwrap_or_default()
+}
+
 /// A fingerprint of everything outside the session file that determines the
-/// envelope: the whole contributor config (consent scopes, PII filter
-/// selection, tenant/instance/subject/device identity, audience, endpoints,
-/// host allowlist), the presence and identity of the NEAR AI
-/// privacy-filter backend, and the redaction ruleset/build this daemon is
-/// running.
+/// envelope: the envelope-determining fields of the contributor config
+/// (consent scopes, PII filter selection, tenant/instance/subject/device
+/// identity, audience, endpoints, host allowlist -- that is, everything
+/// except `NON_ENVELOPE_CONFIG_FIELDS`), the presence and identity of the
+/// NEAR AI privacy-filter backend, and the redaction ruleset/build this
+/// daemon is running.
 ///
 /// Cheap -- no redaction pass, no network -- so it is recorded on every
 /// approval and re-derived before every upload, including for entries that
@@ -182,10 +235,7 @@ pub const REDACTION_RULESET_VERSION: &str = "1";
 /// See the note at the daemon's construction site in `daemon::drain_approved`.
 pub fn input_fingerprint(cfg: &ContributorConfig, near_ai: Option<&NearAiSettings>) -> String {
     let mut h = Sha256::new();
-    // Serialized rather than field-by-field so a field added to
-    // `ContributorConfig` later is covered without anyone remembering to
-    // come back here.
-    h.update(serde_json::to_vec(cfg).unwrap_or_default().as_slice());
+    h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
     h.update(REDACTION_RULESET_VERSION.as_bytes());
     h.update(b"\x00");
@@ -277,6 +327,18 @@ pub struct PreviewSummary {
     /// envelope carries, so an approval given afterwards is fingerprinted
     /// against the real config and a fresh preview is what it covers.
     pub enrolled: bool,
+    /// How many delegated subagent transcripts this envelope merges in, and
+    /// how many the source left out to keep the conversation under its raw
+    /// byte budget.
+    ///
+    /// The second number is the one that matters here. A group trimmed to
+    /// fit is a conversation the contributor is being shown *less* of than
+    /// exists on disk, and a preview that did not say so would describe a
+    /// complete conversation while covering a partial one. The trim is
+    /// decided in the adapter's `load`, so this describes both the bytes
+    /// previewed and the bytes an upload sends -- they are the same bytes.
+    pub subagent_count: u32,
+    pub subagents_dropped: u32,
 }
 
 /// Redact one session without uploading and describe exactly what would be
@@ -380,6 +442,8 @@ pub async fn build_preview(
             envelope_digest: digest,
             input_fingerprint: fingerprint,
             enrolled,
+            subagent_count: transcript.subagent_count,
+            subagents_dropped: transcript.subagents_dropped,
         },
         body,
         envelope,
@@ -403,6 +467,174 @@ pub async fn build_preview(
 pub fn body_of(envelope: &TraceContributionEnvelope) -> Result<String> {
     serde_json::to_string_pretty(&envelope.events)
         .map_err(|_| anyhow::anyhow!("preview-body-serialize-failed"))
+}
+
+/// One separator in the transcript view: a labelled span of the preview
+/// body, never a re-rendering of it.
+///
+/// `byte_offset` and `byte_len` are a half-open range into the **exact**
+/// string [`body_of`] returns for the same envelope. A client renders the
+/// body verbatim and draws a separator at each `byte_offset`; nothing here
+/// replaces a byte of it. That is the whole design: the transcript tab is
+/// titled "exactly what would be sent", and a prose re-render would quietly
+/// drop `structured_payload`, `token_counts`, `latency_ms`, `cost_usd` and
+/// `failure_modes` -- showing a contributor *less* than what an approval
+/// covers, under a heading promising the opposite.
+///
+/// `index` is 0-based, so it indexes this vector directly; a client
+/// displaying "turn 1" for the first separator renders `index + 1`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PreviewTurn {
+    pub index: usize,
+    /// The wire name of the event type that opens this turn -- `user_message`,
+    /// `assistant_message`, `tool_call`, and so on. Identical to the
+    /// `event_type` string inside the bytes at `byte_offset`, so a client
+    /// never has to reconcile two vocabularies.
+    pub role: String,
+    /// The tool this turn invoked, when the opening event names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    pub byte_offset: usize,
+    pub byte_len: usize,
+}
+
+/// The fixed label reported when the body cannot be indexed. Fail-closed:
+/// an index that is not certainly exact is worse than no index at all,
+/// because it would draw a separator over the wrong text.
+pub const REASON_TURN_INDEX_FAILED: &str = "preview-turn-index-failed";
+
+/// The turn index for one envelope: where each turn starts and ends inside
+/// [`body_of`]'s output, and what to label it.
+///
+/// Deliberately an *overlay*, computed from the body [`body_of`] actually
+/// produced rather than from a second serialization of the events. The
+/// offsets are found by scanning that string for its top-level array
+/// elements, so there is no second spelling of the body to drift from the
+/// first -- the same argument [`body_of`]'s own doc comment makes.
+/// `turn_offsets_land_on_the_exact_event_bytes` re-parses every span and
+/// requires it to be the event it claims to be, because an offset that has
+/// drifted by one element silently labels the wrong turn.
+///
+/// # Grouping: a tool call and its result are one turn
+///
+/// A `tool_call` followed **immediately** by the `tool_result` carrying the
+/// same `tool_call_id` is indexed as a single turn spanning both events.
+/// One invocation of one tool is one thing that happened; splitting it puts
+/// a separator between a command and its output, and doubles the separator
+/// count on exactly the traces (long agentic runs) where the index is meant
+/// to help someone navigate.
+///
+/// The pairing is required to be explicit and adjacent, and everything else
+/// is one turn per event: an unmatched call, a result whose call is missing,
+/// a call whose result was reordered or filtered out by redaction, and a
+/// pair with no `tool_call_id` to correlate on all stay separate. Guessing a
+/// pair would mean labelling a byte range that spans two unrelated events --
+/// the one failure this index must not have. In practice this means the
+/// claude-code source, whose records carry no call id to correlate on, is
+/// indexed one turn per event, and a source that does carry one (a
+/// trajectory export) gets the grouped form.
+pub fn turns_of(envelope: &TraceContributionEnvelope) -> Result<Vec<PreviewTurn>> {
+    let body = body_of(envelope)?;
+    let spans = top_level_object_spans(&body)
+        .ok_or_else(|| anyhow::anyhow!("{}", REASON_TURN_INDEX_FAILED))?;
+    // The scan found a different number of elements than the envelope has
+    // events, so one of the two is not what this function believes it is.
+    // Refuse rather than index by position.
+    if spans.len() != envelope.events.len() {
+        return Err(anyhow::anyhow!("{}", REASON_TURN_INDEX_FAILED));
+    }
+
+    let events = &envelope.events;
+    let mut turns = Vec::new();
+    let mut i = 0usize;
+    while i < events.len() {
+        let event = &events[i];
+        let (start, mut end) = spans[i];
+        let mut consumed = 1usize;
+        if event.event_type == TraceContributionEventType::ToolCall {
+            if let (Some(call_id), Some(next)) = (event.tool_call_id.as_deref(), events.get(i + 1))
+            {
+                if next.event_type == TraceContributionEventType::ToolResult
+                    && next.tool_call_id.as_deref() == Some(call_id)
+                {
+                    end = spans[i + 1].1;
+                    consumed = 2;
+                }
+            }
+        }
+        turns.push(PreviewTurn {
+            index: turns.len(),
+            role: wire_name(event.event_type),
+            tool_name: event.tool_name.clone(),
+            byte_offset: start,
+            byte_len: end - start,
+        });
+        i += consumed;
+    }
+    Ok(turns)
+}
+
+/// Byte spans of the top-level elements of a pretty-printed JSON array of
+/// objects, as half-open `(start, end)` pairs into `body`.
+///
+/// A structural scan rather than a re-serialization, for the reason in
+/// [`turns_of`]: the offsets have to describe the bytes that exist, not the
+/// bytes a second pretty-printer would produce. Returns `None` for anything
+/// that is not an array whose every element is an object -- which
+/// [`body_of`] never produces, and which this refuses to index rather than
+/// guess at.
+fn top_level_object_spans(body: &str) -> Option<Vec<(usize, usize)>> {
+    let bytes = body.as_bytes();
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+    let mut opened_outer = false;
+    for (i, &c) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                if depth == 0 {
+                    // The document itself must be the array of events.
+                    if c != b'[' {
+                        return None;
+                    }
+                    opened_outer = true;
+                } else if depth == 1 {
+                    // An element. Every event serializes as an object; an
+                    // array here means this is not the document this
+                    // function was written for.
+                    if c != b'{' {
+                        return None;
+                    }
+                    start = i;
+                }
+                depth += 1;
+            }
+            b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 1 {
+                    spans.push((start, i + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || in_string || !opened_outer {
+        return None;
+    }
+    Some(spans)
 }
 
 /// Serde's wire name for a `Serialize` value that serializes to a bare
@@ -439,6 +671,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 
@@ -461,6 +696,108 @@ mod tests {
         let src = ClaudeCodeSource::new(root);
         let r = src.discover().unwrap().remove(0);
         (dir, src, r)
+    }
+
+    /// A session with `members` delegated transcripts beside it, each
+    /// carrying `body` repeated to `member_bytes`.
+    fn grouped_session(
+        members: usize,
+        member_filler: usize,
+    ) -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let session = "11111111-1111-1111-1111-111111111111";
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{session}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                 \"content\":\"the human's own opening question\"}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"{session}\",\"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        let subagents = project.join(session).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        for i in 0..members {
+            let filler = "lorem ipsum ".repeat(member_filler);
+            std::fs::write(
+                subagents.join(format!("agent-{i:03}.jsonl")),
+                format!(
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                     \"content\":\"planted-in-subagent-{i} {filler}\"}},\
+                     \"cwd\":\"/Users/testuser/code/myproj\",\
+                     \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                     \"sessionId\":\"{session}\",\"uuid\":\"s{i}\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    #[tokio::test]
+    async fn a_previewed_group_shows_the_human_prompt_and_the_delegated_content() {
+        // Both halves of the bug this fixes. The opening prompt must be the
+        // contributor's own first message -- a subagent card used to render
+        // an instruction written by the parent agent in that slot -- and the
+        // body the contributor reads must actually contain the delegated
+        // work, because that is what the upload sends.
+        let (_d, src, r) = grouped_session(3, 1);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.subagent_count, 3);
+        assert_eq!(summary.subagents_dropped, 0);
+        assert!(
+            summary.opening_prompt.contains("the human's own opening"),
+            "got {:?}",
+            summary.opening_prompt
+        );
+        for i in 0..3 {
+            assert!(
+                body.contains(&format!("planted-in-subagent-{i}")),
+                "member {i} missing from the previewed body"
+            );
+        }
+        assert_eq!(
+            summary.event_count,
+            envelope.events.len(),
+            "the count shown must be the count sent"
+        );
+        // One turn per file plus a group header plus one marker per member.
+        assert_eq!(summary.event_count, 1 + 1 + 3 + 3);
+    }
+
+    #[tokio::test]
+    async fn a_114_member_group_still_fits_the_envelope_cap() {
+        // The plan's ratio (42 MB raw to a 2.8 MB envelope) is one
+        // observation, and `GROUP_RAW_BYTE_BUDGET` is set on the assumption
+        // that it holds with room to spare. This is the measurement rather
+        // than the assumption: the largest group on the probed machine had
+        // 114 members, and a group that overruns the cap is refused whole.
+        let (_d, src, r) = grouped_session(114, 200);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(summary.subagent_count, 114);
+        assert_eq!(summary.subagents_dropped, 0, "nothing should need dropping");
+        assert!(
+            summary.would_send_bytes < crate::envelope::MAX_ENVELOPE_BYTES,
+            "114 members produced {} bytes against a {} cap",
+            summary.would_send_bytes,
+            crate::envelope::MAX_ENVELOPE_BYTES
+        );
     }
 
     #[tokio::test]
@@ -734,6 +1071,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claiming_a_public_handle_does_not_invalidate_the_approved_backlog() {
+        // The whole point of `NON_ENVELOPE_CONFIG_FIELDS`. A contributor who
+        // claims, edits, or withdraws a public handle has said nothing about
+        // any queued trace, so every approval they have already given must
+        // survive it -- otherwise the uploader re-offers the entire backlog
+        // under `approval-inputs-changed`.
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let base = sample_cfg(&store);
+        let baseline = input_fingerprint(&base, None);
+
+        let mut claimed = base.clone();
+        claimed.display_handle = Some("quiet-otter".into());
+        claimed.public_bio = Some("Ships billing systems by day.".into());
+        claimed.public_since = Some(chrono::Utc::now());
+        assert_eq!(
+            baseline,
+            input_fingerprint(&claimed, None),
+            "claiming a handle must not move the fingerprint"
+        );
+
+        let mut renamed = claimed.clone();
+        renamed.display_handle = Some("loud-otter".into());
+        renamed.public_bio = None;
+        assert_eq!(
+            baseline,
+            input_fingerprint(&renamed, None),
+            "editing a published profile must not move the fingerprint"
+        );
+    }
+
+    #[test]
+    fn every_config_field_is_a_deliberate_fingerprint_decision() {
+        // The blanket property `input_fingerprint` is built on is "hash the
+        // config whole", which only stays trustworthy while every exception
+        // to it is written down. This pins the full serialized field set so
+        // that adding a field to `ContributorConfig` fails here until
+        // whoever added it decides whether it determines the envelope. The
+        // safe answer -- and the default if they simply drop it into the
+        // list below -- is that it does.
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let value = serde_json::to_value(&cfg).unwrap();
+        let mut all: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            vec![
+                "allowed_hosts",
+                "audience",
+                "consent_scopes",
+                "device_key_id",
+                "display_handle",
+                "ingest_url",
+                "instance_id",
+                "issuer_url",
+                "pii_filter",
+                "public_bio",
+                "public_since",
+                "schema_version",
+                "tenant_id",
+                "user_subject",
+            ],
+            "a new ContributorConfig field must be classified: leave it out of \
+             NON_ENVELOPE_CONFIG_FIELDS to fingerprint it, or add it there with a reason"
+        );
+
+        // And the exclusions must name fields that actually exist -- a typo
+        // would silently fingerprint the field it meant to drop.
+        for field in NON_ENVELOPE_CONFIG_FIELDS {
+            assert!(
+                all.contains(field),
+                "NON_ENVELOPE_CONFIG_FIELDS names {field}, which is not a config field"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_digest_moves_when_the_envelope_does() {
         // Same session bytes, different envelope-determining config: the
@@ -752,5 +1171,168 @@ mod tests {
             .unwrap();
         assert_ne!(a.envelope_digest, b.envelope_digest);
         assert_ne!(a.input_fingerprint, b.input_fingerprint);
+    }
+
+    /// An envelope from the real pipeline, with synthetic tool events
+    /// appended so the grouping rule has something to group. Cloning the
+    /// redacted event keeps every required field real; only the fields the
+    /// index reads are changed.
+    async fn envelope_with_tool_events() -> TraceContributionEnvelope {
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (_summary, _body, mut envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        let template = envelope.events[0].clone();
+
+        let mut call = template.clone();
+        call.event_id = uuid::Uuid::new_v4();
+        call.event_type = TraceContributionEventType::ToolCall;
+        call.tool_name = Some("bash".into());
+        call.tool_call_id = Some("call-1".into());
+        call.redacted_content = Some("ls -la".into());
+
+        let mut result = template.clone();
+        result.event_id = uuid::Uuid::new_v4();
+        result.event_type = TraceContributionEventType::ToolResult;
+        result.tool_name = Some("bash".into());
+        result.tool_call_id = Some("call-1".into());
+        result.redacted_content = Some("total 0".into());
+
+        let mut assistant = template.clone();
+        assistant.event_id = uuid::Uuid::new_v4();
+        assistant.event_type = TraceContributionEventType::AssistantMessage;
+        assistant.tool_name = None;
+        assistant.tool_call_id = None;
+
+        envelope.events.push(call);
+        envelope.events.push(result);
+        envelope.events.push(assistant);
+        envelope
+    }
+
+    #[tokio::test]
+    async fn turn_offsets_land_on_the_exact_event_bytes() {
+        // The property the whole index rests on. An offset that has drifted
+        // -- by an element, or by the two bytes of a separator -- draws a
+        // separator over the wrong text, and does it silently, under a tab
+        // titled "exactly what would be sent". So every span is re-parsed
+        // out of the body `body_of` actually returned and required to be
+        // the events it claims.
+        let envelope = envelope_with_tool_events().await;
+        let body = body_of(&envelope).unwrap();
+        let turns = turns_of(&envelope).unwrap();
+
+        let mut covered = 0usize;
+        let mut next_event = 0usize;
+        for turn in &turns {
+            assert!(
+                turn.byte_offset >= covered,
+                "turns must not overlap: {turn:?}"
+            );
+            let slice = &body[turn.byte_offset..turn.byte_offset + turn.byte_len];
+            // A grouped turn spans two array elements and the separator
+            // between them, so it is a fragment of an array rather than one
+            // value. Re-wrapping is how a fragment is parsed; it asserts
+            // that the span starts and ends exactly on element boundaries,
+            // which is the thing being checked.
+            let parsed: Vec<serde_json::Value> = serde_json::from_str(&format!("[{slice}]"))
+                .unwrap_or_else(|e| {
+                    panic!("span {turn:?} is not a run of whole elements: {e}");
+                });
+            for value in &parsed {
+                assert_eq!(
+                    value,
+                    &serde_json::to_value(&envelope.events[next_event]).unwrap(),
+                    "turn {} does not point at event {next_event}",
+                    turn.index
+                );
+                next_event += 1;
+            }
+            covered = turn.byte_offset + turn.byte_len;
+        }
+        assert_eq!(
+            next_event,
+            envelope.events.len(),
+            "every event must be covered by exactly one turn"
+        );
+        assert_eq!(
+            turns.iter().map(|t| t.index).collect::<Vec<_>>(),
+            (0..turns.len()).collect::<Vec<_>>(),
+            "turn indices are dense and 0-based"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_and_its_result_are_one_turn() {
+        // The grouping decision, pinned: one invocation of one tool is one
+        // turn, spanning both events, labelled with the tool.
+        let envelope = envelope_with_tool_events().await;
+        let turns = turns_of(&envelope).unwrap();
+        assert_eq!(
+            turns.len(),
+            envelope.events.len() - 1,
+            "the call/result pair collapses into a single turn: {turns:?}"
+        );
+        let tool_turn = turns
+            .iter()
+            .find(|t| t.role == "tool_call")
+            .expect("a tool turn");
+        assert_eq!(tool_turn.tool_name.as_deref(), Some("bash"));
+        let body = body_of(&envelope).unwrap();
+        let slice = &body[tool_turn.byte_offset..tool_turn.byte_offset + tool_turn.byte_len];
+        assert!(slice.contains("\"tool_call\""), "{slice}");
+        assert!(
+            slice.contains("\"tool_result\""),
+            "the result belongs to the same turn: {slice}"
+        );
+        assert!(
+            !turns.iter().any(|t| t.role == "tool_result"),
+            "a grouped result must not also open a turn of its own: {turns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_that_cannot_be_correlated_stays_its_own_turn() {
+        // The other half of the rule. Pairing is only ever done on an
+        // explicit, adjacent `tool_call_id`; a result that does not match
+        // one is indexed separately rather than swept into the preceding
+        // call, because a span covering two unrelated events labels bytes
+        // that do not belong together.
+        let mut envelope = envelope_with_tool_events().await;
+        let grouped = turns_of(&envelope).unwrap().len();
+        for event in envelope.events.iter_mut() {
+            if event.event_type == TraceContributionEventType::ToolResult {
+                event.tool_call_id = Some("some-other-call".into());
+            }
+        }
+        let turns = turns_of(&envelope).unwrap();
+        assert_eq!(turns.len(), grouped + 1);
+        assert!(turns.iter().any(|t| t.role == "tool_result"));
+    }
+
+    #[tokio::test]
+    async fn an_envelope_with_no_events_indexes_to_no_turns() {
+        let mut envelope = envelope_with_tool_events().await;
+        envelope.events.clear();
+        assert_eq!(body_of(&envelope).unwrap(), "[]");
+        assert!(turns_of(&envelope).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_span_scan_refuses_a_document_it_was_not_written_for() {
+        // Fail-closed: an index that is not certainly exact is worse than
+        // none, so anything that is not an array of objects is refused
+        // rather than approximated.
+        assert!(top_level_object_spans("{\"a\": 1}").is_none());
+        assert!(top_level_object_spans("[[1]]").is_none());
+        assert!(top_level_object_spans("[{\"a\": 1}").is_none());
+        assert_eq!(top_level_object_spans("[]"), Some(vec![]));
+        // A brace inside a string is text, not structure.
+        let body = "[\n  {\n    \"a\": \"} {\"\n  }\n]";
+        assert_eq!(top_level_object_spans(body).unwrap().len(), 1);
+        let (s, e) = top_level_object_spans(body).unwrap()[0];
+        assert!(serde_json::from_str::<serde_json::Value>(&body[s..e]).is_ok());
     }
 }

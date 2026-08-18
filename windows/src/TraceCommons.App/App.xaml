@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="TraceCommons.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!--
+                    The stock WinUI theme resources, first so that every
+                    control template still resolves the keys it expects, then
+                    the Trace Commons design system on top of them.
+
+                    Order matters and only in this direction: the design
+                    system adds its own Tc* keys and overrides nothing WinUI
+                    defines, so the stock templates keep working while
+                    anything drawn against a Tc* key gets the design. Both
+                    dictionaries carry per-theme values, so the window follows
+                    the system light/dark/high-contrast setting.
+                -->
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Themes/DesignSystem.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

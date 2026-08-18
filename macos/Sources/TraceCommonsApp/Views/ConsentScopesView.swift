@@ -136,13 +136,11 @@ struct ConsentScopesContent: View {
                 // A filled mark in the brand green when granted, an empty
                 // box when not: the shape changes as well as the colour, so
                 // "granted" is never carried by hue alone.
-                Image(systemName: checked ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 15))
-                    .foregroundStyle(checked ? AnyShapeStyle(TC.green) : AnyShapeStyle(.tertiary))
+                TCReadGateCheckbox(checked: checked)
                 VStack(alignment: .leading, spacing: TC.Space.xxs) {
                     HStack(spacing: TC.Space.s) {
                         Text(ScopeCopy.title(for: scope.name, options: model.consentScopes))
-                            .font(TC.Font_.body.weight(.semibold))
+                            .font(TC.Font_.cardTitle)
                         if alwaysOn {
                             TCTag(text: "always on", tone: .clear, symbol: "lock")
                         }
@@ -173,7 +171,7 @@ struct ConsentScopesContent: View {
         return Button("Continue with \(total) \(total == 1 ? "permission" : "permissions")") {
             onContinue(selected)
         }
-                .tcPrimaryAction()
+        .tcPrimaryAction()
         .keyboardShortcut(.defaultAction)
     }
 }
