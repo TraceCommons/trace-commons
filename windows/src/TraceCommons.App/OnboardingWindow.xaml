@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Onboarding: the six screens from the shared design spec
+    (docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md,
+    "## Onboarding"). That document specifies copy for every shell, so the
+    strings here are transcription rather than authorship, and the macOS app
+    is the reference implementation.
+
+    Until this window existed the Windows app could not enrol anyone at all.
+
+    One screen per decision, switched by Visibility rather than a Frame: the
+    flow is linear, the screens are small, and a Frame would add navigation
+    state that nothing here needs. x:Bind converts bool to Visibility on its
+    own, which is the same idiom the queue window uses.
+
+    XML comments cannot contain a double hyphen, so the prose here uses
+    commas and parentheses where the C# files use dashes.
+-->
+<Window
+    x:Class="TraceCommons.App.OnboardingWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Trace Commons">
+
+    <Grid Background="{ThemeResource TcWindowBackgroundBrush}" Padding="28">
+
+        <!-- 1. What this is -->
+        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsWelcome, Mode=OneWay}">
+            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Trace Commons" />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Trace Commons is a shared pool that isn't." />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="This app watches for finished Claude Code and Codex sessions on this machine and shows them to you." />
+            <!--
+                The promise the whole product is judged against, so it is set
+                apart from the paragraph rather than buried inside it.
+            -->
+            <TextBlock Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap"
+                       Text="You decide what gets contributed. Nothing is sent unless you say so." />
+            <!--
+                "Good and it is not perfect" is load bearing. A developer
+                knows automatic redaction is imperfect, and conceding it
+                first is what makes the rest credible. Do not soften this.
+            -->
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="Before anything leaves this machine it is scrubbed locally for secrets, keys, and tokens. That scrubbing is good and it is not perfect, which is why you get to look first." />
+            <Button Content="Get started" HorizontalAlignment="Right" Click="OnGetStarted" />
+        </StackPanel>
+
+        <!-- 2. Connect -->
+        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsConnect, Mode=OneWay}">
+            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Connect" />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="Paste the invite link someone sent you, or click it from your email." />
+            <TextBox PlaceholderText="https://.../onboard#..."
+                     Text="{x:Bind ViewModel.Invite, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                     TextChanged="OnInviteChanged" />
+            <!--
+                The instance is resolved and shown before committing. Only
+                the host: the rest of the invite is the credential.
+            -->
+            <TextBlock Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap"
+                       Text="{x:Bind ViewModel.InstanceLine, Mode=OneWay}"
+                       Visibility="{x:Bind ViewModel.HasInstanceLine, Mode=OneWay}" />
+            <!--
+                One sentence for the entire invite path. enroll answers
+                enroll-failed and never echoes the HTTP condition, so an
+                invite rejected here and one the daemon refused read the
+                same. Anything more specific would leak what the daemon
+                deliberately withheld.
+            -->
+            <TextBlock Style="{StaticResource TcHeadingAlertTextStyle}" TextWrapping="Wrap"
+                       Text="This invite link is no longer valid. Ask whoever sent it for a new one."
+                       Visibility="{x:Bind ViewModel.InviteFailedVisible, Mode=OneWay}" />
+            <Button Content="Connect" HorizontalAlignment="Right"
+                    IsEnabled="{x:Bind ViewModel.CanConnect, Mode=OneWay}"
+                    Click="OnConnect" />
+        </StackPanel>
+
+        <!-- 3. Consent scopes -->
+        <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16"
+              Visibility="{x:Bind ViewModel.IsConsent, Mode=OneWay}">
+            <TextBlock Grid.Row="0" Style="{StaticResource TcTitleScreenTextStyle}"
+                       Text="How may your traces be used?" TextWrapping="Wrap" />
+            <TextBlock Grid.Row="1" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="You can change this later. It applies to traces you send from now on." />
+            <ScrollViewer Grid.Row="2">
+                <StackPanel Spacing="16">
+                    <!--
+                        Three groups because they are three kinds of
+                        decision. The rows and their descriptions come from
+                        consent_options, never a table in this app, so an
+                        operator who changes them changes this screen.
+                    -->
+                    <TextBlock Style="{StaticResource TcEyebrowTextStyle}" Text="Always included" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.AlwaysIncluded}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                                <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,12">
+                                    <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                              IsEnabled="{x:Bind IsEnabled}"
+                                              VerticalAlignment="Top" />
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Style="{StaticResource TcTitleCardTextStyle}"
+                                                   Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                        <TextBlock Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   Text="{x:Bind Description}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Style="{StaticResource TcEyebrowTextStyle}"
+                               Text="Optional, each one lets your traces do more" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Optional}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                                <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,12">
+                                    <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                              VerticalAlignment="Top" />
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Style="{StaticResource TcTitleCardTextStyle}"
+                                                   Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                        <TextBlock Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   Text="{x:Bind Description}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Style="{StaticResource TcEyebrowTextStyle}" Text="Credit" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Credit}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                                <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,12">
+                                    <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                              VerticalAlignment="Top" />
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Style="{StaticResource TcTitleCardTextStyle}"
+                                                   Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                        <TextBlock Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   Text="{x:Bind Description}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </ScrollViewer>
+            <Button Grid.Row="3" Content="Continue" HorizontalAlignment="Right" Click="OnConsent" />
+        </Grid>
+
+        <!-- 4. Extra privacy scan, only when the operator offers it -->
+        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsScan, Mode=OneWay}">
+            <!--
+                Never headline "PII filter" or "NEAR AI": those are internal
+                names. The heading says what actually happens.
+            -->
+            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}"
+                       Text="Extra scrub before sending? (optional)" TextWrapping="Wrap" />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="Local scrubbing removes secrets, keys, tokens and credentials by pattern before anything leaves this machine. It runs either way." />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="You can additionally send the message text of each trace, not tool output, not file contents, through a second scanner run by NEAR AI, a third party, to catch personal information the patterns miss: names, addresses, that kind of thing." />
+            <!--
+                Both halves of the disclosure must stay. The cost (message
+                text really does leave this machine to a third party) and
+                the reassurance (an unreachable scanner holds traces rather
+                than sending them unscanned). Cutting either half makes the
+                screen dishonest in one direction.
+            -->
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="This means your message text is transmitted to NEAR AI before it reaches Trace Commons. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
+            <RadioButton x:Name="ScanLocalOnly" GroupName="Scan" Content="Local scrubbing only" IsChecked="True" />
+            <RadioButton x:Name="ScanWithNearAi" GroupName="Scan" Content="Local scrubbing + NEAR AI scan"
+                         IsChecked="{x:Bind ViewModel.UseNearAiScan, Mode=TwoWay}" />
+            <Button Content="Continue" HorizontalAlignment="Right" Click="OnScan" />
+        </StackPanel>
+
+        <!-- 5. What to watch -->
+        <Grid RowDefinitions="Auto,*,Auto" RowSpacing="16"
+              Visibility="{x:Bind ViewModel.IsWatch, Mode=OneWay}">
+            <TextBlock Grid.Row="0" Style="{StaticResource TcTitleScreenTextStyle}" Text="What to watch" />
+            <!--
+                Everything starts at ask first. Ignore is offered here and
+                auto upload deliberately is not: excluding the client repo
+                is a live thought at this moment and never returns, whereas
+                arming automation before a single preview has been seen is
+                asking for trust that has not been earned yet.
+            -->
+            <ScrollViewer Grid.Row="1">
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Projects}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ProjectViewModel">
+                            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,10">
+                                <TextBlock Grid.Column="0" Style="{StaticResource TcBodyDenseTextStyle}"
+                                           Text="{x:Bind LocalPath}" TextWrapping="Wrap"
+                                           VerticalAlignment="Center" />
+                                <Button Grid.Column="1" Content="Ignore"
+                                        IsEnabled="{x:Bind IsNotIgnored, Mode=OneWay}"
+                                        Click="OnIgnoreProject" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+            <Button Grid.Row="2" Content="Continue" HorizontalAlignment="Right" Click="OnWatch" />
+        </Grid>
+
+        <!-- 6. Done -->
+        <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsDone, Mode=OneWay}">
+            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}"
+                       Text="You're set up. Nothing has been sent." TextWrapping="Wrap" />
+            <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="When a session finishes and goes quiet for 30 minutes, it'll show up here. You'll get at most one notification every 4 hours, and none at all if there's nothing waiting." />
+            <Button Content="Finish" HorizontalAlignment="Right" Click="OnFinish" />
+        </StackPanel>
+
+    </Grid>
+</Window>

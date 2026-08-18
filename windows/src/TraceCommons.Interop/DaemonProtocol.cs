@@ -40,6 +40,17 @@ public static class DaemonProtocol
         public const string Approve = "approve";
         public const string Dismiss = "dismiss";
         public const string Shutdown = "shutdown";
+
+        // Onboarding. Every one of these was already in the daemon's pinned
+        // METHODS array before this app could call any of them: the gap on
+        // Windows was never protocol, only that nothing here asked.
+        public const string Enroll = "enroll";
+        public const string ConsentOptions = "consent_options";
+        public const string SetConsentScopes = "set_consent_scopes";
+        public const string GetSettings = "get_settings";
+        public const string ListProjects = "list_projects";
+        public const string SetProjectMode = "set_project_mode";
+        public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
     }
 
     public static class Events

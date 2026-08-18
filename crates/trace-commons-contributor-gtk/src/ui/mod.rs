@@ -8,6 +8,7 @@
 pub mod community_brand;
 pub mod history;
 pub mod mark;
+pub mod onboarding;
 pub mod preview;
 pub mod queue;
 pub mod settings;
@@ -433,6 +434,10 @@ impl App {
             if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
                 app.render_health(&status);
                 settings::render_status(app, &status);
+                // Both halves of "does this device need onboarding" are the
+                // daemon's to answer, so the question is asked here rather
+                // than at window construction, where neither is known yet.
+                onboarding::present_if_needed(app, status.logged_in, status.tenant_id.as_deref());
                 *app.status.borrow_mut() = Some(status);
             }
         });

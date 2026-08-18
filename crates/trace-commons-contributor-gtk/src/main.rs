@@ -55,6 +55,28 @@ fn main() -> anyhow::Result<()> {
         None => trace_commons_contributor_gtk::state_dir()?,
     };
 
+    // The `x-scheme-handler/tracecommons` registration in the desktop entry
+    // launches us with the URL as an argument, so an invite clicked in mail
+    // lands on the Connect screen instead of being retyped.
+    //
+    // Two things this deliberately does not do. It does not enrol: the
+    // invite is filled in and the button is left for a person to press,
+    // because which commons to join is the decision that screen exists to
+    // ask. And it does not log the URL -- an invite is a credential, and
+    // `max_uses` on the registry side means a captured one stays usable.
+    //
+    // Worth knowing: unlike the macOS URL-event path, a scheme handler
+    // receives this as argv, which is readable by other processes on this
+    // machine via /proc. That exposure is inherent to scheme handlers and
+    // is why the pasted path stays the recommended one for an invite with
+    // a large `max_uses`.
+    if let Some(invite) = std::env::args()
+        .skip(1)
+        .find_map(|a| trace_commons_contributor_gtk::ui::onboarding::invite_from_deep_link(&a))
+    {
+        trace_commons_contributor_gtk::ui::onboarding::set_pending_invite(invite);
+    }
+
     let application = adw::Application::builder()
         .application_id(ui::APP_ID)
         // The window is the primary surface on this platform, so the
