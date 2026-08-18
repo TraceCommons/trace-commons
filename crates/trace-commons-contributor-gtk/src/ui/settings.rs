@@ -66,7 +66,21 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
-    knobs: gtk::Box,
+    /// The three `set_settings` knobs, built once and only ever refilled.
+    ///
+    /// Everything else on this screen is torn down and rebuilt on each
+    /// render, which is fine for labels and fatal for a control: a refresh
+    /// runs on every daemon event, and rebuilding a spin button would
+    /// destroy the one the contributor is in the middle of typing into.
+    quiescence_minutes: gtk::SpinButton,
+    approval_hold_seconds: gtk::SpinButton,
+    /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
+    approval_hold_note: gtk::Label,
+    digest_hours: gtk::SpinButton,
+    /// Set while `render_knobs` is writing the daemon's own values into
+    /// those three, so the `value-changed` they emit is not mistaken for a
+    /// contributor turning a dial and echoed straight back as a write.
+    filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
@@ -140,6 +154,52 @@ impl SettingsView {
 
         content.append(&style::section("How it behaves"));
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
+        // Ranges, not free numbers. The daemon accepts any `u64` for all
+        // three, and a contributor who typed one into a text field could
+        // set a quiet period of a year and then wonder why nothing was
+        // ever offered. The bounds below are wide enough to be nobody's
+        // ceiling and narrow enough that no value inside them breaks the
+        // loop -- and the hold's floor of zero is a real setting (no undo
+        // window), which is why it is not one.
+        let quiescence_minutes = knob_row(
+            &knobs,
+            copy::KNOB_QUIESCENCE_TITLE,
+            copy::KNOB_QUIESCENCE_UNIT,
+            1.0,
+            240.0,
+        );
+        let approval_hold_seconds = knob_row(
+            &knobs,
+            copy::KNOB_HOLD_TITLE,
+            copy::KNOB_HOLD_UNIT,
+            0.0,
+            300.0,
+        );
+        // A hold of zero is not a small undo window, it is none, and that
+        // is a different statement from the number beside it. It gets its
+        // own line, shown only when it is true.
+        let approval_hold_note = gtk::Label::builder()
+            .label(copy::KNOB_HOLD_ZERO)
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        approval_hold_note.add_css_class("tc-caveat");
+        knobs.append(&approval_hold_note);
+        let digest_hours = knob_row(
+            &knobs,
+            copy::KNOB_DIGEST_TITLE,
+            copy::KNOB_DIGEST_UNIT,
+            1.0,
+            24.0,
+        );
+        let knobs_note = gtk::Label::builder()
+            .label(copy::KNOBS_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        knobs_note.add_css_class("tc-caveat");
+        knobs.append(&knobs_note);
         content.append(&knobs);
 
         content.append(&style::section(copy::AUTOSTART_HEADING));
@@ -208,7 +268,11 @@ impl SettingsView {
             connection_checks,
             pause_button,
             projects,
-            knobs,
+            quiescence_minutes,
+            approval_hold_seconds,
+            approval_hold_note,
+            digest_hours,
+            filling_knobs: std::cell::Cell::new(false),
             autostart_body,
             autostart_row,
             autostart_switch,
@@ -236,6 +300,29 @@ pub fn wire(app: &Rc<App>) {
             offer_pause(&a);
         }
     });
+
+    // The three knobs, each writing exactly the one key it owns.
+    //
+    // `set_settings` rejects an object holding a key it does not recognise
+    // rather than ignoring it, and it applies every key present -- so
+    // sending all three on every turn of one dial would make this window
+    // re-assert two values it was not asked to change, over whatever a
+    // concurrent `trace-commons-contributor settings --set` had just
+    // written. One key per write keeps this window's edits to what the
+    // contributor actually edited.
+    wire_knob(app, &app.settings.quiescence_minutes, "quiescence_secs", 60);
+    wire_knob(
+        app,
+        &app.settings.approval_hold_seconds,
+        "approval_hold_secs",
+        1,
+    );
+    wire_knob(
+        app,
+        &app.settings.digest_hours,
+        "digest_interval_secs",
+        3600,
+    );
 
     render_autostart(app);
     render_public(app);
@@ -693,31 +780,123 @@ fn set_mode(app: &Rc<App>, project_id: &str, mode: &str) {
     );
 }
 
-fn render_knobs(app: &Rc<App>, settings: &Settings) {
-    let view = &app.settings.knobs;
-    while let Some(child) = view.first_child() {
-        view.remove(&child);
-    }
+/// Send one knob's value to the daemon whenever the contributor changes it.
+///
+/// `scale` converts the unit on screen into the unit on the wire -- minutes
+/// and hours are what a person sets, seconds are what the contract takes.
+///
+/// The result is not applied optimistically. `set_settings` answers with the
+/// settings as they now stand, and that answer is what fills the controls
+/// back in, so a refused write leaves the knob showing what the daemon
+/// actually holds rather than what this window hoped it would.
+fn wire_knob(app: &Rc<App>, spin: &gtk::SpinButton, key: &'static str, scale: u64) {
+    let app = Rc::clone(app);
+    spin.connect_value_changed(move |spin| {
+        // `render_knobs` writing the daemon's own answer back in is not a
+        // contributor turning a dial, and echoing it would be this window
+        // arguing with the daemon about a value it just supplied.
+        if app.settings.filling_knobs.get() {
+            return;
+        }
+        let seconds = knob_seconds(spin.value_as_int(), scale);
+        app.call(
+            "set_settings",
+            serde_json::json!({ key: seconds }),
+            |app, result| match result {
+                Ok(value) => {
+                    if let Ok(settings) = serde_json::from_value::<Settings>(value) {
+                        render_knobs(app, &settings);
+                    }
+                }
+                // The label is a fixed one by contract; it is not shown,
+                // because none of them is a sentence a contributor can act
+                // on. What they need to know is that nothing changed.
+                Err(_) => {
+                    app.toast(copy::KNOB_NOT_CHANGED);
+                    refresh(app);
+                }
+            },
+        );
+    });
+}
 
-    view.append(&super::titled_paragraph(
-        "Quiet time before a session counts as finished",
-        &format!("{} minutes", settings.quiescence_secs / 60),
-    ));
-    view.append(&super::titled_paragraph(
-        "How long you can take something back",
-        &if settings.approval_hold_secs == 0 {
-            "No undo window. Approving sends on the next pass.".to_string()
-        } else {
-            format!("{} seconds after you approve", settings.approval_hold_secs)
-        },
-    ));
-    view.append(&super::titled_paragraph(
-        "How often you can be interrupted",
-        &format!(
-            "At most once every {} hours",
-            settings.digest_interval_secs / 3600
-        ),
-    ));
+/// The unit on screen, converted to the unit on the wire.
+///
+/// Clamped at zero rather than cast: `set_settings` takes a `u64`, and a
+/// negative value would wrap to an enormous quiet period rather than being
+/// refused. The spin buttons cannot produce one today; this is the reason
+/// they cannot start to.
+fn knob_seconds(shown: i32, scale: u64) -> u64 {
+    shown.max(0) as u64 * scale
+}
+
+/// The unit on the wire, converted back to the unit on screen.
+///
+/// Integer division on purpose: the controls step in whole minutes and
+/// whole hours, so a value between two steps is shown as the step below it
+/// -- and is only ever written back if the contributor turns that dial,
+/// which is them choosing the rounded value rather than this window
+/// choosing it for them.
+fn knob_shown(seconds: u64, scale: u64) -> f64 {
+    (seconds / scale.max(1)) as f64
+}
+
+/// One editable knob: an eyebrow, a spin button, and the unit it counts in.
+///
+/// Appended to `card` here rather than returned as a row, because the only
+/// thing the caller ever wants back is the control it has to read and
+/// write.
+fn knob_row(card: &gtk::Box, title: &str, unit: &str, lower: f64, upper: f64) -> gtk::SpinButton {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    row.append(&style::eyebrow(title));
+    let control = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let spin = gtk::SpinButton::with_range(lower, upper, 1.0);
+    spin.set_numeric(true);
+    // Snaps to the step, so a typed half-minute cannot become a value the
+    // daemon was never offered.
+    spin.set_snap_to_ticks(true);
+    spin.set_valign(gtk::Align::Center);
+    // The eyebrow above is the visible label, and it is not a control, so
+    // it is pointed at the spin button for a screen reader rather than
+    // left as loose text over an unnamed field.
+    spin.update_property(&[gtk::accessible::Property::Label(title)]);
+    control.append(&spin);
+    let unit_label = gtk::Label::builder().label(unit).xalign(0.0).build();
+    unit_label.add_css_class("tc-body");
+    unit_label.set_valign(gtk::Align::Center);
+    control.append(&unit_label);
+    row.append(&control);
+    card.append(&row);
+    spin
+}
+
+/// Fill the three knobs from the daemon's own answer.
+///
+/// Never from this shell's idea of what it just wrote: `set_settings`
+/// returns the settings as they now stand, and both that and `get_settings`
+/// land here, so what is on screen is always what the daemon holds.
+///
+/// `local_notifications` is deliberately not offered. It is a
+/// `set_settings` key, and turning it on would have the daemon render its
+/// own OS notifications alongside the ones this window already posts --
+/// two notifications for one digest, on the desktop of whoever went
+/// looking for the setting. A window that cannot avoid that should not
+/// offer the switch.
+fn render_knobs(app: &Rc<App>, settings: &Settings) {
+    let view = &app.settings;
+    // Writing a value emits `value-changed`. Marked as ours so the handler
+    // does not echo the daemon's own answer straight back at it.
+    view.filling_knobs.set(true);
+    view.quiescence_minutes
+        .set_value(knob_shown(settings.quiescence_secs, 60));
+    view.approval_hold_seconds
+        .set_value(knob_shown(settings.approval_hold_secs, 1));
+    view.digest_hours
+        .set_value(knob_shown(settings.digest_interval_secs, 3600));
+    view.filling_knobs.set(false);
+
+    view.approval_hold_note
+        .set_visible(settings.approval_hold_secs == 0);
 
     // The extra privacy scan and the two session folders used to be
     // restated here as well. §5.4 puts all three in the Connection section
@@ -1100,4 +1279,38 @@ fn brand_link(text: &str, url: &str) -> gtk::Button {
             gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
     });
     button
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_knob_round_trips_through_the_unit_it_is_shown_in() {
+        // The daemon's defaults, which are the values a contributor sees on
+        // a machine nobody has changed: 30 minutes quiet, a 10-second hold,
+        // 4 hours between interruptions.
+        for (seconds, scale, shown) in [(1800u64, 60u64, 30.0), (10, 1, 10.0), (14_400, 3600, 4.0)]
+        {
+            assert_eq!(knob_shown(seconds, scale), shown);
+            assert_eq!(knob_seconds(shown as i32, scale), seconds);
+        }
+    }
+
+    #[test]
+    fn no_shown_value_can_become_an_enormous_one_on_the_wire() {
+        // `set_settings` takes a `u64`. A negative value cast rather than
+        // clamped would wrap into a quiet period measured in centuries,
+        // and the daemon would accept it.
+        assert_eq!(knob_seconds(-1, 60), 0);
+        assert_eq!(knob_seconds(i32::MIN, 3600), 0);
+    }
+
+    #[test]
+    fn a_value_between_two_steps_is_shown_as_the_step_below_it() {
+        // Never rounded up: showing 2 minutes for a 90-second setting would
+        // overstate how long the watcher actually waits.
+        assert_eq!(knob_shown(90, 60), 1.0);
+        assert_eq!(knob_shown(0, 60), 0.0);
+    }
 }

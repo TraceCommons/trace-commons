@@ -121,6 +121,19 @@ pub struct App {
     /// Preview summaries, keyed by entry id, so a row can show what would be
     /// sent without re-running the pipeline on every redraw.
     pub previews: RefCell<HashMap<String, PreviewSummary>>,
+    /// What each withdrawal attempt did, keyed by submission id.
+    ///
+    /// Kept here rather than in a screen-level banner because a failure
+    /// next to a row that still reads "In the commons" leaves it genuinely
+    /// ambiguous whether the trace was withdrawn. History rebuilds its rows
+    /// wholesale on every refresh, so the outcome has to outlive the widget
+    /// that reported it.
+    pub withdrawals: RefCell<HashMap<String, history::Withdrawal>>,
+    /// `queue_outcome_counts`: how many queued sessions ended each way.
+    ///
+    /// A `BTreeMap` so the disclosure lists them in a stable order rather
+    /// than in whatever order a hash map happened to produce this second.
+    pub outcome_counts: RefCell<std::collections::BTreeMap<String, u64>>,
     /// Kept for the session rather than written to disk. The point of
     /// persisting them is that the second trace is one keystroke, and a
     /// search term is the contributor's own sensitive string -- a client
@@ -264,6 +277,8 @@ impl App {
             undo: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
+            withdrawals: RefCell::new(HashMap::new()),
+            outcome_counts: RefCell::new(Default::default()),
             recent_searches: RefCell::new(Vec::new()),
             prefetching: RefCell::new(Default::default()),
             quit_confirmed: Cell::new(false),
@@ -450,6 +465,25 @@ impl App {
             queue::render(app);
             app.prefetch_previews();
         });
+        // Why sessions are no longer waiting, as counts.
+        //
+        // `list_pending` above returns pending entries and nothing else --
+        // `queue.pending()` filters on exactly that state -- so the queue
+        // cannot answer this from the entries it already holds, however
+        // many resolved ones it looks for among them. This is the method
+        // that answers it, and it is the only one that does.
+        self.call(
+            "queue_outcome_counts",
+            serde_json::json!({}),
+            |app, result| {
+                let counts = result
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v.get("reasons").cloned()?).ok())
+                    .unwrap_or_default();
+                *app.outcome_counts.borrow_mut() = counts;
+                queue::render(app);
+            },
+        );
         // The queue's week band needs the same rollup History does. It is
         // read here rather than handed over by `history::refresh` so the
         // band is filled in whether or not History has ever been opened;
