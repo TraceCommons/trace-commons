@@ -164,8 +164,15 @@ public sealed partial class MainWindow : Window
             // renders inside the QUEUE pane, and both dialogs that can land us
             // here are reachable only from History and Settings. The pane that
             // would carry the message is by definition not the pane on screen.
-            // Explaining this properly needs a surface above all three panes,
-            // which is a different change from stopping a crash.
+            //
+            // The health banner IS above all three panes and would be seen.
+            // It is still the wrong surface: it is bound to the daemon's own
+            // health label through HealthCopy, so everything it says is a
+            // statement about the daemon, and borrowing it to report a
+            // transient UI collision would make "contributions are on hold"
+            // and "you have a dialog open" the same kind of sentence. Saying
+            // this properly needs its own surface, which is a different
+            // change from stopping a crash.
             return;
         }
         finally
