@@ -126,9 +126,12 @@ fn the_unsigned_fixture_is_refused_by_the_signature_decision() {
 
 #[cfg(windows)]
 #[test]
-fn the_platform_verifier_refuses_the_unsigned_fixture() {
+fn the_platform_verifier_refuses_an_unsigned_executable() {
     use trace_commons_contributor::update::authenticode::{AuthenticodeError, verify};
-    let path = fixture_dir().join("unsigned/artifact.exe");
+    // Use this test binary rather than the cross-platform text fixture above.
+    // Get-AuthenticodeSignature can reject a non-PE file before it produces a
+    // signature status, whereas Cargo has just built this valid, unsigned PE.
+    let path = std::env::current_exe().expect("current test executable");
     assert!(matches!(
         verify(&path).unwrap_err(),
         AuthenticodeError::NotValid | AuthenticodeError::UnexpectedSigner

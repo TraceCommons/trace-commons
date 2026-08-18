@@ -276,7 +276,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get => _updateStatusText;
         private set => Set(ref _updateStatusText, value);
+    }
 
+    /// <summary>
     /// A one-line result of the last decision, for the cases with no undo to
     /// offer: an approval the daemon held for no time at all, or one it
     /// refused. Always a fixed sentence.
@@ -608,7 +610,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task ApplyUpdateAsync()
     {
         if (_updater is null)
+        {
+            return;
+        }
 
+        IsUpdateApplyEnabled = false;
+        UpdateStatusText = "Finishing any upload in progress…";
+
+        QuiesceOutcome quiesce = await _updater.QuiesceAsync().ConfigureAwait(true);
+        if (!quiesce.CanUpdate)
+        {
+            UpdateStatusText = UpdateProtocol.DescribeRefusal(quiesce.Outcome);
+            return;
+        }
+
+        UpdateStatusText = "Installing the update…";
+        await _host.DisposeAsync().ConfigureAwait(true);
+
+        bool handedOff = await _updater.ApplyAsync().ConfigureAwait(true);
+        if (!handedOff)
+        {
+            UpdateStatusText =
+                "The update could not be installed. Windows will try again on its own schedule.";
+        }
+    }
+
+    /// <summary>
     /// Says that another copy of the app owns the daemon, and what to do
     /// about it.
     /// </summary>
@@ -643,26 +670,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (Equals(_health, next))
         {
             return;
-        }
-
-        IsUpdateApplyEnabled = false;
-        UpdateStatusText = "Finishing any upload in progress…";
-
-        QuiesceOutcome quiesce = await _updater.QuiesceAsync().ConfigureAwait(true);
-        if (!quiesce.CanUpdate)
-        {
-            UpdateStatusText = UpdateProtocol.DescribeRefusal(quiesce.Outcome);
-            return;
-        }
-
-        UpdateStatusText = "Installing the update…";
-        await _host.DisposeAsync().ConfigureAwait(true);
-
-        bool handedOff = await _updater.ApplyAsync().ConfigureAwait(true);
-        if (!handedOff)
-        {
-            UpdateStatusText =
-                "The update could not be installed. Windows will try again on its own schedule.";
         }
 
         _health = next;
