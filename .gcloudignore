@@ -3,6 +3,11 @@
 .git/
 .gitignore
 .worktrees/
+# Agent-tool scratch, and the worktrees it keeps under it. Same reason as
+# .worktrees/ above: these are full checkouts, and `**/target/` does not save
+# the upload because the sources alone run to tens of gigabytes. Left out, a
+# `builds submit` spends its life archiving them and never creates a build.
+.claude/
 target/
 **/target/
 node_modules/
