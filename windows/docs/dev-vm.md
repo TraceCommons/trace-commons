@@ -37,15 +37,59 @@ few days, delete them too:
 gcloud compute routers delete tc-win-dev-router --region us-central1 --project tracecommons-pilot-2026
 ```
 
-`provision-dev-vm.sh create` recreates both, so nothing is lost.
+`provision-dev-vm.sh create` recreates both, so the *resources* are not
+lost. The instance's internet is, until you run it — and the one-command
+fix for that is not an external IP. Read the next two sections before
+reaching for one.
+
+### Deleting the NAT takes the instance's internet with it
+
+That is the whole point of it, and it is easy to forget between sessions. The
+symptom arrives later, as `git fetch` and `cargo` hanging on a box that
+otherwise looks fine: IAP still gets you *in*, because that is Google's
+infrastructure rather than the instance's own routing, so SSH works and only
+egress is dead.
+
+**The tempting fix is the wrong one.** Attaching an external IP restores
+egress in one command, and it silently trades away the only thing standing
+between this box and the internet — see the next section for why. It has
+happened at least once: an access config was added on 2026-08-17 and removed
+the following day, and for the ~37 minutes the instance was running in between,
+tcp:3389 and tcp:22 were reachable from `0.0.0.0/0`.
+
+Recreate the NAT instead:
+
+```bash
+windows/scripts/provision-dev-vm.sh create    # idempotent; recreates router + NAT
+```
+
+Check before trusting either, since neither is visible from inside the box:
+
+```bash
+# Should print nothing at all. Anything here is an external IP.
+gcloud compute instances describe tc-win-dev --project tracecommons-pilot-2026 \
+  --zone us-central1-a --format='get(networkInterfaces[0].accessConfigs)'
+
+# Should exist, and hold a NAT.
+gcloud compute routers describe tc-win-dev-router --region us-central1 \
+  --project tracecommons-pilot-2026 --format='yaml(nats)'
+```
 
 ## The security model
 
 The instance has **no external IP** (`--no-address`), and that is not
-incidental. This project's `default-allow-rdp` firewall rule permits tcp:3389
-from `0.0.0.0/0` with **no target tags**, so it applies to every instance in
-the network. Firewall rules are additive-allow: a narrower rule cannot cancel
-it. The only reliable defence is having no external address to reach.
+incidental. This project carries two firewall rules,
+`default-allow-rdp` (tcp:3389) and `default-allow-ssh` (tcp:22), each
+permitting `0.0.0.0/0` with **no target tags**, so both apply to every instance
+in the network. Firewall rules are additive-allow: a
+narrower rule cannot cancel them, and the tagged `allow-iap-rdp` /
+`allow-iap-ssh-win` rules alongside them narrow nothing. The only reliable
+defence is having no external address to reach.
+
+So the no-address property is load-bearing rather than tidy, and it is not
+self-healing: nothing in `start` re-checks it, and an access config added once
+persists across stop/start until someone deletes it. Verify it rather than
+assume it — the command is in the section above.
 
 Access therefore runs through IAP TCP forwarding, which Google IAM
 authenticates before a packet reaches the host. Cloud NAT supplies outbound
