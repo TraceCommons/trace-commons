@@ -101,8 +101,8 @@ Deliberately absent, and each is its own piece of work:
   and run-at-login are here (see "The tray and the interruption budget"); what
   the shared spec also puts in that menu — pause with its three durations, the
   week summary, the per-project list of what is waiting, settings — is not,
-  because none of those surfaces exist anywhere in this app yet and a menu
-  item that opens nothing is worse than an absent one.
+  because those surfaces do not exist in this app yet and a menu item that
+  opens nothing is worse than an absent one.
 - MSIX packaging and signing, *as a shipping artifact*. The manifest, the
   packaging script and the signing path now exist under `packaging/` and
   `scripts/make-msix.ps1`, but none of it has ever been built: it is opt-in
