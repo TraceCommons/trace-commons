@@ -41,6 +41,18 @@ pub enum PrivacyFilterBackendTag {
     Sidecar,
     NearAi,
 }
+
+impl PrivacyFilterBackendTag {
+    /// Stable operational label. Reaches boot logs and stored envelope
+    /// summaries, so it is a contract rather than a debug rendering.
+    pub fn label(self) -> &'static str {
+        match self {
+            PrivacyFilterBackendTag::None => "none",
+            PrivacyFilterBackendTag::Sidecar => "sidecar",
+            PrivacyFilterBackendTag::NearAi => "near_ai",
+        }
+    }
+}
 /// v2 alongside the deterministic pipeline bump above: the server re-scrub
 /// runs the same detector, so its stamp has to move with it.
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
@@ -2119,6 +2131,26 @@ pub fn privacy_filter_adapter_from_env() -> Result<
     }
 }
 
+/// Resolve which privacy-filter backend the environment configures, without
+/// keeping the adapter.
+///
+/// Callers use this at boot to report the live backend and to refuse to start
+/// when a deployment requires one. It exists because the absence of a filter
+/// is otherwise invisible: [`privacy_filter_adapter_from_env`] returns
+/// `Ok(None)` for an unset backend, the redactor built from it performs no
+/// prose-PII filtering, and a runtime filter failure falls back to the
+/// unfiltered text. None of those paths distinguish "filtered and found
+/// nothing" from "never filtered".
+///
+/// A backend named without its credentials is an error here, so that
+/// misconfiguration surfaces once at startup rather than on every submission.
+pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, PrivacyFilterConfigError>
+{
+    Ok(privacy_filter_adapter_from_env()?
+        .map(|(_adapter, tag)| tag)
+        .unwrap_or(PrivacyFilterBackendTag::None))
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",
@@ -2260,11 +2292,7 @@ pub(crate) fn reset_legacy_privacy_env_warning_for_tests() {
 }
 
 fn privacy_filter_backend_label(backend: PrivacyFilterBackendTag) -> &'static str {
-    match backend {
-        PrivacyFilterBackendTag::None => "none",
-        PrivacyFilterBackendTag::Sidecar => "sidecar",
-        PrivacyFilterBackendTag::NearAi => "near_ai",
-    }
+    backend.label()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7870,5 +7898,87 @@ mod tests {
             explanation.contains("argument"),
             "explanation must name the missing replay inputs, got: {explanation}"
         );
+    }
+
+    // --- Privacy filter observability ---------------------------------
+    //
+    // An unset backend resolves to `Ok(None)` and builds a redactor that
+    // silently performs no prose-PII filtering. That is indistinguishable at
+    // runtime from a filter that ran and found nothing, and nothing anywhere
+    // reports which backend is live. These pin the two properties that make
+    // the difference observable: the backend can be asked for by name, and a
+    // deployment can demand that one exists.
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_none_when_unset() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        let backend = privacy_filter_backend_from_env().expect("unset is not an error");
+        assert_eq!(
+            backend,
+            PrivacyFilterBackendTag::None,
+            "an unset backend must be reportable as None rather than invisible"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_the_configured_backend() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        // Sidecar rather than near-ai: the near-ai adapter is behind an
+        // optional cargo feature that this crate's own test build does not
+        // enable, and the property under test is backend reporting, not which
+        // backend. The server crate compiles the near-ai feature in
+        // unconditionally.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::set_var("TRACE_PRIVACY_FILTER_COMMAND", "/bin/true");
+        }
+        let backend = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        assert_eq!(
+            backend.expect("configured backend must resolve"),
+            PrivacyFilterBackendTag::Sidecar,
+            "a configured backend must be reportable by name"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_surfaces_a_misconfigured_backend() {
+        use super::privacy_filter_backend_from_env;
+        // A backend named without its required configuration is the one
+        // combination that must never resolve quietly. Before this, it
+        // surfaced per-submission instead of at boot, which is how a filter
+        // stays broken unnoticed.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+            std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        let result = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(
+            result.is_err(),
+            "a backend named without its configuration must be an error, not a silent None"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_labels_are_stable() {
+        use super::PrivacyFilterBackendTag;
+        // These labels reach operational surfaces and stored envelope
+        // summaries, so they are a contract rather than a debug string.
+        assert_eq!(PrivacyFilterBackendTag::None.label(), "none");
+        assert_eq!(PrivacyFilterBackendTag::Sidecar.label(), "sidecar");
+        assert_eq!(PrivacyFilterBackendTag::NearAi.label(), "near_ai");
     }
 }
