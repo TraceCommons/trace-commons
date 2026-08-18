@@ -200,6 +200,11 @@ pub fn set_pending_invite(invite: String) {
 
 /// Build and show the onboarding window.
 pub fn present(app: &Rc<App>) {
+    present_at(app, None);
+}
+
+/// Build and show the window, optionally opening on a specific screen.
+fn present_at(app: &Rc<App>, start: Option<Step>) {
     let window = adw::Window::builder()
         .transient_for(&app.window)
         .modal(true)
@@ -290,14 +295,60 @@ pub fn present(app: &Rc<App>) {
     // the instance is named and the button still has to be pressed. The
     // welcome screen is skipped because someone who clicked an invite has
     // already been told what this is by whoever sent it.
-    match PENDING_INVITE.with(|p| p.borrow_mut().take()) {
-        Some(invite) => {
+    match (start, PENDING_INVITE.with(|p| p.borrow_mut().take())) {
+        // An explicit starting screen wins: it is only ever set by someone
+        // who clicked a control asking for that screen.
+        (Some(step), _) => onboarding.go(step),
+        (None, Some(invite)) => {
             onboarding.invite.set_text(&invite);
             onboarding.go(Step::Connect);
         }
-        None => onboarding.go(Step::Welcome),
+        (None, None) => onboarding.go(Step::Welcome),
     }
     window.present();
+}
+
+/// Open onboarding at the screen that answers a health banner's action.
+///
+/// The banner's button used to be drawn, labelled, and wired to nothing: it
+/// appeared, invited a click, and did nothing at all. Both labels that carry
+/// an action resolve on a screen this window already has, so the button now
+/// opens that screen.
+///
+/// `not-logged-in` is answered by Connect. `near-ai-notice-not-acknowledged`
+/// is answered by the privacy screen, whose choice is the only thing in this
+/// application that calls `acknowledge_near_ai_notice` -- without that call
+/// the daemon refuses the filter indefinitely, which is precisely the state
+/// the banner is reporting.
+///
+/// Deliberately not routed through [`present_if_needed`]: that function
+/// decides whether to interrupt someone at launch, and its "already
+/// complete, do nothing" answer is right there and wrong here. Someone who
+/// has just clicked the banner's only button has asked for the screen, and
+/// silently doing nothing would leave it the dead button it has been.
+///
+/// A label with no action never reaches this, because the button is hidden
+/// for those -- but an unknown label returning early is the safe direction
+/// rather than opening a screen that answers nothing.
+pub fn present_for_health(app: &Rc<App>, label: &str) {
+    let Some(step) = health_step(label) else {
+        return;
+    };
+    present_at(app, Some(step));
+}
+
+/// The screen that answers a health label, if this window has one.
+///
+/// Separate from [`present_for_health`] so the mapping can be tested
+/// against `copy::health_action` without standing up a window: the property
+/// worth holding is that the set of labels offering a button and the set
+/// with somewhere to send someone are the same set.
+fn health_step(label: &str) -> Option<Step> {
+    match label {
+        "not-logged-in" => Some(Step::Connect),
+        "near-ai-notice-not-acknowledged" => Some(Step::Scan),
+        _ => None,
+    }
 }
 
 impl Onboarding {
@@ -784,6 +835,37 @@ mod tests {
         );
         // A second window must not silently reuse it.
         assert_eq!(PENDING_INVITE.with(|p| p.borrow_mut().take()), None);
+    }
+
+    /// Every health label that shows a button must have a screen to send
+    /// someone to, and every label that does not must not.
+    ///
+    /// The banner's button was dead for its whole existence: drawn,
+    /// labelled, and connected to nothing. This pins the two halves together
+    /// so a label added to `health_action` later cannot quietly reintroduce
+    /// a button that goes nowhere.
+    #[test]
+    fn every_actionable_health_label_has_a_screen() {
+        for label in ["not-logged-in", "near-ai-notice-not-acknowledged"] {
+            assert!(
+                copy::health_action(label).is_some(),
+                "{label} should offer an action"
+            );
+            assert!(
+                health_step(label).is_some(),
+                "{label} offers an action but has no screen to open"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_with_no_action_opens_nothing() {
+        // The button is hidden for these, so this is belt and braces -- but
+        // returning early is the safe direction if one ever reaches it.
+        for label in ["upload-failed", "", "something-this-build-never-heard-of"] {
+            assert!(copy::health_action(label).is_none());
+            assert!(health_step(label).is_none());
+        }
     }
 
     /// `logged_in` alone must never stand in for "onboarded". `enroll`
