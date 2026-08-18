@@ -1,0 +1,453 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    "Look inside": the preview sheet from the shared design spec
+    (docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md,
+    "## The review moment"). That document specifies the copy for every
+    shell, so the strings here are transcription rather than authorship, and
+    the macOS sheet is the reference implementation.
+
+    Until this existed the Windows app could not contribute anything at all:
+    nothing in it called approve or dismiss, and TcPreview was implemented and
+    tested with no caller.
+
+    A UserControl rather than the window itself, and that is not cosmetic. The
+    transcript panel below uses x:Load, whose generated code calls FindName on
+    the root element. A WinUI Window is not a FrameworkElement and has no
+    FindName, so x:Load cannot be used directly on one. The gate depends on
+    x:Load (see the panel), so the sheet lives in a control the window hosts.
+
+    Four tabs in the spec's order, Search first and focused, and Contribute in
+    the footer and nowhere else. The queue row has no approve button on
+    purpose, because approving from the row is approving without looking.
+
+    Contribute is armed by the read gate above it, never by the sheet having
+    loaded. See PreviewSheetViewModel and TraceCommons.Interop.ReadGate.
+
+    XML comments cannot contain a double hyphen, so the prose here uses commas
+    and parentheses where the C# files use dashes.
+-->
+<UserControl
+    x:Class="TraceCommons.App.Controls.PreviewSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="720"
+    MinHeight="560">
+
+    <Grid Background="{ThemeResource TcWindowBackgroundBrush}"
+          RowDefinitions="Auto,Auto,*,Auto">
+
+        <!--
+            Header: the same identity line and the same labelled figures as
+            the queue card, in the same order. Recognising the card you just
+            clicked is one of the quieter things that makes a preview
+            trustworthy.
+        -->
+        <StackPanel Grid.Row="0"
+                    Spacing="8"
+                    Padding="20,14"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                    BorderThickness="0,0,0,1">
+            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
+                <TextBlock Grid.Column="0"
+                           Text="{x:Bind ViewModel.Entry.ProjectLabel}"
+                           Style="{StaticResource TcTitleCardTextStyle}"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="1"
+                           Text="{x:Bind ViewModel.Entry.Source}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <TextBlock Grid.Column="2"
+                           Text="{x:Bind ViewModel.Entry.DiscoveredText}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcInkTertiaryBrush}" />
+            </Grid>
+
+            <StackPanel Orientation="Horizontal" Spacing="28">
+                <!--
+                    "Would send" is the redacted envelope, which only a
+                    preview knows. The queue row prints the session file on
+                    disk instead and labels it as such: the two are different
+                    numbers, and labelling one as the other would be the app's
+                    first false statement about what leaves the machine.
+                -->
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Would send" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.WouldSendText, Mode=OneWay}"
+                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Session on disk" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.RawSessionText, Mode=OneWay}"
+                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                </StackPanel>
+                <!--
+                    The redaction receipt. It proves scrubbing ran, and it
+                    calibrates: "nothing matched" on a session that obviously
+                    touched a .env is a signal the contributor can act on,
+                    which is why that case is drawn in the attention tone
+                    rather than reassured over.
+                -->
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Scrubbing found" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <TextBlock Text="{x:Bind ViewModel.ScrubbingFoundText, Mode=OneWay}"
+                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                </StackPanel>
+            </StackPanel>
+
+            <TextBlock Text="Nothing has been sent. This is what would be."
+                       Style="{StaticResource TcCaptionTextStyle}" />
+        </StackPanel>
+
+        <!--
+            The tab strip. Plain buttons rather than a NavigationView: two of
+            the four carry a count, so a contributor can see there is
+            something to look at before clicking the tab.
+        -->
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    Spacing="4"
+                    Padding="20,10,20,0"
+                    Visibility="{x:Bind ViewModel.IsShowingContent, Mode=OneWay}">
+            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                    Click="OnSearchTab"
+                    Content="Search" />
+            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                    Click="OnWhatsInItTab">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="What's in it" />
+                    <TextBlock Text="{x:Bind ViewModel.RedactionBadge, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.HasRedactionBadge, Mode=OneWay}"
+                               Style="{StaticResource TcMonoBadgeTextStyle}" />
+                </StackPanel>
+            </Button>
+            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                    Click="OnTranscriptTab"
+                    Content="Exactly what would be sent" />
+            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                    Click="OnPermissionsTab">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="Permissions" />
+                    <TextBlock Text="{x:Bind ViewModel.PermissionsBadge, Mode=OneWay}"
+                               Style="{StaticResource TcMonoBadgeTextStyle}" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Padding="20,14">
+
+            <!-- While the redaction pass runs. It reads the session and
+                 redacts it locally, which on a large trace takes a moment. -->
+            <StackPanel Spacing="6"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Visibility="{x:Bind ViewModel.IsLoading, Mode=OneWay}">
+                <TextBlock Text="Scrubbing it locally…"
+                           Style="{StaticResource TcTitleCardTextStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="Reading the session and running the redaction pass."
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <!-- A preview that could not be opened or could not be read. The
+                 second sentence is the one that matters: the failure costs
+                 the contributor nothing. -->
+            <StackPanel Spacing="6"
+                        MaxWidth="420"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Visibility="{x:Bind ViewModel.HasFailed, Mode=OneWay}">
+                <TextBlock Text="This one can't be shown."
+                           Style="{StaticResource TcHeadingAlertTextStyle}"
+                           TextWrapping="Wrap"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="Nothing has been sent, and nothing will be until it can be shown to you."
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center" />
+            </StackPanel>
+
+            <!--
+                1. Search. The highest value affordance in the product: type a
+                client name, get 0 matches or jump to context, without reading
+                148 turns.
+            -->
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto,*"
+                  Visibility="{x:Bind ViewModel.IsSearchTab, Mode=OneWay}">
+                <TextBlock Grid.Row="0"
+                           Text="Search this trace for anything you need to be sure isn't in it."
+                           Style="{StaticResource TcBodyTextStyle}"
+                           TextWrapping="Wrap" />
+                <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="0,10,0,0">
+                    <TextBox x:Name="SearchBox"
+                             Grid.Column="0"
+                             PlaceholderText="Client name, hostname, anything"
+                             Text="{x:Bind ViewModel.Needle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             TextChanged="OnNeedleChanged" />
+                    <Button Grid.Column="1"
+                            Style="{StaticResource TcSecondaryButtonStyle}"
+                            Content="Search"
+                            Click="OnSearchClick" />
+                </Grid>
+
+                <!-- The contributor's own earlier questions, one click away.
+                     Kept in memory only, never written to disk: see
+                     PreviewSheetViewModel. -->
+                <ItemsControl Grid.Row="2"
+                              Margin="0,8,0,0"
+                              ItemsSource="{x:Bind ViewModel.RecentSearches, Mode=OneWay}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" Spacing="6" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Content="{x:Bind}"
+                                    Click="OnRecentSearchClick" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <StackPanel Grid.Row="3" Spacing="4" Margin="0,12,0,0">
+                    <TextBlock Text="{x:Bind ViewModel.SearchResultText, Mode=OneWay}"
+                               Style="{StaticResource TcHeadingAlertTextStyle}" />
+                    <!-- A search that found nothing is not evidence that
+                         nothing is there, and this is where that is said
+                         rather than implied. -->
+                    <TextBlock Text="{x:Bind ViewModel.NothingMatchedNote}"
+                               Visibility="{x:Bind ViewModel.ShowNothingMatchedNote, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <ScrollViewer Grid.Row="4" Margin="0,10,0,0">
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Excerpts, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <Border Background="{ThemeResource TcSurfaceScrimBrush}"
+                                        CornerRadius="{StaticResource TcControlCornerRadius}"
+                                        Padding="10,8"
+                                        Margin="0,0,0,8">
+                                    <TextBlock Text="{x:Bind}"
+                                               Style="{StaticResource TcMonoCodeTextStyle}"
+                                               TextWrapping="Wrap"
+                                               IsTextSelectionEnabled="True" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+
+            <!-- 2. What's in it. -->
+            <ScrollViewer Visibility="{x:Bind ViewModel.IsWhatsInItTab, Mode=OneWay}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.TurnsText, Mode=OneWay}"
+                               Style="{StaticResource TcMetricValueTextStyle}" />
+                    <TextBlock Text="Turns recorded" Style="{StaticResource TcEyebrowTextStyle}" />
+
+                    <TextBlock Text="What scrubbing removed"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               Margin="0,10,0,0" />
+                    <!-- The one card here drawn to be found. A session where
+                         no pattern fired is the session most worth a second
+                         look, and it is the case a count cannot state. -->
+                    <Border Visibility="{x:Bind ViewModel.NothingMatched, Mode=OneWay}"
+                            Background="{ThemeResource TcSurfaceInsetBrush}"
+                            BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Padding="12,10">
+                        <TextBlock Text="Nothing matched. On a session that touched credentials, that is itself worth a second look."
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </Border>
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RedactionRows, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{x:Bind}" Style="{StaticResource TcBodyTextStyle}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <StackPanel Spacing="4"
+                                Margin="0,10,0,0"
+                                Visibility="{x:Bind ViewModel.HasPiiLabels, Mode=OneWay}">
+                        <TextBlock Text="Personal-information categories seen"
+                                   Style="{StaticResource TcTitleCardTextStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.PiiLabelsText, Mode=OneWay}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="Categories only. The matched text is never reported here."
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <TextBlock Text="Residual risk"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               Margin="0,10,0,0" />
+                    <TextBlock Text="{x:Bind ViewModel.ResidualRiskText, Mode=OneWay}"
+                               Style="{StaticResource TcBodyTextStyle}"
+                               TextWrapping="Wrap" />
+                    <!-- The spec's queue row lists files touched and tools
+                         invoked. The preview contract carries neither, so
+                         they are absent rather than guessed at. -->
+                    <TextBlock Text="Files touched and tools invoked are not in this contract's preview summary, so they are not shown rather than guessed at."
+                               Style="{StaticResource TcCaptionSmallTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <!--
+                3. Exactly what would be sent.
+
+                x:Load rather than Visibility, and this is load bearing: a
+                collapsed element still exists and still raises Loaded, so a
+                Visibility toggle would let the read gate record a transcript
+                that was never on screen. With x:Load the panel is not created
+                until the tab is selected, so its realization IS its display,
+                and OnTranscriptRealized is the only thing that arms the first
+                half of the gate.
+            -->
+            <ScrollViewer x:Name="TranscriptPanel"
+                          x:Load="{x:Bind ViewModel.IsTranscriptTab, Mode=OneWay}"
+                          Loaded="OnTranscriptRealized">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="These are the exact bytes an approval covers. Marks like &lt;PRIVATE_SECRET_1&gt; show where scrubbing fired, legible as chips, not holes."
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                            BorderBrush="{ThemeResource TcHairlineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Padding="12,10">
+                        <!-- Filled in code behind from TranscriptMarkers.Split
+                             so the markers can be drawn as chips. A plain
+                             TextBlock cannot carry two backgrounds. -->
+                        <RichTextBlock x:Name="TranscriptBody"
+                                       FontFamily="{StaticResource TcMonoFontFamily}"
+                                       FontSize="{StaticResource TcMonoTranscriptFontSize}"
+                                       Foreground="{ThemeResource TcInkPrimaryBrush}"
+                                       IsTextSelectionEnabled="True" />
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- 4. Permissions, restated at the moment of consent rather than
+                 only at onboarding. -->
+            <ScrollViewer Visibility="{x:Bind ViewModel.IsPermissionsTab, Mode=OneWay}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="What this upload asks for"
+                               Style="{StaticResource TcTitleCardTextStyle}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Permissions, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:PermissionRow">
+                                <TextBlock Text="{x:Bind Title}"
+                                           Style="{StaticResource TcBodyTextStyle}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,4" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="These are the permissions this device requests. Trace Commons can narrow them, never widen them, and if your permissions change between now and sending, this approval stops applying and you are asked again."
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <!--
+            The footer: the caveat, the read gate, and the only approve control
+            in the product.
+        -->
+        <StackPanel Grid.Row="3"
+                    Spacing="10"
+                    Padding="20,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                    BorderThickness="0,1,0,0">
+
+            <!-- Word for word what the queue window prints under the list. It
+                 has to be identical in both places, so that a person who read
+                 it there recognises it here rather than reading a second,
+                 weaker message. -->
+            <TextBlock Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+
+            <!-- Gate line 1. A button, because its job is to take you to the
+                 thing it is asking you to look at. -->
+            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                    HorizontalAlignment="Left"
+                    Click="OnTranscriptTab"
+                    IsEnabled="{x:Bind ViewModel.IsShowingContent, Mode=OneWay}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <!-- The shape changes with the state, not only the
+                         colour, so it survives greyscale and colour
+                         blindness. -->
+                    <FontIcon FontSize="12"
+                              Glyph="&#xE73E;"
+                              Visibility="{x:Bind ViewModel.GateTranscriptShown, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind ViewModel.GateOpenedLine, Mode=OneWay}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Button>
+
+            <!-- Gate line 2. Disabled until the transcript has been on screen,
+                 because a box ticked about bytes nobody has seen acknowledges
+                 nothing. ReadGate refuses it in that order too, so the rule
+                 does not depend on this attribute. -->
+            <CheckBox IsChecked="{x:Bind ViewModel.GateAcknowledged, Mode=TwoWay}"
+                      IsEnabled="{x:Bind ViewModel.GateTranscriptShown, Mode=OneWay}">
+                <TextBlock Text="I have looked at what would be sent, and I understand scrubbing is pattern-based and may have missed something."
+                           Style="{StaticResource TcBodyTextStyle}"
+                           TextWrapping="Wrap"
+                           MaxWidth="620" />
+            </CheckBox>
+
+            <!-- The concession. A gate that overstated what it verified would
+                 be worse than no gate at all. -->
+            <TextBlock Text="Contribute stays off until both are done. Looking at the first screen is what this checks, it cannot check that you read all of it, and it does not claim to."
+                       Visibility="{x:Bind ViewModel.ShowGateFootnote, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                       TextWrapping="Wrap" />
+
+            <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                <!-- Outlined like Close, never filled: it must not read as a
+                     second way to approve. -->
+                <Button Grid.Column="0"
+                        Style="{StaticResource TcSecondaryButtonStyle}"
+                        Content="Not this one"
+                        IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
+                        ToolTipService.ToolTip="Skips this session only. This project will keep being offered."
+                        Click="OnNotThisOne" />
+                <Button Grid.Column="2"
+                        Style="{StaticResource TcSecondaryButtonStyle}"
+                        Content="Close"
+                        Click="OnClose" />
+                <!--
+                    The ONLY approve control in the product. It is behind the
+                    preview by design, behind the read gate by design, and it
+                    carries NO keyboard accelerator and is not the default
+                    button: an irreversible send one Return away from a hand
+                    resting on the keyboard is exactly the misclick this sheet
+                    exists to prevent.
+                -->
+                <Button Grid.Column="3"
+                        Style="{StaticResource TcPrimaryButtonStyle}"
+                        Content="Contribute"
+                        IsEnabled="{x:Bind ViewModel.CanContribute, Mode=OneWay}"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.ContributeHelp, Mode=OneWay}"
+                        Click="OnContribute" />
+            </Grid>
+        </StackPanel>
+    </Grid>
+</UserControl>
