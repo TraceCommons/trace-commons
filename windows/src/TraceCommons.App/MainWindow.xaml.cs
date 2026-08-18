@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI;
@@ -22,6 +23,20 @@ public sealed partial class MainWindow : Window
 {
     private readonly DaemonHost _host;
 
+    /// <summary>
+    /// The notification-area presence, and the only thing in this app that
+    /// may interrupt.
+    /// </summary>
+    private readonly TrayIcon _tray = new();
+
+    /// <summary>
+    /// The interruption budget. See <see cref="DigestCadence"/> for why the
+    /// shell gates this a second time when the daemon already does.
+    /// </summary>
+    private readonly DigestCadence _digestCadence = new();
+
+    private bool _quitConfirmed;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -41,8 +56,77 @@ public sealed partial class MainWindow : Window
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host);
 
+        // The tray reflects daemon state and never drives it: it re-reads
+        // status on the same events the queue does rather than being told
+        // what to show by the view model, so the two cannot drift.
+        _host.QueueChanged += OnTrayWorthyChange;
+        _host.StatusChanged += OnTrayWorthyChange;
+        _host.DigestDue += OnDigestDue;
+        _tray.OpenRequested += OnTrayOpenRequested;
+        _tray.QuitRequested += OnTrayQuitRequested;
+
+        AppWindow.Closing += OnAppWindowClosing;
         Closed += OnClosed;
         Activated += OnFirstActivated;
+    }
+
+    /// <summary>
+    /// What quitting costs, said before it happens.
+    /// </summary>
+    /// <remarks>
+    /// Transcribed from the shared design spec, which gives two wordings and
+    /// is explicit that picking the wrong one "is a lie about whether the
+    /// machine is still watching". This app HOSTS the daemon in-process --
+    /// <see cref="DaemonHost"/> owns it and <see cref="OnClosed"/> tears it
+    /// down -- so the hosting wording is the true one. The Linux shell says
+    /// the other thing, correctly, because there a systemd unit keeps
+    /// running.
+    /// </remarks>
+    private const string QuitBody =
+        "Quitting stops Trace Commons watching for finished sessions. Nothing is queued or "
+        + "sent until you open it again. Anything already waiting stays waiting.";
+
+    /// <summary>
+    /// Intercepts the close so the consequence can be stated first.
+    /// </summary>
+    /// <remarks>
+    /// On the window's own close button as well as on the tray's Quit. Once
+    /// the app has a tray icon, "I closed the window" and "I stopped
+    /// contributing" become different acts on every other platform -- and on
+    /// this one they are still the same act, because the watcher is this
+    /// process. A contributor must not have to guess which it was.
+    /// </remarks>
+    private async void OnAppWindowClosing(
+        Microsoft.UI.Windowing.AppWindow sender,
+        Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        if (_quitConfirmed)
+        {
+            return;
+        }
+
+        // Cancelled first and re-closed after: AppWindow.Closing cannot be
+        // awaited, so the only way to ask a question is to refuse this close
+        // and start another one from the answer.
+        args.Cancel = true;
+
+        var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Quit Trace Commons?",
+            Content = QuitBody,
+            PrimaryButtonText = "Quit",
+            CloseButtonText = "Cancel",
+            DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
+        };
+
+        Microsoft.UI.Xaml.Controls.ContentDialogResult result = await dialog.ShowAsync();
+
+        if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
+        {
+            _quitConfirmed = true;
+            Close();
+        }
     }
 
     public MainViewModel ViewModel { get; }
@@ -57,7 +141,111 @@ public sealed partial class MainWindow : Window
     {
         Activated -= OnFirstActivated;
         await ViewModel.InitializeAsync();
+        await RefreshTrayAsync();
         await ShowOnboardingIfNeededAsync();
+    }
+
+    /// <summary>
+    /// Re-reads the one status object the tray needs and hands it over.
+    /// </summary>
+    /// <remarks>
+    /// <c>status</c> is described in <c>ipc.rs</c> as "the tray's whole world
+    /// in one object", and this takes it at its word rather than assembling
+    /// the same three facts from the queue the window happens to be showing.
+    /// An error frame leaves the tray as it was: a momentarily stale
+    /// indicator is better than one that flips to "nothing waiting" because a
+    /// call failed.
+    /// </remarks>
+    private async Task RefreshTrayAsync()
+    {
+        if (!_tray.IsPresent)
+        {
+            return;
+        }
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.Status)
+            .ConfigureAwait(true);
+
+        if (response.ResultAs<DaemonStatus>() is not DaemonStatus status)
+        {
+            return;
+        }
+
+        _tray.Update(status.QueueDepth, status.Paused, status.IsHealthy);
+    }
+
+    private async void OnTrayWorthyChange()
+    {
+        await RefreshTrayAsync();
+    }
+
+    /// <summary>
+    /// The 4-hour digest.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two gates stand between a <c>digest_due</c> event and an interruption,
+    /// and both must pass: the daemon's, which is the shared policy every
+    /// shell obeys, and <see cref="DigestCadence"/>, which is this process's
+    /// own backstop. Neither can cause a notification; each can only suppress
+    /// one. That is what keeps the onboarding screen's promise -- at most one
+    /// notification every 4 hours, and none at all when nothing is waiting --
+    /// literally true rather than approximately.
+    /// </para>
+    /// <para>
+    /// Project labels come from the queue the window already holds, which the
+    /// daemon has already reduced from paths to labels. No path, and no line
+    /// of transcript, reaches a notification.
+    /// </para>
+    /// </remarks>
+    private void OnDigestDue(int pending)
+    {
+        if (!_digestCadence.TryClaim(pending, DateTimeOffset.UtcNow))
+        {
+            return;
+        }
+
+        var labels = new List<string>();
+        foreach (QueueEntryViewModel entry in ViewModel.Pending)
+        {
+            if (entry.ProjectLabel.Length > 0 && !labels.Contains(entry.ProjectLabel))
+            {
+                labels.Add(entry.ProjectLabel);
+            }
+        }
+
+        labels.Sort(StringComparer.Ordinal);
+        _tray.ShowDigest(DigestText.Body(pending, labels));
+    }
+
+    /// <summary>
+    /// Brings the window forward from the tray or from a digest.
+    /// </summary>
+    /// <remarks>
+    /// Raising a window is the entire vocabulary of every surface outside it.
+    /// Nothing reachable from the tray or from a notification approves,
+    /// dismisses or sends anything -- the read gate is the only route to an
+    /// approval, and it lives behind the preview sheet.
+    /// </remarks>
+    private void OnTrayOpenRequested()
+    {
+        // Marshalled onto the UI thread: the tray's window procedure runs on
+        // whichever thread pumped its message, which is not this one.
+        _host.Dispatcher.TryEnqueue(() =>
+        {
+            AppWindow.Show();
+            Activate();
+        });
+    }
+
+    private void OnTrayQuitRequested()
+    {
+        _host.Dispatcher.TryEnqueue(() =>
+        {
+            Activate();
+            Close();
+        });
     }
 
     /// <summary>
@@ -233,6 +421,12 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnClosed(object sender, WindowEventArgs args)
     {
+        // Before the daemon teardown, and synchronously: an icon left in the
+        // notification area after the process exits is a ghost the shell only
+        // reaps when someone hovers over it, and it would claim a watcher
+        // that is no longer running.
+        _tray.Dispose();
+
         await _host.DisposeAsync();
     }
 }
