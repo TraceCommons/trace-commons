@@ -75,6 +75,15 @@ public sealed class DaemonHost : IAsyncDisposable
     public bool IsRunning => _daemon is not null;
 
     /// <summary>
+    /// The UI thread's queue, for the one caller that needs a timer on it.
+    ///
+    /// Exposed rather than duplicated: the undo bar counts down against the
+    /// daemon's own hold deadline, and a second dispatcher obtained elsewhere
+    /// would be the same queue reached by a route that no longer says so.
+    /// </summary>
+    public DispatcherQueue Dispatcher => _dispatcher;
+
+    /// <summary>
     /// Starts the daemon and subscribes to its events.
     ///
     /// Runs the start on a background thread: tc_daemon_start builds a runtime
@@ -143,6 +152,34 @@ public sealed class DaemonHost : IAsyncDisposable
             .ConfigureAwait(true);
 
         return response.ResultAs<PendingList>()?.Pending ?? (IReadOnlyList<QueueEntry>)Array.Empty<QueueEntry>();
+    }
+
+    /// <summary>
+    /// Opens the in-process preview for an entry, off the UI thread.
+    ///
+    /// Off-thread because <c>tc_preview_open</c> reads the session file and
+    /// runs the whole redaction pass synchronously: on a 169 KB trace that is
+    /// a visible freeze if it happens on the UI thread, and this is the one
+    /// screen where a freeze reads as the app struggling with the very bytes
+    /// it is about to send.
+    ///
+    /// The returned preview is the caller's to dispose. It holds native memory
+    /// and every borrowed pointer it handed out dies with it.
+    /// </summary>
+    /// <exception cref="TcException">
+    /// The entry is unknown, or the daemon handle is already gone.
+    /// </exception>
+    public async Task<TcPreview> OpenPreviewAsync(
+        string entryId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+
+        TcDaemon daemon = _daemon
+            ?? throw new TcException("daemon-not-started");
+
+        return await Task.Run(() => daemon.OpenPreview(entryId), cancellationToken)
+            .ConfigureAwait(true);
     }
 
     /// <summary>
