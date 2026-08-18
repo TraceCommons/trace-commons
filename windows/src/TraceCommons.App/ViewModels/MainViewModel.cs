@@ -3,8 +3,11 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Globalization;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.UI.Dispatching;
 using TraceCommons.Interop;
 
 namespace TraceCommons.App.ViewModels;
@@ -19,10 +22,32 @@ namespace TraceCommons.App.ViewModels;
 /// </summary>
 public sealed class MainViewModel : INotifyPropertyChanged
 {
+    /// <summary>
+    /// The undo bar's body, from the Linux shell word for word.
+    ///
+    /// It promises exactly two things and no more: the send happens on the
+    /// watcher's next sweep, and undo works until that sweep starts. Neither
+    /// sentence claims this window can see the send land, because it cannot.
+    /// </summary>
+    public const string UndoBody =
+        "The watcher sends approved sessions on its next sweep. Undo works until the sweep "
+        + "starts, and says so plainly if it is already too late.";
+
+    /// <summary>
+    /// What is said when the daemon granted no hold. There is nothing to
+    /// undo, so nothing offers to.
+    /// </summary>
+    public const string ApprovedNoUndo = "Approved. It goes out on the next pass.";
+
     private readonly DaemonHost _host;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly DispatcherQueueTimer _undoTick;
     private string _statusText = "Starting…";
     private bool _isBusy;
+    private string _notice = string.Empty;
+    private ApprovalHold? _undoHold;
+    private string _undoEntryId = string.Empty;
+    private string _undoProjectLabel = string.Empty;
 
     public MainViewModel(DaemonHost host)
     {
@@ -30,6 +55,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _host.QueueChanged += OnQueueChanged;
         _host.StatusChanged += OnStatusChanged;
         _host.Lagged += OnLagged;
+
+        // One tick per second, only while an undo is live. It moves the
+        // remaining count and retires the bar when the daemon's hold runs
+        // out; it does not rebuild the bar, so a pointer already resting on
+        // Undo does not have the button pulled out from under it.
+        _undoTick = _host.Dispatcher.CreateTimer();
+        _undoTick.Interval = TimeSpan.FromSeconds(1);
+        _undoTick.Tick += (_, _) => OnUndoTick();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -74,6 +107,207 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>True when there is nothing pending, for an empty-state view.</summary>
     public bool IsEmpty => Pending.Count == 0;
+
+    /// <summary>
+    /// A one-line result of the last decision, for the cases with no undo to
+    /// offer: an approval the daemon held for no time at all, or one it
+    /// refused. Always a fixed sentence.
+    /// </summary>
+    public string Notice
+    {
+        get => _notice;
+        private set
+        {
+            if (Set(ref _notice, value))
+            {
+                Raise(nameof(HasNotice));
+            }
+        }
+    }
+
+    public bool HasNotice => _notice.Length > 0;
+
+    /// <summary>
+    /// Whether an approval can still be recalled.
+    ///
+    /// The five-second undo the shared spec asks for is trivially cheap and it
+    /// converts a misclick from permanent into a non-event. It is counted
+    /// against the DAEMON'S hold deadline rather than a timer invented here:
+    /// a bar outliving the hold would offer a recall that cannot work, and one
+    /// retiring early would take away a recall that still would.
+    /// </summary>
+    public bool HasUndo => _undoHold is not null;
+
+    /// <summary>"Approved trace-commons-server. Still on this machine."</summary>
+    public string UndoHeadline =>
+        _undoProjectLabel.Length == 0
+            ? string.Empty
+            : $"Approved {_undoProjectLabel}. Still on this machine.";
+
+    /// <summary>"Undo (4)" -- the spec's countdown, on the daemon's clock.</summary>
+    public string UndoButtonText =>
+        _undoHold is null
+            ? "Undo"
+            : string.Format(
+                CultureInfo.CurrentCulture,
+                "Undo ({0})",
+                _undoHold.RemainingSeconds(DateTimeOffset.UtcNow));
+
+    /// <summary>
+    /// The other half of the pair. Not "Dismiss": what this button does is let
+    /// the send happen, and it should say so.
+    /// </summary>
+    public const string LetItSend = "Let it send";
+
+    /// <summary>
+    /// Records what the preview sheet decided.
+    /// </summary>
+    /// <remarks>
+    /// The sheet performs the decision -- it is the only surface that may,
+    /// because it is the only one behind the read gate -- and hands the result
+    /// here so recovery lands on the screen the contributor is looking at
+    /// rather than behind a sheet that has already closed.
+    /// </remarks>
+    public async Task OnDecidedAsync(QueueEntryViewModel entry, PreviewDecision decision)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(decision);
+
+        ClearUndo();
+
+        switch (decision.Outcome)
+        {
+            case PreviewOutcome.Approved when decision.Hold is { } hold
+                                              && hold.IsLive(DateTimeOffset.UtcNow):
+                _undoHold = hold;
+                _undoEntryId = entry.EntryId;
+                _undoProjectLabel = entry.ProjectLabel;
+                Notice = string.Empty;
+                RaiseUndo();
+                _undoTick.Start();
+                break;
+
+            case PreviewOutcome.Approved:
+                // No hold, or one that had already expired by the time the
+                // response arrived. Saying so is the honest option; a button
+                // that would be refused is not.
+                Notice = ApprovedNoUndo;
+                break;
+
+            case PreviewOutcome.Failed:
+                Notice = decision.Message ?? string.Empty;
+                break;
+
+            case PreviewOutcome.Dismissed:
+                Notice = string.Empty;
+                break;
+        }
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Not this one" from a queue row: refuses this session and leaves the
+    /// project being offered.
+    /// </summary>
+    /// <remarks>
+    /// Reachable without a preview on purpose. Declining is safe in the
+    /// direction that matters -- nothing leaves the machine -- and making a
+    /// contributor read a transcript before they may refuse it would push them
+    /// towards approving just to clear the row.
+    /// </remarks>
+    public async Task DismissAsync(QueueEntryViewModel entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        DaemonResponse response = await _host
+            .CallAsync(
+                DaemonProtocol.Methods.Dismiss,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["entry_id"] = entry.EntryId }))
+            .ConfigureAwait(true);
+
+        Notice = response.IsError
+            ? "That couldn't be skipped just now. Nothing has been sent."
+            : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Recalls an approval, backed by the daemon's <c>cancel</c>.
+    /// </summary>
+    /// <remarks>
+    /// A refusal here is reported rather than swallowed: <c>cancel</c> refuses
+    /// anything an upload pass has already claimed, and someone who pressed
+    /// Undo is owed the truth about whether it worked.
+    /// </remarks>
+    public async Task UndoAsync()
+    {
+        if (_undoHold is null || _undoEntryId.Length == 0)
+        {
+            return;
+        }
+
+        string entryId = _undoEntryId;
+        ClearUndo();
+
+        DaemonResponse response = await _host
+            .CallAsync(
+                DaemonProtocol.Methods.Cancel,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["entry_id"] = entryId }))
+            .ConfigureAwait(true);
+
+        Notice = response.IsError
+            ? "Too late to undo: it has already gone out."
+            : "Undone. It stays on this machine.";
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Retires the undo bar without cancelling. The hold simply runs out on
+    /// its own, which is what the contributor asked for by pressing this.
+    /// </summary>
+    public void DismissUndo()
+    {
+        ClearUndo();
+        Notice = ApprovedNoUndo;
+    }
+
+    private void OnUndoTick()
+    {
+        if (_undoHold is null)
+        {
+            _undoTick.Stop();
+            return;
+        }
+
+        if (!_undoHold.IsLive(DateTimeOffset.UtcNow))
+        {
+            ClearUndo();
+            return;
+        }
+
+        Raise(nameof(UndoButtonText));
+    }
+
+    private void ClearUndo()
+    {
+        _undoTick.Stop();
+        _undoHold = null;
+        _undoEntryId = string.Empty;
+        _undoProjectLabel = string.Empty;
+        RaiseUndo();
+    }
+
+    private void RaiseUndo()
+    {
+        Raise(nameof(HasUndo));
+        Raise(nameof(UndoHeadline));
+        Raise(nameof(UndoButtonText));
+    }
 
     /// <summary>
     /// Starts the daemon and loads the first queue snapshot.
@@ -207,15 +441,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
             : "Reconnecting…";
     }
 
-    private void Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    /// <summary>
+    /// Assigns and notifies, reporting whether anything changed so a setter
+    /// can raise the properties derived from it without re-notifying on a
+    /// no-op write.
+    /// </summary>
+    private bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
         {
-            return;
+            return false;
         }
 
         field = value;
         Raise(name);
+        return true;
     }
 
     private void Raise(string? name) =>

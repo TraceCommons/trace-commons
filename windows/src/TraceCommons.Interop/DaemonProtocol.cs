@@ -39,6 +39,13 @@ public static class DaemonProtocol
         public const string Resume = "resume";
         public const string Approve = "approve";
         public const string Dismiss = "dismiss";
+
+        /// <summary>
+        /// Recalls an approval while the daemon's hold is still running. This
+        /// is what the undo bar is made of; without it "Sending…" would be a
+        /// label rather than a reprieve.
+        /// </summary>
+        public const string Cancel = "cancel";
         public const string Shutdown = "shutdown";
 
         // Onboarding. Every one of these was already in the daemon's pinned

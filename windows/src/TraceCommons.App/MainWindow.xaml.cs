@@ -133,6 +133,72 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Opens the preview sheet for a row.
+    /// </summary>
+    /// <remarks>
+    /// This is the only route to approving anything. The row itself carries no
+    /// Contribute button and never will: approving from the row is approving
+    /// without looking, and an approval has to cover exactly the bytes the
+    /// contributor was shown.
+    /// </remarks>
+    private void OnLookInside(object sender, RoutedEventArgs e)
+    {
+        if (EntryOf(sender) is not QueueEntryViewModel entry)
+        {
+            return;
+        }
+
+        var sheet = new PreviewWindow(_host, entry);
+        sheet.Decided += OnSheetDecided;
+        sheet.Activate();
+    }
+
+    /// <summary>
+    /// "Not this one" from the row: skips this session only.
+    /// </summary>
+    /// <remarks>
+    /// Dismissing without a preview is deliberate and is not the inverse of
+    /// the read gate. Declining to send something is safe in the direction
+    /// that matters -- nothing leaves the machine -- so requiring a contributor
+    /// to read a transcript before refusing it would only push them towards
+    /// approving to make the row go away.
+    /// </remarks>
+    private async void OnNotThisOne(object sender, RoutedEventArgs e)
+    {
+        if (EntryOf(sender) is QueueEntryViewModel entry)
+        {
+            await ViewModel.DismissAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// Which queue row a click came from.
+    /// </summary>
+    /// <remarks>
+    /// Tag first, DataContext second. Both are set by the row template, and
+    /// the pair is deliberate rather than defensive habit: the entry a click
+    /// refers to is the one thing on this card that must never be ambiguous,
+    /// because acting on the wrong row means previewing one session and
+    /// refusing another.
+    /// </remarks>
+    private static QueueEntryViewModel? EntryOf(object sender) =>
+        sender is FrameworkElement element
+            ? element.Tag as QueueEntryViewModel ?? element.DataContext as QueueEntryViewModel
+            : null;
+
+    private async void OnSheetDecided(QueueEntryViewModel entry, PreviewDecision decision)
+    {
+        await ViewModel.OnDecidedAsync(entry, decision);
+    }
+
+    private async void OnUndo(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.UndoAsync();
+    }
+
+    private void OnLetItSend(object sender, RoutedEventArgs e) => ViewModel.DismissUndo();
+
+    /// <summary>
     /// Tears the daemon down on close.
     ///
     /// Fire-and-forget is unavoidable here -- Closed is not awaitable -- but
