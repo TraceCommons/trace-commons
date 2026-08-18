@@ -793,6 +793,35 @@ fn tap_bumps_go_through_a_pull_request() {
     }
 }
 
+/// `gh pr create --repo` selects the base repository but cannot infer a head
+/// branch from a different workflow checkout. Both real 0.2.x tag runs pushed
+/// their tap branches and then failed here with "use the --head flag". Pin the
+/// explicit branch so a package-manager follow-up cannot fail the release job
+/// after its assets have already been published.
+#[test]
+fn cross_repository_pull_requests_name_their_head_branches() {
+    let apps = read(".github/workflows/release-apps.yml");
+    assert!(
+        apps.contains("gh pr create --fill --repo TraceCommons/homebrew-tap --head \"$BRANCH\""),
+        "the app cask PR must explicitly name its pushed head branch"
+    );
+
+    let contributor = read(".github/workflows/release-contributor.yml");
+    assert!(
+        contributor
+            .contains("gh pr create --fill --repo TraceCommons/homebrew-tap --head \"$BRANCH\""),
+        "the contributor formula PR must explicitly name its pushed head branch"
+    );
+    assert!(
+        contributor.contains("FORK_OWNER=\"$(gh api user --jq .login)\""),
+        "the winget job must derive the owner of the token-scoped fork"
+    );
+    assert!(
+        contributor.contains("--head \"${FORK_OWNER}:$BRANCH\""),
+        "the winget PR must explicitly name its fork-owned head branch"
+    );
+}
+
 #[test]
 fn runbook_states_why_zap_spares_the_device_key() {
     let runbook = read("docs/release-runbook.md");
