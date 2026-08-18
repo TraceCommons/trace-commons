@@ -95,8 +95,11 @@ Deliberately absent, and each is its own piece of work:
   "withdrawn". A bulk button could not honour it at any wording. The held
   group says so where a contributor would look for the button, and points at
   the per-row control that *can* tell them what it did.
-- Settings. The rail now has two rows; the spec's third belongs there when the
-  view does, not drawn disabled ahead of it.
+- The rest of Settings. The rail's third row exists now and carries the public
+  profile panel (see "Claiming a public handle"); the watcher knobs, the
+  connection section and the per-project list the spec also puts on that screen
+  are absent from the screen rather than drawn disabled, for the same reason
+  the row itself was absent until now.
 - The rest of the tray menu's vocabulary. The icon, the tooltip, the digest
   and run-at-login are here (see "The tray and the interruption budget"); what
   the shared spec also puts in that menu — pause with its three durations, the
@@ -298,3 +301,50 @@ Everything above is decided in the interop assembly and tested off Windows.
 What only a real Windows box can confirm is that the `ContentDialog` shows,
 that the weighted body is visibly the heavier of the two, and that the nav rail
 switches panes.
+
+## Claiming a public handle
+
+The rail's Settings row carries one panel: the public profile from section 5.6
+of the shared design spec. It is backed by `get_public_profile`,
+`set_public_profile` and `clear_public_profile`, all three of which were
+already in the daemon's pinned `METHODS` array — the gap on Windows was never
+protocol, only that nothing here asked.
+
+Three things on it are contract rather than layout.
+
+- **`handle_persisted` is not whether the claim worked.** By the time that flag
+  exists at all the server has already taken the handle; it reports only
+  whether the daemon managed to write its own local copy afterwards. So a
+  claim with `handle_persisted: false` is reported as **published**, and the
+  false branch adds only the weaker thing that is true — that this window will
+  show the contributor as unlisted again until the next successful save, and
+  that nothing about what is public changed. Telling someone their handle did
+  not go up when it did is a false statement about an outward-facing act, and
+  it is the one error this surface must never make.
+  `PublicProfileCopyTests.AProfileThatWasPublishedNeverReadsAsOneThatWasNot`
+  pins it as an invariant rather than as a string: both sentences must open
+  "You're on the roster" and neither may contain the vocabulary of a refusal,
+  so the copy stays free to be reworded and not to be reversed. The Linux
+  shell asserts the same properties in `copy.rs`.
+- **The claim is not gated on the local consent-scope list.** The server
+  authorizes the `PUT` against the grant ceiling on the claim, not against the
+  scopes this device happens to have recorded. The local set can be narrower
+  than what the credential carries, so refusing here would refuse contributors
+  the server would have allowed. The daemon makes the same choice explicitly,
+  and so do the CLI and the other two shells.
+- **The words are the Linux shell's, verbatim.** The shared design spec
+  specifies the consent-scope checkbox and nothing else about this surface, so
+  `crates/trace-commons-contributor-gtk/src/copy.rs` is the source of truth and
+  `PublicProfileCopy` mirrors it — dashes included. macOS mirrors the same
+  constants in `PublicProfileCopy.swift`. Two shells that word an
+  outward-facing consent action differently are two different promises about
+  what becomes public, so a change to one belongs in all three.
+
+Going public keeps its acknowledgement gate: nothing is pre-checked, and
+`Go public` stays disabled until the box is ticked and there is a handle to
+claim. Leaving the roster is not gated, because it withdraws a consent rather
+than granting one.
+
+What only a real Windows box can confirm here is that the go-public
+`ContentDialog` lays out its two columns, that a refusal keeps that dialog open
+beside the field it is about, and that the rail's third row selects.
