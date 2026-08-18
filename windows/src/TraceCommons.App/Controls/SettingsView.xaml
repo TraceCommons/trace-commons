@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Settings screen, and its first panel: the public profile from section
+    5.6 of the design spec.
+
+    Three methods back it (get_public_profile, set_public_profile,
+    clear_public_profile). Every one of them was already in the daemon's
+    pinned METHODS array; this screen adds no method.
+
+    Until this existed, claiming a public handle was the one thing a
+    contributor could do on Linux and macOS and not on Windows, and this app
+    had no Settings destination to put it on at all.
+
+    Two surfaces, not two states of one. Off the roster this is a single
+    control that grants nothing and opens a consent dialog; on it, it is a
+    panel of the fields that are actually published. The change of surface IS
+    the statement about where the public boundary is, which is why the two are
+    separate elements rather than one restyled into the other.
+
+    The footnote sits OUTSIDE the panel, in the window's own type: it is this
+    window talking about the public surface, not part of it.
+
+    Anything else the design spec puts under Settings (the watcher knobs, the
+    connection section, the project list) is absent rather than drawn
+    disabled, and windows/README.md still lists it. A control that leads
+    nowhere would be this screen's first untrue statement.
+
+    XML comments cannot contain a double hyphen, so the prose here uses commas
+    and parentheses where the C# files use dashes.
+-->
+<UserControl
+    x:Class="TraceCommons.App.Controls.SettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <StackPanel Grid.Row="0"
+                    Spacing="2"
+                    Padding="20,9"
+                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                    BorderThickness="0,0,0,1">
+            <TextBlock Text="Settings" Style="{StaticResource TcTitleScreenTextStyle}" />
+            <TextBlock Text="What this device shares, and under whose name."
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
+            <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+
+                <TextBlock Text="{x:Bind ViewModel.HeadingText}"
+                           Style="{StaticResource TcTitleSectionTextStyle}" />
+
+                <!--
+                    Off the roster. One control, and turning it on does not
+                    put anyone on the roster: it opens the consent dialog,
+                    which is where the handle is typed and the acknowledgement
+                    is given. Nothing is claimed by a toggle flip.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsNotListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0"
+                                   Text="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Center" />
+                        <!--
+                            A ToggleSwitch with no on/off words, because the
+                            row's own label already says what it does and the
+                            switch is never the thing that grants anything.
+                            It is put back to off if the dialog is abandoned:
+                            see OnGoPublicToggled.
+                        -->
+                        <ToggleSwitch x:Name="GoPublicToggle"
+                                      Grid.Column="1"
+                                      OnContent=""
+                                      OffContent=""
+                                      IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                      Toggled="OnGoPublicToggled" />
+                    </Grid>
+                </Border>
+
+                <!--
+                    On the roster. The fields as published, and the two acts
+                    available on them.
+
+                    Save re-publishes the WHOLE profile, because that is what
+                    the PUT does: the handle and the bio as they stand in
+                    these two boxes, both of them, every time. There is no
+                    partial update to offer, so there is no per field save.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="16,14">
+                    <StackPanel Spacing="12">
+
+                        <TextBlock Text="{x:Bind ViewModel.OnRosterSinceText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasOnRosterSince, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   HorizontalAlignment="Right" />
+
+                        <TextBox Header="{x:Bind ViewModel.HandleLabelText}"
+                                 Text="{x:Bind ViewModel.Handle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 FontFamily="{ThemeResource TcMonoFontFamily}"
+                                 IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+
+                        <StackPanel Spacing="4">
+                            <TextBox Header="{x:Bind ViewModel.BioLabelText}"
+                                     Text="{x:Bind ViewModel.Bio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     Height="78"
+                                     IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+                            <!--
+                                The counter counts UTF-8 bytes, which is the
+                                unit the budget is denominated in, and it
+                                refuses nothing: what happens at and above the
+                                limit is the server's call.
+                            -->
+                            <TextBlock Text="{x:Bind ViewModel.BioCounterText, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                       HorizontalAlignment="Right" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.SaveProfileText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnSaveProfile" />
+                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.LeaveRosterText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnLeaveRoster" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    What the last act actually did. It is the one place this
+                    screen reports an outcome, and the sentence is chosen in
+                    TraceCommons.Interop.PublicProfileCopy rather than here: a
+                    claim the daemon could not cache locally is still a
+                    PUBLISHED profile, and saying otherwise is the one error
+                    this surface must never make.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcBodyDenseTextStyle}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="{x:Bind ViewModel.FootnoteText}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcInkTertiaryBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

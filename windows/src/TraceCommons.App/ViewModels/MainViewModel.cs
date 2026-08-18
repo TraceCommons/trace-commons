@@ -48,7 +48,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private ApprovalHold? _undoHold;
     private string _undoEntryId = string.Empty;
     private string _undoProjectLabel = string.Empty;
-    private bool _showingHistory;
+    private MainPane _pane = MainPane.Queue;
 
     public MainViewModel(DaemonHost host)
     {
@@ -72,32 +72,52 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 
     /// <summary>
-    /// Which of the rail's two destinations is showing.
+    /// Which of the rail's destinations is showing.
     /// </summary>
     /// <remarks>
-    /// A pair of exclusive booleans rather than an enum plus converters: two
-    /// destinations do not justify a converter class, and both panes bind
-    /// their Visibility directly to one of these. The queue is what opens,
-    /// because the queue is what has something waiting on the contributor.
+    /// One field and a derived boolean per destination, rather than one
+    /// boolean per destination kept in step by hand. Every pane binds its
+    /// Visibility to one of these directly -- which is why they stay booleans
+    /// and the enum stays private -- and with three of them the invariant that
+    /// exactly one is true is worth having the compiler hold rather than the
+    /// setters. The queue is what opens, because the queue is what has
+    /// something waiting on the contributor.
     /// </remarks>
-    public bool ShowingQueue => !_showingHistory;
-
-    public bool ShowingHistory => _showingHistory;
-
-    public void ShowQueue() => SetPane(history: false);
-
-    public void ShowHistory() => SetPane(history: true);
-
-    private void SetPane(bool history)
+    private enum MainPane
     {
-        if (_showingHistory == history)
+        Queue,
+        History,
+        Settings,
+    }
+
+    public bool ShowingQueue => _pane == MainPane.Queue;
+
+    public bool ShowingHistory => _pane == MainPane.History;
+
+    public bool ShowingSettings => _pane == MainPane.Settings;
+
+    public void ShowQueue() => SetPane(MainPane.Queue);
+
+    public void ShowHistory() => SetPane(MainPane.History);
+
+    public void ShowSettings() => SetPane(MainPane.Settings);
+
+    private void SetPane(MainPane pane)
+    {
+        if (_pane == pane)
         {
             return;
         }
 
-        _showingHistory = history;
+        _pane = pane;
+
+        // All three are raised on every change rather than only the two that
+        // moved: the rail's selection bars and the panes both bind to these,
+        // and a destination left un-raised is a rail row that stays lit for a
+        // pane that is no longer on screen.
         Raise(nameof(ShowingQueue));
         Raise(nameof(ShowingHistory));
+        Raise(nameof(ShowingSettings));
     }
 
     /// <summary>
