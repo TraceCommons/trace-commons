@@ -42,6 +42,27 @@ use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{HistoryRecord, HistoryRollup, human_when};
 
+/// What a withdrawal attempt did, kept per submission so the row that was
+/// acted on says it, rather than a screen-level banner saying it about
+/// nothing in particular.
+///
+/// A failure next to a row that still reads "In the commons" is the exact
+/// ambiguity this exists to remove: the contributor has to be able to tell,
+/// from the row itself, whether their trace was taken back.
+#[derive(Debug, Clone)]
+pub enum Withdrawal {
+    /// The request is out. Nothing has happened yet, and the row says so in
+    /// the present tense.
+    InFlight,
+    /// The server withdrew it, and reported this tier. `None` means the
+    /// daemon sent a label this build does not know -- reported as
+    /// not-knowable, never smoothed into the mild answer.
+    Done(Option<String>),
+    /// It did not happen. Carries the daemon's fixed label, which by
+    /// contract is never a path, a token, or a response body.
+    Failed(String),
+}
+
 /// What the public roster says about this contributor, as §5.5's snapshot
 /// payload words.
 ///
@@ -212,7 +233,14 @@ fn render(
     // monospaced, unadorned, no symbol and nothing that could read as a
     // score. The prose beside it is what stops the number being mistaken
     // for one.
-    content.append(&style::section(copy::CREDIT_SECTION));
+    // The section rule carries the one control that asks for fresher
+    // figures. It sits here rather than in the header bar because these
+    // figures are what a contributor is looking at when they wonder
+    // whether the screen is current -- and because nothing else on this
+    // screen is refreshed by it.
+    let credit_section = style::section(copy::CREDIT_SECTION);
+    credit_section.append(&check_for_updates(app));
+    content.append(&credit_section);
     let credit = style::card(gtk::Orientation::Vertical, space::S);
 
     // `last_refreshed_at: null` renders as staleness, never as a confident
@@ -309,8 +337,32 @@ fn render(
         content.append(&header);
     }
     for record in records {
-        content.append(&record_row(record));
+        content.append(&record_row(app, record));
     }
+}
+
+/// The `refresh_history` control.
+///
+/// What this achieves, exactly: the daemon's background poller owns the
+/// network call, and `refresh_history` answers `requested: true` without
+/// making one. So the toast says the ask landed and nothing more -- see
+/// `copy::CHECK_FOR_UPDATES_ASKED`. History is re-read straight afterwards
+/// anyway, which is free and picks up anything the poller has already
+/// brought in since this screen was last drawn.
+fn check_for_updates(app: &Rc<App>) -> gtk::Button {
+    let button = gtk::Button::with_label(copy::CHECK_FOR_UPDATES);
+    button.add_css_class("tc-quiet");
+    button.set_valign(gtk::Align::Center);
+    let app = Rc::clone(app);
+    button.connect_clicked(move |_| {
+        app.call("refresh_history", serde_json::json!({}), |app, result| {
+            if result.is_ok() {
+                app.toast(copy::CHECK_FOR_UPDATES_ASKED);
+            }
+            refresh(app);
+        });
+    });
+    button
 }
 
 /// One of §5.3's three stat cards: glyph, eyebrow, figure.
@@ -363,15 +415,15 @@ fn held_group(quarantined: u32) -> gtk::Expander {
     body.add_css_class("tc-body");
     inner.append(&body);
 
-    // Withdraw is first-class in the shared spec and has no method on
-    // `trace_commons.daemon.v1_1` this shell can reach -- see the report,
-    // which records this as a gap rather than a design choice. Rather than
-    // draw a button that cannot work, say plainly where the capability is.
+    // The shared spec draws a "Withdraw these traces" button here, and this
+    // shell does not offer one. Withdrawal itself is now reachable -- every
+    // record below carries its own button -- but the bulk call cannot be
+    // made to honour the rule that no outcome is ever reported as a bare
+    // "withdrawn". See `copy::WITHDRAW_NO_BULK`, which says all of that to
+    // the contributor rather than leaving a drawn affordance missing with
+    // no explanation.
     let withdraw_note = gtk::Label::builder()
-        .label(
-            "To pull these back, use `trace-commons-contributor` from a terminal. \
-             Withdrawing from this window isn't wired up yet.",
-        )
+        .label(copy::WITHDRAW_NO_BULK)
         .xalign(0.0)
         .wrap(true)
         .build();
@@ -383,7 +435,7 @@ fn held_group(quarantined: u32) -> gtk::Expander {
 
 /// One record: name and when on the first line, the state as a chip on the
 /// right, then whatever that state owes an explanation for.
-fn record_row(record: &HistoryRecord) -> gtk::Box {
+fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
     let card = style::card(gtk::Orientation::Vertical, space::S);
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -444,7 +496,200 @@ fn record_row(record: &HistoryRecord) -> gtk::Box {
         line.add_css_class("tc-neutral");
         card.append(&line);
     }
+
+    // Withdrawal, which the shared spec calls first-class and always
+    // available. It is the one promise on this screen that is the
+    // contributor's to make about their own trace, so it is on the row
+    // rather than behind a menu. See `offers_withdrawal` for which rows
+    // get it.
+    if offers_withdrawal(record) {
+        card.append(&withdraw_control(app, record));
+    }
     card
+}
+
+/// Whether a record gets a withdraw button.
+///
+/// An already-withdrawn record does not: there is nothing left to withdraw,
+/// and it stays on the list reading as withdrawn rather than being dropped
+/// or re-labelled. A record carrying no `submission_id` does not either --
+/// `withdraw` takes exactly that id and nothing else, so the button would
+/// have nothing to send and would fail for a reason the contributor could
+/// do nothing about.
+fn offers_withdrawal(record: &HistoryRecord) -> bool {
+    record.status != "withdrawn" && !record.submission_id.is_empty()
+}
+
+/// The withdraw button, or -- once an attempt has been made -- what that
+/// attempt actually did.
+///
+/// The outcome replaces the button rather than sitting beside it, because
+/// the two states are answers to different questions: before, "do you want
+/// to take this back?"; after, "here is what taking it back achieved". A
+/// failure keeps the button, since a failed withdrawal is one the
+/// contributor may well want to retry.
+fn withdraw_control(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    let outcome = app.withdrawals.borrow().get(&record.submission_id).cloned();
+
+    match outcome {
+        Some(Withdrawal::InFlight) => {
+            let progress = gtk::Label::builder()
+                .label(copy::WITHDRAWING)
+                .xalign(0.0)
+                .build();
+            progress.add_css_class("tc-meta");
+            row.append(&progress);
+            return row;
+        }
+        Some(Withdrawal::Done(reach)) => {
+            // Never a generic "withdrawn": this sentence names the tier the
+            // server actually applied, and says so plainly when the server
+            // reported a tier this build does not know.
+            let done = gtk::Label::builder()
+                .label(copy::withdraw_result_sentence(reach.as_deref()))
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            done.add_css_class("tc-body");
+            row.append(&done);
+            let credit = gtk::Label::builder()
+                .label(copy::WITHDRAW_CREDIT_NOTE)
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            credit.add_css_class("tc-caveat");
+            row.append(&credit);
+            return row;
+        }
+        Some(Withdrawal::Failed(label)) => {
+            // Leads with the fact that nothing happened. A contributor must
+            // not walk away from a failed withdrawal believing their trace
+            // was taken back.
+            let failed = gtk::Label::builder()
+                .label(copy::withdraw_failure_sentence(&label))
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            failed.add_css_class("tc-caveat");
+            failed.add_css_class("tc-attention");
+            row.append(&failed);
+        }
+        None => {}
+    }
+
+    let button = gtk::Button::with_label(copy::WITHDRAW);
+    button.add_css_class("tc-quiet");
+    button.set_halign(gtk::Align::Start);
+    let app = Rc::clone(app);
+    let status = record.status.clone();
+    let submission_id = record.submission_id.clone();
+    button.connect_clicked(move |_| {
+        confirm_withdrawal(&app, &submission_id, &status);
+    });
+    row.append(&button);
+    row
+}
+
+/// The confirmation, which is shown before the request and is keyed on what
+/// this machine actually knows.
+///
+/// The tier is computed by the server *during* the withdrawal, so it cannot
+/// be stated here. `copy::withdraw_confirmation` decides what may honestly
+/// be said from a local `status`; this function only lays it out, and the
+/// body carrying the cannot-be-recalled clause is the one weighted.
+fn confirm_withdrawal(app: &Rc<App>, submission_id: &str, status: &str) {
+    let confirmation = copy::withdraw_confirmation(copy::WithdrawStage::of_status(status));
+
+    let dialog = adw::MessageDialog::new(Some(&app.window), Some(confirmation.question), None);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+    if let Some(ambiguity) = confirmation.ambiguity {
+        let line = gtk::Label::builder()
+            .label(ambiguity)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        line.add_css_class("tc-body");
+        body.append(&line);
+    }
+    for (index, text) in confirmation.bodies.iter().enumerate() {
+        let line = gtk::Label::builder()
+            .label(*text)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        line.add_css_class("tc-body");
+        // The gravest body is the one a contributor most needs to have
+        // read, so it is the one drawn in the attention ink rather than
+        // being one paragraph of two identical ones.
+        if confirmation.gravest == Some(index) {
+            line.add_css_class("tc-attention");
+        }
+        body.append(&line);
+    }
+    let credit = gtk::Label::builder()
+        .label(confirmation.credit)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    credit.add_css_class("tc-caveat");
+    body.append(&credit);
+    dialog.set_extra_child(Some(&body));
+
+    dialog.add_responses(&[
+        ("cancel", copy::WITHDRAW_CANCEL),
+        ("withdraw", confirmation.confirm_label),
+    ]);
+    dialog.set_close_response("cancel");
+    // Withdrawal deletes. The destructive appearance is what stops it
+    // reading as the ordinary way out of this dialog.
+    dialog.set_response_appearance("withdraw", adw::ResponseAppearance::Destructive);
+
+    let app = Rc::clone(app);
+    let submission_id = submission_id.to_string();
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        if response != "withdraw" {
+            return;
+        }
+        withdraw(&app, &submission_id);
+    });
+    dialog.present();
+}
+
+/// Make the request, and record what it did against the submission.
+///
+/// On success the row is not flipped here: the daemon has already updated
+/// its own history cache, so the status is re-read rather than assumed. A
+/// row that claimed "withdrawn" on the strength of this process's optimism
+/// would be the one claim on this screen nobody could check.
+fn withdraw(app: &Rc<App>, submission_id: &str) {
+    app.withdrawals
+        .borrow_mut()
+        .insert(submission_id.to_string(), Withdrawal::InFlight);
+    refresh(app);
+    let key = submission_id.to_string();
+    app.call(
+        "withdraw",
+        serde_json::json!({ "submission_id": submission_id }),
+        move |app, result| {
+            let outcome = match result {
+                Ok(value) => Withdrawal::Done(
+                    value
+                        .get("distribution_reach")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                ),
+                // A fixed label by contract, so carrying it into the row
+                // cannot leak a path or a token.
+                Err(label) => Withdrawal::Failed(label),
+            };
+            app.withdrawals.borrow_mut().insert(key.clone(), outcome);
+            // Re-read history from the daemon, which is what turns the row
+            // over to withdrawn.
+            refresh(app);
+        },
+    );
 }
 
 /// The mono figure line under a record, or nothing when there is no figure
@@ -848,6 +1093,47 @@ mod tests {
         }
     }
 
+    fn record(status: &str, submission_id: &str) -> HistoryRecord {
+        HistoryRecord {
+            submission_id: submission_id.to_string(),
+            submitted_at: None,
+            project_label: String::new(),
+            status: status.to_string(),
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_record_is_not_offered_withdrawal_again() {
+        // ...and it is still on the list to be offered anything at all:
+        // withdrawal never drops a record or re-labels it as a failure.
+        assert!(!offers_withdrawal(&record("withdrawn", "sub-1")));
+        assert_eq!(status_word("withdrawn"), copy::WITHDRAWN_BY_YOU);
+    }
+
+    #[test]
+    fn every_other_state_can_be_withdrawn() {
+        // "Withdraw is first-class and always available" in the shared
+        // design, which includes the held ones -- the state a contributor
+        // is most likely to want out of.
+        for status in ["submitted", "quarantined", "accepted", "something-new"] {
+            assert!(
+                offers_withdrawal(&record(status, "sub-1")),
+                "{status} cannot be withdrawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_with_no_submission_id_is_not_offered_a_button_that_cannot_work() {
+        // `withdraw` takes exactly that id. Without one there is nothing to
+        // send, and a button would fail for a reason the contributor could
+        // do nothing about.
+        assert!(!offers_withdrawal(&record("accepted", "")));
+    }
+
     #[test]
     fn an_unknown_status_is_never_claimed_to_be_in_the_commons() {
         for status in ["submitted", "pending", "something-new"] {
@@ -858,6 +1144,7 @@ mod tests {
     #[test]
     fn no_credit_figure_carries_a_symbol_or_a_projection() {
         let record = HistoryRecord {
+            submission_id: String::new(),
             submitted_at: None,
             project_label: String::new(),
             status: "accepted".to_string(),
@@ -875,6 +1162,7 @@ mod tests {
     #[test]
     fn a_record_with_nothing_scored_yet_states_that_rather_than_a_zero() {
         let mut record = HistoryRecord {
+            submission_id: String::new(),
             submitted_at: None,
             project_label: String::new(),
             status: "submitted".to_string(),

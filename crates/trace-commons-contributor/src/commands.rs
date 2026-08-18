@@ -1774,9 +1774,124 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
     })
 }
 
+/// The instance an invite names, for a shell that has to show a contributor
+/// whose commons they are about to join before they commit to joining it
+/// (shared design spec, "### 2. Connect": *resolve and show the instance
+/// before committing*).
+///
+/// Returns the host only, and deliberately nothing else. The obvious API
+/// here would expose [`ParsedInvite`], but that carries `code` -- the
+/// credential -- and handing it to four shells is four chances to put it in
+/// a label, a log line, or a window title. A shell cannot leak what it was
+/// never given, so this returns the one field it has a reason to draw.
+///
+/// `None` for anything `parse_invite` refuses, which is what the caller
+/// wants: the shared spec gives the whole invite path a single failure
+/// sentence, so the distinction between "not a URL" and "no code in it" is
+/// one the interface must not draw anyway.
+pub fn invite_issuer_host(raw: &str) -> Option<String> {
+    let parsed = parse_invite(raw).ok()?;
+    reqwest::Url::parse(&parsed.issuer_url)
+        .ok()?
+        .host_str()
+        .map(str::to_string)
+}
+
+/// The invite inside a `tracecommons://enroll?invite=…` deep link, or
+/// `None` for anything else — including every other argument a shell is
+/// launched with, since registering a scheme handler means this question
+/// gets asked about all of them.
+///
+/// An issuer link cannot open a desktop app, so an invite mail carries the
+/// app's own scheme with the real invite folded into the `invite`
+/// parameter. Scheme and host are compared case-insensitively, matching
+/// `DeepLink.inviteURL` on macOS: a handler registration elsewhere in the
+/// system need not preserve the case anyone typed.
+///
+/// This lives here rather than in a shell so that every Rust shell agrees
+/// on what a deep link is, and so none of them vendors its own URL parser
+/// to find out.
+pub fn invite_from_deep_link(arg: &str) -> Option<String> {
+    let url = reqwest::Url::parse(arg).ok()?;
+    if !url.scheme().eq_ignore_ascii_case("tracecommons") {
+        return None;
+    }
+    if !url.host_str()?.eq_ignore_ascii_case("enroll") {
+        return None;
+    }
+    url.query_pairs()
+        .find(|(k, _)| k == "invite")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod invite_tests {
-    use super::parse_invite;
+    use super::{invite_from_deep_link, invite_issuer_host, parse_invite};
+
+    #[test]
+    fn deep_link_yields_the_invite() {
+        let got = invite_from_deep_link(
+            "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        );
+        assert_eq!(got.as_deref(), Some("https://issuer.example/onboard#CODE"));
+    }
+
+    #[test]
+    fn deep_link_scheme_and_host_are_case_insensitive() {
+        let got =
+            invite_from_deep_link("TraceCommons://ENROLL?invite=https%3A%2F%2Fi.example%2Fo%23C");
+        assert_eq!(got.as_deref(), Some("https://i.example/o#C"));
+    }
+
+    /// The exact argv a real Windows shell delivered when a
+    /// `tracecommons://` link was opened: it normalised the URL and added a
+    /// slash after the host, which nothing in our code wrote. Parsing via
+    /// `Url` survives that; splitting on `"://enroll?"` would not have.
+    ///
+    /// Kept here as well as in the Windows tests because both shells parse
+    /// links produced by the same invite mail, and a desktop portal is as
+    /// free to normalise as the Windows shell was.
+    #[test]
+    fn the_form_a_shell_actually_delivers() {
+        let got = invite_from_deep_link(
+            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
+        );
+        assert_eq!(
+            got.as_deref(),
+            Some("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+        );
+    }
+
+    #[test]
+    fn other_arguments_are_not_invites() {
+        // Registering a scheme handler means this is asked about every
+        // argument the shell is ever launched with, including its own.
+        assert_eq!(invite_from_deep_link("https://example.com/"), None);
+        assert_eq!(invite_from_deep_link("tracecommons://open?x=1"), None);
+        assert_eq!(invite_from_deep_link("--state-dir"), None);
+        assert_eq!(invite_from_deep_link("tracecommons://enroll?invite="), None);
+    }
+
+    #[test]
+    fn issuer_host_is_shown_without_the_code() {
+        let host = invite_issuer_host("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+            .expect("a well-formed invite resolves to its host");
+        assert_eq!(host, "issuer.tracecommons.ai");
+        // The point of the narrow return type: the credential is not in it.
+        assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
+    }
+
+    #[test]
+    fn issuer_host_refuses_what_parse_invite_refuses() {
+        // A bare code, and a URL carrying no code at all. Both are `None`,
+        // because the interface shows one sentence for every failure here.
+        assert_eq!(invite_issuer_host("VQWWPGYSG8Y4LTP6"), None);
+        assert_eq!(
+            invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
+            None
+        );
+    }
 
     #[test]
     fn parses_fragment_form() {

@@ -37,6 +37,29 @@ public sealed class DaemonHost : IAsyncDisposable
     public event Action? StatusChanged;
 
     /// <summary>
+    /// Raised on the UI thread when the daemon says a digest is due, carrying
+    /// the pending count it decided on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The daemon owns the decision, because the batching policy is shared by
+    /// every application that attaches to it: <c>daemon/notify.rs</c> refuses
+    /// on an empty queue and otherwise fires once per
+    /// <c>digest_interval_secs</c>, persisting the stamp so the spacing
+    /// survives a restart. This event is delivery, not policy, and the shell
+    /// must not invent a timer of its own to supplement it.
+    /// </para>
+    /// <para>
+    /// The daemon's own <c>text</c> field is deliberately ignored by the
+    /// subscriber. It phrases the digest for a shell-less daemon; the shared
+    /// spec's wording for an application is what
+    /// <c>TraceCommons.Interop.DigestText</c> produces, and all three shells
+    /// use that.
+    /// </para>
+    /// </remarks>
+    public event Action<int>? DigestDue;
+
+    /// <summary>
     /// Raised on the UI thread when the ABI reported dropped events. The view
     /// model treats this as "your local picture is stale, refetch everything",
     /// which is the only correct response to an unknown number of missed
@@ -73,6 +96,15 @@ public sealed class DaemonHost : IAsyncDisposable
 
     /// <summary>Whether a daemon is currently running in this process.</summary>
     public bool IsRunning => _daemon is not null;
+
+    /// <summary>
+    /// The UI thread's queue, for the one caller that needs a timer on it.
+    ///
+    /// Exposed rather than duplicated: the undo bar counts down against the
+    /// daemon's own hold deadline, and a second dispatcher obtained elsewhere
+    /// would be the same queue reached by a route that no longer says so.
+    /// </summary>
+    public DispatcherQueue Dispatcher => _dispatcher;
 
     /// <summary>
     /// Starts the daemon and subscribes to its events.
@@ -146,6 +178,34 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// Opens the in-process preview for an entry, off the UI thread.
+    ///
+    /// Off-thread because <c>tc_preview_open</c> reads the session file and
+    /// runs the whole redaction pass synchronously: on a 169 KB trace that is
+    /// a visible freeze if it happens on the UI thread, and this is the one
+    /// screen where a freeze reads as the app struggling with the very bytes
+    /// it is about to send.
+    ///
+    /// The returned preview is the caller's to dispose. It holds native memory
+    /// and every borrowed pointer it handed out dies with it.
+    /// </summary>
+    /// <exception cref="TcException">
+    /// The entry is unknown, or the daemon handle is already gone.
+    /// </exception>
+    public async Task<TcPreview> OpenPreviewAsync(
+        string entryId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+
+        TcDaemon daemon = _daemon
+            ?? throw new TcException("daemon-not-started");
+
+        return await Task.Run(() => daemon.OpenPreview(entryId), cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// The subscription callback. Runs on a RUST BACKGROUND THREAD, so it does
     /// the minimum possible work and hops to the UI thread for everything
     /// else. Nothing here may touch observable state directly.
@@ -172,6 +232,10 @@ public sealed class DaemonHost : IAsyncDisposable
 
                 case DaemonProtocol.Events.StatusChanged:
                     StatusChanged?.Invoke();
+                    break;
+
+                case DaemonProtocol.Events.DigestDue:
+                    DigestDue?.Invoke(evt.PendingCount);
                     break;
 
                 case DaemonProtocol.Events.Lagged:

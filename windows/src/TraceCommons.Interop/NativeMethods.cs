@@ -196,6 +196,18 @@ internal static class NativeMethods
     internal static extern IntPtr tc_last_error();
 
     /// <summary>
+    /// The instance an invite link names, as an owned char*, or NULL if the
+    /// argument is not a usable invite.
+    ///
+    /// A pure function of its argument: no handle, no daemon state. It is on
+    /// the binding rather than the daemon protocol because adding a method
+    /// would change the pinned METHODS array that hello advertises.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_invite_issuer_host(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? invite);
+
+    /// <summary>
     /// Copies a borrowed <c>const char*</c> into a managed string without
     /// freeing it. NULL becomes null.
     /// </summary>

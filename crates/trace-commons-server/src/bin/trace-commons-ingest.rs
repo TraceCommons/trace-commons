@@ -27,10 +27,11 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
-    ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
-    ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
-    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
-    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    ConsentScope, EmbeddingAnalysisMetadata, PrivacyFilterBackendTag, ProcessEvalRating,
+    ProcessEvaluationLabels, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
     rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
     retention_policy_for_trace, run_privacy_filter_canary,
 };
@@ -574,6 +575,7 @@ const TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS: &str =
     "TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS";
 const TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS: &str =
     "TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS";
+const TRACE_COMMONS_REQUIRE_PRIVACY_FILTER: &str = "TRACE_COMMONS_REQUIRE_PRIVACY_FILTER";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -3217,6 +3219,19 @@ impl AppState {
                 db_tenant_policy_reads,
             },
         )?;
+        // Resolve and announce the privacy-filter backend at boot. The label
+        // is the only operational signal that prose-PII filtering is live:
+        // nothing else distinguishes a filter that ran from one that was never
+        // configured.
+        let privacy_filter_backend = resolve_privacy_filter_backend()?;
+        validate_privacy_filter_config(
+            env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER),
+            privacy_filter_backend,
+        )?;
+        tracing::info!(
+            privacy_filter_backend = privacy_filter_backend.label(),
+            "Trace Commons privacy filter backend resolved"
+        );
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
@@ -10130,6 +10145,38 @@ fn parse_credit_settlement_issuer_approval_max_age(
     } else {
         Ok(Some(Duration::hours(hours)))
     }
+}
+
+/// Resolve the configured privacy-filter backend once, at boot.
+///
+/// The adapter is otherwise built per submission, so a backend named without
+/// its credentials surfaces as a failed submission rather than a failed
+/// start. Resolving here turns that into a boot refusal.
+fn resolve_privacy_filter_backend() -> anyhow::Result<PrivacyFilterBackendTag> {
+    privacy_filter_backend_from_env()
+        .map_err(|err| anyhow::anyhow!("privacy filter backend is configured but unusable: {err}"))
+}
+
+/// Refuse to start when a deployment requires prose-PII filtering and no
+/// backend is configured.
+///
+/// An unset backend resolves to "no filter" with no error, the redactor built
+/// from it performs deterministic redaction only, and a runtime filter failure
+/// falls back to the unfiltered text. A deployment can therefore run with no
+/// prose-PII filtering while every external signal looks healthy — the service
+/// is active, the journal is clean, submissions succeed. Opt-in so existing
+/// deployments keep their current boot behaviour.
+fn validate_privacy_filter_config(
+    require_privacy_filter: bool,
+    backend: PrivacyFilterBackendTag,
+) -> anyhow::Result<()> {
+    if require_privacy_filter && backend == PrivacyFilterBackendTag::None {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_PRIVACY_FILTER} is set but no privacy filter backend is \
+             configured (missing control: privacy_filter_backend)"
+        );
+    }
+    Ok(())
 }
 
 fn validate_credit_settlement_issuer_approval_freshness_config(

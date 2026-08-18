@@ -15,20 +15,57 @@
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
 
     <!--
-      Unpackaged (WindowsPackageType=None) rather than MSIX for this slice.
+      Unpackaged (WindowsPackageType=None) BY DEFAULT, MSIX only on request.
 
-      MSIX is the right end state for shipping — it is how the macOS app's
-      bundle and the Linux shell's desktop entry are matched on Windows — but
-      it needs signing identity and a packaging project, neither of which
-      exists yet. Unpackaged builds and runs from CI with no certificate, so
-      the interop path can be proven on Windows before packaging work starts.
+      The shipping artifact is the self-contained unpackaged publish tree,
+      zipped: it needs no prerequisites on a contributor's machine, it installs
+      per user without administrator rights, and it builds in CI with no
+      certificate at all — which is what lets the `windows contributor app` job
+      verify the XAML and the Windows App SDK wiring on every pull request.
+
+      TcPackaged=true switches this project to MSIX. It is opt-in rather than
+      the default because the packaged flavour is NOT a superset: it needs
+      Windows 10 2004 (the manifest disables write virtualization, which is a
+      2004 feature and a restricted capability), and it cannot be signed
+      without the release identity. See windows/packaging/README.md. Nothing
+      builds with it set except windows/scripts/make-msix.ps1.
     -->
-    <WindowsPackageType>None</WindowsPackageType>
+    <TcPackaged Condition="'$(TcPackaged)' == ''">false</TcPackaged>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
 
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TcPackaged)' != 'true'">
+    <WindowsPackageType>None</WindowsPackageType>
+  </PropertyGroup>
+
+  <!--
+    The packaged flavour. AppxPackageSigningEnabled is false on purpose: this
+    repository has no PFX and never will — signing is Azure Trusted Signing,
+    performed by signtool after packaging, against the same identity the
+    Authenticode pass uses. A build that tried to sign here would fail looking
+    for a certificate store.
+  -->
+  <PropertyGroup Condition="'$(TcPackaged)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TcPackaged)' == 'true'">
+    <AppxManifest Include="$(MSBuildThisFileDirectory)../../packaging/Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="$(MSBuildThisFileDirectory)../../packaging/Assets/*.png">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
