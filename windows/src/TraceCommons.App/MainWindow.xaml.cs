@@ -146,15 +146,26 @@ public sealed partial class MainWindow : Window
         catch (Exception)
         {
             // WinUI allows one ContentDialog per XamlRoot, and this window now
-            // has two other callers -- WithdrawDialog and GoPublicDialog. If
-            // one of them is open, ShowAsync throws, and this handler is
-            // `async void`, so the throw would take the process down.
+            // has two other callers -- WithdrawDialog, from History, and
+            // GoPublicDialog, from Settings. If either is open, ShowAsync
+            // throws, and this handler is `async void`, so the throw would
+            // take the process down.
             //
-            // The close stays cancelled. That is the only safe direction:
-            // quitting is what stops the watcher, so an unaskable quit must
-            // not become a silent one. The contributor dismisses the dialog
-            // that is already up and closes again, which is how a modal
-            // behaves everywhere else.
+            // Catching is the whole fix, and there is no second decision to
+            // make here: `args.Cancel = true` ran synchronously above, before
+            // the first await, so WinUI has already honoured the cancellation
+            // by the time this throw is possible. The close is refused
+            // whatever happens next; the only question was whether the
+            // process survived to be closed again.
+            //
+            // Which leaves the window closing silently-refused. That is not
+            // one sentence away from being fixed, and it is worth saying why:
+            // MainViewModel.Notice, the obvious home for the explanation,
+            // renders inside the QUEUE pane, and both dialogs that can land us
+            // here are reachable only from History and Settings. The pane that
+            // would carry the message is by definition not the pane on screen.
+            // Explaining this properly needs a surface above all three panes,
+            // which is a different change from stopping a crash.
             return;
         }
         finally
