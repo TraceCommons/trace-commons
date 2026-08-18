@@ -8,28 +8,27 @@ using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 
-namespace TraceCommons.App;
+namespace TraceCommons.App.Controls;
 
 /// <summary>
-/// The preview sheet's window.
+/// The preview sheet's markup and wiring. <see cref="PreviewWindow"/> hosts it.
 ///
-/// Thin by design, like <see cref="OnboardingWindow"/>: every decision lives
-/// in <see cref="PreviewSheetViewModel"/>, which is where the contract
-/// behaviours are commented, and the read gate itself lives one layer further
-/// down in <see cref="ReadGate"/> so it can be tested off Windows. This file
-/// wires clicks and draws the transcript.
+/// Thin by design, like <c>OnboardingWindow</c>: every decision lives in
+/// <see cref="PreviewSheetViewModel"/>, which is where the contract behaviours
+/// are commented, and the read gate itself lives one layer further down in
+/// <see cref="ReadGate"/> so it can be tested off Windows. This file wires
+/// clicks and draws the transcript.
 /// </summary>
-public sealed partial class PreviewWindow : Window
+public sealed partial class PreviewSheet : UserControl, IDisposable
 {
-    public PreviewWindow(DaemonHost host, QueueEntryViewModel entry)
+    public PreviewSheet(DaemonHost host, QueueEntryViewModel entry)
     {
         InitializeComponent();
 
         ViewModel = new PreviewSheetViewModel(host, entry);
         ViewModel.Decided += OnDecided;
 
-        Closed += OnClosed;
-        Activated += OnFirstActivated;
+        Loaded += OnFirstLoaded;
     }
 
     public PreviewSheetViewModel ViewModel { get; }
@@ -42,14 +41,14 @@ public sealed partial class PreviewWindow : Window
     public event Action<QueueEntryViewModel, PreviewDecision>? Decided;
 
     /// <summary>
-    /// Opens the preview on first activation rather than in the constructor,
-    /// so the window is on screen before the redaction pass starts: on a large
-    /// session that pass takes long enough that doing it first would look like
-    /// a failure to open.
+    /// Opens the preview once the sheet is on screen rather than in the
+    /// constructor, so the window is visible before the redaction pass starts:
+    /// on a large session that pass takes long enough that doing it first
+    /// would look like a failure to open.
     /// </summary>
-    private async void OnFirstActivated(object sender, WindowActivatedEventArgs args)
+    private async void OnFirstLoaded(object sender, RoutedEventArgs e)
     {
-        Activated -= OnFirstActivated;
+        Loaded -= OnFirstLoaded;
         await ViewModel.LoadAsync();
 
         // Search is the tab a contributor can answer a question with in five
@@ -134,7 +133,7 @@ public sealed partial class PreviewWindow : Window
             return;
         }
 
-        Brush markerBrush = (Brush)Application.Current.Resources["TcGoldTextBrush"];
+        var markerBrush = (Brush)Application.Current.Resources["TcGoldTextBrush"];
 
         IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(body);
         foreach (TranscriptRun run in runs)
@@ -157,9 +156,9 @@ public sealed partial class PreviewWindow : Window
     /// </summary>
     /// <remarks>
     /// Reads the box rather than the view model, for the same reason
-    /// <see cref="OnboardingWindow"/> does: the order of the two-way binding's
-    /// push and this event is not guaranteed, so reading the view model here
-    /// would search for the previous keystroke.
+    /// <c>OnboardingWindow</c> does: the order of the two-way binding's push
+    /// and this event is not guaranteed, so reading the view model here would
+    /// search for the previous keystroke.
     /// </remarks>
     private void OnNeedleChanged(object sender, TextChangedEventArgs e)
     {
@@ -190,7 +189,10 @@ public sealed partial class PreviewWindow : Window
         await ViewModel.ContributeAsync();
     }
 
-    private void OnClose(object sender, RoutedEventArgs e) => Close();
+    private void OnClose(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
+
+    /// <summary>Raised when the sheet is finished with, for any reason.</summary>
+    public event Action? CloseRequested;
 
     /// <summary>
     /// One sheet, one session, one decision: both decisions close the window
@@ -199,16 +201,16 @@ public sealed partial class PreviewWindow : Window
     private void OnDecided(PreviewDecision decision)
     {
         Decided?.Invoke(ViewModel.Entry, decision);
-        Close();
+        CloseRequested?.Invoke();
     }
 
     /// <summary>
-    /// Frees the preview with the window.
+    /// Frees the preview.
     ///
     /// The native body dies here, which is what bounds the ABI's one content
     /// exemption to a sheet that is open.
     /// </summary>
-    private void OnClosed(object sender, WindowEventArgs args)
+    public void Dispose()
     {
         ViewModel.Decided -= OnDecided;
         ViewModel.Dispose();
