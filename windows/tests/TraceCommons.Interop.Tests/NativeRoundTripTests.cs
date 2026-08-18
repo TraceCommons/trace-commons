@@ -127,6 +127,17 @@ public sealed class NativeRoundTripTests : IDisposable
                      DaemonProtocol.Methods.Approve,
                      DaemonProtocol.Methods.Dismiss,
                      DaemonProtocol.Methods.Shutdown,
+
+                     // The roster profile. Named here rather than trusted,
+                     // because this is the only check that these three
+                     // constants are the daemon's own strings: everything
+                     // else about the Settings panel is exercised against
+                     // fixtures, and a typo would surface as an
+                     // unknown_method in front of a contributor claiming a
+                     // handle.
+                     DaemonProtocol.Methods.GetPublicProfile,
+                     DaemonProtocol.Methods.SetPublicProfile,
+                     DaemonProtocol.Methods.ClearPublicProfile,
                  })
         {
             Assert.Contains(method, hello!.Methods);
