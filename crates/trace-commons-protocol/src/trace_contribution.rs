@@ -891,6 +891,163 @@ pub fn estimate_initial_credit(envelope: &TraceContributionEnvelope) -> CreditEs
     }
 }
 
+/// Field names an emitter may use to carry the arguments a tool call was
+/// issued with. `arguments` is what this crate's own envelope builder writes;
+/// the rest are the spellings the upstream source adapters encounter.
+const REPLAY_ARGUMENT_KEYS: &[&str] = &["arguments", "args", "parameters", "params", "input"];
+
+/// Field names an emitter may use to carry what a tool returned.
+const REPLAY_RESULT_KEYS: &[&str] = &["result", "results", "output", "response", "content"];
+
+/// A marker flag is not a payload. `{"has_result": true}` says a result
+/// existed somewhere upstream; it does not carry the result, and a consumer
+/// cannot grade against it. Booleans and nulls therefore never count as
+/// populated, which is what keeps this measure from being satisfied by the
+/// same metadata that satisfied the boolean it replaces.
+fn replay_value_is_populated(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn payload_carries_any(payload: &Value, keys: &[&str]) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    keys.iter()
+        .any(|key| object.get(*key).is_some_and(replay_value_is_populated))
+}
+
+fn has_text(content: Option<&String>) -> bool {
+    content.is_some_and(|text| !text.trim().is_empty())
+}
+
+fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+}
+
+fn event_carries_result(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+/// Whether an event carries anything a consumer could read, as opposed to
+/// metadata about an event that once carried something.
+fn event_carries_content(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+fn replay_call_id(event: &TraceContributionEvent) -> Option<&str> {
+    event.tool_call_id.as_deref().or_else(|| {
+        event
+            .structured_payload
+            .as_object()
+            .and_then(|object| object.get("tool_call_id"))
+            .and_then(Value::as_str)
+    })
+}
+
+/// What a downstream consumer needs to rebuild a trace as a runnable task:
+/// a prompt to issue, arguments to issue each tool call with, and a result
+/// per call to grade against.
+///
+/// This exists because `replayability` used to be `replay.replayable`
+/// restated. That field is set by the emitter and was `true` on every
+/// envelope in the pilot corpus, including the ones carrying nothing but
+/// tool names, so the score could not fail and the corpus reported itself
+/// healthy indefinitely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReplaySufficiency {
+    pub has_initial_prompt: bool,
+    pub tool_calls: usize,
+    pub tool_calls_with_arguments: usize,
+    pub tool_calls_with_results: usize,
+}
+
+impl ReplaySufficiency {
+    /// Equal thirds, because a replay needs all three and any one of them
+    /// missing leaves a consumer unable to build a benchmark item. Partial
+    /// tool coverage earns partial credit: a corpus where half the calls are
+    /// seedable is genuinely worth more than one where none are.
+    pub fn score(&self) -> f32 {
+        let prompt = if self.has_initial_prompt { 1.0 } else { 0.0 };
+        if self.tool_calls == 0 {
+            // Nothing to seed beyond the prompt, so the prompt is the whole
+            // of what replay needs. Guards the division below.
+            return prompt;
+        }
+        let calls = self.tool_calls as f32;
+        let arguments = self.tool_calls_with_arguments as f32 / calls;
+        let results = self.tool_calls_with_results as f32 / calls;
+        ((prompt + arguments + results) / 3.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Measure what of a replay actually survived into the envelope.
+pub fn replay_sufficiency(envelope: &TraceContributionEnvelope) -> ReplaySufficiency {
+    let has_initial_prompt = envelope
+        .events
+        .iter()
+        .find(|event| event.event_type == TraceContributionEventType::UserMessage)
+        .is_some_and(event_carries_content);
+
+    // Results are matched to calls by `tool_call_id` where both sides carry
+    // one, and otherwise drawn in order from a pool of unkeyed results. The
+    // fallback matters because no emitter on the pilot path sets the id.
+    let mut keyed_results: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unkeyed_results = 0usize;
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolResult {
+            continue;
+        }
+        if !event_carries_result(event) {
+            continue;
+        }
+        match replay_call_id(event) {
+            Some(call_id) => *keyed_results.entry(call_id).or_default() += 1,
+            None => unkeyed_results += 1,
+        }
+    }
+
+    let mut sufficiency = ReplaySufficiency {
+        has_initial_prompt,
+        ..ReplaySufficiency::default()
+    };
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolCall {
+            continue;
+        }
+        sufficiency.tool_calls += 1;
+        if event_carries_arguments(event) {
+            sufficiency.tool_calls_with_arguments += 1;
+        }
+        let matched_by_id = replay_call_id(event)
+            .and_then(|call_id| keyed_results.get_mut(call_id))
+            .is_some_and(|remaining| {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            });
+        if matched_by_id {
+            sufficiency.tool_calls_with_results += 1;
+        } else if unkeyed_results > 0 {
+            unkeyed_results -= 1;
+            sufficiency.tool_calls_with_results += 1;
+        }
+    }
+    sufficiency
+}
+
 pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceValueScorecard {
     let schema_validity = if envelope.schema_version == TRACE_CONTRIBUTION_SCHEMA_VERSION {
         1.0
@@ -900,8 +1057,30 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     let privacy_risk = privacy_risk_score(envelope.privacy.residual_pii_risk);
     let gate = privacy_gate(envelope.privacy.residual_pii_risk);
     let event_count = envelope.events.len() as f32;
-    let quality = (event_count / 8.0).clamp(0.15, 1.0);
-    let replayability = if envelope.replay.replayable { 1.0 } else { 0.0 };
+    // Length alone used to be the whole of `quality`, which meant redaction
+    // raised a trace's score: stripping content leaves the event count
+    // untouched. Weight length by the share of events that actually carry
+    // something, so padding an envelope with contentless events cannot pay.
+    let substantive_events = envelope
+        .events
+        .iter()
+        .filter(|event| event_carries_content(event))
+        .count() as f32;
+    let content_share = if event_count == 0.0 {
+        0.0
+    } else {
+        substantive_events / event_count
+    };
+    let quality = ((event_count / 8.0).clamp(0.0, 1.0) * content_share).clamp(0.15, 1.0);
+    let sufficiency = replay_sufficiency(envelope);
+    // Sufficiency can only lower the score: an emitter that declares a trace
+    // unreplayable keeps the last word, but one that declares it replayable
+    // now has to have shipped the inputs that claim requires.
+    let replayability = if envelope.replay.replayable {
+        sufficiency.score()
+    } else {
+        0.0
+    };
     let novelty = envelope
         .embedding_analysis
         .as_ref()
@@ -968,7 +1147,29 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         explanation.push("Residual privacy risk is high; credit is held for review.".to_string());
     }
     if envelope.replay.replayable {
-        explanation.push("Replay metadata is present.".to_string());
+        // Name what is missing rather than asserting the block exists. A
+        // consumer who cannot replay a trace needs to know which of the three
+        // inputs did not survive, and "Replay metadata is present." told them
+        // nothing at all.
+        if sufficiency.tool_calls == 0 {
+            explanation.push(if sufficiency.has_initial_prompt {
+                "Replay inputs present: an initial prompt, and no tool calls to seed.".to_string()
+            } else {
+                "Replay is blocked: no initial prompt to re-issue.".to_string()
+            });
+        } else {
+            explanation.push(format!(
+                "Replay inputs: initial prompt {}, arguments on {} of {} tool call(s), results on {}.",
+                if sufficiency.has_initial_prompt {
+                    "present"
+                } else {
+                    "missing"
+                },
+                sufficiency.tool_calls_with_arguments,
+                sufficiency.tool_calls,
+                sufficiency.tool_calls_with_results,
+            ));
+        }
     }
     if !envelope.replay.required_tools.is_empty() {
         explanation.push(format!(
@@ -7402,6 +7603,272 @@ mod tests {
         assert!(
             format!("{error:?}").contains("input exceeded limit"),
             "expected the length refusal: {error:?}"
+        );
+    }
+
+    // --- Replay sufficiency -------------------------------------------
+    //
+    // A downstream consumer measured 330 pilot envelopes and found every one
+    // scoring `replayability: 1.0` while none could be turned back into a
+    // runnable task. The old formula restated `replay.replayable`, an
+    // emitter-set boolean, so it could not fail. These pin the properties a
+    // replay score has to have instead: a task to issue, arguments to issue
+    // it with, and an answer to grade against.
+
+    fn replay_event(
+        event_type: super::TraceContributionEventType,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        content: Option<&str>,
+        payload: super::Value,
+    ) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type,
+            timestamp: Utc::now(),
+            redacted_content: content.map(str::to_string),
+            structured_payload: payload,
+            tool_name: tool_name.map(str::to_string),
+            tool_category: None,
+            tool_call_id: tool_call_id.map(str::to_string),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
+    /// The shape the web-history capture path actually emits: tool names and
+    /// nothing else, with `replayable` asserted true.
+    fn web_history_shaped_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                None,
+                serde_json::json!({"state": "Completed"}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                None,
+                None,
+                serde_json::json!({"has_result": true, "has_error": false}),
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                None,
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    /// The shape a benchmark item needs: a prompt, arguments on the call, and
+    /// a result carrying what the agent observed.
+    fn seedable_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                Some("summarise my unread mail"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                None,
+                serde_json::json!({"arguments": {"label": "UNREAD"}}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolResult,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                Some("2 unread threads"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                Some("you have 2 unread threads"),
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    #[test]
+    fn replayability_is_zero_when_nothing_replayable_survived_redaction() {
+        use super::*;
+        // The exact corpus finding: `replayable: true`, tool names recorded,
+        // no prompt, no arguments, no results. Nothing here can be replayed,
+        // so nothing here may score as replayable.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        assert_eq!(
+            scored.replayability, 0.0,
+            "a trace with no prompt, arguments or results is not replayable"
+        );
+    }
+
+    #[test]
+    fn replayability_is_one_for_a_seedable_trace() {
+        use super::*;
+        let scored = compute_value_scorecard(&seedable_envelope());
+        assert_eq!(
+            scored.replayability, 1.0,
+            "prompt + arguments + a result per call is everything replay needs"
+        );
+    }
+
+    #[test]
+    fn replayability_beats_the_metadata_only_shape() {
+        use super::*;
+        // The property that matters more than either endpoint: the metric has
+        // to separate these two at all. The old one scored them equal.
+        let seedable = compute_value_scorecard(&seedable_envelope());
+        let metadata_only = compute_value_scorecard(&web_history_shaped_envelope());
+        assert!(
+            seedable.replayability > metadata_only.replayability,
+            "seedable {} must out-score metadata-only {}",
+            seedable.replayability,
+            metadata_only.replayability
+        );
+    }
+
+    #[test]
+    fn replayability_degrades_when_only_some_calls_carry_arguments() {
+        use super::*;
+        // Partial coverage is partial credit, not all-or-nothing: a trace half
+        // of whose calls are seedable is worth more than one with none and
+        // less than one that is fully seedable.
+        let mut envelope = seedable_envelope();
+        envelope.events.push(replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("slack__post_message"),
+            Some("call-2"),
+            None,
+            serde_json::json!({"has_result": true}),
+        ));
+        let partial = compute_value_scorecard(&envelope).replayability;
+        let full = compute_value_scorecard(&seedable_envelope()).replayability;
+        assert!(
+            partial > 0.0 && partial < full,
+            "partial coverage must land strictly between: {partial} vs {full}"
+        );
+    }
+
+    #[test]
+    fn an_emitter_declaring_a_trace_unreplayable_is_still_believed() {
+        use super::*;
+        // Sufficiency can only ever lower the score. An emitter that knows the
+        // trace cannot be replayed keeps the last word.
+        let mut envelope = seedable_envelope();
+        envelope.replay.replayable = false;
+        assert_eq!(
+            compute_value_scorecard(&envelope).replayability,
+            0.0,
+            "replayable: false is authoritative"
+        );
+    }
+
+    #[test]
+    fn a_trace_with_no_tool_calls_needs_only_a_prompt() {
+        use super::*;
+        // The tool-free traces in the corpus: there are no calls to carry
+        // arguments, so the prompt is the whole of what replay needs. Absent
+        // guarding, dividing by zero calls would score them 0 or NaN.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = Vec::new();
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::UserMessage,
+            None,
+            None,
+            Some("what is the capital of France"),
+            Value::Null,
+        )];
+        let scored = compute_value_scorecard(&envelope);
+        assert!(
+            scored.replayability.is_finite(),
+            "a tool-free trace must not divide by zero calls"
+        );
+        assert_eq!(
+            scored.replayability, 1.0,
+            "a prompt is all a tool-free trace needs to be re-issued"
+        );
+    }
+
+    #[test]
+    fn quality_does_not_reward_redacted_length() {
+        use super::*;
+        // `quality` was `event_count / 8.0`, so the more content redaction
+        // stripped, the higher a trace scored. Forty empty events must not
+        // out-score four that carry what they claim to.
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        while padded.events.len() < 40 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        let substantive_quality = compute_value_scorecard(&seedable_envelope()).quality;
+        assert!(
+            substantive_quality > padded_quality,
+            "content must out-score length: {substantive_quality} vs {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn padding_a_trace_with_empty_events_cannot_raise_its_score() {
+        use super::*;
+        // The sharper form of the same property: appending contentless events
+        // is the cheapest thing an emitter can do, so it must never pay. This
+        // is what carried the pilot corpus to a 0.813 mean.
+        let base = compute_value_scorecard(&web_history_shaped_envelope()).quality;
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        for _ in 0..30 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        assert!(
+            padded_quality <= base,
+            "padding raised quality from {base} to {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn the_scorecard_explains_which_replay_inputs_are_missing() {
+        use super::*;
+        // The consumer's complaint was not only the number but that "Replay
+        // metadata is present." told them nothing. Make the explanation name
+        // what is absent.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        let explanation = scored.explanation.join(" ");
+        assert!(
+            explanation.contains("argument"),
+            "explanation must name the missing replay inputs, got: {explanation}"
         );
     }
 }
