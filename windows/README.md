@@ -85,18 +85,33 @@ Windows is unaffected, since its transport is a named pipe.
 
 ## What is not here yet
 
-This slice is the interop layer and the main window. Deliberately absent, and
-each is its own piece of work:
+Deliberately absent, and each is its own piece of work:
 
-- Onboarding, consent scopes, withdrawal, credit and history views. The macOS
-  app has roughly eighteen views; this has one.
-- The preview sheet. `TcPreview` is implemented and tested against its error
-  path, but nothing in the UI opens one yet.
+- Withdrawal, credit and history views. The macOS app has roughly eighteen
+  views; this has three.
 - System tray presence and run-at-login.
 - MSIX packaging and signing. The app builds unpackaged so that CI can verify
   it without a certificate.
-- The rest of the queue frame the design specifies: the health banner, the undo
-  bar, the week band, and the per-row "Not this one" and "Look inside" actions.
-  The design system is in place (`src/TraceCommons.App/Themes/DesignSystem.xaml`
-  and the mark in `Controls/BrandMark.xaml`), but each of those elements needs
-  daemon state the app does not have yet, so none of them is drawn.
+- The rest of the queue frame the design specifies: the health banner and the
+  week band. Both need daemon state the app does not read yet, so neither is
+  drawn.
+- Persistent recent searches. The preview sheet remembers search terms for the
+  life of the process and writes none of them to disk; the macOS shell persists
+  its own. A recent search is the contributor's list of the things they are
+  worried about leaking, so keeping it in memory is a deliberate narrowing
+  rather than an omission.
+
+## The read gate
+
+The preview sheet is the only surface that can approve anything, and the queue
+row has no `Contribute` button — approving from the row is approving without
+looking. Contribute is armed by `TraceCommons.Interop.ReadGate`, which requires
+three things at once: a pinned preview, the redacted transcript having actually
+been on screen, and an acknowledgement the contributor ticks themselves.
+
+The gate lives in the interop assembly rather than in a view model because it
+is the safety property of this shell, and there it is exercised by
+`tests/TraceCommons.Interop.Tests/PreviewTests.cs` on a machine that cannot
+build WinUI at all. The XAML wiring that feeds it — `x:Load` on the transcript
+panel, so realization means display rather than a collapsed element having
+raised `Loaded` — is the part only Windows can confirm.
