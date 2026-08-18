@@ -87,14 +87,22 @@ Windows is unaffected, since its transport is a named pipe.
 
 Deliberately absent, and each is its own piece of work:
 
-- Withdrawal, credit and history views. The macOS app has roughly eighteen
-  views; this has three.
+- Bulk withdrawal. This is a refusal rather than a gap, and it is the only
+  affordance the shared design draws that this app states in words instead of
+  drawing. `withdraw_bulk` reports only `withdrawn` and `failed` counts, so
+  afterwards there is no per-trace tier to report — and the withdrawal
+  contract's first rule is that no outcome may be reported as a generic
+  "withdrawn". A bulk button could not honour it at any wording. The held
+  group says so where a contributor would look for the button, and points at
+  the per-row control that *can* tell them what it did.
+- Settings. The rail now has two rows; the spec's third belongs there when the
+  view does, not drawn disabled ahead of it.
 - The rest of the tray menu's vocabulary. The icon, the tooltip, the digest
   and run-at-login are here (see "The tray and the interruption budget"); what
   the shared spec also puts in that menu — pause with its three durations, the
   week summary, the per-project list of what is waiting, settings — is not,
-  because none of those surfaces exist anywhere in this app yet and a menu
-  item that opens nothing is worse than an absent one.
+  because those surfaces do not exist in this app yet and a menu item that
+  opens nothing is worse than an absent one.
 - MSIX packaging and signing. The app builds unpackaged so that CI can verify
   it without a certificate.
 - The rest of the queue frame the design specifies: the health banner and the
@@ -176,3 +184,51 @@ is the safety property of this shell, and there it is exercised by
 build WinUI at all. The XAML wiring that feeds it — `x:Load` on the transcript
 panel, so realization means display rather than a collapsed element having
 raised `Loaded` — is the part only Windows can confirm.
+
+## Withdrawal copy is contract, not UI text
+
+History is backed by `list_history`, `history_rollup`, `refresh_history` and
+`queue_outcome_counts`, and the one thing on it a contributor can *do* is
+`withdraw`. That last one is the reason this section exists.
+
+The three confirmation bodies are not this shell's to write. They are fixed in
+`docs/contributor-daemon-ipc-v1_1.md` under "Canonical confirmation copy",
+transcribed word for word into `TraceCommons.Interop.WithdrawCopy`, and
+compared whole against that table by
+`tests/TraceCommons.Interop.Tests/WithdrawCopyTests.cs`. The Linux shell holds
+the identical constants in
+`crates/trace-commons-contributor-gtk/src/copy.rs`; the two must not diverge.
+
+**The tier is not knowable before the call.** The server computes
+`distribution_reach` *during* the withdrawal, from live export membership, and
+the confirmation has to be shown before that response exists. All this machine
+holds is the record's local `status`, so:
+
+| local status | shown before the call |
+| --- | --- |
+| `submitted`, `quarantined` | the `not_distributed` body alone — that is the server's own rule |
+| `accepted` | **both** commons bodies, the distributed one weighted, and a sentence saying the outcome is decided on the server |
+| anything else | the `commons_distributed` body alone — the furthest reach cannot be ruled out |
+
+Afterwards the row reports the tier the server actually applied, using that
+tier's body. Never a generic "withdrawn".
+
+Two consequences worth knowing before touching this code:
+
+- **A withdrawn record stays on the list and reads as withdrawn.** It is never
+  dropped and never re-labelled as something that failed, and on success
+  history is re-read rather than the row optimistically flipped. The tier the
+  server applied is held per submission across that re-read, because
+  `list_history` reports a status and never a tier — losing it would break the
+  never-a-generic-withdrawn rule by way of a refresh.
+- **`withdraw` currently always answers `account-session-required`.** The
+  daemon holds a device key and never an account session, deliberately, so
+  withdrawal survives losing the device that submitted the trace. That makes
+  the failure path the one contributors actually hit, so it renders the whole
+  explanatory sentence rather than a bare label — and, like every failure
+  branch here, opens by saying nothing was withdrawn and nothing was deleted.
+
+Everything above is decided in the interop assembly and tested off Windows.
+What only a real Windows box can confirm is that the `ContentDialog` shows,
+that the weighted body is visibly the heavier of the two, and that the nav rail
+switches panes.

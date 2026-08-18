@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 
@@ -318,6 +319,30 @@ public sealed partial class MainWindow : Window
     private async void OnRefreshClick(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshAsync();
+    }
+
+    private void OnShowQueue(object sender, RoutedEventArgs e) => ViewModel.ShowQueue();
+
+    /// <summary>
+    /// Switches to History, creating the view the first time and keeping it
+    /// thereafter.
+    /// </summary>
+    /// <remarks>
+    /// Kept rather than rebuilt because the pane holds what a withdrawal
+    /// actually did, per submission. <c>list_history</c> reports a record's
+    /// status and never the tier a withdrawal resolved to, so a rebuilt pane
+    /// would replace "this trace had already been included in a published
+    /// export" with a bare chip -- the contract's first withdrawal rule,
+    /// broken by a nav click rather than by any copy change.
+    ///
+    /// Created lazily rather than in the constructor because it makes three
+    /// IPC calls as soon as it loads, and a contributor who never opens
+    /// History should not pay for them at launch.
+    /// </remarks>
+    private void OnShowHistory(object sender, RoutedEventArgs e)
+    {
+        HistoryPane.Content ??= new HistoryView(_host);
+        ViewModel.ShowHistory();
     }
 
     /// <summary>

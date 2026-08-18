@@ -40,9 +40,11 @@ const BIO_BYTE_LIMIT: usize = 280;
 /// hardcoded; the panel renders whatever this carries and does not render
 /// at all when there is nothing to render.
 ///
-/// There is no daemon method that fills this in yet: the IPC contract has
-/// no public-profile call, and adding one is a feature change, not a
-/// design pass. `render_public` is the seam it will arrive through.
+/// Filled from `get_public_profile`, which reports the daemon's local
+/// cache of the last claim this device made. There is no
+/// `GET /v1/community/profile` to read the server's own row from, so this
+/// is what a shell has, and it is a cache: it says what this machine last
+/// published, not what the roster holds this second.
 #[derive(Debug, Clone)]
 pub struct PublicProfile {
     pub handle: String,
@@ -94,9 +96,9 @@ pub struct SettingsView {
     /// is two different surfaces -- the native opt-in toggle and the brand
     /// panel -- rather than one surface in two states.
     public: gtk::Box,
-    /// `None` means "not on the roster", which is also the state every
-    /// build ships in today: no daemon method fills this in. See
-    /// `PublicProfile`.
+    /// `None` means "not on the roster". Filled from `get_public_profile`
+    /// on every refresh, and from the answer to a claim or a withdrawal
+    /// the moment one lands. See `PublicProfile`.
     public_profile: RefCell<Option<PublicProfile>>,
     audit: gtk::Box,
 }
@@ -587,6 +589,17 @@ pub fn refresh(app: &Rc<App>) {
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
     });
+    // The roster state, from the daemon rather than from what this window
+    // last did. A failure -- `not-logged-in` on a device that has never
+    // enrolled, most of all -- draws the off-the-roster surface, which is
+    // the true one: an unenrolled device has claimed nothing.
+    app.call(
+        "get_public_profile",
+        serde_json::json!({}),
+        |app, result| {
+            set_public_profile(app, result.ok().and_then(|v| parse_public_profile(&v)));
+        },
+    );
     app.call(
         "list_audit",
         serde_json::json!({ "limit": 20 }),
@@ -915,13 +928,150 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
 // built separately rather than restyled into each other.
 
 /// Hand the view a public profile, or the absence of one, and redraw.
-///
-/// This is the seam the daemon will arrive through. The IPC contract has no
-/// public-profile method today, so nothing calls this with `Some` yet and
-/// the section renders its off-the-roster state in every shipped build.
 pub fn set_public_profile(app: &Rc<App>, profile: Option<PublicProfile>) {
     *app.settings.public_profile.borrow_mut() = profile;
     render_public(app);
+}
+
+/// Read the daemon's profile shape.
+///
+/// All three profile methods answer with the same object -- that is
+/// deliberate on the daemon's side, so a client parses one thing whichever
+/// call it made -- and all three land here.
+///
+/// `on_roster` is the daemon's own verdict and is what decides, rather than
+/// this window inferring one from the presence of a handle: the field
+/// exists to answer exactly this question, and a shell that answered it
+/// some other way would be a second opinion about who is public.
+fn parse_public_profile(value: &serde_json::Value) -> Option<PublicProfile> {
+    if !value
+        .get("on_roster")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(PublicProfile {
+        handle: value.get("handle").and_then(|v| v.as_str())?.to_string(),
+        // Absent and empty are the same thing here: no bio was published.
+        bio: value
+            .get("bio")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        on_roster_since: value
+            .get("public_since")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok()),
+        // Null by contract today: the daemon knows the origin it uploads
+        // to, not the origin the community site serves profiles from, and
+        // says so rather than inventing a link that would not resolve. Read
+        // anyway, so the affordance appears the day something supplies one.
+        public_url: value
+            .get("public_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// What to say about a claim the server accepted.
+///
+/// `handle_persisted` is NOT whether the claim worked. The server has
+/// taken the handle by the time this flag exists at all; the flag reports
+/// whether the daemon managed to write its local copy of it. So both
+/// branches report a published profile, and the false branch adds the
+/// weaker thing that is actually true -- that this window will show the
+/// contributor as unlisted again until the next successful save.
+fn published_sentence(handle_persisted: bool) -> &'static str {
+    if handle_persisted {
+        copy::PROFILE_PUBLISHED
+    } else {
+        copy::PROFILE_PUBLISHED_NOT_CACHED
+    }
+}
+
+/// The mirror, for a withdrawal the server accepted.
+fn left_roster_sentence(handle_persisted: bool) -> &'static str {
+    if handle_persisted {
+        copy::PROFILE_LEFT_ROSTER
+    } else {
+        copy::PROFILE_LEFT_ROSTER_NOT_CACHED
+    }
+}
+
+/// The bio as the wire wants it.
+///
+/// An empty box is `null`, not `""`: the `PUT` replaces the whole profile,
+/// so "leave the bio alone" is not something the server can be asked for,
+/// and the daemon refuses an omitted `bio` outright rather than guessing.
+/// An empty box is a contributor saying they want no bio, and that is what
+/// this sends.
+fn bio_param(text: &str) -> serde_json::Value {
+    match text.trim() {
+        "" => serde_json::Value::Null,
+        bio => serde_json::Value::String(bio.to_string()),
+    }
+}
+
+/// Claim or update the handle, and report what happened.
+///
+/// `done` is handed the daemon's fixed error label on a refusal and
+/// `None` on success, so the two call sites can put the refusal where the
+/// contributor can act on it: the dialog keeps it beside the field being
+/// corrected, the panel toasts it. Nothing here validates the handle
+/// first -- the daemon and the server share one copy of those rules, and a
+/// second copy in this window is how a handle this shell accepts becomes
+/// one the server refuses.
+fn claim_handle<F>(app: &Rc<App>, handle: &str, bio: &str, done: F)
+where
+    F: FnOnce(&Rc<App>, Option<String>) + 'static,
+{
+    app.call(
+        "set_public_profile",
+        serde_json::json!({ "handle": handle, "bio": bio_param(bio) }),
+        move |app, result| match result {
+            Ok(value) => {
+                // Rendered from the daemon's answer rather than from what
+                // this window sent: the handle it stored is the validated
+                // display form, which is trimmed, and the roster date is
+                // the server's.
+                set_public_profile(app, parse_public_profile(&value));
+                let persisted = value
+                    .get("handle_persisted")
+                    .and_then(|v| v.as_bool())
+                    // A build that did not report the flag is treated as
+                    // having persisted: the alternative is warning about a
+                    // local cache miss that may not have happened, on a
+                    // profile that is public either way.
+                    .unwrap_or(true);
+                app.toast(published_sentence(persisted));
+                done(app, None);
+            }
+            Err(label) => done(app, Some(label)),
+        },
+    );
+}
+
+/// Withdraw the handle from the roster.
+fn leave_roster(app: &Rc<App>) {
+    app.call(
+        "clear_public_profile",
+        serde_json::json!({}),
+        |app, result| match result {
+            Ok(value) => {
+                set_public_profile(app, parse_public_profile(&value));
+                let persisted = value
+                    .get("handle_persisted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                app.toast(left_roster_sentence(persisted));
+            }
+            // Its own sentence, not the claim one: after a failed
+            // withdrawal the handle is still published, and "nothing was
+            // published" would read as the opposite.
+            Err(label) => app.toast(&copy::roster_leave_failure_sentence(&label)),
+        },
+    );
 }
 
 fn render_public(app: &Rc<App>) {
@@ -1060,12 +1210,30 @@ fn public_profile_panel(app: &Rc<App>, profile: &PublicProfile) -> gtk::Box {
     buttons.append(&leave);
     panel.append(&buttons);
 
-    // Neither button has anywhere to go: the contract carries no
-    // public-profile method, and adding one is a feature change rather
-    // than a design pass. Both say so instead of appearing to work.
-    for button in [&save, &leave] {
+    // Save re-publishes the whole profile, because that is what the `PUT`
+    // does: the handle and the bio as they stand in these two fields, both
+    // of them, every time. There is no partial update to offer.
+    {
         let app = Rc::clone(app);
-        button.connect_clicked(move |_| app.toast(copy::ROSTER_UNREACHABLE));
+        let handle_field = handle.clone();
+        let bio_buffer = bio.buffer();
+        save.connect_clicked(move |_| {
+            let text = bio_buffer.text(&bio_buffer.start_iter(), &bio_buffer.end_iter(), false);
+            claim_handle(
+                &app,
+                handle_field.text().as_str(),
+                text.as_str(),
+                |app, refusal| {
+                    if let Some(label) = refusal {
+                        app.toast(&copy::profile_failure_sentence(&label));
+                    }
+                },
+            );
+        });
+    }
+    {
+        let app = Rc::clone(app);
+        leave.connect_clicked(move |_| leave_roster(&app));
     }
     panel
 }
@@ -1134,6 +1302,56 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     ));
     body.append(&columns);
 
+    // The handle itself, and the optional bio. They are inside the consent
+    // dialog rather than behind it because the thing being consented to is
+    // this exact string becoming public: a contributor cannot meaningfully
+    // acknowledge "my handle becomes public" and then be asked afterwards
+    // what the handle is.
+    let handle = gtk::Entry::builder().build();
+    handle.add_css_class("tc-brand-field");
+    handle.add_css_class("tc-brand-mono");
+    handle.update_property(&[gtk::accessible::Property::Label(
+        copy::GO_PUBLIC_HANDLE_LABEL,
+    )]);
+    let handle_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    handle_group.append(&brand_label(copy::GO_PUBLIC_HANDLE_LABEL));
+    handle_group.append(&handle);
+    body.append(&handle_group);
+
+    let bio = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .accepts_tab(false)
+        .build();
+    bio.add_css_class("tc-brand-bio");
+    bio.update_property(&[gtk::accessible::Property::Label(copy::GO_PUBLIC_BIO_LABEL)]);
+    let bio_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    bio_frame.add_css_class("tc-brand-field");
+    bio_frame.append(&bio);
+    let bio_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    bio_group.append(&brand_label(copy::GO_PUBLIC_BIO_LABEL));
+    bio_group.append(&bio_frame);
+    let counter = brand_label(&bio_counter(""));
+    counter.set_xalign(1.0);
+    bio_group.append(&counter);
+    let counter_handle = counter.clone();
+    bio.buffer().connect_changed(move |buffer| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        counter_handle.set_label(&bio_counter(text.as_str()));
+    });
+    body.append(&bio_group);
+
+    // A refusal stays in the dialog, next to the field it is about. A toast
+    // would land behind a modal window, and the one thing a contributor
+    // needs after "that handle is reserved" is the box they typed it into.
+    let refusal = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .build();
+    refusal.add_css_class("tc-brand-body");
+    body.append(&refusal);
+
     // The acknowledgement. Unchecked, and the only thing that unlocks the
     // primary.
     let ack_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -1174,8 +1392,19 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     footnote.add_css_class("tc-brand-footnote");
     body.append(&footnote);
 
-    let confirm_handle = confirm.clone();
-    ack.connect_toggled(move |ack| confirm_handle.set_sensitive(ack.is_active()));
+    // The acknowledgement gate, plus the one thing the call cannot be made
+    // without. Both are the same rule stated twice: the primary does
+    // nothing until there is something to consent to and a consent to it.
+    let unlock = {
+        let confirm = confirm.clone();
+        let ack = ack.clone();
+        let handle = handle.clone();
+        move || confirm.set_sensitive(ack.is_active() && !handle.text().trim().is_empty())
+    };
+    let on_ack = unlock.clone();
+    ack.connect_toggled(move |_| on_ack());
+    let on_typed = unlock.clone();
+    handle.connect_changed(move |_| on_typed());
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("tc-brand-surface");
@@ -1183,9 +1412,11 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     content.append(&body);
     dialog.set_content(Some(&content));
 
-    // Every way out of this dialog leaves the switch off, the confirm
-    // included: there is nowhere for a confirmed opt-in to go yet, so the
-    // switch must not be left claiming a listing that does not exist.
+    // Closing without a claim leaves the switch off. The switch says
+    // whether a handle is on the roster, and abandoning this dialog has
+    // put none there -- a switch left on would be this window claiming a
+    // listing that does not exist. A successful claim never reaches this:
+    // the panel replaces the row the switch lives in.
     dialog.connect_close_request(move |_| {
         toggle.set_active(false);
         gtk::glib::Propagation::Proceed
@@ -1194,9 +1425,35 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     not_now.connect_clicked(move |_| window.close());
     let window = dialog.clone();
     let app = Rc::clone(app);
-    confirm.connect_clicked(move |_| {
-        app.toast(copy::ROSTER_UNREACHABLE);
-        window.close();
+    let bio_buffer = bio.buffer();
+    confirm.connect_clicked(move |confirm| {
+        let text = bio_buffer.text(&bio_buffer.start_iter(), &bio_buffer.end_iter(), false);
+        // Held shut for the round trip, so a second click cannot send a
+        // second claim while the first is still in flight.
+        confirm.set_sensitive(false);
+        refusal.set_visible(false);
+        let window = window.clone();
+        let confirm = confirm.clone();
+        let refusal = refusal.clone();
+        claim_handle(
+            &app,
+            handle.text().as_str(),
+            text.as_str(),
+            move |_app, label| match label {
+                // Claimed. The toast is already up and the panel has
+                // already replaced the toggle; this dialog has nothing
+                // left to say.
+                None => window.close(),
+                // Refused, so the dialog stays open on the handle that was
+                // refused: this is the only surface where it can be
+                // corrected without typing it again.
+                Some(label) => {
+                    refusal.set_label(&copy::profile_failure_sentence(&label));
+                    refusal.set_visible(true);
+                    confirm.set_sensitive(true);
+                }
+            },
+        );
     });
     dialog.present();
 }
@@ -1304,6 +1561,70 @@ mod tests {
         // and the daemon would accept it.
         assert_eq!(knob_seconds(-1, 60), 0);
         assert_eq!(knob_seconds(i32::MIN, 3600), 0);
+    }
+
+    #[test]
+    fn a_published_profile_is_read_back_off_the_daemons_own_verdict() {
+        let profile = parse_public_profile(&serde_json::json!({
+            "on_roster": true,
+            "handle": "manian",
+            "bio": "Ships billing systems by day.",
+            "public_since": "2026-05-12T09:00:00Z",
+            "public_url": serde_json::Value::Null,
+        }))
+        .expect("a claimed handle renders the panel");
+        assert_eq!(profile.handle, "manian");
+        assert_eq!(profile.bio, "Ships billing systems by day.");
+        assert!(profile.on_roster_since.is_some());
+        // Null by contract: the daemon does not know the origin the
+        // community site serves profiles from, so no link is offered.
+        assert!(profile.public_url.is_none());
+    }
+
+    #[test]
+    fn an_unclaimed_handle_draws_the_opt_in_and_not_an_empty_panel() {
+        assert!(
+            parse_public_profile(&serde_json::json!({
+                "on_roster": false,
+                "handle": serde_json::Value::Null,
+                "bio": serde_json::Value::Null,
+                "public_since": serde_json::Value::Null,
+                "public_url": serde_json::Value::Null,
+            }))
+            .is_none()
+        );
+        // `not-logged-in` arrives as an error rather than as a shape, and
+        // an answer this build cannot read must not become a half-drawn
+        // panel either.
+        assert!(parse_public_profile(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn a_cache_write_that_failed_is_never_reported_as_a_failed_claim() {
+        // The correctness point of the whole surface. `handle_persisted:
+        // false` means the server took the handle and this device did not
+        // manage to write its own copy of it -- the profile IS public. A
+        // shell that reported that as a failure would tell a contributor
+        // their handle is private when it is not.
+        let uncached = published_sentence(false);
+        assert!(uncached.starts_with("You're on the roster"));
+        assert_ne!(uncached, published_sentence(true));
+        // And the withdrawal mirror: the row is gone from the server
+        // whether or not the local clear stuck.
+        assert!(left_roster_sentence(false).starts_with("You've left the roster"));
+    }
+
+    #[test]
+    fn an_empty_bio_box_is_sent_as_no_bio_rather_than_as_an_empty_one() {
+        // The PUT replaces the whole profile and the daemon refuses an
+        // omitted `bio` outright, so the empty box has to mean something
+        // explicit. It means "no bio".
+        assert!(bio_param("").is_null());
+        assert!(bio_param("   \n ").is_null());
+        assert_eq!(
+            bio_param("  Ships billing systems.  "),
+            "Ships billing systems."
+        );
     }
 
     #[test]
