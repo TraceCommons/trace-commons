@@ -208,6 +208,48 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
+#[test]
+fn release_tags_are_checked_against_the_versions_the_binaries_report() {
+    let apps = read(".github/workflows/release-apps.yml");
+    assert!(
+        apps.contains("crates/trace-commons-contributor-gtk/Cargo.toml"),
+        "the app release must compare its tag with the Linux shell package version"
+    );
+    assert!(
+        apps.contains("PACKAGE_VERSION") && apps.contains("TAG_VERSION"),
+        "the app release must refuse a tag/package version mismatch"
+    );
+
+    let contributor = read(".github/workflows/release-contributor.yml");
+    for manifest in [
+        "crates/trace-commons-contributor/Cargo.toml",
+        "crates/trace-commons-contributor-ffi/Cargo.toml",
+    ] {
+        assert!(
+            contributor.contains(manifest),
+            "the contributor release must check {manifest} against its tag"
+        );
+    }
+    assert!(
+        contributor.contains("PACKAGE_VERSION") && contributor.contains("TAG_VERSION"),
+        "the contributor release must refuse a tag/package version mismatch"
+    );
+    for required in [
+        "HOMEBREW_TAP_TOKEN",
+        "WINGET_PKGS_TOKEN",
+        "TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX",
+    ] {
+        assert!(
+            contributor.contains("missing configuration") && contributor.contains(required),
+            "the contributor release must fail before building when {required} is absent"
+        );
+    }
+    assert!(
+        contributor.contains("needs: release-config"),
+        "the signed contributor build must wait for release configuration preflight"
+    );
+}
+
 /// The publish job's gate allows a partial run (at least one platform
 /// succeeded), so the release notes must not unconditionally describe all
 /// three platforms -- otherwise a Linux-only or macOS-only run tells
