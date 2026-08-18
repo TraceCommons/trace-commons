@@ -58,6 +58,24 @@ public sealed class DeepLinkTests
     }
 
     [Fact]
+    public void TheFormWindowsActuallyDelivers()
+    {
+        // Not a hypothetical. Registering the scheme on a real Windows box
+        // and clicking a tracecommons:// URL delivered this exact argv, with
+        // a slash after the host that nothing in our code wrote:
+        //
+        //   tracecommons://enroll/?invite=...
+        //
+        // The shell normalises the URL before handing it over. Reading
+        // Uri.Host survives that; splitting the string on "://enroll?" would
+        // not have, and the invite would have silently gone missing.
+        string? invite = DeepLink.InviteFrom(
+            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6");
+
+        Assert.Equal("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", invite);
+    }
+
+    [Fact]
     public void AnInviteWithAnAmpersandSurvivesTheQuerySplit()
     {
         // The invite is a whole URL living inside a query parameter, so its

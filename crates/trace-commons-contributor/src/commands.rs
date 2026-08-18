@@ -1844,6 +1844,25 @@ mod invite_tests {
         assert_eq!(got.as_deref(), Some("https://i.example/o#C"));
     }
 
+    /// The exact argv a real Windows shell delivered when a
+    /// `tracecommons://` link was opened: it normalised the URL and added a
+    /// slash after the host, which nothing in our code wrote. Parsing via
+    /// `Url` survives that; splitting on `"://enroll?"` would not have.
+    ///
+    /// Kept here as well as in the Windows tests because both shells parse
+    /// links produced by the same invite mail, and a desktop portal is as
+    /// free to normalise as the Windows shell was.
+    #[test]
+    fn the_form_a_shell_actually_delivers() {
+        let got = invite_from_deep_link(
+            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
+        );
+        assert_eq!(
+            got.as_deref(),
+            Some("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+        );
+    }
+
     #[test]
     fn other_arguments_are_not_invites() {
         // Registering a scheme handler means this is asked about every
