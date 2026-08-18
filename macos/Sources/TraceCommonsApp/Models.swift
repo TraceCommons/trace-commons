@@ -144,6 +144,37 @@ struct PreviewSummary: Decodable, Equatable {
     }
 }
 
+// MARK: - Audit
+
+/// One row of the daemon's local change log (`list_audit`).
+///
+/// Every field here is a fixed label by contract -- `action` and `detail`
+/// are "never free text, a path, or a token", and `project_label` is the
+/// daemon-derived display name, never a `project_key` or a path. That is
+/// what makes this shape safe to render at all, and it is why nothing in
+/// this app may enrich a row with anything more identifying.
+///
+/// The contract is equally explicit that this log is a VISIBILITY feature
+/// for the contributor, not a security control: nothing in this app may
+/// gate, permit or refuse anything on the strength of what is in here.
+struct AuditEntry: Decodable, Equatable {
+    let at: Date
+    let action: String
+    let projectLabel: String?
+    /// Carried because the contract carries it, and deliberately not
+    /// rendered: the Linux shell shows the action and the project only, and
+    /// inventing a second line of copy for a label neither shell has ever
+    /// displayed would put this app's audit surface out of step with it.
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case at
+        case action
+        case projectLabel = "project_label"
+        case detail
+    }
+}
+
 // MARK: - History
 
 struct HistoryRecord: Decodable, Identifiable, Equatable {
