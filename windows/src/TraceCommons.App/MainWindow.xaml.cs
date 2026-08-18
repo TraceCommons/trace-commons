@@ -82,6 +82,23 @@ public sealed partial class MainWindow : Window
             .CallAsync(DaemonProtocol.Methods.Status)
             .ConfigureAwait(true);
 
+        // No daemon means this process lost the race for the state
+        // directory's lock, which is what happens when the app is already
+        // running and a second copy is launched -- exactly what clicking an
+        // invite link does, since the scheme handler starts a new process.
+        //
+        // Onboarding must NOT open here. Every call it made would fail, and
+        // enroll failing shows the one fixed sentence the invite path has:
+        // "This invite link is no longer valid." That sentence would be a
+        // lie. The invite is fine; this copy of the app simply cannot reach
+        // a daemon. Blaming the contributor's invite for our own state is
+        // worse than saying nothing, so this says the true thing instead.
+        if (status.IsError)
+        {
+            ViewModel.ReportAlreadyRunning(App.PendingInvite is not null);
+            return;
+        }
+
         string? tenantId = null;
         bool loggedIn = false;
         if (status.Result is JsonElement element)

@@ -138,6 +138,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Says that another copy of the app owns the daemon, and what to do
+    /// about it.
+    /// </summary>
+    /// <remarks>
+    /// Split into two sentences by whether an invite was on the command
+    /// line, because the two situations need different next actions. Someone
+    /// who double-clicked the app just needs to find the window they already
+    /// have. Someone who clicked an invite link in mail is holding something
+    /// they were trying to use, and needs to be told where to use it --
+    /// otherwise the link looks broken and the invite looks dead, which is
+    /// the impression this whole path exists to avoid giving.
+    /// </remarks>
+    public void ReportAlreadyRunning(bool withInvite)
+    {
+        StatusText = withInvite
+            ? "Trace Commons is already running. Open that window and paste your invite there."
+            : "Trace Commons is already running. Use the window that is already open.";
+    }
+
     private static string DescribeQueue(int count) => count switch
     {
         0 => "No sessions waiting for review.",
