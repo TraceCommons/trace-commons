@@ -283,26 +283,28 @@ pub fn render(app: &Rc<App>) {
     // Surfacing them is what keeps "not sent" distinguishable from "sent",
     // and it is why the queue can always explain itself. Collapsed, because
     // they are a record rather than a decision owed.
-    let resolved: Vec<&QueueEntry> = entries
-        .iter()
-        .filter(|e| matches!(e.state.as_str(), "refused" | "expired" | "superseded"))
-        .collect();
-    if !resolved.is_empty() {
+    //
+    // Drawn from `queue_outcome_counts`, not from `entries`. This used to
+    // filter `entries` for the resolved states and list them one per line,
+    // which looked right and could never show anything: `list_pending`
+    // answers with `queue.pending()`, which is entries in the pending state
+    // and no others, so the filter had nothing to find. The daemon rolls
+    // these up by `reason_label` instead, and that roll-up is the only way
+    // to reach them over this socket -- at the cost of the per-session
+    // project label, which the count carries no room for.
+    let counts = app.outcome_counts.borrow();
+    let total: u64 = counts.values().sum();
+    if total > 0 {
         let expander = gtk::Expander::builder()
-            .label(copy::no_longer_waiting(resolved.len()))
+            .label(copy::no_longer_waiting(total))
             .build();
         let inner = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         inner.set_margin_top(space::S);
-        for entry in resolved {
-            let reason = entry
-                .reason_label
-                .as_deref()
-                .map(copy::reason_sentence)
-                .unwrap_or("Nothing was sent.");
+        for (label, count) in counts.iter() {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
             line.append(&style::tag("Not sent", Tone::Refused));
             let text = gtk::Label::builder()
-                .label(format!("{} - {}", entry.project_label, reason))
+                .label(format!("{count} - {}", copy::reason_sentence(label)))
                 .xalign(0.0)
                 .wrap(true)
                 .build();
@@ -310,6 +312,15 @@ pub fn render(app: &Rc<App>) {
             line.append(&text);
             inner.append(&line);
         }
+        // What this list does not cover, said rather than left to be
+        // assumed. See `copy::NOT_OFFERED_BOUND`.
+        let bound = gtk::Label::builder()
+            .label(copy::NOT_OFFERED_BOUND)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        bound.add_css_class("tc-caveat");
+        inner.append(&bound);
         expander.set_child(Some(&inner));
         view.disclosure.append(&expander);
     }

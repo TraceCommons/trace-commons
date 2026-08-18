@@ -99,9 +99,20 @@ pub fn waiting_heading(waiting: usize) -> String {
     }
 }
 
-pub fn no_longer_waiting(count: usize) -> String {
+pub fn no_longer_waiting(count: u64) -> String {
     format!("Sessions no longer waiting ({count})")
 }
+
+/// The bound on what [`no_longer_waiting`] can account for, stated rather
+/// than left to be assumed.
+///
+/// `queue_outcome_counts` counts entries that reached the queue. It cannot
+/// explain a session the watcher discarded before an entry existed -- an
+/// ineligible verdict, or a project set to be ignored -- and a contributor
+/// who read this list as complete would come away believing sessions had
+/// been accounted for that were never counted at all.
+pub const NOT_OFFERED_BOUND: &str = "This covers sessions that reached the queue. Sessions that were never queued at all are not \
+     counted here.";
 
 // --- Preview -----------------------------------------------------------
 
@@ -226,6 +237,257 @@ pub const QUARANTINE_BODY: &str = "A person at Trace Commons reads these before 
      with anyone but the reviewer. They are sitting still.\n\nTypical wait: we don't have a \
      reliable number yet.";
 
+// --- Withdrawal --------------------------------------------------------
+//
+// Withdrawal is the one place in this product where a plausible-sounding
+// phrase becomes a false promise about erasure, so the three confirmation
+// bodies are NOT this shell's to write. They are fixed in
+// `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical confirmation copy"
+// table, reproduced here word for word, and the tests at the foot of this
+// file fail if they are paraphrased, shortened, or "tightened".
+//
+// Five rules come with them, and each is honoured somewhere below:
+//
+// 1. Never a generic "withdrawn" -- [`withdraw_result_sentence`] always
+//    names what the tier that actually applied did.
+// 2. Never claim more erasure than the tier achieved -- which is why
+//    [`withdraw_confirmation`] shows an `accepted` trace BOTH commons
+//    bodies rather than picking the gentler one.
+// 3. Withdrawal does not reverse settled credit -- [`WITHDRAW_CREDIT_NOTE`],
+//    and nothing here implies otherwise.
+// 4. `not_found` must not disclose which -- [`WITHDRAW_NOT_FOUND`].
+// 5. Bulk withdrawal spans tiers -- [`WITHDRAW_NO_BULK`] says why this
+//    shell does not offer it.
+//
+// ## Why the confirmation cannot simply state the tier
+//
+// The server computes `distribution_reach` *during* the withdrawal, from
+// live export membership. It arrives in the response, and the confirmation
+// has to be shown before that response exists. All this machine holds is
+// the record's `status`, so the confirmation is keyed on that instead --
+// see [`WithdrawStage`].
+
+/// `distribution_reach` as the server spells it. Wire strings rather than a
+/// typed enum: the shell only ever looks a tier up to find its sentence,
+/// and an unrecognised one is reported as unrecognised (see
+/// [`withdraw_result_sentence`]) rather than failing to parse.
+pub const REACH_NOT_DISTRIBUTED: &str = "not_distributed";
+pub const REACH_COMMONS_NOT_DISTRIBUTED: &str = "commons_not_distributed";
+pub const REACH_COMMONS_DISTRIBUTED: &str = "commons_distributed";
+
+/// Canonical copy for `not_distributed`, verbatim.
+pub const WITHDRAW_BODY_NOT_DISTRIBUTED: &str = "This trace never entered the commons. Withdrawing deletes it. Nothing was distributed and \
+     nothing needs recalling.";
+
+/// Canonical copy for `commons_not_distributed`, verbatim.
+pub const WITHDRAW_BODY_COMMONS_NOT_DISTRIBUTED: &str = "This trace is in the commons but has not been included in any published export or benchmark \
+     yet. Withdrawing deletes it and excludes it from everything published from here on.";
+
+/// Canonical copy for `commons_distributed`, verbatim. The clause from "but
+/// copies" onward is the one sentence in this feature that must never be
+/// softened, shortened, or quietly dropped.
+pub const WITHDRAW_BODY_COMMONS_DISTRIBUTED: &str = "This trace has already been included in a published export or benchmark. Withdrawing \
+     deletes our copy and excludes it from everything published from here on, but copies that \
+     have already been distributed cannot be recalled. Withdrawing does not undo that.";
+
+/// Credit is not clawed back, and this says only that -- nothing about how
+/// much, when it settles, or what it is worth.
+pub const WITHDRAW_CREDIT_NOTE: &str = "Credit already recorded stays.";
+
+/// The canonical body for a tier, or `None` for a tier this build has never
+/// heard of.
+pub fn withdraw_canonical_body(reach: &str) -> Option<&'static str> {
+    match reach {
+        REACH_NOT_DISTRIBUTED => Some(WITHDRAW_BODY_NOT_DISTRIBUTED),
+        REACH_COMMONS_NOT_DISTRIBUTED => Some(WITHDRAW_BODY_COMMONS_NOT_DISTRIBUTED),
+        REACH_COMMONS_DISTRIBUTED => Some(WITHDRAW_BODY_COMMONS_DISTRIBUTED),
+        _ => None,
+    }
+}
+
+/// What this machine can honestly say about how far a trace got, read off
+/// the history record's `status`. Not the server's tier: this is the weaker
+/// thing the client knows before it asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawStage {
+    /// `submitted` or `quarantined`. `not_distributed`, exactly -- that is
+    /// the server's own rule.
+    NotInTheCommons,
+    /// `accepted`. One of the two commons tiers, and not knowable which.
+    InTheCommons,
+    /// Any other status this build does not recognise. Treated as the worst
+    /// case, because the furthest reach cannot be ruled out.
+    Unknown,
+}
+
+impl WithdrawStage {
+    pub fn of_status(status: &str) -> Self {
+        match status {
+            "submitted" | "quarantined" => Self::NotInTheCommons,
+            "accepted" => Self::InTheCommons,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The confirmation as parts rather than one blob, so the dialog can weight
+/// the body carrying the cannot-be-recalled clause and leave the rest as
+/// ordinary body copy.
+pub struct WithdrawConfirmation {
+    pub question: &'static str,
+    /// Present only where the tier is ambiguous: says so, in this shell's
+    /// own words, before the canonical bodies it cannot choose between.
+    pub ambiguity: Option<&'static str>,
+    /// Canonical bodies that may apply, in order. One when the tier is
+    /// known, two when it is not.
+    pub bodies: &'static [&'static str],
+    /// Index into `bodies` of the one carrying the cannot-be-recalled
+    /// clause, so the dialog can weight it. `None` when none does.
+    pub gravest: Option<usize>,
+    pub credit: &'static str,
+    /// "Withdraw" where the outcome is unambiguous, "Withdraw anyway" where
+    /// the contributor is being asked to accept a limit.
+    pub confirm_label: &'static str,
+}
+
+pub const WITHDRAW_QUESTION: &str = "Withdraw this trace?";
+pub const WITHDRAW: &str = "Withdraw";
+pub const WITHDRAW_ANYWAY: &str = "Withdraw anyway";
+pub const WITHDRAW_CANCEL: &str = "Keep it";
+
+pub fn withdraw_confirmation(stage: WithdrawStage) -> WithdrawConfirmation {
+    match stage {
+        WithdrawStage::NotInTheCommons => WithdrawConfirmation {
+            question: WITHDRAW_QUESTION,
+            ambiguity: None,
+            bodies: &[WITHDRAW_BODY_NOT_DISTRIBUTED],
+            gravest: None,
+            credit: WITHDRAW_CREDIT_NOTE,
+            confirm_label: WITHDRAW,
+        },
+        WithdrawStage::InTheCommons => WithdrawConfirmation {
+            question: WITHDRAW_QUESTION,
+            ambiguity: Some(
+                "This trace is in the commons. Whether it has already gone into a published \
+                 export or benchmark is decided on the server, and this window cannot tell from \
+                 here which of these two applies:",
+            ),
+            bodies: &[
+                WITHDRAW_BODY_COMMONS_NOT_DISTRIBUTED,
+                WITHDRAW_BODY_COMMONS_DISTRIBUTED,
+            ],
+            gravest: Some(1),
+            credit: WITHDRAW_CREDIT_NOTE,
+            confirm_label: WITHDRAW_ANYWAY,
+        },
+        WithdrawStage::Unknown => WithdrawConfirmation {
+            question: WITHDRAW_QUESTION,
+            ambiguity: Some(
+                "This window does not recognise what stage this trace reached, so it cannot rule \
+                 out the furthest one:",
+            ),
+            bodies: &[WITHDRAW_BODY_COMMONS_DISTRIBUTED],
+            gravest: Some(0),
+            credit: WITHDRAW_CREDIT_NOTE,
+            confirm_label: WITHDRAW_ANYWAY,
+        },
+    }
+}
+
+/// What actually happened, from the tier the server applied. Never a
+/// generic "withdrawn": the canonical body for the tier that applied is
+/// what says which of the three outcomes this was.
+pub fn withdraw_result_sentence(reach: Option<&str>) -> String {
+    match reach.and_then(withdraw_canonical_body) {
+        Some(body) => format!("Withdrawn. {body}"),
+        // The daemon sent a tier this build does not know. The withdrawal
+        // happened; what cannot be stated is how far the trace had
+        // travelled -- so the furthest tier is not ruled out.
+        None => "Withdrawn, but the server did not report which of the three tiers applied, so \
+                 this window cannot tell you whether it had already been included in a published \
+                 export or benchmark. If it had, copies that have already been distributed \
+                 cannot be recalled."
+            .to_string(),
+    }
+}
+
+/// Withdrawal is authenticated by an account session, which this build has
+/// no way to obtain. Leads with the fact that nothing happened: a
+/// contributor must not walk away from a failed withdrawal believing their
+/// trace was taken back.
+pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it is \
+     authenticated by your Trace Commons account rather than by this device -- that is what lets \
+     you withdraw a trace after losing the machine that sent it. This build has no account \
+     sign-in yet, so it cannot make the request.";
+
+/// The daemon's label for "the server has no record of this submission for
+/// this account".
+///
+/// The server answers identically whether the submission belongs to someone
+/// else or does not exist at all, so that accounts cannot be enumerated,
+/// and this window must not undo that by guessing out loud. So this sentence
+/// says neither.
+pub const WITHDRAW_NOT_FOUND: &str = "Nothing was withdrawn and nothing was deleted. There is no trace with that id under your \
+     account.";
+
+/// The daemon labels that mean not-found. Unreachable today --
+/// `daemon/withdraw.rs` collapses every failure into `withdraw-failed` --
+/// and handled anyway, because the day that label is passed through is not
+/// the day to be inventing this sentence.
+pub const WITHDRAW_NOT_FOUND_LABELS: [&str; 3] = ["not-found", "not_found", "submission-not-found"];
+
+/// Any other failure. Same first clause, for the same reason.
+///
+/// The label is the daemon's fixed, content-free error message, which by
+/// contract is never a path, a token, or a response body -- so printing it
+/// cannot leak one, and leaving it out would make two different failures
+/// indistinguishable to whoever is asked to help.
+pub fn withdraw_failure_sentence(label: &str) -> String {
+    if label == "account-session-required" {
+        return WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string();
+    }
+    if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
+        return WITHDRAW_NOT_FOUND.to_string();
+    }
+    format!(
+        "Nothing was withdrawn and nothing was deleted. The request did not go through \
+         ({label}). You can try again."
+    )
+}
+
+/// Why the held group has no "withdraw all of these" button, even though
+/// the shared design draws one.
+///
+/// Rule 6 permits bulk only if the confirmation can say the selected traces
+/// may fall into different tiers and that some may already have been
+/// distributed. There is a second problem on top of that one, and it is the
+/// reason bulk is left out rather than worded around: `withdraw_bulk`
+/// reports only `withdrawn` and `failed` counts, so afterwards there is no
+/// per-trace tier to report and rule 1 cannot be honoured at all.
+pub const WITHDRAW_NO_BULK: &str = "There is no button here that withdraws all of them at once. The bulk call reports only how \
+     many succeeded, never what happened to any one trace, and it chooses what to withdraw from \
+     this machine's copy of your history, which can be out of date -- so it could not tell you \
+     afterwards which of these had already been distributed. Withdraw them one at a time below \
+     and each one tells you what it actually did.";
+
+/// The row-level progress label while a withdrawal is in flight. Present
+/// tense, because nothing has happened yet.
+pub const WITHDRAWING: &str = "Withdrawing…";
+
+// --- Checking for updates -----------------------------------------------
+
+/// The History button behind `refresh_history`.
+pub const CHECK_FOR_UPDATES: &str = "Check for updates";
+
+/// What `refresh_history` actually achieved, said accurately.
+///
+/// The daemon answers `requested: true` and nothing else: the background
+/// poller owns the network call, and this only asks it to run sooner. So
+/// this sentence says the ask landed, never that anything was fetched --
+/// "Updated" would be a claim about a round trip that has not happened yet.
+pub const CHECK_FOR_UPDATES_ASKED: &str =
+    "Asked for an update. New results appear here as they arrive.";
+
 // --- Community ---------------------------------------------------------
 //
 // §5.5's panel in History and §5.6's block in Settings are the two public
@@ -261,6 +523,40 @@ pub const CHECK_CODEX_SET: &str = "Codex sessions folder set";
 pub const CHECK_CODEX_DEFAULT: &str = "Codex sessions read from the usual place";
 pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
 pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
+
+// --- Settings: how it behaves --------------------------------------------
+//
+// The three timing knobs `set_settings` accepts, as a title and a unit
+// each. Every one of them is a promise the daemon keeps -- how long a
+// session must be quiet, how long an approval is held, how often a
+// contributor may be interrupted -- so each label says what the number does
+// to the contributor rather than naming the setting.
+
+pub const KNOB_QUIESCENCE_TITLE: &str = "Quiet time before a session counts as finished";
+pub const KNOB_QUIESCENCE_UNIT: &str = "minutes";
+pub const KNOB_HOLD_TITLE: &str = "How long you can take something back";
+pub const KNOB_HOLD_UNIT: &str = "seconds after you approve";
+
+/// A hold of zero is not a smaller undo window, it is no undo window at
+/// all, and the row says so rather than showing a bare `0`.
+pub const KNOB_HOLD_ZERO: &str = "No undo window. Approving sends on the next pass.";
+pub const KNOB_DIGEST_TITLE: &str = "How often you can be interrupted";
+pub const KNOB_DIGEST_UNIT: &str = "hours between notifications, at most";
+
+/// Where a change made here lands, said once under the three of them.
+///
+/// On Linux the watcher is usually a separate process, so "this window" is
+/// the wrong mental model for what was just changed -- and a contributor
+/// who thought these were window preferences would be surprised by them
+/// still holding after the window closed.
+pub const KNOBS_NOTE: &str = "These govern the background watcher, not this window, and take \
+     effect as soon as they are changed. The same values are readable and settable from the \
+     command line.";
+
+/// A refused write. States the data consequence -- nothing changed -- since
+/// a knob that silently snapped back would otherwise look like a value that
+/// had been accepted.
+pub const KNOB_NOT_CHANGED: &str = "That couldn't be changed just now. Nothing was changed.";
 
 // --- Settings: the public profile, §5.6 ----------------------------------
 
@@ -735,5 +1031,164 @@ mod tests {
             assert!(!line.contains("no background-app list"));
             assert!(line.to_lowercase().contains("couldn't tell"));
         }
+    }
+
+    // --- Withdrawal ------------------------------------------------------
+    //
+    // These are assertions on the copy, not on the plumbing. This block is
+    // a second copy of wording whose canonical form lives in a document,
+    // and an edit that shortens the cannot-be-recalled clause, or hands an
+    // `accepted` trace only the gentler body, is exactly the change nobody
+    // would notice in review.
+
+    #[test]
+    fn the_canonical_bodies_are_still_the_documents_own_words() {
+        // Transcribed from the "Canonical confirmation copy" table in
+        // `docs/contributor-daemon-ipc-v1_1.md`. Compared whole rather than
+        // by keyword: a paraphrase that kept every keyword would still be a
+        // paraphrase.
+        assert_eq!(
+            WITHDRAW_BODY_NOT_DISTRIBUTED,
+            "This trace never entered the commons. Withdrawing deletes it. Nothing was \
+             distributed and nothing needs recalling."
+        );
+        assert_eq!(
+            WITHDRAW_BODY_COMMONS_NOT_DISTRIBUTED,
+            "This trace is in the commons but has not been included in any published export or \
+             benchmark yet. Withdrawing deletes it and excludes it from everything published \
+             from here on."
+        );
+        assert_eq!(
+            WITHDRAW_BODY_COMMONS_DISTRIBUTED,
+            "This trace has already been included in a published export or benchmark. \
+             Withdrawing deletes our copy and excludes it from everything published from here \
+             on, but copies that have already been distributed cannot be recalled. Withdrawing \
+             does not undo that."
+        );
+    }
+
+    #[test]
+    fn a_trace_already_in_the_commons_is_never_shown_only_the_gentler_tier() {
+        // Rule 2. `accepted` may resolve to either commons tier and this
+        // window cannot tell which, so showing only the gentler body would
+        // be claiming more erasure than may have been achieved.
+        let commons = withdraw_confirmation(WithdrawStage::InTheCommons);
+        assert!(
+            commons.bodies.contains(&WITHDRAW_BODY_COMMONS_DISTRIBUTED),
+            "an accepted trace is not warned about distributed copies"
+        );
+        assert!(
+            commons.ambiguity.is_some(),
+            "an accepted trace is shown a tier this window cannot know"
+        );
+        assert_eq!(commons.gravest, Some(1));
+        assert_eq!(commons.confirm_label, WITHDRAW_ANYWAY);
+    }
+
+    #[test]
+    fn a_trace_that_never_entered_the_commons_is_not_told_it_was_excluded() {
+        // The other half of rule 2: `submitted`/`quarantined` maps to
+        // `not_distributed` exactly, so the gentlest body is shown alone
+        // and no export it was never in is mentioned.
+        let outside = withdraw_confirmation(WithdrawStage::NotInTheCommons);
+        assert_eq!(outside.bodies, &[WITHDRAW_BODY_NOT_DISTRIBUTED]);
+        assert_eq!(outside.gravest, None);
+        assert_eq!(outside.confirm_label, WITHDRAW);
+        assert_eq!(
+            WithdrawStage::of_status("submitted"),
+            WithdrawStage::NotInTheCommons
+        );
+        assert_eq!(
+            WithdrawStage::of_status("quarantined"),
+            WithdrawStage::NotInTheCommons
+        );
+        assert_eq!(
+            WithdrawStage::of_status("accepted"),
+            WithdrawStage::InTheCommons
+        );
+        assert_eq!(
+            WithdrawStage::of_status("something-new"),
+            WithdrawStage::Unknown
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_stage_cannot_rule_out_the_furthest_reach() {
+        let unknown = withdraw_confirmation(WithdrawStage::Unknown);
+        assert_eq!(unknown.bodies, &[WITHDRAW_BODY_COMMONS_DISTRIBUTED]);
+        assert_eq!(unknown.gravest, Some(0));
+    }
+
+    #[test]
+    fn every_tier_states_the_same_verified_thing_about_credit() {
+        // Rule 3. Credit already awarded stays awarded, and no tier says
+        // anything else about it.
+        for stage in [
+            WithdrawStage::NotInTheCommons,
+            WithdrawStage::InTheCommons,
+            WithdrawStage::Unknown,
+        ] {
+            assert_eq!(withdraw_confirmation(stage).credit, WITHDRAW_CREDIT_NOTE);
+        }
+    }
+
+    #[test]
+    fn no_outcome_is_ever_reported_as_a_bare_withdrawn() {
+        // Rule 1. Each tier's report carries that tier's canonical body,
+        // and an unknown tier is not smoothed into the mild answer.
+        for reach in [
+            REACH_NOT_DISTRIBUTED,
+            REACH_COMMONS_NOT_DISTRIBUTED,
+            REACH_COMMONS_DISTRIBUTED,
+        ] {
+            let sentence = withdraw_result_sentence(Some(reach));
+            assert!(
+                sentence.contains(withdraw_canonical_body(reach).unwrap()),
+                "{reach} does not carry its tier's canonical wording"
+            );
+        }
+        assert!(withdraw_result_sentence(None).contains("cannot be recalled"));
+        assert!(
+            withdraw_result_sentence(Some("a-tier-from-the-future")).contains("cannot be recalled")
+        );
+    }
+
+    #[test]
+    fn a_failed_withdrawal_opens_by_saying_nothing_happened() {
+        // A contributor must not walk away from a failure believing their
+        // trace was taken back, whichever failure it was.
+        for sentence in [
+            WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string(),
+            WITHDRAW_NOT_FOUND.to_string(),
+            withdraw_failure_sentence("withdraw-failed"),
+            withdraw_failure_sentence("account-session-required"),
+            withdraw_failure_sentence("not-found"),
+        ] {
+            assert!(
+                sentence.starts_with("Nothing was withdrawn"),
+                "a failure sentence does not open by saying nothing happened: {sentence}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_not_found_sentence_discloses_neither_existence_nor_ownership() {
+        // Rule 4: the server answers identically whether a submission
+        // belongs to somebody else or does not exist, so that accounts
+        // cannot be enumerated. This window must not undo that.
+        let lower = WITHDRAW_NOT_FOUND.to_lowercase();
+        assert!(!lower.contains("belongs to"));
+        assert!(!lower.contains("does not exist"));
+    }
+
+    #[test]
+    fn asking_for_an_update_never_claims_one_arrived() {
+        // `refresh_history` answers `requested: true` and nothing else --
+        // the poller owns the network call. Copy that said "Updated" would
+        // be a claim about a round trip that has not happened yet.
+        let lower = CHECK_FOR_UPDATES_ASKED.to_lowercase();
+        assert!(lower.starts_with("asked"));
+        assert!(!lower.contains("updated"));
+        assert!(!lower.contains("refreshed"));
     }
 }
