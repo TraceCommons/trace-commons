@@ -53,6 +53,14 @@ public static class GoPublicDialog
     /// claiming has put none there; a control left on would be this window
     /// claiming a listing that does not exist.
     /// </remarks>
+    /// <summary>
+    /// Whether this dialog is already on screen.
+    /// </summary>
+    /// <remarks>
+    /// Static because the dialog is: one window, one XamlRoot, one slot.
+    /// </remarks>
+    private static bool _open;
+
     public static async Task<bool> RunAsync(XamlRoot xamlRoot, PublicProfileViewModel viewModel)
     {
         ArgumentNullException.ThrowIfNull(xamlRoot);
@@ -156,7 +164,35 @@ public static class GoPublicDialog
             }
         };
 
-        await dialog.ShowAsync();
+        // WinUI permits ONE ContentDialog per XamlRoot, and this is awaited
+        // from an `async void` handler -- the `async Task` in between contains
+        // nothing, so a throw here leaves that boundary unhandled and takes the
+        // process down. The caption button and the tray menu stay live behind
+        // app-modal content, so a second dialog is one click away.
+        //
+        // Refusing is the safe direction. `published` stays false, so a handle
+        // is never reported as claimed on a screen the contributor never saw --
+        // and going public is the outward-facing act in this window, the one
+        // where a false confirmation is worst.
+        if (_open)
+        {
+            return false;
+        }
+
+        _open = true;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        finally
+        {
+            _open = false;
+        }
+
         return published;
     }
 
