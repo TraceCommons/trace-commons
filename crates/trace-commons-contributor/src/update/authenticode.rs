@@ -81,12 +81,21 @@ fn parse_verifier_output(bytes: &[u8]) -> Result<(), AuthenticodeError> {
 pub fn verify(path: &std::path::Path) -> Result<(), AuthenticodeError> {
     use std::process::Command;
 
-    // An absolute path under %SystemRoot%, never a bare `powershell.exe`: a
-    // PATH lookup for the program that decides whether a binary is trusted
-    // is a lookup an attacker who can write to PATH gets to answer.
+    // Prefer PowerShell 7 when it is installed. The Windows Server 2025
+    // runner carries Windows PowerShell for compatibility but its legacy
+    // security module cannot inspect these freshly-built PE files; pwsh is
+    // also what the release and installer jobs exercise. Both candidates are
+    // absolute paths in administrator-owned directories, never a PATH lookup
+    // that an attacker who can write to PATH could answer.
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let shell =
+    let windows_powershell =
         std::path::Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let powershell_7 = std::env::var_os("ProgramFiles")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join(r"PowerShell\7\pwsh.exe"));
+    let shell = powershell_7
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or(windows_powershell);
 
     // Single-quote the path for PowerShell and double any embedded quote.
     // `-LiteralPath` additionally stops PowerShell treating `[` and `]` in a
