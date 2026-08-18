@@ -551,16 +551,150 @@ pub struct TraceValueScorecard {
     pub explanation: Vec<String>,
 }
 
+/// Aggregate confidence signals for a trace, reduced from per-token
+/// log-probabilities on the contributor's machine.
+///
+/// # These are not dataset cartography, and must not be described as it
+///
+/// The field names come from Swayamdipta et al., *Dataset Cartography* (2020),
+/// which defines confidence, variability and correctness **across training
+/// epochs, against a gold label**. Single-pass generation has neither epochs
+/// nor a gold label, so what is recorded here is a deliberate analogue:
+///
+/// | Field | Cartography | Here |
+/// |---|---|---|
+/// | `mean_confidence` | mean p(gold) across epochs | mean p(chosen token) across the trace |
+/// | `variability` | s.d. of p(gold) **across epochs** | s.d. of p(chosen) **across tokens** |
+/// | `correctness` | fraction of epochs predicted right | an outcome signal, supplied separately |
+///
+/// `variability` is the one that differs in kind rather than degree: within-
+/// sequence dispersion is not the across-epoch instability the paper measures,
+/// and the two should not be compared. The name is kept because the field
+/// predates this reduction and renaming it would break the wire format; this
+/// paragraph exists so nobody reads the name and infers the paper's semantics.
+///
+/// # Why aggregates rather than raw distributions
+///
+/// Raw per-token distributions do not fit — `MAX_INGEST_BODY_BYTES` is 2 MiB
+/// and top-5 logprobs for a typical trace is several times that — and they are
+/// conditioned on the entire context, which makes them more sensitive than the
+/// text they describe. Four numbers give an attacker essentially nothing to
+/// invert. The reduction therefore happens where the raw data already lives,
+/// and only the result crosses the ingest boundary.
+///
+/// # Trust
+///
+/// Every field here is contributor-supplied. Nothing may be treated as
+/// attested, and anything that consumes these values must assume they were
+/// chosen rather than measured. [`Self::validation_error`] enforces only that
+/// they are well-formed, which is not the same as true.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TrainingDynamicsSignals {
+    /// Mean probability of the tokens the model actually emitted, in `0.0..=1.0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mean_confidence: Option<f32>,
+    /// Population standard deviation of those probabilities across tokens, in
+    /// `0.0..=1.0`. See the type docs: this is not the paper's variability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variability: Option<f32>,
+    /// Whether the work was right, in `0.0..=1.0`. Never derivable from
+    /// log-probabilities; it needs an outcome signal such as a failing test or
+    /// a task-failed flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correctness: Option<f32>,
+    /// Coarse bucket derived from the two figures above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cartography_bucket: Option<CartographyBucket>,
+}
+
+/// At or above this mean confidence, a steady trace is [`CartographyBucket::Easy`].
+///
+/// Provisional. Chosen to be defensible rather than calibrated — no corpus has
+/// been measured against it yet — so treat a shift in the distribution of
+/// buckets after any change here as expected, not as a finding.
+pub const CARTOGRAPHY_EASY_MEAN_CONFIDENCE: f32 = 0.75;
+
+/// At or above this dispersion, a trace is [`CartographyBucket::Ambiguous`]
+/// regardless of its mean. Provisional, as above.
+pub const CARTOGRAPHY_AMBIGUOUS_VARIABILITY: f32 = 0.25;
+
+impl TrainingDynamicsSignals {
+    /// Name of the first field that is not well-formed, or `None`.
+    ///
+    /// Well-formed means finite and within `0.0..=1.0`. These values arrive
+    /// inside a submitted envelope, so they are attacker-controlled: a
+    /// consumer that assumes a probability and receives `1e30` is the bug this
+    /// prevents. Rejecting rather than clamping is deliberate — silently
+    /// repairing contributor data hides a broken producer, and a producer that
+    /// emits out-of-range confidence is wrong in ways clamping will not fix.
+    #[must_use]
+    pub fn validation_error(&self) -> Option<&'static str> {
+        for (name, value) in [
+            ("mean_confidence", self.mean_confidence),
+            ("variability", self.variability),
+            ("correctness", self.correctness),
+        ] {
+            if let Some(value) = value
+                && !(value.is_finite() && (0.0..=1.0).contains(&value))
+            {
+                return Some(name);
+            }
+        }
+        None
+    }
+}
+
+/// Reduce per-token probabilities to the aggregate signals the envelope carries.
+///
+/// `probabilities` are p(chosen token) for each generated token — that is,
+/// `exp(logprob)`, not the logprob itself. An empty slice measures nothing and
+/// yields an empty set of signals rather than a confident-looking zero.
+///
+/// `correctness` is always left unset: no arrangement of log-probabilities
+/// answers whether the work was right, and substituting confidence for
+/// correctness would be the kind of quiet redefinition this envelope's
+/// vocabulary cannot afford. Callers with a real outcome signal should set it
+/// themselves.
+#[must_use]
+pub fn reduce_token_confidences(probabilities: &[f32]) -> TrainingDynamicsSignals {
+    if probabilities.is_empty() {
+        return TrainingDynamicsSignals::default();
+    }
+
+    let count = probabilities.len() as f32;
+    // Clamp on the way in: a caller that hands us a malformed probability
+    // should not be able to produce signals the server would then reject.
+    let clamped = || {
+        probabilities.iter().map(|p| {
+            if p.is_finite() {
+                p.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+    };
+
+    let mean = clamped().sum::<f32>() / count;
+    let variance = clamped().map(|p| (p - mean).powi(2)).sum::<f32>() / count;
+    let variability = variance.sqrt().clamp(0.0, 1.0);
+    let mean = mean.clamp(0.0, 1.0);
+
+    let bucket = if variability >= CARTOGRAPHY_AMBIGUOUS_VARIABILITY {
+        // Dispersion first: a run that swings between certainty and doubt is
+        // the interesting case, and its mean hides exactly that.
+        CartographyBucket::Ambiguous
+    } else if mean >= CARTOGRAPHY_EASY_MEAN_CONFIDENCE {
+        CartographyBucket::Easy
+    } else {
+        CartographyBucket::Hard
+    };
+
+    TrainingDynamicsSignals {
+        mean_confidence: Some(mean),
+        variability: Some(variability),
+        correctness: None,
+        cartography_bucket: Some(bucket),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5455,6 +5589,205 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
     envelope.value.explanation = estimate.explanation;
     envelope.value_card.scorecard = estimate.scorecard;
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+}
+
+#[cfg(test)]
+mod training_dynamics_tests {
+    use super::{CartographyBucket, TrainingDynamicsSignals, reduce_token_confidences};
+
+    fn approx(actual: Option<f32>, expected: f32) {
+        let actual = actual.expect("value present");
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected ~{expected}, got {actual}"
+        );
+    }
+
+    // -- reduction ------------------------------------------------------------
+
+    /// Nothing observed means nothing claimed. An empty capture must not
+    /// produce a confident-looking zero.
+    #[test]
+    fn empty_input_measures_nothing() {
+        let signals = reduce_token_confidences(&[]);
+        assert_eq!(signals, TrainingDynamicsSignals::default());
+        assert!(signals.mean_confidence.is_none());
+        assert!(signals.cartography_bucket.is_none());
+    }
+
+    #[test]
+    fn mean_confidence_is_the_mean_of_chosen_token_probabilities() {
+        let signals = reduce_token_confidences(&[0.2, 0.4, 0.6, 0.8]);
+        approx(signals.mean_confidence, 0.5);
+    }
+
+    /// Population standard deviation, not sample: we are describing the tokens
+    /// we have, not estimating a parameter of a population we sampled from.
+    #[test]
+    fn variability_is_population_standard_deviation() {
+        let signals = reduce_token_confidences(&[0.2, 0.4, 0.6, 0.8]);
+        // mean 0.5; deviations 0.3/0.1/0.1/0.3 → variance 0.05 → sd ~0.2236
+        approx(signals.variability, 0.223_607);
+    }
+
+    #[test]
+    fn a_single_token_has_no_variability() {
+        let signals = reduce_token_confidences(&[0.42]);
+        approx(signals.mean_confidence, 0.42);
+        approx(signals.variability, 0.0);
+    }
+
+    /// `correctness` asks whether the work was right. No arrangement of
+    /// log-probabilities answers that, so the reduction must leave it unset
+    /// rather than substitute confidence for correctness.
+    #[test]
+    fn correctness_is_never_inferred_from_confidence() {
+        for probs in [
+            vec![0.99, 0.99, 0.99],
+            vec![0.01, 0.01, 0.01],
+            vec![0.5, 0.9, 0.1],
+        ] {
+            assert!(
+                reduce_token_confidences(&probs).correctness.is_none(),
+                "correctness must come from an outcome signal, never from confidence"
+            );
+        }
+    }
+
+    // -- bucketing ------------------------------------------------------------
+
+    #[test]
+    fn steady_and_confident_is_easy() {
+        let signals = reduce_token_confidences(&[0.95, 0.93, 0.97, 0.94]);
+        assert_eq!(signals.cartography_bucket, Some(CartographyBucket::Easy));
+    }
+
+    #[test]
+    fn steady_and_unconfident_is_hard() {
+        let signals = reduce_token_confidences(&[0.10, 0.12, 0.08, 0.11]);
+        assert_eq!(signals.cartography_bucket, Some(CartographyBucket::Hard));
+    }
+
+    /// High dispersion wins regardless of the mean: a run that swings between
+    /// certainty and doubt is the interesting case, and averaging hides it.
+    #[test]
+    fn high_variability_is_ambiguous_whatever_the_mean() {
+        let low_mean = reduce_token_confidences(&[0.99, 0.01, 0.99, 0.01]);
+        assert_eq!(
+            low_mean.cartography_bucket,
+            Some(CartographyBucket::Ambiguous)
+        );
+        let high_mean = reduce_token_confidences(&[1.0, 0.4, 1.0, 0.4]);
+        assert_eq!(
+            high_mean.cartography_bucket,
+            Some(CartographyBucket::Ambiguous)
+        );
+    }
+
+    // -- validation -----------------------------------------------------------
+
+    /// These arrive inside a submitted envelope, so they are contributor-
+    /// supplied and adversarial by default.
+    #[test]
+    fn well_formed_signals_validate() {
+        assert!(
+            reduce_token_confidences(&[0.3, 0.7])
+                .validation_error()
+                .is_none()
+        );
+        assert!(
+            TrainingDynamicsSignals::default()
+                .validation_error()
+                .is_none()
+        );
+        assert!(
+            TrainingDynamicsSignals {
+                mean_confidence: Some(0.0),
+                variability: Some(1.0),
+                correctness: Some(1.0),
+                cartography_bucket: Some(CartographyBucket::Unknown),
+            }
+            .validation_error()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn out_of_range_values_are_rejected() {
+        for (field, signals) in [
+            (
+                "mean_confidence",
+                TrainingDynamicsSignals {
+                    mean_confidence: Some(1.5),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mean_confidence",
+                TrainingDynamicsSignals {
+                    mean_confidence: Some(-0.1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "variability",
+                TrainingDynamicsSignals {
+                    variability: Some(9.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "correctness",
+                TrainingDynamicsSignals {
+                    correctness: Some(-2.0),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = signals.validation_error();
+            assert_eq!(
+                error,
+                Some(field),
+                "expected {field} to be rejected, got {error:?}"
+            );
+        }
+    }
+
+    /// JSON cannot carry NaN or infinity, but the type can be built in process
+    /// and a future transport might. Bounds that only hold for JSON are not
+    /// bounds.
+    #[test]
+    fn non_finite_values_are_rejected() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let signals = TrainingDynamicsSignals {
+                mean_confidence: Some(value),
+                ..Default::default()
+            };
+            assert_eq!(signals.validation_error(), Some("mean_confidence"));
+        }
+    }
+
+    /// Everything the reduction can produce must pass the validation the
+    /// server applies, or we have shipped a producer that fails our own gate.
+    #[test]
+    fn reduction_output_always_validates() {
+        let corpora: Vec<Vec<f32>> = vec![
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 1.0, 1.0],
+            vec![0.0, 1.0],
+            vec![1.0, 0.0, 1.0, 0.0, 1.0],
+            vec![0.5],
+            (0..1000).map(|i| (i % 101) as f32 / 100.0).collect(),
+        ];
+        for probs in corpora {
+            let signals = reduce_token_confidences(&probs);
+            assert_eq!(
+                signals.validation_error(),
+                None,
+                "reduction produced something the server would reject: {signals:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
