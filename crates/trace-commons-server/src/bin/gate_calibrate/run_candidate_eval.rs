@@ -271,7 +271,9 @@ fn score_one_rarity(
 ///    range from the collected `f64` vectors.
 /// 3. Replay the first `min(16, novel.len())` novel entries
 ///    `repeat_runs` times to compute determinism stddev. Set
-///    `passed_determinism_gate = stddev < DETERMINISM_GATE`.
+///    `passed_determinism_gate = stddev < DETERMINISM_GATE`, and fail it
+///    closed if any replay sample fails (a failed replay is a missing
+///    observation, not evidence of determinism).
 /// 4. Sample peak VRAM via `nvidia-smi` on CUDA hosts; zero elsewhere.
 ///
 /// Failures: per-entry scorer errors are counted; if the cumulative rate
@@ -595,6 +597,7 @@ pub async fn run_candidate_eval(
         "determinism_replay_start"
     );
     let mut runs: Vec<Vec<f64>> = Vec::with_capacity(repeat_runs as usize);
+    let mut replay_failed = false;
     for _ in 0..repeat_runs {
         let mut row: Vec<f64> = Vec::with_capacity(sample_n);
         for text in corpus.novel.iter().take(sample_n) {
@@ -611,22 +614,33 @@ pub async fn run_candidate_eval(
             match sample {
                 Ok(v) => row.push(v),
                 Err(()) => {
-                    // Determinism samples that fail leave an NaN-equivalent
-                    // hole; we substitute zero so the population stddev
-                    // computation doesn't trip over missing entries. A
-                    // candidate that fails determinism replays will also
-                    // have been flagged by the main failure-rate gate.
-                    row.push(0.0);
+                    // A failed replay is a missing observation, not a score of
+                    // zero. The replay pass is a separate pass from the primary
+                    // scoring loop, so its failures never reach the pooled
+                    // failure-rate gate above; a scorer can fail every replay
+                    // and nothing else catches it. Substituting a value — 0.0
+                    // least of all — manufactures the strongest determinism
+                    // evidence on no successful sample. Drop the sample and
+                    // fail the gate closed instead (#206).
+                    replay_failed = true;
                 }
             }
         }
-        runs.push(row);
+        // Keep only complete rows so `determinism_stddev` sees aligned
+        // per-trace columns; a partial row would mis-index the variance.
+        if row.len() == sample_n {
+            runs.push(row);
+        }
     }
     let det_stddev = determinism_stddev(&runs);
-    let passed_det_gate = det_stddev < DETERMINISM_GATE;
+    // Fail closed on any replay failure, regardless of the surviving-sample
+    // stddev. `pick_winner` treats this flag as its first eligibility stage,
+    // so a pass must reflect complete replay evidence, not a substituted hole.
+    let passed_det_gate = !replay_failed && det_stddev < DETERMINISM_GATE;
     tracing::info!(
         candidate_id = %candidate.id,
         stddev = det_stddev,
+        replay_failed,
         passed = passed_det_gate,
         "determinism_replay_done"
     );
