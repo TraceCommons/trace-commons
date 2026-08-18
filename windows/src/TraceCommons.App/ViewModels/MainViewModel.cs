@@ -49,6 +49,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _undoEntryId = string.Empty;
     private string _undoProjectLabel = string.Empty;
     private MainPane _pane = MainPane.Queue;
+    private HealthCopy? _health;
+    private HistoryRollup _rollup = new();
 
     public MainViewModel(DaemonHost host)
     {
@@ -119,6 +121,79 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingHistory));
         Raise(nameof(ShowingSettings));
     }
+
+    // --- The health banner -------------------------------------------------
+    //
+    // Rendered from status.health.last_error_label and nothing else.
+    //
+    // The daemon owns the precedence order between conditions
+    // (daemon::health::precedence: not-logged-in outranks the near-AI notice,
+    // which outranks the self-test failure, and so on), and it sends exactly
+    // one already-resolved label. A client that reconstructed that order would
+    // eventually disagree with the daemon, and therefore with the tray, about
+    // what is wrong -- so this stores whichever label arrived and hands it
+    // straight to HealthCopy without ranking, merging or synthesising one. The
+    // Linux shell's render_health carries the same note for the same reason.
+
+    /// <summary>Whether anything is holding contributions up.</summary>
+    public bool HasHealthBanner => _health is not null;
+
+    public string HealthTitle => _health?.Title ?? string.Empty;
+
+    public string HealthDetail => _health?.Detail ?? string.Empty;
+
+    /// <summary>
+    /// Whether this condition has an action worth offering.
+    /// </summary>
+    /// <remarks>
+    /// Only two labels get one. The rest clear on their own, and a button that
+    /// cannot change the condition it sits beside teaches a contributor that
+    /// the buttons in this app do nothing -- a lesson they would then apply to
+    /// Undo, which is the one control here that must be believed.
+    /// </remarks>
+    public bool HasHealthAction => _health?.ActionLabel is not null;
+
+    public string HealthActionLabel => _health?.ActionLabel ?? string.Empty;
+
+    // --- The week band -----------------------------------------------------
+    //
+    // Backed by history_rollup: counters the daemon already holds, and the
+    // same read History makes. The queue asks for it in its own refresh rather
+    // than taking it from the History screen, so the band is filled whether or
+    // not History has ever been opened -- History's view is built lazily on
+    // first nav and would otherwise leave this blank until someone clicked it.
+    // App::refresh in the Linux shell makes the same call for the same reason.
+
+    public string ThisWeekLabel => WeekBandCopy.ThisWeek;
+
+    public string ContributedLabel => WeekBandCopy.Contributed;
+
+    public string HeldLabel => WeekBandCopy.Held;
+
+    public string InTheCommonsLabel => WeekBandCopy.InTheCommons;
+
+    // Formatted to strings here rather than bound as ints, for the reason
+    // HistoryViewModel records: x:Bind is strongly typed and performs no
+    // implicit ToString for TextBlock.Text, so an int bound straight to a
+    // figure is a compile error on Windows and nowhere else.
+    public string ContributedCountText =>
+        _rollup.Week.Submitted.ToString(CultureInfo.CurrentCulture);
+
+    public string HeldCountText =>
+        _rollup.Week.Quarantined.ToString(CultureInfo.CurrentCulture);
+
+    /// <summary>
+    /// In the commons: all time, not this week.
+    /// </summary>
+    /// <remarks>
+    /// This one figure is deliberately not a weekly slice. "In the commons" is
+    /// a standing total, and slicing it by week would read as the commons
+    /// shrinking every Monday -- untrue, and discouraging in exactly the place
+    /// a contributor looks for evidence that their work went somewhere. The
+    /// Linux shell takes all_time here and says the same thing.
+    /// </remarks>
+    public string InTheCommonsCountText =>
+        _rollup.AllTime.Accepted.ToString(CultureInfo.CurrentCulture);
 
     /// <summary>
     /// A short, human-readable status line. Fixed labels only -- everything
@@ -414,6 +489,33 @@ public sealed class MainViewModel : INotifyPropertyChanged
             StatusText = status.IsError
                 ? $"Daemon unavailable ({status.Error!.Code})"
                 : DescribeQueue(Pending.Count);
+
+            // The banner comes out of the status read this method already
+            // makes. An error frame leaves the previous banner rather than
+            // clearing it: a daemon that could not answer has not told us the
+            // condition is over, and clearing on silence would retract a
+            // "nothing is being sent" the contributor is entitled to keep
+            // seeing until something says otherwise.
+            if (!status.IsError)
+            {
+                SetHealth(status.ResultAs<DaemonStatus>()?.Health?.LastErrorLabel);
+            }
+
+            DaemonResponse rollup = await _host
+                .CallAsync(DaemonProtocol.Methods.HistoryRollup)
+                .ConfigureAwait(true);
+
+            // A rollup that cannot be read keeps the previous figures rather
+            // than zeroing them, matching HistoryViewModel: zeros drawn from a
+            // failed read are a confident claim about someone's contributions
+            // that nothing actually made.
+            if (rollup.ResultAs<HistoryRollup>() is { } parsed)
+            {
+                _rollup = parsed;
+                Raise(nameof(ContributedCountText));
+                Raise(nameof(HeldCountText));
+                Raise(nameof(InTheCommonsCountText));
+            }
         }
         finally
         {
@@ -440,6 +542,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusText = withInvite
             ? "Trace Commons is already running. Open that window and paste your invite there."
             : "Trace Commons is already running. Use the window that is already open.";
+    }
+
+    /// <summary>
+    /// Takes the daemon's single health label and re-renders the banner.
+    /// </summary>
+    /// <remarks>
+    /// Compared by value before raising, so a status event that repeats an
+    /// unchanged condition does not rebuild the banner underneath a pointer
+    /// already resting on its action button -- the same care the undo bar's
+    /// tick takes, and for the same reason.
+    /// </remarks>
+    private void SetHealth(string? label)
+    {
+        HealthCopy? next = HealthCopy.ForLabel(label);
+        if (Equals(_health, next))
+        {
+            return;
+        }
+
+        _health = next;
+        Raise(nameof(HasHealthBanner));
+        Raise(nameof(HealthTitle));
+        Raise(nameof(HealthDetail));
+        Raise(nameof(HasHealthAction));
+        Raise(nameof(HealthActionLabel));
     }
 
     private static string DescribeQueue(int count) => count switch
