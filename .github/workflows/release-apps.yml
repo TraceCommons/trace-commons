@@ -1096,7 +1096,8 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
-          git switch -c "bump-cask-$V"
+          BRANCH="bump-cask-$V"
+          git switch -c "$BRANCH"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Casks/trace-commons.rb
           # Assert exactly one sha256 line before substituting: harmless
           # today with a single hash, but a positional sed like the
@@ -1112,8 +1113,11 @@ jobs:
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
           git commit -am "trace-commons $V"
-          git push -u origin "bump-cask-$V"
-          gh pr create --fill --repo TraceCommons/homebrew-tap
+          git push -u origin "$BRANCH"
+          # `--repo` changes gh's base repository but does not tell it which
+          # remote branch is the PR head. Without an explicit head, the real
+          # tag run aborts here even though the branch was pushed successfully.
+          gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH"
 
   publish-updates:
     name: publish update manifests

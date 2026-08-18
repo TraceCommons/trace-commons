@@ -465,7 +465,8 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
-          git switch -c "bump-formula-$V"
+          BRANCH="bump-formula-$V"
+          git switch -c "$BRANCH"
           sed -i "s/^  version \".*\"/  version \"$V\"/" Formula/trace-commons-contributor.rb
           # The positional substitution below assumes the arm64 block comes
           # first, the x86_64 second. Assert that rather than assuming it --
@@ -508,8 +509,11 @@ jobs:
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
           git commit -am "trace-commons-contributor $V"
-          git push -u origin "bump-formula-$V"
-          gh pr create --fill --repo TraceCommons/homebrew-tap
+          git push -u origin "$BRANCH"
+          # `--repo` selects the base repository only. Name the already-pushed
+          # branch explicitly so gh does not try to infer it from this
+          # cross-repository workflow checkout.
+          gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH"
 
   winget-bump:
     name: bump the winget manifest
@@ -541,15 +545,19 @@ jobs:
           set -euo pipefail
           V="${GITHUB_REF_NAME#contributor-v}"
           ./scripts/winget/generate-manifests.sh "$V"
-          gh repo clone microsoft/winget-pkgs winget-pkgs -- --depth 1
+          FORK_OWNER="$(gh api user --jq .login)"
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${FORK_OWNER}/winget-pkgs.git" winget-pkgs
           # The generator already wrote the partitioned path winget-pkgs
           # expects, so copy the tree across rather than individual files.
           cp -R "manifests/t" "winget-pkgs/manifests/"
           cd winget-pkgs
-          git switch -c "TraceCommons.Contributor-$V"
+          BRANCH="TraceCommons.Contributor-$V"
+          git switch -c "$BRANCH"
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
           git add "manifests/t/TraceCommons/Contributor/$V"
           git commit -m "New version: TraceCommons.Contributor version $V"
-          git push -u origin "TraceCommons.Contributor-$V"
-          gh pr create --fill --repo microsoft/winget-pkgs
+          git push -u origin "$BRANCH"
+          gh pr create --fill --repo microsoft/winget-pkgs \
+            --head "${FORK_OWNER}:$BRANCH"
