@@ -58,6 +58,29 @@ public static class DaemonProtocol
         public const string ListProjects = "list_projects";
         public const string SetProjectMode = "set_project_mode";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
+
+        // History and withdrawal. Like the onboarding block above, every one
+        // of these was already in the daemon's pinned METHODS array before
+        // this app could call any of them -- the gap on Windows was never
+        // protocol, only that nothing here asked. Adding a name that is NOT
+        // in that array would break
+        // `hello_advertises_exactly_the_documented_method_set`.
+        public const string ListHistory = "list_history";
+        public const string HistoryRollup = "history_rollup";
+        public const string RefreshHistory = "refresh_history";
+        public const string QueueOutcomeCounts = "queue_outcome_counts";
+
+        /// <summary>
+        /// Withdraws one submission and reports the tier the server applied.
+        ///
+        /// Deliberately paired with no <c>withdraw_bulk</c> constant. Bulk
+        /// reports only counts, so a bulk outcome cannot name a per-trace
+        /// tier, and the contract's first withdrawal rule -- never a generic
+        /// "withdrawn" -- cannot be honoured for it at all. See
+        /// <see cref="WithdrawCopy.NoBulk"/>, which says that to the
+        /// contributor rather than leaving the affordance silently missing.
+        /// </summary>
+        public const string Withdraw = "withdraw";
     }
 
     public static class Events
