@@ -19,6 +19,20 @@ import SwiftUI
 /// point: per §7.3 the black frame is the exact boundary of what becomes
 /// public. See `CommunityBrand` for why those values are not `TC` tokens.
 struct SettingsView: View {
+    var body: some View {
+        ScrollView {
+            SettingsContent()
+        }
+        .tcScreen()
+    }
+}
+
+/// The screen's content, split out of its `ScrollView` for the same reason
+/// `QueueContent` and `ConsentScopesContent` are: `ImageRenderer` renders a
+/// `ScrollView` as blank, so the screenshot hook can only rasterize what
+/// lives outside one -- and the local change log at the foot of this screen
+/// is a surface that has to be looked at to be checked.
+struct SettingsContent: View {
     @EnvironmentObject private var model: AppModel
 
     // Read fresh on appear rather than cached across the view's lifetime:
@@ -36,24 +50,28 @@ struct SettingsView: View {
     private static let proseColumn: CGFloat = 520
 
     var body: some View {
-        ScrollView {
-            // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
-            // 28 this screen used before.
-            VStack(alignment: .leading, spacing: TC.Space.lg) {
-                connection
-                loginItem
-                consent
-                publicProfile
-                watching
-                projects
-            }
-            .padding(.top, TC.Space.Content.top)
-            .padding(.horizontal, TC.Space.Content.horizontal)
-            .padding(.bottom, TC.Space.Content.bottom)
-            .tcColumn(Self.proseColumn)
+        // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
+        // 28 this screen used before.
+        VStack(alignment: .leading, spacing: TC.Space.lg) {
+            connection
+            loginItem
+            consent
+            publicProfile
+            watching
+            projects
+            audit
         }
-        .tcScreen()
-        .onAppear { loginItemState = LoginItemManager.currentState }
+        .padding(.top, TC.Space.Content.top)
+        .padding(.horizontal, TC.Space.Content.horizontal)
+        .padding(.bottom, TC.Space.Content.bottom)
+        .tcColumn(Self.proseColumn)
+        .onAppear {
+            loginItemState = LoginItemManager.currentState
+            // Same reason the login-item state is read fresh here: the log
+            // can have grown since launch (the CLI writes to it too), and
+            // the daemon publishes no event when it does.
+            model.refreshAudit()
+        }
         .sheet(isPresented: $showingGoPublic) {
             GoPublicDialog(onDismiss: { showingGoPublic = false })
         }
@@ -423,6 +441,84 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - The local change log
+
+    /// What has been changed on this machine, from the daemon's `list_audit`.
+    ///
+    /// The shared design spec does not draw this surface -- the Linux shell
+    /// is the only prior art -- so the section heading, the empty sentence
+    /// and every action sentence below are the Linux shell's own words
+    /// (`crates/trace-commons-contributor-gtk/src/ui/settings.rs`) rather
+    /// than new copy. Two shells narrating the same log differently is a
+    /// worse outcome than either wording on its own.
+    ///
+    /// Every value drawn here is a fixed label by contract: the instant, the
+    /// action name mapped to a sentence, and the daemon-derived project
+    /// label. Nothing on this screen may be enriched with a path, a token, a
+    /// tenant, a session hash or a trace body -- see `AuditEntry`. And per
+    /// the contract this is a record, not a guard: nothing in this app
+    /// decides anything on the strength of what is listed here.
+    private var audit: some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            TCSectionHeader(title: "What has been changed on this machine")
+            if model.audit.isEmpty {
+                Text("Nothing has been changed.")
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
+            // The rows carry no id on the wire, and two entries can legally
+            // agree on every field they do carry (the same action, on the
+            // same project, within the same second), so the offset in a
+            // newest-first list is the only stable identity available.
+            ForEach(Array(model.audit.enumerated()), id: \.offset) { _, entry in
+                auditRow(entry)
+            }
+        }
+    }
+
+    private func auditRow(_ entry: AuditEntry) -> some View {
+        // The instant is a figure, so it is set as one, and the column of
+        // them lines up down the section -- same reasoning as the Linux
+        // shell's ledger treatment.
+        HStack(alignment: .firstTextBaseline, spacing: TC.Space.m) {
+            Text(Self.instant(entry.at))
+                .font(TC.Font_.ledger)
+                .foregroundStyle(.secondary)
+            Text(Self.auditSentence(entry.action, project: entry.projectLabel))
+                .font(TC.Font_.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The Linux shell prints the raw RFC 3339 instant because GTK has it as
+    /// a string; this layer has already decoded it to a `Date`, so it is
+    /// shown in the reader's own locale and time zone. Same fact, stated the
+    /// way the platform states dates elsewhere in this app.
+    private static func instant(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+
+    /// Fixed action labels to sentences. The wording is the Linux shell's
+    /// `audit_sentence`, verbatim, including its catch-all: an action this
+    /// build does not know still gets a row, because a change that happened
+    /// and is not listed is exactly what this log exists to prevent.
+    private static func auditSentence(_ action: String, project: String?) -> String {
+        let sentence: String
+        switch action {
+        case "armed-auto-upload": sentence = "Automatic contributing turned on for"
+        case "disarmed-auto-upload": sentence = "Automatic contributing turned off for"
+        case "queue-bulk-approved": sentence = "The whole queue was approved"
+        case "consent-scopes-changed": sentence = "Permissions changed"
+        case "near-ai-notice-acknowledged": sentence = "The extra privacy scan was confirmed"
+        default: sentence = "Changed"
+        }
+        guard let project, !project.isEmpty else { return sentence }
+        return "\(sentence) \(project)"
     }
 
     private func modeSentence(_ mode: ProjectMode) -> String {
