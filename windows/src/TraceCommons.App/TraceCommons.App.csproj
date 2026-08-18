@@ -1,0 +1,104 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>TraceCommons.App</RootNamespace>
+    <AssemblyName>TraceCommons</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWinUI>true</UseWinUI>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+
+    <!--
+      Unpackaged (WindowsPackageType=None) BY DEFAULT, MSIX only on request.
+
+      The shipping artifact is the self-contained unpackaged publish tree,
+      zipped: it needs no prerequisites on a contributor's machine, it installs
+      per user without administrator rights, and it builds in CI with no
+      certificate at all — which is what lets the `windows contributor app` job
+      verify the XAML and the Windows App SDK wiring on every pull request.
+
+      TcPackaged=true switches this project to MSIX. It is opt-in rather than
+      the default because the packaged flavour is NOT a superset: it needs
+      Windows 10 2004 (the manifest disables write virtualization, which is a
+      2004 feature and a restricted capability), and it cannot be signed
+      without the release identity. See windows/packaging/README.md. Nothing
+      builds with it set except windows/scripts/make-msix.ps1.
+    -->
+    <TcPackaged Condition="'$(TcPackaged)' == ''">false</TcPackaged>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TcPackaged)' != 'true'">
+    <WindowsPackageType>None</WindowsPackageType>
+  </PropertyGroup>
+
+  <!--
+    The packaged flavour. AppxPackageSigningEnabled is false on purpose: this
+    repository has no PFX and never will — signing is Azure Trusted Signing,
+    performed by signtool after packaging, against the same identity the
+    Authenticode pass uses. A build that tried to sign here would fail looking
+    for a certificate store.
+  -->
+  <PropertyGroup Condition="'$(TcPackaged)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TcPackaged)' == 'true'">
+    <AppxManifest Include="$(MSBuildThisFileDirectory)../../packaging/Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="$(MSBuildThisFileDirectory)../../packaging/Assets/*.png">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../TraceCommons.Interop/TraceCommons.Interop.csproj" />
+  </ItemGroup>
+
+  <!--
+    The Rust cdylib ships beside the executable.
+
+    TC_FFI_LIB_DIR points at a cargo output directory; it defaults to the
+    workspace release build, which is what a shipping app links. A missing DLL
+    is a BUILD failure, not a runtime one: an app that starts and only then
+    reports it cannot find its core is strictly worse than one that never
+    builds.
+  -->
+  <PropertyGroup>
+    <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
+    <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/release</TcFfiLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(TcFfiLibDir)/trace_commons_contributor_ffi.dll"
+          Condition="Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="VerifyFfiLibraryPresent" BeforeTargets="Build">
+    <Error Condition="!Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
+           Text="trace_commons_contributor_ffi.dll was not found in $(TcFfiLibDir). Build it first with: cargo build -p trace-commons-contributor-ffi --release  (or set TC_FFI_LIB_DIR to a directory containing it)." />
+  </Target>
+
+</Project>

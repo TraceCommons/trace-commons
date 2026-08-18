@@ -32,6 +32,14 @@ CREATE ROLE trace_gate_driver NOLOGIN NOBYPASSRLS;
 -- table, trace_gate_evaluation_attempts
 ```
 
+`V45__trace_gate_driver_column_grants.sql` then narrows those grants to the
+exact columns the driver's queries select, join on, filter by, or order by —
+the same convention `V38__trace_pii_backstop.sql` established for
+`trace_pii_backstop_driver`. Cross-tenant enumeration stays deliberate
+(`USING (true)` policies unchanged); a compromised driver credential must not
+read object keys, encryption key refs, redaction payloads, or other columns
+outside that surface.
+
 Two properties are load-bearing, exactly as for `trace_login_resolver`:
 
 - **`NOLOGIN`** — the role cannot be connected to directly as shipped. An
@@ -39,7 +47,8 @@ Two properties are load-bearing, exactly as for `trace_login_resolver`:
   anything.
 - **`NOBYPASSRLS`** — the role MUST remain NOBYPASSRLS. Cross-tenant
   visibility is authorized **only** by the role-scoped permissive policies
-  added in V36, never by bypassing RLS outright.
+  added in V36, never by bypassing RLS outright. Column width is constrained
+  by V42.
 
 ### What the pool code actually does
 

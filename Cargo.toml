@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/trace-commons-build-info",
     "crates/trace-commons-contributor",
     "crates/trace-commons-contributor-ffi",
     "crates/trace-commons-gate-api",
@@ -8,6 +9,12 @@ members = [
     "crates/trace-commons-protocol",
     "crates/trace-commons-server",
 ]
+# The Linux contributor shell is its own workspace. It links GTK 4 and
+# libadwaita and cannot build on macOS, where the crates above are developed
+# and checked; excluding it keeps a `cargo check` here honest rather than
+# newly broken, and keeps the GTK dependency tree out of this lockfile.
+# Build it with scripts/linux-build.sh.
+exclude = ["crates/trace-commons-contributor-gtk"]
 resolver = "2"
 
 [workspace.package]

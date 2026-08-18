@@ -10,10 +10,11 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::collections::BTreeMap;
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate,
+    ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
 };
 
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
@@ -137,6 +138,74 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
 /// Whether a submit result must make the command exit non-zero. Only an
 /// expected size finding is non-fatal during dry-run. Every known privacy or
 /// pipeline refusal, and every future refusal label, fails closed.
+/// Why an envelope carries the residual risk it does, in labels only.
+///
+/// The risk VALUE is never recomputed here -- it is read from
+/// `envelope.privacy.residual_pii_risk`, which the protocol crate already
+/// derived. Only the explanation is assembled, from the envelope's own counts,
+/// labels and consent flags. A second implementation of the risk rule in this
+/// crate would eventually disagree with the first, and an explanation that
+/// contradicts the number it explains is worse than no explanation.
+///
+/// Labels and counts only. This runs over other people's private traces, so
+/// no matched text, no path, no content ever reaches the output.
+fn residual_risk_explanation(
+    message_text_included: bool,
+    tool_payloads_included: bool,
+    redaction_counts: &BTreeMap<String, u32>,
+    pii_labels_present: &[String],
+) -> String {
+    let mut causes: Vec<String> = Vec::new();
+
+    let mut consent_flags: Vec<&str> = Vec::new();
+    if message_text_included {
+        consent_flags.push("message_text_included");
+    }
+    if tool_payloads_included {
+        consent_flags.push("tool_payloads_included");
+    }
+    if !consent_flags.is_empty() {
+        causes.push(format!("consent flags: {}", consent_flags.join(", ")));
+    }
+
+    if !redaction_counts.is_empty() {
+        let mut parts: Vec<String> = redaction_counts
+            .iter()
+            .map(|(label, count)| format!("{count} {label}"))
+            .collect();
+        parts.sort();
+        causes.push(format!("redaction found: {}", parts.join(", ")));
+    }
+
+    if !pii_labels_present.is_empty() {
+        let mut labels = pii_labels_present.to_vec();
+        labels.sort();
+        causes.push(format!("pii labels: {}", labels.join(", ")));
+    }
+
+    if causes.is_empty() {
+        "nothing in this envelope raised the floor".to_string()
+    } else {
+        causes.join("; ")
+    }
+}
+
+/// What a given tier means for storage on the server.
+///
+/// Phrased conditionally on purpose: the client cannot see the operator's
+/// configuration, so it says what the tier means rather than promising an
+/// outcome it cannot know.
+fn residual_risk_storage_note(risk: ResidualPiiRisk) -> &'static str {
+    match risk {
+        ResidualPiiRisk::Low => "Low is accepted.",
+        ResidualPiiRisk::Medium => {
+            "Medium accepts only if the operator enabled \
+             TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS; otherwise quarantines."
+        }
+        ResidualPiiRisk::High => "High quarantines for review.",
+    }
+}
+
 pub fn outcomes_have_failure(outcomes: &[SubmitOutcome], dry_run: bool) -> bool {
     outcomes.iter().any(|outcome| match outcome {
         SubmitOutcome::Failed { .. } => true,
@@ -502,9 +571,26 @@ impl<'a> SubmitContext<'a> {
                         envelope.submission_id
                     );
                 } else {
+                    // Unchanged first line: anything parsing it keeps working.
                     println!(
                         "dry-run: submission_id={} bytes={size}",
                         envelope.submission_id
+                    );
+                    let risk = envelope.privacy.residual_pii_risk;
+                    println!("dry-run: risk={risk:?}");
+                    println!(
+                        "dry-run: why={}",
+                        residual_risk_explanation(
+                            envelope.consent.message_text_included,
+                            envelope.consent.tool_payloads_included,
+                            &envelope.privacy.redaction_counts,
+                            &envelope.privacy.pii_labels_present,
+                        )
+                    );
+                    println!("dry-run: storage={}", residual_risk_storage_note(risk));
+                    println!(
+                        "dry-run: the server re-scrubs and can RAISE this risk but never \
+                         silently lower it; this client-side risk is a floor, not a promise."
                     );
                 }
             }
@@ -696,6 +782,42 @@ pub async fn set_profile(
         .context("setting public profile")
 }
 
+/// Response of `POST /v1/account/login-links`. `url` is a ROOT-RELATIVE path
+/// carrying a single-use code; it is a secret for the few minutes it lives.
+/// `account_id` is returned by the server but not used here.
+#[derive(Debug, Clone, Deserialize)]
+struct MintLoginLinkResponse {
+    url: String,
+}
+
+/// Mint a single-use account login link for this device's principal.
+///
+/// Used by `crate::account_auth::sign_in` to open the human's browser at the
+/// EXISTING redeem flow. This is the same device-authenticated endpoint the
+/// account slice has always exposed, called with the same empty-scope claim as
+/// `status`: minting a login link is an authority the device key already has,
+/// and the loopback flow adds none.
+///
+/// Returns the root-relative path only. The caller joins it onto the
+/// configured ingest base URL; it is never logged.
+pub async fn mint_account_login_link(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<String> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for account sign-in")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    let minted: MintLoginLinkResponse = client
+        .call_json(Method::POST, "/v1/account/login-links", &[], None::<&()>)
+        .await
+        .context("minting an account login link")?;
+    Ok(minted.url)
+}
+
 /// Withdraw this contributor's public attribution.
 ///
 /// The row goes at the next snapshot. This is the action `/about/privacy`
@@ -714,6 +836,54 @@ pub async fn clear_profile(store: &ConfigStore, cfg: &ContributorConfig) -> Resu
         .await
         .context("withdrawing public profile")?;
     Ok(())
+}
+
+/// Record the profile the server just accepted in the local cache, and
+/// persist it. Returns whether the write stuck.
+///
+/// There is no `GET /v1/community/profile`: the server derives the principal
+/// from the authenticated request and offers no read-back, so this cache is
+/// the only way anything on this machine can tell that a handle was ever
+/// claimed. Both shells depend on it -- the daemon's `get_public_profile`
+/// answers from it, and `daemon::refresh_community` polls the roster only
+/// when it names a handle -- so a caller of `set_profile` that does not write
+/// it leaves the contributor on the roster with no local sign of it, and
+/// their community section never appears.
+///
+/// The write is here rather than in either shell so the CLI and the socket
+/// cache identically. The reason this is a plain function taking `&mut
+/// ContributorConfig` rather than part of `set_profile` is that the caller
+/// already holds the config it loaded, and reloading it inside the network
+/// call would race that copy.
+///
+/// A failed write is reported, not raised: the handle is published either
+/// way -- the server already accepted it -- so a caller must not tell the
+/// contributor their profile did not go up. The weaker true statement is
+/// that the profile will not read back until the next successful call.
+pub fn cache_public_profile(
+    store: &ConfigStore,
+    cfg: &mut ContributorConfig,
+    profile: &CommunityProfile,
+) -> bool {
+    cfg.display_handle = Some(profile.display_handle.clone());
+    cfg.public_bio = profile.bio.clone();
+    cfg.public_since = Some(profile.public_since);
+    store.save_config(cfg).is_ok()
+}
+
+/// Drop the cached public profile after a successful withdrawal, and
+/// persist. Returns whether the write stuck.
+///
+/// The reverse of [`cache_public_profile`]'s reasoning: the row is gone from
+/// the server regardless, and a cache that still names a withdrawn handle is
+/// worse than one that is merely stale -- it keeps `refresh_community`
+/// polling for a row that no longer exists and keeps a settings panel
+/// claiming public attribution the contributor has withdrawn.
+pub fn clear_cached_public_profile(store: &ConfigStore, cfg: &mut ContributorConfig) -> bool {
+    cfg.display_handle = None;
+    cfg.public_bio = None;
+    cfg.public_since = None;
+    store.save_config(cfg).is_ok()
 }
 
 /// Fetch a server-signed attestation of this contributor's own scores.
@@ -939,9 +1109,17 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
 
+    /// Body limit every stub endpoint is mounted with. axum defaults to
+    /// 2 MiB, which is BELOW the envelope cap -- a stub left on the default
+    /// would 413 a legitimately-sized envelope and surface as a generic
+    /// `http-failure`, hiding whatever the test was actually asserting.
+    /// Mirrors real ingest: the envelope cap plus framing headroom.
+    const STUB_BODY_LIMIT_BYTES: usize = MAX_ENVELOPE_BYTES + 4 * 1024 * 1024;
+
     async fn spawn(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let router = router.layer(axum::extract::DefaultBodyLimit::max(STUB_BODY_LIMIT_BYTES));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
     }
@@ -953,6 +1131,7 @@ mod tests {
     async fn spawn_as_localhost(router: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let router = router.layer(axum::extract::DefaultBodyLimit::max(STUB_BODY_LIMIT_BYTES));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://localhost:{port}")
     }
@@ -1115,6 +1294,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into(), "model_training".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         }
     }
 
@@ -1161,6 +1343,9 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         };
         assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
         assert_eq!(preview_cfg.tenant_id.len(), 71);
@@ -1250,6 +1435,42 @@ mod tests {
         assert_eq!(preview.submission_id.get_version_num(), 8);
         assert_eq!(enrolled.submission_id.get_version_num(), 5);
         assert_ne!(preview.submission_id, enrolled.submission_id);
+    }
+
+    #[test]
+    fn the_explanation_names_causes_in_labels_only() {
+        // The point of the dry-run explanation is that a contributor can see
+        // WHY a trace will quarantine. The point of this test is that seeing
+        // why never costs them the content: this runs over other people's
+        // private traces, so counts and labels only.
+        let counts = BTreeMap::from([("secret:aws_access_key".to_string(), 2u32)]);
+        let labels = vec!["email".to_string()];
+
+        let why = residual_risk_explanation(true, false, &counts, &labels);
+
+        assert!(why.contains("message_text_included"));
+        assert!(why.contains("2 secret:aws_access_key"));
+        assert!(why.contains("email"));
+        // The matched text itself must never appear.
+        assert!(!why.contains("AKIA"), "no matched secret may appear: {why}");
+        assert!(!why.contains('/'), "no path may appear: {why}");
+    }
+
+    #[test]
+    fn a_clean_envelope_says_so_rather_than_listing_nothing() {
+        let why = residual_risk_explanation(false, false, &BTreeMap::new(), &[]);
+        assert_eq!(why, "nothing in this envelope raised the floor");
+    }
+
+    #[test]
+    fn the_storage_note_is_conditional_for_medium() {
+        // The client cannot see the operator's configuration, so Medium must
+        // describe the tier rather than promise an outcome.
+        let note = residual_risk_storage_note(ResidualPiiRisk::Medium);
+        assert!(note.contains("only if the operator enabled"));
+        assert!(note.contains("TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS"));
+        assert!(residual_risk_storage_note(ResidualPiiRisk::Low).contains("accepted"));
+        assert!(residual_risk_storage_note(ResidualPiiRisk::High).contains("quarantines"));
     }
 
     #[test]

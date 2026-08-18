@@ -75,6 +75,8 @@ pub enum TraceOnboardErrorCode {
     EnrollNotAuthorized,
     EnrollRateLimited,
     EnrollCapExceeded,
+    InviteRegistryNotConfigured,
+    InviteRegistryStale,
 }
 
 impl TraceOnboardErrorCode {
@@ -93,6 +95,8 @@ impl TraceOnboardErrorCode {
             Self::EnrollNotAuthorized => "EnrollNotAuthorized",
             Self::EnrollRateLimited => "EnrollRateLimited",
             Self::EnrollCapExceeded => "EnrollCapExceeded",
+            Self::InviteRegistryNotConfigured => "InviteRegistryNotConfigured",
+            Self::InviteRegistryStale => "InviteRegistryStale",
         }
     }
 }

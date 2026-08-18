@@ -13,6 +13,13 @@ bytes = "1"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
+# bech32/k256/ripemd together implement the Cosmos half of the self-serve
+# invite claims: ADR-036 secp256k1 signature verification and the
+# `bech32(hrp, ripemd160(sha256(pubkey)))` address derivation that binds a
+# signing key to the address it controls. `cosmrs` would have been one crate
+# instead of three, but drags in tendermint-rs, prost and tonic for what is
+# one signature check and one digest pipeline.
+bech32 = "0.11"
 borsh = { version = "1", features = ["derive"] }
 bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
@@ -24,9 +31,11 @@ dirs = "6"
 hex = "0.4"
 hkdf = "0.12"
 jsonwebtoken = "9"
+k256 = "0.13"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
+ripemd = "0.1"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +48,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1"
 zstd = "0.13"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+trace-commons-build-info = { path = "../trace-commons-build-info" }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }

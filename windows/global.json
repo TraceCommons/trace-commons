@@ -1,0 +1,9 @@
+{
+  "//": "Pins the .NET SDK major version for everything under windows/.",
+  "//why": "Windows App SDK 1.6's MrtCore.PriGen.targets loads a packaging task from a path that exists in the .NET 8 SDK layout but not in .NET 10's. MSBuild otherwise selects the NEWEST installed SDK regardless of what setup-dotnet installed, so a GitHub runner with .NET 10 preinstalled failed with MSB4062 even though 8.0.x was present. rollForward latestMinor accepts any installed 8.x and excludes 10.x.",
+  "sdk": {
+    "version": "8.0.100",
+    "rollForward": "latestMinor",
+    "allowPrerelease": false
+  }
+}

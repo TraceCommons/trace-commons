@@ -130,7 +130,7 @@ procedure.
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | optional | — | Rate-limit budget per tenant. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
 | `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. |
-| `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver`. See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
+| `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver` (V36 policies + V42 column-scoped SELECT). See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
 | `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when `TRACE_COMMONS_PII_BACKSTOP_ENABLED=true` | (none, refuses boot) | Separate connection string for the narrow `trace_pii_backstop_driver` role pool (migration V38). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_pii_backstop_driver`. See [`pii-backstop.md`](pii-backstop.md). |
 
 ## 8. Auth / signed-token surface
@@ -159,6 +159,27 @@ procedure.
 | `TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS` | R for prod | `false` | Require keyset-managed EdDSA (not inline PEM). |
 | `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS` | R for prod | `false` | Require grant-row authorization on every read. |
 
+### 8a. Score attestation signing
+
+Set all three or none. With none set, attestation signing is disabled and
+both `/.well-known/trace-commons-attestation-keyset.json` and
+`/v1/contributors/me/score-attestation` fail closed with
+`503 attestation_signing_key_unconfigured` — correct, but indistinguishable
+from an outage to a contributor running `trace-commons-contributor attest`,
+so configure these wherever contributors attest. A partial configuration is
+an operator error and refuses at boot rather than silently disabling.
+
+Generate the keypair with `trace-commons-ingest --generate-attestation-keypair`;
+it reads no env and touches no database, so it works before the server is
+configured, and prints all three assignments in env-file format.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID` | R when attesting | (none) | Key id published in the keyset and stamped in the JWS header. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` | R when attesting | (none) | PKCS#8 v2 Ed25519 private key PEM. Operator secret; never commit. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_PUBLIC_KEY_PEM` | R when attesting | (none) | SPKI Ed25519 public key PEM. Published in the keyset endpoint. |
+| `TRACE_COMMONS_INGEST_ATTESTATION_TTL_SECONDS` | optional | `86400` | Attestation lifetime. Must be positive. |
+
 ## 9. Analytics surface
 
 | Var | R? | Default | Description |
@@ -168,7 +189,8 @@ procedure.
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA` | optional | — | Max noise delta in micros. |
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS` | optional | — | Configured epsilon. |
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS` | optional | — | Refuse epsilons above this. |
-| `TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED` | optional | `false` | Enables `/v1/community/*` profile, leaderboard, contributor, and analytics snapshot routes. Requires the DB mirror for real data. |
+| `TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED` | optional | `false` | Enables `/v1/community/*` profile, leaderboard, contributor, and analytics snapshot routes. Requires the DB mirror for real data. When enabled, also starts the coalesced withdrawal→snapshot invalidation drain on `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS`. |
+| `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS` | optional | `900` | Interval for the in-process community snapshot invalidation drain (and the published ≤15-minute freshness bound's rebuild cadence). Clamped to `[30, 86400]`. Only consulted when the community surface is enabled. |
 | `TRACE_COMMONS_COMMUNITY_TENANT_IDS` | optional | — | Comma-separated tenant ids included in community snapshot recompute. Set this when the runtime DB role is non-bypassing and forced RLS would hide `trace_tenants` enumeration. |
 | `TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS` | optional | `approved_noise_mechanism` | What published corpus aggregates rest on. `approved_noise_mechanism` (default) withholds analytics until a calibrated mechanism is approved. `suppression_only` publishes under cell suppression alone — **no noise is applied and totals are not suppressed**, so at small corpus sizes the totals can still describe a handful of contributors closely. The min-cell floor is required either way and is never waived. Any user-facing description of the deployment must state which basis is in force. |
 | `TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS` | optional | — | Recompute the community snapshot in-process on this interval. Unset, empty or `0` leaves recompute admin-triggered only. Minimum 60s. **Assumes a single writer**: the worker skips a tick when a snapshot is already fresh, but that is coordination, not mutual exclusion. On a multi-replica deployment either leave this unset and drive recompute from one elected scheduler, or accept duplicate aggregation work. Retention keeps the 96 most recent snapshots per window/metric. Without it the published leaderboard is only as fresh as the last manual POST to `/v1/admin/community/snapshots/recompute`. |
@@ -396,7 +418,23 @@ the driver database URL or the API key refuses at boot.
 The privacy filter backend is selected explicitly — there is no auto-fallback.
 Unknown values for `TRACE_PRIVACY_FILTER_BACKEND` are refused at startup so
 misconfigurations surface immediately rather than silently degrading to a
-weaker path.
+weaker path. A backend named without the configuration it needs (`near-ai`
+without its API key, `sidecar` without its command) is refused at startup too,
+rather than surfacing on each submission.
+
+`trace-commons-ingest` logs the resolved backend once at startup:
+
+```
+Trace Commons privacy filter backend resolved  privacy_filter_backend=near_ai
+```
+
+A value of `none` there means deterministic-only redaction. That line is the
+only signal distinguishing a filter that ran from one that was never
+configured — an unset backend is not an error, and a runtime filter failure
+falls back to the unfiltered text with a `privacy_filter:<backend>_failure`
+counter. Deployments that require prose-PII filtering should set
+`TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` so an absent backend refuses the boot
+instead.
 
 The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
 pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
@@ -406,6 +444,7 @@ audit-relevant and is included in gate version hash derivation.
 | Var | R? | Default | Description |
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
 | `TRACE_PRIVACY_FILTER_TIMEOUT_MS` | optional | `10000` | Sidecar timeout. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS`. |
@@ -413,7 +452,7 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES` | optional | (sidecar default) | Max stdout bytes. Legacy: `IRONCLAW_*`. |
 | `TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES` | optional | (sidecar default) | Max stderr bytes. Legacy: `IRONCLAW_*`. |
 | `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
-| `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports `privacy-filter.completions.near.ai/v1` faster path. |
+| `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports the `https://privacy-filter.completions.near.ai/v1` faster path. Must include the scheme and must be `https`, or `http` against loopback (local sidecars, tests) -- the API key rides on every request as a bearer token, so a plaintext non-loopback endpoint is refused at construction. |
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
 | `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |

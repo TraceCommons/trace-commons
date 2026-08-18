@@ -60,9 +60,9 @@ pub struct DatabaseConfig {
     /// pool used by the perplexity scoring driver's ungated-submissions
     /// enumeration. Its DB user MUST be an operator-provisioned LOGIN role
     /// that inherits the `trace_gate_driver` role (NOLOGIN base, NOBYPASSRLS,
-    /// permissive cross-tenant SELECT policies only — see migration V36).
-    /// Optional at the type level; the gate driver is fail-closed without it.
-    /// Never reuse the runtime `url` here.
+    /// V36 USING(true) cross-tenant policies, V42 column-scoped SELECT grants —
+    /// see migrations V36/V42). Optional at the type level; the gate driver is
+    /// fail-closed without it. Never reuse the runtime `url` here.
     pub gate_driver_url: Option<SecretString>,
     /// Separate connection string for the narrow, cross-tenant PII-backstop
     /// driver pool used by the server-side NEAR AI PII backstop driver's
@@ -73,6 +73,11 @@ pub struct DatabaseConfig {
     /// backstop driver is fail-closed without it. Never reuse the runtime
     /// `url` here. Mirrors `gate_driver_url`.
     pub pii_backstop_driver_url: Option<SecretString>,
+    /// Narrow, SEPARATE connection string for the `trace_invite_registry` role
+    /// (NOLOGIN base, NOBYPASSRLS, permissive policy from V42). Serves both the
+    /// invite cache refresh and the admin invite API. `None` keeps invite
+    /// redemption fail-closed under authoritative mode. NEVER aliased to `url`.
+    pub invite_registry_url: Option<SecretString>,
 }
 
 impl DatabaseConfig {
@@ -84,6 +89,7 @@ impl DatabaseConfig {
             login_resolver_url: Self::login_resolver_url_from_env(),
             gate_driver_url: Self::gate_driver_url_from_env(),
             pii_backstop_driver_url: Self::pii_backstop_driver_url_from_env(),
+            invite_registry_url: Self::invite_registry_url_from_env(),
         }
     }
 
@@ -120,6 +126,17 @@ impl DatabaseConfig {
             .map(SecretString::from)
     }
 
+    /// Read the optional separate invite-registry connection string from
+    /// `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL`. A blank value is treated as
+    /// unset so a misconfigured deploy fails closed rather than building a pool
+    /// from an empty string. Mirrors `gate_driver_url_from_env`.
+    pub fn invite_registry_url_from_env() -> Option<SecretString> {
+        std::env::var("TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::from)
+    }
+
     pub fn url(&self) -> &str {
         self.url.expose_secret()
     }
@@ -140,6 +157,10 @@ impl DatabaseConfig {
         self.pii_backstop_driver_url
             .as_ref()
             .map(|value| value.expose_secret())
+    }
+
+    pub fn invite_registry_url(&self) -> Option<&str> {
+        self.invite_registry_url.as_ref().map(|s| s.expose_secret())
     }
 }
 

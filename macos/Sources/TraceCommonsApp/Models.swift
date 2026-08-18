@@ -1,0 +1,403 @@
+import Foundation
+
+// Typed shapes for `trace_commons.daemon.v1_1`, as specified in
+// docs/contributor-daemon-ipc-v1_1.md. Nothing here carries a filesystem
+// path: the contract keeps `project_key` and `path` off the wire on purpose,
+// and this layer has no field to put one in.
+
+// MARK: - Queue
+
+enum QueueState: String, Codable {
+    case pending, approved, uploading, uploaded, refused, failed, expired, superseded
+
+    /// Every state except `uploaded`/`uploading` means nothing left this
+    /// machine, and the queue view says so in words rather than in a colour.
+    var nothingWasSent: Bool {
+        switch self {
+        case .uploaded, .uploading: return false
+        default: return true
+        }
+    }
+}
+
+struct QueueEntry: Decodable, Identifiable, Hashable {
+    let entryID: String
+    let sessionHash: String
+    let source: String
+    let projectLabel: String
+    let sizeBytes: Int
+    let discoveredAt: Date
+    let state: QueueState
+    let reasonLabel: String?
+    let attempts: Int
+
+    var id: String { entryID }
+
+    enum CodingKeys: String, CodingKey {
+        case entryID = "entry_id"
+        case sessionHash = "session_hash"
+        case source
+        case projectLabel = "project_label"
+        case sizeBytes = "size_bytes"
+        case discoveredAt = "discovered_at"
+        case state
+        case reasonLabel = "reason_label"
+        case attempts
+    }
+
+    /// "Claude Code" / "Codex", never the raw source token.
+    var agentName: String {
+        switch source {
+        case "claude-code", "claude_code": return "Claude Code"
+        case "codex": return "Codex"
+        case "trajectory", "letta_trajectory": return "Letta trajectory"
+        default:
+            return source
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        }
+    }
+}
+
+private struct PendingList: Decodable {
+    let pending: [QueueEntry]
+}
+
+// MARK: - Status
+
+struct DaemonHealth: Decodable, Equatable {
+    let lastErrorLabel: String?
+    let since: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case lastErrorLabel = "last_error_label"
+        case since
+    }
+}
+
+struct DaemonStatus: Decodable, Equatable {
+    let schemaVersion: String
+    let loggedIn: Bool
+    let tenantID: String?
+    let consentScopes: [String]
+    let paused: Bool
+    let queueDepth: Int
+    let nextDigestAt: Date?
+    let health: DaemonHealth
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case loggedIn = "logged_in"
+        case tenantID = "tenant_id"
+        case consentScopes = "consent_scopes"
+        case paused
+        case queueDepth = "queue_depth"
+        case nextDigestAt = "next_digest_at"
+        case health
+    }
+
+    static let unknown = DaemonStatus(
+        schemaVersion: "",
+        loggedIn: false,
+        tenantID: nil,
+        consentScopes: [],
+        paused: false,
+        queueDepth: 0,
+        nextDigestAt: nil,
+        health: DaemonHealth(lastErrorLabel: nil, since: nil)
+    )
+}
+
+// MARK: - Preview
+
+/// The socket `preview` result: summary only, never the trace body.
+struct PreviewSummary: Decodable, Equatable {
+    let wouldSendBytes: Int
+    let rawSessionBytes: Int
+    let eventCount: Int
+    let openingPrompt: String
+    let redactions: [String: Int]
+    let piiLabelsPresent: [String]
+    let consentScopes: [String]
+    let residualRisk: String
+
+    enum CodingKeys: String, CodingKey {
+        case wouldSendBytes = "would_send_bytes"
+        case rawSessionBytes = "raw_session_bytes"
+        case eventCount = "event_count"
+        case openingPrompt = "opening_prompt"
+        case redactions
+        case piiLabelsPresent = "pii_labels_present"
+        case consentScopes = "consent_scopes"
+        case residualRisk = "residual_risk"
+    }
+
+    /// "12 secrets, 4 tokens, 31 paths" -- category labels and counts only;
+    /// the contract guarantees neither map ever carries matched text.
+    var redactionReceipt: String {
+        if redactions.isEmpty { return "scrubbed: nothing matched" }
+        let parts = redactions
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
+        return "scrubbed: " + parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Audit
+
+/// One row of the daemon's local change log (`list_audit`).
+///
+/// Every field here is a fixed label by contract -- `action` and `detail`
+/// are "never free text, a path, or a token", and `project_label` is the
+/// daemon-derived display name, never a `project_key` or a path. That is
+/// what makes this shape safe to render at all, and it is why nothing in
+/// this app may enrich a row with anything more identifying.
+///
+/// The contract is equally explicit that this log is a VISIBILITY feature
+/// for the contributor, not a security control: nothing in this app may
+/// gate, permit or refuse anything on the strength of what is in here.
+struct AuditEntry: Decodable, Equatable {
+    let at: Date
+    let action: String
+    let projectLabel: String?
+    /// Carried because the contract carries it, and deliberately not
+    /// rendered: the Linux shell shows the action and the project only, and
+    /// inventing a second line of copy for a label neither shell has ever
+    /// displayed would put this app's audit surface out of step with it.
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case at
+        case action
+        case projectLabel = "project_label"
+        case detail
+    }
+}
+
+// MARK: - History
+
+struct HistoryRecord: Decodable, Identifiable, Equatable {
+    let submissionID: String
+    let submittedAt: Date
+    let projectLabel: String
+    let source: String
+    let status: String
+    let consentScopes: [String]
+    let creditPointsPending: Double
+    let creditPointsFinal: Double?
+    let explanations: [String]
+    let lastRefreshedAt: Date?
+
+    var id: String { submissionID }
+
+    enum CodingKeys: String, CodingKey {
+        case submissionID = "submission_id"
+        case submittedAt = "submitted_at"
+        case projectLabel = "project_label"
+        case source
+        case status
+        case consentScopes = "consent_scopes"
+        case creditPointsPending = "credit_points_pending"
+        case creditPointsFinal = "credit_points_final"
+        case explanations
+        case lastRefreshedAt = "last_refreshed_at"
+    }
+}
+
+// MARK: - Withdrawal
+
+/// Which of the three withdrawal tiers the server applied.
+///
+/// The wire names are the SERVER's, pinned in
+/// `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
+/// (`TRACE_WITHDRAWAL_REACH_*`) and mirrored by `DistributionReach` in
+/// `crates/trace-commons-contributor/src/withdraw.rs`. The two sides were
+/// once written in parallel and did NOT agree -- the Rust client expected
+/// `in_commons`/`distributed` while the server sends
+/// `commons_not_distributed`/`commons_distributed` -- so the exact strings
+/// below matter more than they look. `docs/contributor-daemon-ipc-v1_1.md`
+/// still documents the old, wrong pair; the Rust is authoritative.
+///
+/// Deliberately decoded leniently (see `WithdrawalOutcome`): an unrecognized
+/// label must leave this `nil` so the UI says it cannot tell which tier
+/// applied, rather than throwing away a withdrawal that really happened.
+enum WithdrawalReach: String, Decodable {
+    /// Never entered the commons. Nothing was distributed.
+    case notDistributed = "not_distributed"
+    /// In the commons, never published in an export or benchmark.
+    case commonsNotDistributed = "commons_not_distributed"
+    /// In the commons AND already published. Copies cannot be recalled.
+    case commonsDistributed = "commons_distributed"
+}
+
+/// The `withdraw` result: `withdrawn: true` plus the tier that applied.
+struct WithdrawalOutcome: Decodable, Equatable {
+    let withdrawn: Bool
+    /// `nil` when the daemon sent a label this build does not know. The
+    /// withdrawal still happened; what cannot be stated is how far the trace
+    /// had travelled, and the UI says so rather than guessing the gentler
+    /// answer.
+    let distributionReach: WithdrawalReach?
+
+    enum CodingKeys: String, CodingKey {
+        case withdrawn
+        case distributionReach = "distribution_reach"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        withdrawn = try container.decodeIfPresent(Bool.self, forKey: .withdrawn) ?? true
+        let label = try container.decodeIfPresent(String.self, forKey: .distributionReach)
+        distributionReach = label.flatMap(WithdrawalReach.init(rawValue:))
+    }
+}
+
+struct HistoryCounts: Decodable, Equatable {
+    let submitted: Int
+    let accepted: Int
+    let quarantined: Int
+    let other: Int
+}
+
+struct HistoryRollup: Decodable, Equatable {
+    let week: HistoryCounts
+    let month: HistoryCounts
+    let allTime: HistoryCounts
+    let creditPending: Double
+    let creditFinal: Double
+    let quarantined: Int
+    let lastRefreshedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case week, month
+        case allTime = "all_time"
+        case creditPending = "credit_pending"
+        case creditFinal = "credit_final"
+        case quarantined
+        case lastRefreshedAt = "last_refreshed_at"
+    }
+}
+
+// MARK: - Consent, projects, settings
+
+struct ConsentScope: Decodable, Identifiable, Equatable {
+    let name: String
+    let description: String
+    let alwaysOn: Bool
+    let grantsDataUse: Bool
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, description
+        case alwaysOn = "always_on"
+        case grantsDataUse = "grants_data_use"
+    }
+}
+
+enum ProjectMode: String, Decodable {
+    case ask
+    case autoUpload = "auto_upload"
+    case ignore
+}
+
+struct ProjectRow: Decodable, Identifiable, Equatable {
+    let projectLabel: String
+    let mode: ProjectMode
+    let addedAt: Date
+
+    var id: String { projectLabel }
+
+    enum CodingKeys: String, CodingKey {
+        case projectLabel = "project_label"
+        case mode
+        case addedAt = "added_at"
+    }
+}
+
+/// `get_settings`: the credential and both session roots are reported as
+/// configured-or-not booleans, never as values. This type has nowhere to put
+/// the values even if the daemon sent them.
+struct DaemonSettingsView: Decodable, Equatable {
+    let quiescenceSecs: Int
+    let digestIntervalSecs: Int
+    let localNotifications: Bool
+    let queueTtlDays: Int
+    let maxQueueEntries: Int
+    let maxUploadsPerDay: Int
+    let nearAIConfigured: Bool
+    let claudeRootConfigured: Bool
+    let codexRootConfigured: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case quiescenceSecs = "quiescence_secs"
+        case digestIntervalSecs = "digest_interval_secs"
+        case localNotifications = "local_notifications"
+        case queueTtlDays = "queue_ttl_days"
+        case maxQueueEntries = "max_queue_entries"
+        case maxUploadsPerDay = "max_uploads_per_day"
+        case nearAIConfigured = "near_ai_configured"
+        case claudeRootConfigured = "claude_root_configured"
+        case codexRootConfigured = "codex_root_configured"
+    }
+}
+
+/// `enroll`'s success shape. `tenant_id`/`device_key_id` are the same
+/// already-public identifiers `whoami` prints -- never key material, never a
+/// URL. See "### `enroll`" in the contract for what is deliberately absent
+/// on failure.
+struct EnrollResult: Decodable, Equatable {
+    let enrolled: Bool
+    let tenantID: String?
+    let deviceKeyID: String?
+    let consentScopes: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case enrolled
+        case tenantID = "tenant_id"
+        case deviceKeyID = "device_key_id"
+        case consentScopes = "consent_scopes"
+    }
+}
+
+// MARK: - Events
+
+enum DaemonEvent: Equatable {
+    case snapshot(pending: [QueueEntry], status: DaemonStatus)
+    case queueChanged
+    case statusChanged
+    case digestDue(pending: Int, text: String)
+    case resyncRequired
+    /// The ABI's synthetic frame for a delivery gap. Treated exactly like
+    /// `resync_required`: refetch rather than reason about what was missed.
+    case lagged(skipped: Int)
+    case unknown(String)
+}
+
+// MARK: - Decoding
+
+enum DaemonDecoding {
+    /// chrono serializes `DateTime<Utc>` as RFC 3339 with fractional
+    /// seconds; `.iso8601` alone rejects those, so both spellings are tried.
+    static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            if let d = withFraction.date(from: text) { return d }
+            if let d = plain.date(from: text) { return d }
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "unparseable timestamp")
+            )
+        }
+        return decoder
+    }
+
+    static func pendingEntries(from data: Data) throws -> [QueueEntry] {
+        try decoder().decode(PendingList.self, from: data).pending
+    }
+}

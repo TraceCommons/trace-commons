@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_handle,
-    tc_handle_free, tc_last_error, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free, tc_subscribe,
+    tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -553,6 +554,14 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
         std::sync::atomic::AtomicBool::new(false);
     static REFUSED_CORRECTLY: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
+    // Set LAST, after `REFUSED_CORRECTLY` has been written. The test waits on
+    // this rather than on `SELF_UNSUBSCRIBE_ATTEMPTED`, which is set on entry:
+    // waiting on the entry flag let the test observe "the callback started"
+    // and then assert on a value the callback had not stored yet, so the
+    // refusal assertion failed intermittently on a callback that was in fact
+    // about to refuse correctly.
+    static SELF_UNSUBSCRIBE_DONE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     static TOKEN: AtomicU64 = AtomicU64::new(0);
 
     extern "C" fn self_unsubscribe_cb(_event_json: *const c_char, ctx: *mut c_void) {
@@ -579,6 +588,8 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
                 .map(|s| s == "unsubscribe-refused-inside-runtime-context")
                 .unwrap_or(false);
         REFUSED_CORRECTLY.store(refused, Ordering::SeqCst);
+        // Publish completion only after the verdict above is visible.
+        SELF_UNSUBSCRIBE_DONE.store(true, Ordering::SeqCst);
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -589,7 +600,7 @@ fn tc_unsubscribe_from_inside_its_own_callback_refuses_rather_than_deadlocks() {
 
     let _ = call(h, "resume", "{}");
     for _ in 0..100 {
-        if SELF_UNSUBSCRIBE_ATTEMPTED.load(Ordering::SeqCst) {
+        if SELF_UNSUBSCRIBE_DONE.load(Ordering::SeqCst) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1123,4 +1134,45 @@ fn tc_daemon_start_with_settings_null_config_dir_is_an_error() {
     assert!(h.is_null());
     assert!(!err.is_null());
     unsafe { tc_string_free(err) };
+}
+
+/// The instance a shell shows before committing to an invite.
+///
+/// Owned string out, freed by the caller, NULL for anything unusable --
+/// including a bare code and a URL with no code in it, which the interface
+/// must not tell apart because the whole invite path has one failure
+/// sentence.
+#[test]
+fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
+    let invite = cstr_str("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6");
+    let out = unsafe { tc_invite_issuer_host(invite.as_ptr()) };
+    assert!(!out.is_null(), "a well-formed invite resolves");
+    let host = unsafe { std::ffi::CStr::from_ptr(out) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    unsafe { tc_string_free(out) };
+
+    assert_eq!(host, "issuer.tracecommons.ai");
+    // The point of the narrow return: the credential does not cross.
+    assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
+}
+
+#[test]
+fn tc_invite_issuer_host_is_null_for_anything_unusable() {
+    for bad in [
+        "VQWWPGYSG8Y4LTP6",
+        "https://issuer.tracecommons.ai/onboard",
+        "not a url",
+    ] {
+        let arg = cstr_str(bad);
+        let out = unsafe { tc_invite_issuer_host(arg.as_ptr()) };
+        assert!(out.is_null(), "{bad} must not resolve");
+    }
+}
+
+#[test]
+fn tc_invite_issuer_host_tolerates_null() {
+    let out = unsafe { tc_invite_issuer_host(std::ptr::null()) };
+    assert!(out.is_null());
 }

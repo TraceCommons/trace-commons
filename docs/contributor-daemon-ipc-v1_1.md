@@ -29,10 +29,33 @@ old behaviour, because no application has shipped against `v1` yet. See
   only `project_label`, and a label is not an admissible `project_key`.
   Arming and ignoring a project were unreachable from every GUI. See
   ["Naming a project"](#naming-a-project-ids-keys-and-labels).
+- `set_public_profile`, `clear_public_profile`, and `get_public_profile` --
+  the public roster handle. A shell could show the `public_attribution`
+  consent scope but had no way to claim the handle that scope is about, so
+  the "Go public" flow and the settings profile panel were unreachable from
+  every application. See ["The public profile"](#the-public-profile).
 - `list_projects` now reports **discovered** projects as well as configured
   ones, each with the mode actually in force and a `configured` boolean. An
   onboarding screen that asks a contributor to exclude a repository has to
   be able to list a repository nobody has ruled on yet.
+- `preview_turns` — an index of turn boundaries **into the body
+  `preview_body` already returns**. The transcript surface wants
+  `— user — turn 1 —` separators and a `144 more turns` footer, and had
+  nothing to place them from. This is strictly an overlay: `preview_body`'s
+  request and response shapes are untouched, its bytes are unchanged, and
+  every offset indexes that same string. The daemon deliberately does not
+  re-render the events as turns -- that would drop `structured_payload`,
+  `token_counts`, `latency_ms`, `cost_usd` and `failure_modes`, showing a
+  contributor less than the artifact under a tab titled "exactly what would
+  be sent". See ["`preview_turns`"](#preview_turns).
+- `history_rollup` now carries an optional `community` object: this
+  contributor's own line on the public roster, polled from the server's
+  public snapshot on the daemon's own interval. Both desktop clients already
+  draw a History community section and neither could populate it, because
+  nothing on this contract carried the standing. Additive in the strict
+  sense -- no existing `history_rollup` field changed shape, and a client
+  that ignores the object is unaffected. See
+  ["`history_rollup`"](#history_rollup).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -293,6 +316,13 @@ carve-out, and it is bounded:
   history record, notification text, or a receipt. Not truncated, not
   summarized, not hashed-with-a-sample. Nothing copies it into any of those.
 
+`preview_turns` is **not** part of the exemption and does not need to be: it
+carries event-type labels, tool names the envelope already records as
+metadata, and byte offsets, never redacted text. It is still served only for
+an entry the caller already holds, under the same `unknown-entry-id` rule,
+because the shape of a contributor's transcript is itself something they
+have not offered anyone.
+
 The exemption also covers **the previewed envelope at rest**. A successful
 `preview` writes the redacted envelope it built to the contributor's own
 0700 state directory (`daemon-approved-envelope-{entry_id}.json`, 0600,
@@ -329,6 +359,7 @@ history record, audit entry, notification text, or IPC response.
 | `list_pending` | — | `pending[]` of queue entries | |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
+| `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
 | `approve` | `entry_id` or `all: true` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; see "The approval hold" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
@@ -347,8 +378,13 @@ history record, audit entry, notification text, or IPC response.
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
+| `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
+| `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
+| `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
 | `subscribe` | — | `subscribed: true`, then a `snapshot` event | |
 | `shutdown` | — | `stopping: true` | |
+| `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
+| `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 
 ### `status`
 
@@ -384,9 +420,36 @@ healthy.
   "residual_risk": "pattern-based",
   "envelope_digest": "sha256:…",
   "input_fingerprint": "sha256:…",
-  "enrolled": true
+  "enrolled": true,
+  "subagent_count": 3,
+  "subagents_dropped": 0
 }
 ```
+
+`subagent_count` and `subagents_dropped` also appear on every queue entry
+(`list_pending`, the `snapshot` event). Both are additive; the schema version
+stays `trace_commons.daemon.v1_1`, and a client that ignores them behaves
+exactly as before.
+
+A Claude Code conversation is not one file: each delegated subagent's turns
+are written beside the session under `<session-uuid>/subagents/`, and one
+conversation on a probed machine had 114 of them. The daemon offers the whole
+conversation as a single entry, so `subagent_count` is how many delegated
+transcripts that entry covers. A client should say so on the card -- what is
+being consented to is the whole conversation, and its extent is part of the
+description rather than decoration.
+
+`subagents_dropped` is non-zero only when the conversation exceeded the
+source's raw byte budget and the largest delegated transcripts were left out
+to keep the envelope under its cap. A client **must** surface a non-zero
+value: the difference between a trace the contributor knows was trimmed and
+one that silently arrives partial is the whole point of showing it. The drop
+is decided when the transcript is loaded, so the preview and the upload
+describe the same bytes.
+
+No ordinal is exposed -- there is no "1 of 3" -- because nothing in the
+transcript format supplies one. Ordering delegated transcripts against each
+other would be a claim this daemon cannot verify.
 
 `opening_prompt` is redacted trace content -- see "The preview exemption"
 above for why this one field is allowed to be, and what that permission does
@@ -537,6 +600,92 @@ Where the body comes from, and why it is stable:
 
 `envelope_digest` is the same value `preview` reports, so an app can confirm
 the body it is showing belongs to the summary it displayed.
+
+### `preview_turns`
+
+Where the turns begin inside the body `preview_body` returns, so a client
+can draw `— user — turn 1 —` separators and a `144 more turns` footer over a
+transcript it is rendering verbatim.
+
+**This adds nothing to the body and changes nothing about it.** It is an
+overlay: `preview_body`'s bytes are still the whole artifact, still
+pretty-printed JSON, still exactly what the upload sends, and every offset
+here indexes that same string. The daemon does **not** re-render the events
+as chat turns, and a client must not either. A prose re-render drops every
+field that has no prose form -- `structured_payload`, `token_counts`,
+`latency_ms`, `cost_usd`, `failure_modes` -- and would therefore show a
+contributor *less* than what would be sent, under a tab titled "exactly what
+would be sent". Flat monospace with separators drawn at these offsets is the
+design, and this method is what makes it possible without a second
+rendering path.
+
+Request:
+
+```json
+{ "entry_id": "…", "body_digest": "sha256:…" }
+```
+
+Response:
+
+```json
+{
+  "entry_id": "…",
+  "body_digest": "sha256:…",
+  "envelope_digest": "sha256:…",
+  "turn_count": 3,
+  "turns": [
+    { "index": 0, "role": "user_message", "byte_offset": 2, "byte_len": 412 },
+    { "index": 1, "role": "assistant_message", "byte_offset": 416, "byte_len": 690 },
+    { "index": 2, "role": "tool_call", "tool_name": "bash", "byte_offset": 1108, "byte_len": 1244 }
+  ]
+}
+```
+
+`index` is 0-based and dense, so it indexes the array directly; a client
+showing "turn 1" for the first separator renders `index + 1`. `role` is the
+`event_type` wire name of the event that opens the turn -- the same string
+that appears in the bytes at `byte_offset`, so there are not two
+vocabularies to reconcile. `tool_name` is present only when the opening
+event names a tool. `byte_offset` and `byte_len` are a half-open range of
+**UTF-8 byte** offsets into the body, on character and element boundaries.
+
+**Grouping: a tool call and its result are one turn.** A `tool_call`
+followed immediately by the `tool_result` carrying the same `tool_call_id`
+is indexed as a single turn spanning both events, so the separator reads
+`— tool: bash — turn 3 —` once rather than putting a boundary between a
+command and its output. The pairing must be explicit and adjacent:
+an unmatched call, a result whose call is missing, a pair reordered by the
+source, and a pair with no `tool_call_id` to correlate on are all one turn
+per event. Guessing a pair would mean labelling a span that covers two
+unrelated events, which is the one error this index must not make.
+
+**`body_digest` is required, on every call.** This is the anchoring rule
+`preview_body`'s continuation pages use, applied from the first request,
+because an index is a set of offsets into one specific string: against any
+other string it is not stale, it is wrong, and wrong invisibly -- a
+separator drawn over the wrong text still looks like a transcript. Omitting
+it is `bad_params` / `body-digest-required`; a non-string is `bad_params` /
+`body-digest-invalid`; a digest that does not match the body the daemon
+resolved is `unavailable` / `preview-body-changed`. The correct response to
+that last one is the same as for a page: re-read the body from `offset: 0`
+and index the body you actually hold.
+
+Where the body comes from, when an unpinned entry is built and pinned, and
+which failures are refused rather than rebuilt are all exactly as described
+for `preview_body` -- the two methods resolve the same envelope through the
+same path, so the index and the body can never come from two different
+builds. An entry that resolves but whose body cannot be indexed is
+`unavailable` / `preview-turn-index-failed`: fail-closed, because an index
+that is not certainly exact is worse than none.
+
+The result is not paged, and does not need to be: a turn serializes to well
+under 100 bytes while one pretty-printed event costs upwards of 170, and an
+envelope is capped at 1.5 MB, so the index stays a fraction of the 1 MiB
+line cap even for an envelope at the ceiling. It is never truncated -- a
+truncated index is a transcript with turns silently missing from the end --
+so `turn_count` always equals `turns.length`. A client that wants a
+`144 more turns` footer computes it from `turn_count` and what it chose to
+render, not from anything the daemon left out.
 
 ### `list_projects`
 
@@ -734,6 +883,68 @@ contributor who sees it grouped with failures reads it as rejection.
 `last_refreshed_at` is `null` when history has never been refreshed from the
 server; show staleness rather than presenting a stale cache as current.
 
+The answer additionally carries a `community` object when, and only when,
+this contributor has a standing on the public roster:
+
+```json
+{
+  "community": {
+    "rank": 14,
+    "novelty_credit": 1240.0,
+    "accepted_in_window": 12,
+    "accept_rate": 0.75,
+    "window_label": "7d",
+    "public_since": "2026-07-09T10:30:00Z",
+    "snapshot_at": "2026-08-17T12:00:00Z",
+    "analytics_withheld": true
+  }
+}
+```
+
+This is additive: every field above is new, no existing field of
+`history_rollup` changed shape, and a client that ignores `community`
+behaves exactly as it did before. The protocol version is unchanged.
+
+The figures are this contributor's own row on the roster the server serves
+publicly at `GET /v1/community/leaderboard`, reduced to what a client draws.
+The names differ from the server's, deliberately: `novelty_credit` is the
+server's `score` (named for the snapshot's metric, which is
+`novelty_credit`); `accepted_in_window` is its `accepted_count`, whose window
+is `window_label`; `snapshot_at` is its `computed_at`. `accept_rate` is a
+decimal in `0..=1`, not a percentage. `analytics_withheld` says whether the
+corpus-wide aggregates were withheld -- when it is `true`, say so in words
+rather than drawing an empty chart.
+
+**Absent means no standing, and absent is not `null`.** The object is omitted
+entirely -- rather than sent with null or zeroed fields -- in every one of
+these cases, which a client renders identically by drawing no community
+section at all:
+
+- The contributor has published no handle.
+- No snapshot is being served. The server answers `503` when the snapshot is
+  withheld or has not been computed yet; that is a normal state of the
+  community surface, not an error, and it must not surface to a contributor
+  as one.
+- The handle is not on the roster.
+- `accepted_in_window` cannot be represented -- the snapshot reported a
+  negative or out-of-range count. It is a bare number on the wire with no
+  absent form, so rather than being rounded into a definite "0 accepted" it
+  withholds the whole object.
+
+`rank` and `accept_rate` may themselves be `null` inside an otherwise present
+object; render a dash rather than `#0` or `0%`.
+
+The daemon fetches the roster on its own interval (15 minutes, matching the
+server's snapshot cadence and its published 15-minute withdrawal bound) and
+`history_rollup` serves that cache. **The handler makes no network call**, and
+there is no method to force a fetch. A cached standing older than twice the
+withdrawal bound is dropped rather than served, so a daemon whose poll has
+been failing goes quiet instead of publishing a stale public figure.
+
+No `profile_url` is sent: nothing on the contributor's machine is configured
+with the community site's address. A client draws no link rather than a
+guessed one.
+
 ### `consent_options`
 
 ```json
@@ -779,6 +990,210 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+### The public profile
+
+Three methods, one shape. `set_public_profile` and `clear_public_profile`
+call the server's `PUT` and `DELETE` on `/v1/community/profile`;
+`get_public_profile` reads a local cache and makes no network call at all.
+
+```json
+{
+  "on_roster": true,
+  "handle": "manian",
+  "bio": "Ships billing systems by day.",
+  "public_since": "2026-05-12T09:31:00Z",
+  "public_url": null
+}
+```
+
+`set_public_profile` adds `handle_persisted`; `clear_public_profile` adds
+`withdrawn: true` and `handle_persisted`. Both are otherwise this shape, so
+a client parses one profile whichever call it made.
+
+**"Go public" is TWO calls, not one.** `set_consent_scopes` with
+`public_attribution` added to the scope list, and then
+`set_public_profile`. Neither implies the other: the scope records what the
+contributor agreed to, and the second call is what actually puts a row on
+the roster. A dialog that only sets the scope leaves the contributor
+believing they are listed when nothing was published.
+
+**The server authorizes against the claim's grant ceiling, not the local
+scope list**, and the daemon deliberately does not pre-check
+`consent_scopes` before calling. These calls mint an empty-scope claim,
+which the issuer resolves to the caller's full grant ceiling, so the local
+set can be *narrower* than what the credential actually carries -- refusing
+locally would refuse contributors the server would have allowed. If the
+server refuses, the contributor's remedy is to enrol again with
+`public_attribution` in `scopes`, not to change anything locally.
+
+**`bio` is required, and `null` is how you publish none.** The server
+upserts with `bio = excluded.bio`, so the `PUT` replaces the *whole*
+profile: there is no "leave the bio alone", and a call that omitted `bio`
+would silently erase a published one on a handle rename. Omitting the key
+is `bad_params` / `bio-required-or-null`. Send `"bio": null` to publish no
+bio and `"bio": "…"` to publish one. (The CLI refuses the same ambiguity
+with its `--bio` / `--no-bio` pair.)
+
+**`get_public_profile` is a local cache, and a client must present it as
+one.** There is no `GET /v1/community/profile` -- the server derives the
+principal from the authenticated request and offers a contributor no
+read-back of their own row -- so this reports what *this device* last
+published: the handle, bio, and roster date the server returned on the last
+successful `set_public_profile`, cleared by a successful
+`clear_public_profile`. It is not a live read, and a profile claimed from
+another device does not appear here. `on_roster` is simply whether a handle
+is cached.
+
+**`public_url` is always `null`.** The daemon knows the ingest origin it
+uploads to, not the origin the community website serves profiles from.
+Inventing one would give a "View public profile" link that does not
+resolve, so the field is reported as `null` and a client that wants that
+link must get the origin elsewhere.
+
+**`handle_persisted` is not whether the call worked.** The response is a
+success either way: the server already accepted the change, and the profile
+is public (or withdrawn) regardless of what happened on this disk.
+`handle_persisted: false` means only that the local cache write failed, so
+`get_public_profile` will not report this profile until the next successful
+`set_public_profile`. Do not render it as a failed save.
+
+Errors, all fixed labels under the taxonomy at the bottom of this document:
+
+| Code | Label | When |
+|---|---|---|
+| `bad_params` | `handle-required` | no `handle` |
+| `bad_params` | `handle-too-short`, `handle-too-long`, `handle-invalid-character`, `handle-invalid-boundary`, `handle-consecutive-separators`, `handle-reserved` | the shared handle rules refused it |
+| `bad_params` | `bio-required-or-null` | `bio` omitted (see above) |
+| `bad_params` | `bio-invalid` | `bio` present but neither a string nor `null` |
+| `bad_params` | `bio-too-long`, `bio-invalid-character` | the shared bio rules refused it |
+| `unavailable` | `not-logged-in` | no enrollment on this device |
+| `unavailable` | `profile-update-failed` / `profile-withdraw-failed` | the server call failed; the underlying error is never echoed, since it can carry a response body or a URL |
+
+The handle and bio rules are `trace_commons_protocol::community_handle`'s,
+the same code the server validates with, rather than a second copy in the
+daemon: 3--32 characters of ASCII `[a-zA-Z0-9_-]`, alphanumeric at both
+ends, no doubled separator, not a reserved name, and a bio of at most 280
+UTF-8 bytes with no control characters except newline. Surrounding
+whitespace on the handle is trimmed before validating, and the trimmed form
+is what gets published. A client may pre-validate to give live feedback,
+but the daemon's refusal is the authority.
+
+The handle and the bio are the one thing on this surface that may appear in
+a response, because publishing them is the entire point of the call. They
+are still never written to a log line or an audit entry.
+
+### Withdrawal
+
+`withdraw` and `withdraw_bulk` call the server's
+`POST /v1/account/traces/{submission_id}/withdraw` (see
+`docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md` for the full
+design and the three response tiers). A successful `withdraw` reports
+`distribution_reach`, one of:
+
+- `not_distributed` -- the trace was `submitted` or `quarantined` and never
+  entered the commons. Its content is simply deleted.
+- `commons_not_distributed` -- the trace was `accepted` but not yet used in
+  any published export or benchmark. Its content is deleted and it is
+  excluded going forward.
+- `commons_distributed` -- the trace was `accepted` and already included in a
+  published export or benchmark. Its content is deleted and it is excluded
+  going forward, but copies already distributed cannot be recalled.
+
+**These are the server's names, and two of them were wrong in this document
+until 2026-08-10.** It previously said `in_commons` and `distributed`. A client
+built from the old text deserialises `not_distributed` correctly and fails on
+the other two -- which are exactly the tiers whose message a contributor most
+needs to be true. `wire_names_match_the_server` in
+`crates/trace-commons-contributor/src/withdraw.rs` pins them; if that test
+fails, this table is what to fix.
+
+#### Canonical confirmation copy
+
+Three applications are built from this document, and withdrawal is the one
+place where a plausible-sounding phrase becomes a false promise about erasure.
+Do not paraphrase per platform. Use these, adapted only for sentence case and
+platform punctuation conventions.
+
+**The tier is not knowable before the call, and that shapes everything below.**
+The server computes `distribution_reach` during the withdrawal, from live
+export membership. A client holds only the local `status`. So:
+
+- local status `submitted` or `quarantined` maps to `not_distributed`
+  reliably -- that is the server's own rule, and its copy can be shown before
+  the action.
+- local status `accepted` may resolve to EITHER `commons_not_distributed` or
+  `commons_distributed`, and the client cannot tell which. It must show
+  **both** bodies before the action, with the `commons_distributed` one given
+  the greater weight, and must say plainly that the outcome is decided on the
+  server. Showing only the gentler one would be a promise the client is not in
+  a position to make.
+- an unrecognised status shows the `commons_distributed` body alone, on the
+  grounds that the furthest reach cannot be ruled out.
+
+After the call, report the tier the server actually applied, using that tier's
+body. Never a generic "withdrawn".
+
+A contributor deciding whether to withdraw needs to know what it will achieve
+while they can still change their mind -- which here means knowing the range
+of what it might achieve, honestly, rather than a single confident sentence
+the client cannot support.
+
+| tier | confirmation body |
+|---|---|
+| `not_distributed` | "This trace never entered the commons. Withdrawing deletes it. Nothing was distributed and nothing needs recalling." |
+| `commons_not_distributed` | "This trace is in the commons but has not been included in any published export or benchmark yet. Withdrawing deletes it and excludes it from everything published from here on." |
+| `commons_distributed` | "This trace has already been included in a published export or benchmark. Withdrawing deletes our copy and excludes it from everything published from here on, **but copies that have already been distributed cannot be recalled.** Withdrawing does not undo that." |
+
+Rules that bind every application:
+
+1. **Never a generic "withdrawn".** The tier determines what actually
+   happened, and collapsing three outcomes into one word is the specific
+   failure this table exists to prevent.
+2. **Never claim more erasure than the tier achieved.** In particular
+   `commons_distributed` must not be phrased so a contributor could come away
+   believing distributed copies were retrieved.
+3. **Withdrawal does not reverse settled credit.** Do not state or imply that
+   it does. (Revocation used to claw credit back; that is being removed.)
+4. **`not_found` must not disclose which.** The server deliberately answers
+   the same way whether a submission belongs to someone else or does not exist
+   at all, so that account enumeration is impossible. An application must
+   therefore say something like "no trace with that id under your account",
+   and must NOT say "that trace belongs to someone else" or "that trace does
+   not exist" -- either phrasing leaks precisely what the server refuses to.
+5. **`confirmation_prompt` in the Rust client takes a `reach` the caller does
+   not have pre-action.** It is usable for the after-the-fact message, or with
+   a deliberately chosen worst case; it is not a pre-action lookup. Do not
+   build a flow that assumes the tier is known before the request.
+6. **Bulk withdrawal spans tiers.** `withdraw_bulk` reports only counts, so a
+   bulk confirmation cannot promise a per-tier outcome. It must say that the
+   selected traces may fall into different tiers and that some may already
+   have been distributed. If an application cannot say that clearly, it should
+   not offer bulk withdrawal.
+
+`withdraw_bulk` withdraws every submission currently at `status` in the
+local history cache (one of `submitted`, `quarantined`, or `accepted`; not
+`withdrawn` itself, and not the `other` bucket `history_rollup` reports,
+which covers statuses this client has no stable name for). It reports
+`withdrawn` and `failed` counts rather than per-submission detail -- a
+partial failure does not fail the whole call, and a contributor can retry
+individual traces with `withdraw` if some did not go through.
+
+Both update the local history cache immediately (the record's `status`
+becomes `withdrawn`) so a contributor sees the effect without needing a
+`refresh_history` round trip first.
+
+**Both methods answer `unavailable` / `account-session-required` today,
+always**, before ever attempting the call. Withdrawal is authenticated by an
+account session -- deliberately not the device key that authenticates every
+other call in this contract, so withdrawal survives losing the device that
+submitted the trace -- and this daemon does not yet acquire or store one; it
+only ever holds a device key. `account-session-required` is a distinct,
+documented error rather than a generic failure so a calling shell can route
+the contributor to account sign-in instead of showing a dead end, once
+account sign-in exists to route to. Acquiring an account session is separate
+work, tracked outside this document; nothing in this contract should be
+read as that flow already existing.
 
 ## Events
 
@@ -870,6 +1285,12 @@ detail, not for picking a different label to show instead.
 `body-digest-invalid`, `body-digest-required` (all `bad_params`), and
 `preview-body-changed`, `preview-failed`, `approved-envelope-unavailable`
 (all `unavailable`).
+
+`preview_turns` reuses that set -- `unknown-entry-id`, `body-digest-invalid`
+and `body-digest-required` (`bad_params`), `preview-body-changed`,
+`preview-failed` and `approved-envelope-unavailable` (`unavailable`) -- and
+adds one of its own, `preview-turn-index-failed` (`unavailable`), for a body
+that resolved but could not be indexed exactly.
 
 `not_authorized` is retained in the error taxonomy for forward
 compatibility but is no longer returned by any method in this version --

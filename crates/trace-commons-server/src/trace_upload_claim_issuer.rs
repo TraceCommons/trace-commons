@@ -23,9 +23,11 @@ use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
 use crate::db::Database;
+use crate::db::postgres::PgBackend;
 use crate::trace_corpus_storage::{
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
 };
+use crate::trace_invite_registry::{DbInviteRegistry, InviteRegistry, InviteRegistryError};
 use crate::trace_upload_claim_allowlist::{
     AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
     hash_invite_code,
@@ -168,6 +170,12 @@ pub const TRACE_COMMONS_ONBOARDING_COMMUNITY_URL_ENV: &str =
 pub const TRACE_COMMONS_ONBOARDING_PROFILE_URL_ENV: &str = "TRACE_COMMONS_ONBOARDING_PROFILE_URL";
 pub const TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV: &str =
     "TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL";
+/// Cutover flag: when true, `/v1/onboard` redeems invites through the
+/// database registry instead of the file allowlist. Defaults to false (the
+/// file allowlist stays authoritative) so every pre-existing onboarding
+/// deployment and test is unaffected until an operator opts in.
+pub const TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV: &str =
+    "TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE";
 const TRACE_DEVICE_KEY_ID_HEADER: &str = "x-trace-device-key-id";
 const TRACE_DEVICE_SIGNATURE_HEADER: &str = "x-trace-device-signature";
 
@@ -204,6 +212,19 @@ pub struct TraceUploadClaimIssuerConfig {
     /// Must be a loopback address unless
     /// `TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC=1` is set.
     pub admin_bind: Option<SocketAddr>,
+    /// Narrow-pool backend for the admin invite routes, populated by
+    /// [`configure_invite_admin_from_env`]. `None` keeps
+    /// `/v1/admin/invites*` unmounted — fail-closed, matching every other
+    /// optional narrow-pool feature in this config.
+    pub invite_admin_backend: Option<Arc<PgBackend>>,
+    /// Cache/invalidation layer over `invite_admin_backend`, sharing the
+    /// SAME registry instance the admin routes and (in a later task) the
+    /// redemption path both read: two independent caches over one table
+    /// would diverge.
+    pub invite_admin_registry: Option<Arc<DbInviteRegistry>>,
+    /// Cutover flag from [`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV`].
+    /// `false` keeps `/v1/onboard` on the unchanged file-allowlist path.
+    pub invite_registry_authoritative: bool,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -255,6 +276,18 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
                 &self.onboarding_leaderboard_url,
             )
             .field("admin_bind", &self.admin_bind)
+            .field(
+                "invite_admin_backend",
+                &self.invite_admin_backend.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "invite_admin_registry",
+                &self.invite_admin_registry.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "invite_registry_authoritative",
+                &self.invite_registry_authoritative,
+            )
             .finish()
     }
 }
@@ -371,6 +404,9 @@ impl TraceUploadClaimIssuerConfig {
             onboarding_leaderboard_url: optional_env(TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV)?
                 .and_then(|value| trim_optional(Some(value))),
             admin_bind,
+            invite_admin_backend: None,
+            invite_admin_registry: None,
+            invite_registry_authoritative: false,
         })
     }
 
@@ -481,6 +517,17 @@ impl TraceUploadClaimIssuerConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(60),
+            invite_admin_backend: self.invite_admin_backend.clone(),
+            invite_admin_registry: self.invite_admin_registry.clone(),
+            invite_registry_authoritative: self.invite_registry_authoritative,
+            near_legion_claim: crate::near_legion_claim::NearLegionClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
+            celestine_sloth_claim: crate::celestine_sloth_claim::CelestineSlothClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
         }))
     }
 }
@@ -524,6 +571,67 @@ pub async fn configure_onboarding_device_key_registry_from_env(
     Ok(())
 }
 
+/// Wire the admin invite routes to a live database-backed registry when
+/// `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is configured. Absent that,
+/// leaves `config.invite_admin_backend`/`invite_admin_registry` at `None`,
+/// which keeps `/v1/admin/invites*` unmounted (fail-closed) exactly like
+/// today, rather than the previous state where nothing could ever mount
+/// them.
+///
+/// Builds exactly one `DbInviteRegistry`/`PgBackend` pair and stores the
+/// `Arc<DbInviteRegistry>` on the config (and, via `build_state`, on
+/// `TraceUploadClaimIssuerState`). A later redemption-path task MUST reuse
+/// this same `Arc` — obtained from `TraceUploadClaimIssuerState` — rather
+/// than constructing a second `DbInviteRegistry` over the same table, or the
+/// two caches would diverge and a code minted through the admin API would
+/// not be visible to redemption.
+pub async fn configure_invite_admin_from_env(
+    config: &mut TraceUploadClaimIssuerConfig,
+) -> anyhow::Result<()> {
+    // Read unconditionally, even if the registry URL below is absent: an
+    // operator who sets AUTHORITATIVE=true without also configuring the
+    // registry must get the fail-closed 503
+    // (InviteRegistryNotConfigured) at request time, not a silent
+    // reversion to the file allowlist.
+    config.invite_registry_authoritative =
+        env_truthy(TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV);
+    if DatabaseConfig::invite_registry_url_from_env().is_none() {
+        return Ok(());
+    }
+    let url = std::env::var("DATABASE_URL")
+        .context("Trace upload-claim issuer admin invite routes require DATABASE_URL")?;
+    let pool_size = std::env::var("DATABASE_POOL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5);
+    let db_config = DatabaseConfig::from_postgres_url(&url, pool_size);
+    let backend = Arc::new(
+        PgBackend::new(&db_config)
+            .await
+            .context("failed to connect Trace upload-claim issuer invite-registry DB")?,
+    );
+    backend
+        .run_migrations()
+        .await
+        .context("failed to run migrations for Trace upload-claim issuer invite-registry DB")?;
+    // Warms the cache before returning; a failed warm must fail issuer
+    // startup rather than come up believing it has a usable registry.
+    let registry = Arc::new(
+        DbInviteRegistry::new(
+            backend.clone(),
+            StdDuration::from_secs(DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS),
+            StdDuration::from_secs(DEFAULT_ALLOWLIST_MAX_STALE_SECONDS),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to warm invite registry cache: {e}"))?,
+    );
+    registry.clone().spawn_refresh_task();
+    tracing::info!("Trace upload-claim issuer admin invite registry enabled");
+    config.invite_admin_backend = Some(backend);
+    config.invite_admin_registry = Some(registry);
+    Ok(())
+}
+
 async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Database>> {
     let url = std::env::var("DATABASE_URL")
         .context("Trace upload-claim issuer DB-backed features require DATABASE_URL")?;
@@ -563,16 +671,55 @@ struct TraceUploadClaimIssuerState {
     instance_replay_cache: Arc<crate::instance_enroll_guard::ReplayCache>,
     instance_rate_limiter: Arc<crate::instance_enroll_guard::InstanceRateLimiter>,
     instance_enroll_default_rate_per_min: u32,
+    invite_admin_backend: Option<Arc<PgBackend>>,
+    invite_admin_registry: Option<Arc<DbInviteRegistry>>,
+    invite_registry_authoritative: bool,
+    /// Self-serve NEAR Legion claim surface. `None` — routes unmounted —
+    /// unless the feature is enabled AND NEAR sign-in and the invite backend
+    /// are both configured. Built once here so the in-flight challenge store
+    /// is shared across requests rather than rebuilt per call.
+    near_legion_claim: Option<crate::near_legion_claim::NearLegionClaimState>,
+    /// Self-serve Celestine Sloth Society claim surface. `None` — routes
+    /// unmounted — unless the feature is enabled AND the collection, the LCD
+    /// endpoint, the tenant template and the invite backend are all configured.
+    /// Built once here so the in-flight challenge store is shared across
+    /// requests rather than rebuilt per call.
+    celestine_sloth_claim: Option<crate::celestine_sloth_claim::CelestineSlothClaimState>,
 }
 
 impl TraceUploadClaimIssuerState {
     /// Build the AdminState the admin router consumes. Lives here so the
     /// admin module never needs visibility into the private state fields.
+    ///
+    /// `invite_admin` is `Some` only when both a backend and a registry were
+    /// configured (see `configure_invite_admin_from_env`); otherwise the
+    /// invite routes stay unmounted, matching the fail-closed posture of
+    /// every other narrow-pool feature. The admin-token decoding key reuses
+    /// this issuer's own signing public key (already validated at startup),
+    /// and `expected_iss`/`expected_aud` reuse the same issuer/audience
+    /// strings this issuer already stamps on the upload-claim tokens it
+    /// mints, rather than inventing a second identity pair.
     pub(crate) fn build_admin_state(&self) -> crate::trace_upload_claim_issuer_admin::AdminState {
+        let invite_admin = match (&self.invite_admin_backend, &self.invite_admin_registry) {
+            (Some(backend), Some(registry)) => {
+                let decoding_key = DecodingKey::from_ed_pem(self.signing_public_key_pem.as_bytes())
+                    .expect("signing_public_key_pem validated in build_state");
+                Some(crate::trace_invite_admin::InviteAdminState {
+                    backend: backend.clone(),
+                    registry: registry.clone(),
+                    decoding_key: Arc::new(decoding_key),
+                    expected_iss: self.issuer.clone(),
+                    expected_aud: self.audience.clone(),
+                    default_policy_label: self.issuer.clone(),
+                })
+            }
+            _ => None,
+        };
         crate::trace_upload_claim_issuer_admin::AdminState {
             source: self.allowlist_source.clone(),
             denial_counter: Arc::clone(&self.denial_counter),
             max_stale_seconds: self.allowlist_max_stale.as_secs(),
+            invite_admin,
         }
     }
 }
@@ -881,21 +1028,7 @@ pub fn trace_upload_claim_issuer_router(
     let request_timeout = StdDuration::from_secs(config.request_timeout_seconds.max(1));
     let max_request_bytes = config.max_request_bytes.max(1);
     let state = config.build_state()?;
-    Ok(Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/.well-known/trace-commons-ed25519-keyset.json",
-            get(keyset_handler),
-        )
-        .route("/onboard", get(invite_landing_handler))
-        .route("/v1/trace-upload-claim", post(issue_claim_handler))
-        .route("/v1/onboard", post(onboard_handler))
-        .route("/v1/enroll", post(enroll_handler))
-        .layer(DefaultBodyLimit::max(max_request_bytes))
-        .layer(axum::middleware::from_fn(move |req, next| {
-            request_timeout_middleware(req, next, request_timeout)
-        }))
-        .with_state(state))
+    Ok(router_from_state(state, request_timeout, max_request_bytes))
 }
 
 async fn request_timeout_middleware(
@@ -967,7 +1100,12 @@ fn router_from_state(
     request_timeout: StdDuration,
     max_request_bytes: usize,
 ) -> Router {
-    Router::new()
+    // Built before `with_state` because the claim sub-router carries its own
+    // state; merging it in keeps the self-serve surface unmounted (404) on any
+    // deployment that has not configured it.
+    let near_legion = state.near_legion_claim.clone();
+    let celestine_sloths = state.celestine_sloth_claim.clone();
+    let router = Router::new()
         .route("/health", get(health_handler))
         .route(
             "/.well-known/trace-commons-ed25519-keyset.json",
@@ -977,11 +1115,27 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .with_state(state);
+
+    let router = match near_legion {
+        Some(claim_state) => router.merge(crate::near_legion_claim::near_legion_claim_router(
+            claim_state,
+        )),
+        None => router,
+    };
+
+    let router = match celestine_sloths {
+        Some(claim_state) => router.merge(
+            crate::celestine_sloth_claim::celestine_sloth_claim_router(claim_state),
+        ),
+        None => router,
+    };
+
+    router
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(axum::middleware::from_fn(move |req, next| {
             request_timeout_middleware(req, next, request_timeout)
         }))
-        .with_state(state)
 }
 
 async fn serve_both_with_graceful_shutdown(
@@ -1350,17 +1504,27 @@ async fn health_handler(
             })
         })
         .unwrap_or(false);
-    if healthy {
-        (
-            StatusCode::OK,
-            Json(json!({ "status": "ok", "checks": checks })),
-        )
+    // Build identity is additive and sits beside `checks` rather than inside
+    // it: `checks` is scanned for the "ok"/"configured" labels that decide the
+    // status code above, and an identity string is not a check. It is reported
+    // on the degraded response too -- knowing which build is broken is exactly
+    // what a degraded issuer is being asked.
+    let status = if healthy { "ok" } else { "degraded" };
+    let code = if healthy {
+        StatusCode::OK
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "degraded", "checks": checks })),
-        )
-    }
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(json!({
+            "status": status,
+            "checks": checks,
+            "build_commit": trace_commons_build_info::COMMIT,
+            "build_time": trace_commons_build_info::BUILD_TIME,
+            "build_version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
 }
 
 async fn keyset_handler(
@@ -1541,7 +1705,7 @@ impl TraceUploadClaimIssuerState {
                 .or(workload.sub.as_deref()),
             "workload subject is required",
         )?;
-        let grant_principal_ref = principal_storage_ref(&format!("signed:{tenant_id}:{actor}"));
+        let grant_principal_ref = signed_claim_auth_principal_ref(&tenant_id, &actor);
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
                 actor,
@@ -1863,6 +2027,86 @@ impl TraceUploadClaimIssuerState {
         }
 
         let subject_hash = hash_invite_code(invite_code);
+
+        if self.invite_registry_authoritative {
+            // Authoritative mode with no registry configured must refuse,
+            // NEVER fall back to the file allowlist -- a revoked invite
+            // could otherwise be resurrected by a stale file.
+            let registry = self.invite_admin_registry.as_ref().ok_or_else(|| {
+                IssuerError::onboard_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    TraceOnboardErrorCode::InviteRegistryNotConfigured,
+                )
+            })?;
+            let backend = self.invite_admin_backend.as_ref().ok_or_else(|| {
+                IssuerError::onboard_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    TraceOnboardErrorCode::InviteRegistryNotConfigured,
+                )
+            })?;
+            // The cache answers first for latency; only used to short-circuit
+            // an obviously-unknown code before paying for the database
+            // round trip below.
+            match registry.lookup(&subject_hash) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::FORBIDDEN,
+                        TraceOnboardErrorCode::InviteNotValid,
+                    ));
+                }
+                Err(InviteRegistryError::Stale { .. }) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        TraceOnboardErrorCode::InviteRegistryStale,
+                    ));
+                }
+                Err(InviteRegistryError::Backend(_)) => return Err(IssuerError::internal()),
+            }
+
+            // The database decides. Expiry, revocation, and the tenant all
+            // come from the in-transaction re-check under FOR SHARE, so a
+            // concurrent revoke serializes behind an in-flight redemption.
+            // A device key is stable per device, so it doubles as the
+            // per-user subject a derived tenant is keyed on.
+            let user_subject = device_key_id_from_public_key_bytes(&public_key_bytes);
+            let redemption = match backend
+                .redeem_invite_grant(&subject_hash, &user_subject)
+                .await
+            {
+                Ok(Some(redemption)) => redemption,
+                // Absent, revoked, or expired -- one label, so a caller
+                // cannot distinguish "never existed" from "revoked".
+                Ok(None) => {
+                    return Err(IssuerError::onboard_error(
+                        StatusCode::FORBIDDEN,
+                        TraceOnboardErrorCode::InviteNotValid,
+                    ));
+                }
+                // A backend outage must never be reported as an invalid
+                // invite.
+                Err(_) => return Err(IssuerError::internal()),
+            };
+            let max_uses = i32::try_from(redemption.max_uses).map_err(|_| {
+                IssuerError::onboard_error(
+                    StatusCode::BAD_REQUEST,
+                    TraceOnboardErrorCode::InviteMalformed,
+                )
+            })?;
+            return self
+                .complete_onboard_with_redemption(
+                    &request,
+                    &public_key_bytes,
+                    subject_hash,
+                    redemption.tenant_id,
+                    None,
+                    max_uses,
+                    Some(redemption.allowed_consent_scopes),
+                    Some(redemption.allowed_uses),
+                )
+                .await;
+        }
+
         let snapshot = self.onboard_allowlist_snapshot()?;
         let Some(entry) = snapshot.entry(&subject_hash) else {
             self.denial_counter.record();
@@ -1879,6 +2123,37 @@ impl TraceUploadClaimIssuerState {
                 TraceOnboardErrorCode::InviteMalformed,
             )
         })?;
+
+        self.complete_onboard_with_redemption(
+            &request,
+            &public_key_bytes,
+            subject_hash,
+            tenant_id,
+            contributor_label,
+            max_uses,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Shared tail of both onboarding paths: provisions the device key and
+    /// builds the response. `allowed_consent_scopes`/`allowed_uses` are
+    /// `None` on the file-allowlist path (today's hardcoded process-wide
+    /// defaults apply) and `Some(...)` from the invite when redeeming
+    /// through the DB-authoritative registry.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_onboard_with_redemption(
+        &self,
+        request: &TraceOnboardRequest,
+        public_key_bytes: &[u8],
+        subject_hash: String,
+        tenant_id: String,
+        contributor_label: Option<String>,
+        max_uses: i32,
+        allowed_consent_scopes: Option<Vec<String>>,
+        allowed_uses: Option<Vec<String>>,
+    ) -> Result<TraceOnboardResponse, IssuerError> {
         let db = self
             .onboarding_device_key_db
             .as_ref()
@@ -1887,7 +2162,7 @@ impl TraceUploadClaimIssuerState {
             .onboarding_ingest_url
             .clone()
             .ok_or_else(IssuerError::onboard_tenant_config_missing)?;
-        let device_key_id = device_key_id_from_public_key_bytes(&public_key_bytes);
+        let device_key_id = device_key_id_from_public_key_bytes(public_key_bytes);
         let client_info = serde_json::to_value(&request.client_info).map_err(|_| {
             IssuerError::onboard_error(
                 StatusCode::BAD_REQUEST,
@@ -1898,10 +2173,12 @@ impl TraceUploadClaimIssuerState {
             .onboard_device_key(
                 crate::db::DeviceKeyWrite {
                     device_key_id: device_key_id.clone(),
-                    tenant_id: tenant_id.clone(),
+                    tenant_id,
                     public_key: request.device_public_key.trim().to_string(),
                     invite_subject_hash: subject_hash,
                     client_info,
+                    allowed_consent_scopes,
+                    allowed_uses,
                 },
                 max_uses,
             )
@@ -2262,10 +2539,30 @@ impl TraceUploadClaimIssuerState {
             .tenant_access_grant_db
             .as_ref()
             .ok_or_else(IssuerError::internal)?;
-        let grants = db
-            .list_active_trace_tenant_access_grants_for_principal(tenant_id, principal_ref, now)
-            .await
-            .map_err(|_| IssuerError::internal())?;
+        // Dual-read canonical method-bound refs and pre-#209 signed hashes so
+        // grants provisioned under either shape still authorize.
+        let mut principal_refs = vec![principal_ref.to_string()];
+        let legacy_signed = legacy_signed_claim_principal_ref(tenant_id, actor);
+        if legacy_signed != principal_ref {
+            principal_refs.push(legacy_signed);
+        }
+        let mut grants = Vec::new();
+        for candidate in &principal_refs {
+            let matched = db
+                .list_active_trace_tenant_access_grants_for_principal(tenant_id, candidate, now)
+                .await
+                .map_err(|_| IssuerError::internal())?;
+            for grant in matched {
+                if grants
+                    .iter()
+                    .all(|existing: &TraceTenantAccessGrantRecord| {
+                        existing.grant_id != grant.grant_id
+                    })
+                {
+                    grants.push(grant);
+                }
+            }
+        }
         authorize_upload_claim_from_tenant_grants(
             &grants,
             &self.issuer,
@@ -2760,6 +3057,35 @@ fn principal_storage_ref(value: &str) -> String {
     format!("principal_sha256:{}", hex::encode(digest))
 }
 
+fn method_bound_principal_material(method: &str, identity_material: &str) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        method.len(),
+        method,
+        identity_material.len(),
+        identity_material
+    )
+}
+
+fn method_bound_principal_ref(method: &str, identity_material: &str) -> String {
+    principal_storage_ref(&method_bound_principal_material(method, identity_material))
+}
+
+fn signed_claim_identity_material(tenant_id: &str, actor_ref: &str) -> String {
+    format!("signed:{tenant_id}:{actor_ref}")
+}
+
+fn signed_claim_auth_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    method_bound_principal_ref(
+        "signed_claim",
+        &signed_claim_identity_material(tenant_id, actor_ref),
+    )
+}
+
+fn legacy_signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
+    principal_storage_ref(&signed_claim_identity_material(tenant_id, actor_ref))
+}
+
 /// Maximum accepted byte length for a client-supplied subject.
 const MAX_SUBJECT_LEN: usize = 128;
 
@@ -2834,7 +3160,7 @@ pub(crate) fn optional_env(name: &'static str) -> anyhow::Result<Option<String>>
     }
 }
 
-fn env_truthy(name: &'static str) -> bool {
+pub(crate) fn env_truthy(name: &'static str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| parse_truthy_env_value(&value))
@@ -3063,6 +3389,9 @@ mod tests {
             onboarding_profile_url: Some("https://tracecommons.ai/profile".to_string()),
             onboarding_leaderboard_url: Some("https://tracecommons.ai/leaderboard".to_string()),
             admin_bind: None,
+            invite_admin_backend: None,
+            invite_admin_registry: None,
+            invite_registry_authoritative: false,
         }
     }
 
@@ -3664,8 +3993,16 @@ mod tests {
     #[test]
     fn tenant_grant_principal_ref_matches_ingest_signed_actor_shape() {
         assert_eq!(
-            principal_storage_ref("signed:tenant-a:actor-123"),
-            "principal_sha256:5cd45d57c4270245a9eae65dc4140e2bbaa5b18e84371fdf9a3abb2feb8c26cc"
+            signed_claim_auth_principal_ref("tenant-a", "actor-123"),
+            method_bound_principal_ref("signed_claim", "signed:tenant-a:actor-123")
+        );
+        assert_eq!(
+            legacy_signed_claim_principal_ref("tenant-a", "actor-123"),
+            principal_storage_ref("signed:tenant-a:actor-123")
+        );
+        assert_ne!(
+            signed_claim_auth_principal_ref("tenant-a", "actor-123"),
+            legacy_signed_claim_principal_ref("tenant-a", "actor-123")
         );
     }
 
@@ -3845,6 +4182,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_endpoint_reports_build_identity_on_both_outcomes() {
+        // The point of the identity is that it survives a bad deploy, so it has
+        // to be on the degraded response as much as the healthy one.
+        for (config_state, expected_status) in [
+            (test_config().build_state().expect("state builds"), "ok"),
+            (
+                {
+                    let mut state =
+                        (*test_config().build_state().expect("state builds")).clone_for_test();
+                    state.workload_public_key_pem =
+                        "-----BEGIN PUBLIC KEY-----\nnot-base64\n-----END PUBLIC KEY-----\n"
+                            .to_string();
+                    Arc::new(state)
+                },
+                "degraded",
+            ),
+        ] {
+            let router = Router::new()
+                .route("/health", get(health_handler))
+                .with_state(config_state);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["status"], expected_status);
+            assert_eq!(json["build_commit"], trace_commons_build_info::COMMIT);
+            assert_eq!(json["build_time"], trace_commons_build_info::BUILD_TIME);
+            assert_eq!(json["build_version"], env!("CARGO_PKG_VERSION"));
+            // Additive only: the fields existing consumers read are untouched.
+            assert!(json["checks"].is_object());
+        }
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_completes_within_grace_window() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let router = trace_upload_claim_issuer_router(test_config()).expect("router builds");
@@ -3924,6 +4303,14 @@ mod tests {
                 instance_replay_cache: Arc::clone(&self.instance_replay_cache),
                 instance_rate_limiter: Arc::clone(&self.instance_rate_limiter),
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
+                invite_admin_backend: self.invite_admin_backend.clone(),
+                invite_admin_registry: self.invite_admin_registry.clone(),
+                invite_registry_authoritative: self.invite_registry_authoritative,
+                // The self-serve claim surfaces have their own hermetic tests in
+                // `near_legion_claim` and `celestine_sloth_claim`; these issuer
+                // tests build state without either.
+                near_legion_claim: None,
+                celestine_sloth_claim: None,
             }
         }
     }
@@ -4094,6 +4481,23 @@ mod tests {
         assert_eq!(
             body.get("error").and_then(|v| v.as_str()),
             Some("InviteNotValid")
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_fails_closed_when_authoritative_with_no_registry() {
+        // Authoritative mode with no registry must refuse, NOT fall back to
+        // the file allowlist. Silent fallback would let a revoked invite
+        // redeem again after a config mistake.
+        let config = TraceUploadClaimIssuerConfig {
+            invite_registry_authoritative: true,
+            ..test_config()
+        };
+        let (status, body) = post_onboard(config, onboard_request("INVOK001INVOK001")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InviteRegistryNotConfigured")
         );
     }
 
@@ -4387,6 +4791,7 @@ mod tests {
             login_resolver_url: None,
             gate_driver_url: None,
             pii_backstop_driver_url: None,
+            invite_registry_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,
@@ -4706,6 +5111,7 @@ mod tests {
             login_resolver_url: None,
             gate_driver_url: None,
             pii_backstop_driver_url: None,
+            invite_registry_url: None,
         };
         let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
             Ok(b) => b,

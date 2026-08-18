@@ -67,7 +67,9 @@ starts.
 | `--generate-keypair` | Generate a fresh Ed25519 keypair and print the PKCS#8 private key PEM, SPKI public key PEM, and a suggested `kid` (UUID v4) to stdout. Output is not written to disk; the operator pipes it where they want. Exit 0 on success. |
 | `--health-check` | Load env vars, attempt to build state and exercise the signing and workload keys, then print `OK` (exit 0) or `FAIL: <reason>` (exit 1). The reason is a hash-free stable label. Does not bind a listener. |
 | `--mint-test-claim` | Mint a test upload claim for a hardcoded test tenant (`trace-upload-claim-issuer-test-tenant`) and principal (`principal:trace-upload-claim-issuer-test`) and print the JWT to stdout. For testing / deploy probes only — must not be exposed in production traffic paths. |
-| `--hash-invite-code <CODE>` | Print the canonical `sha256:` invite subject hash for a raw pilot invite code. Prefer `scripts/operator/generate-pilot-invites.py` for normal batch operations. |
+| `--hash-invite-code <CODE>` | Print the canonical `sha256:` invite subject hash for a raw pilot invite code. Prefer `--mint-invites` for normal batch operations. |
+| `--import-file-invites <PATH> --policy-label <LABEL>` | One-time migration of an existing pilot allowlist JSON file's invite entries into the database. Idempotent on the invite hash. Instance entries stay in the file and are counted, not imported. Prints counts only. |
+| `--mint-invites <COUNT> --mint-tenant-template <TEMPLATE> --policy-label <LABEL> [--mint-max-uses <N>] [--mint-expires-in-days <N>] [--mint-note-label <LABEL>] [--mint-consent-scopes <a,b,c>] [--mint-allowed-uses <a,b,c>]` | Mint `COUNT` server-side invites directly against the database, replacing the retired `scripts/operator/generate-pilot-invites.py`. Prints one raw 16-character code per line to stdout and nothing else. |
 
 ## Key rotation procedure
 

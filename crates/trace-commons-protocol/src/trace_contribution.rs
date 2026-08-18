@@ -41,14 +41,62 @@ pub enum PrivacyFilterBackendTag {
     Sidecar,
     NearAi,
 }
+
+impl PrivacyFilterBackendTag {
+    /// Stable operational label. Reaches boot logs and stored envelope
+    /// summaries, so it is a contract rather than a debug rendering.
+    pub fn label(self) -> &'static str {
+        match self {
+            PrivacyFilterBackendTag::None => "none",
+            PrivacyFilterBackendTag::Sidecar => "sidecar",
+            PrivacyFilterBackendTag::NearAi => "near_ai",
+        }
+    }
+}
 /// v2 alongside the deterministic pipeline bump above: the server re-scrub
 /// runs the same detector, so its stamp has to move with it.
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v2";
 #[cfg(feature = "near-ai-privacy-filter")]
 pub const NEAR_AI_PII_BACKSTOP_PIPELINE_SUFFIX: &str = "near-ai-pii-backstop-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
-pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// Largest serialized contribution envelope the platform accepts, and the
+/// single source of truth for that number.
+///
+/// It lives here rather than in the client because both ends have to agree:
+/// the contributor refuses an oversized envelope before upload, ingest caps
+/// the request body, and account read-back caps what it will return. When
+/// those were three independent constants they drifted -- the client refused
+/// at 1.5 MB while ingest accepted 2 MiB -- so a client raise alone silently
+/// bought nothing. Everything downstream is now derived from this value with
+/// explicit headroom, and tests assert the ordering holds.
+///
+/// Sized for whole agent coding sessions: a 42 MB raw session redacts to
+/// roughly 2.8 MB of envelope, so this clears the observed worst case by a
+/// wide margin. Scoring cost does not scale with it -- the gate chunk cap
+/// bounds how much of a trace is ever scored.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 16_000_000;
+/// Largest single field text an external privacy filter will accept.
+///
+/// Tied to the envelope cap, because any one event could in principle carry
+/// most of an envelope -- an agent pasting a whole file into one message is
+/// the ordinary case. A smaller per-field cap does not bound the work: the
+/// NEAR AI adapter classifies in fixed `CLASSIFY_CHUNK_BYTES` windows, so a
+/// given quantity of text costs the same whether it arrives as one field or
+/// a hundred, and the envelope cap already bounds the total. All a lower
+/// per-field cap bought was a failure mode -- the external-filter pass
+/// propagates with `?`, so one oversized event failed the whole submission.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = MAX_TRACE_ENVELOPE_BYTES;
+/// Sidecar stdout carries the REDACTED TEXT back, so it has to scale with
+/// the input cap or the refusal simply moves from the input guard to the
+/// output guard. Doubled because replacement placeholders can be longer
+/// than what they replace and JSON escaping expands control characters.
+pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES: usize =
+    2 * PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES;
+const _: () = assert!(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES >= MAX_TRACE_ENVELOPE_BYTES);
+const _: () = assert!(
+    PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES
+        >= PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
+);
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS: u32 = 24 * 365;
 pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -989,6 +1037,163 @@ pub fn estimate_initial_credit(envelope: &TraceContributionEnvelope) -> CreditEs
     }
 }
 
+/// Field names an emitter may use to carry the arguments a tool call was
+/// issued with. `arguments` is what this crate's own envelope builder writes;
+/// the rest are the spellings the upstream source adapters encounter.
+const REPLAY_ARGUMENT_KEYS: &[&str] = &["arguments", "args", "parameters", "params", "input"];
+
+/// Field names an emitter may use to carry what a tool returned.
+const REPLAY_RESULT_KEYS: &[&str] = &["result", "results", "output", "response", "content"];
+
+/// A marker flag is not a payload. `{"has_result": true}` says a result
+/// existed somewhere upstream; it does not carry the result, and a consumer
+/// cannot grade against it. Booleans and nulls therefore never count as
+/// populated, which is what keeps this measure from being satisfied by the
+/// same metadata that satisfied the boolean it replaces.
+fn replay_value_is_populated(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn payload_carries_any(payload: &Value, keys: &[&str]) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    keys.iter()
+        .any(|key| object.get(*key).is_some_and(replay_value_is_populated))
+}
+
+fn has_text(content: Option<&String>) -> bool {
+    content.is_some_and(|text| !text.trim().is_empty())
+}
+
+fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+}
+
+fn event_carries_result(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+/// Whether an event carries anything a consumer could read, as opposed to
+/// metadata about an event that once carried something.
+fn event_carries_content(event: &TraceContributionEvent) -> bool {
+    has_text(event.redacted_content.as_ref())
+        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+        || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
+}
+
+fn replay_call_id(event: &TraceContributionEvent) -> Option<&str> {
+    event.tool_call_id.as_deref().or_else(|| {
+        event
+            .structured_payload
+            .as_object()
+            .and_then(|object| object.get("tool_call_id"))
+            .and_then(Value::as_str)
+    })
+}
+
+/// What a downstream consumer needs to rebuild a trace as a runnable task:
+/// a prompt to issue, arguments to issue each tool call with, and a result
+/// per call to grade against.
+///
+/// This exists because `replayability` used to be `replay.replayable`
+/// restated. That field is set by the emitter and was `true` on every
+/// envelope in the pilot corpus, including the ones carrying nothing but
+/// tool names, so the score could not fail and the corpus reported itself
+/// healthy indefinitely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReplaySufficiency {
+    pub has_initial_prompt: bool,
+    pub tool_calls: usize,
+    pub tool_calls_with_arguments: usize,
+    pub tool_calls_with_results: usize,
+}
+
+impl ReplaySufficiency {
+    /// Equal thirds, because a replay needs all three and any one of them
+    /// missing leaves a consumer unable to build a benchmark item. Partial
+    /// tool coverage earns partial credit: a corpus where half the calls are
+    /// seedable is genuinely worth more than one where none are.
+    pub fn score(&self) -> f32 {
+        let prompt = if self.has_initial_prompt { 1.0 } else { 0.0 };
+        if self.tool_calls == 0 {
+            // Nothing to seed beyond the prompt, so the prompt is the whole
+            // of what replay needs. Guards the division below.
+            return prompt;
+        }
+        let calls = self.tool_calls as f32;
+        let arguments = self.tool_calls_with_arguments as f32 / calls;
+        let results = self.tool_calls_with_results as f32 / calls;
+        ((prompt + arguments + results) / 3.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Measure what of a replay actually survived into the envelope.
+pub fn replay_sufficiency(envelope: &TraceContributionEnvelope) -> ReplaySufficiency {
+    let has_initial_prompt = envelope
+        .events
+        .iter()
+        .find(|event| event.event_type == TraceContributionEventType::UserMessage)
+        .is_some_and(event_carries_content);
+
+    // Results are matched to calls by `tool_call_id` where both sides carry
+    // one, and otherwise drawn in order from a pool of unkeyed results. The
+    // fallback matters because no emitter on the pilot path sets the id.
+    let mut keyed_results: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unkeyed_results = 0usize;
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolResult {
+            continue;
+        }
+        if !event_carries_result(event) {
+            continue;
+        }
+        match replay_call_id(event) {
+            Some(call_id) => *keyed_results.entry(call_id).or_default() += 1,
+            None => unkeyed_results += 1,
+        }
+    }
+
+    let mut sufficiency = ReplaySufficiency {
+        has_initial_prompt,
+        ..ReplaySufficiency::default()
+    };
+    for event in &envelope.events {
+        if event.event_type != TraceContributionEventType::ToolCall {
+            continue;
+        }
+        sufficiency.tool_calls += 1;
+        if event_carries_arguments(event) {
+            sufficiency.tool_calls_with_arguments += 1;
+        }
+        let matched_by_id = replay_call_id(event)
+            .and_then(|call_id| keyed_results.get_mut(call_id))
+            .is_some_and(|remaining| {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            });
+        if matched_by_id {
+            sufficiency.tool_calls_with_results += 1;
+        } else if unkeyed_results > 0 {
+            unkeyed_results -= 1;
+            sufficiency.tool_calls_with_results += 1;
+        }
+    }
+    sufficiency
+}
+
 pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceValueScorecard {
     let schema_validity = if envelope.schema_version == TRACE_CONTRIBUTION_SCHEMA_VERSION {
         1.0
@@ -998,8 +1203,30 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     let privacy_risk = privacy_risk_score(envelope.privacy.residual_pii_risk);
     let gate = privacy_gate(envelope.privacy.residual_pii_risk);
     let event_count = envelope.events.len() as f32;
-    let quality = (event_count / 8.0).clamp(0.15, 1.0);
-    let replayability = if envelope.replay.replayable { 1.0 } else { 0.0 };
+    // Length alone used to be the whole of `quality`, which meant redaction
+    // raised a trace's score: stripping content leaves the event count
+    // untouched. Weight length by the share of events that actually carry
+    // something, so padding an envelope with contentless events cannot pay.
+    let substantive_events = envelope
+        .events
+        .iter()
+        .filter(|event| event_carries_content(event))
+        .count() as f32;
+    let content_share = if event_count == 0.0 {
+        0.0
+    } else {
+        substantive_events / event_count
+    };
+    let quality = ((event_count / 8.0).clamp(0.0, 1.0) * content_share).clamp(0.15, 1.0);
+    let sufficiency = replay_sufficiency(envelope);
+    // Sufficiency can only lower the score: an emitter that declares a trace
+    // unreplayable keeps the last word, but one that declares it replayable
+    // now has to have shipped the inputs that claim requires.
+    let replayability = if envelope.replay.replayable {
+        sufficiency.score()
+    } else {
+        0.0
+    };
     let novelty = envelope
         .embedding_analysis
         .as_ref()
@@ -1038,6 +1265,16 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .and_then(|labels| labels.overall_score)
         .map(|score| score.clamp(0.0, 1.0));
 
+    // Residual privacy risk is charged ONCE, as the multiplicative `gate`.
+    // There used to be a `- 0.60 * privacy_risk` term here as well, which
+    // charged it twice: `privacy_gate` and `privacy_risk_score` are
+    // complementary functions of the same enum (they sum to 1.0 for every
+    // band — pinned by a test), so the subtraction re-applied the gate. The
+    // effect fell entirely on the medium band, where a 0.5 gate plus a flat
+    // -0.30 put every realistic score at or below zero: accepted work that
+    // could never earn anything. Low risk was unaffected either way, since
+    // `privacy_risk_score(Low)` is 0.0, and high risk is zeroed by the gate
+    // and again by the explicit `High` check below.
     let raw = gate
         * schema_validity
         * (0.25 * quality
@@ -1046,18 +1283,6 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        // Residual privacy risk is applied once, by `gate`, and not again
-        // here. `privacy_gate` and `privacy_risk_score` are both pure
-        // functions of the same enum, so subtracting the second after
-        // multiplying by the first penalised one signal twice. For the
-        // medium band that was a halving plus a flat -0.30, which needs the
-        // weighted terms above 0.6 to clear zero - unreachable in practice
-        // once `replayability` is 0, as it is for any recorded session. Every
-        // medium-risk submission in the pilot corpus scored exactly zero.
-        //
-        // Dropping this term changes nothing for low risk, where
-        // `privacy_risk_score` is already 0.0, and nothing for high risk,
-        // which the `credit_points_estimate` branch below zeroes outright.
         - 0.40 * duplicate_penalty;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
@@ -1077,7 +1302,29 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         explanation.push("Residual privacy risk is high; credit is held for review.".to_string());
     }
     if envelope.replay.replayable {
-        explanation.push("Replay metadata is present.".to_string());
+        // Name what is missing rather than asserting the block exists. A
+        // consumer who cannot replay a trace needs to know which of the three
+        // inputs did not survive, and "Replay metadata is present." told them
+        // nothing at all.
+        if sufficiency.tool_calls == 0 {
+            explanation.push(if sufficiency.has_initial_prompt {
+                "Replay inputs present: an initial prompt, and no tool calls to seed.".to_string()
+            } else {
+                "Replay is blocked: no initial prompt to re-issue.".to_string()
+            });
+        } else {
+            explanation.push(format!(
+                "Replay inputs: initial prompt {}, arguments on {} of {} tool call(s), results on {}.",
+                if sufficiency.has_initial_prompt {
+                    "present"
+                } else {
+                    "missing"
+                },
+                sufficiency.tool_calls_with_arguments,
+                sufficiency.tool_calls,
+                sufficiency.tool_calls_with_results,
+            ));
+        }
     }
     if !envelope.replay.required_tools.is_empty() {
         explanation.push(format!(
@@ -1537,15 +1784,6 @@ pub struct RedactionReport {
     pub pii_labels_present: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// True when a secret-shaped span was **found and removed** during scrub.
-    ///
-    /// This is a redaction success signal, not evidence that a live secret
-    /// remains in the envelope. `residual_risk` therefore treats it as a
-    /// Medium floor (reviewable), matching the polarity used by comparable
-    /// corpora (Dolma drops only *unredacted* spans; BigCode / Sentry /
-    /// OTel treat detection reports as annotations). High is reserved for
-    /// `key_finding_detected` (unredactable) and for residual envelope-scan
-    /// hits that survive scrub (via `resolve_post_scrub_risk`).
     pub blocked_secret_detected: bool,
     /// Set when a classifier flagged an *object key* (not just a value) as
     /// PII-bearing. Keys are not rewritten in place (rewriting risks
@@ -2036,6 +2274,26 @@ pub fn privacy_filter_adapter_from_env() -> Result<
     }
 }
 
+/// Resolve which privacy-filter backend the environment configures, without
+/// keeping the adapter.
+///
+/// Callers use this at boot to report the live backend and to refuse to start
+/// when a deployment requires one. It exists because the absence of a filter
+/// is otherwise invisible: [`privacy_filter_adapter_from_env`] returns
+/// `Ok(None)` for an unset backend, the redactor built from it performs no
+/// prose-PII filtering, and a runtime filter failure falls back to the
+/// unfiltered text. None of those paths distinguish "filtered and found
+/// nothing" from "never filtered".
+///
+/// A backend named without its credentials is an error here, so that
+/// misconfiguration surfaces once at startup rather than on every submission.
+pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, PrivacyFilterConfigError>
+{
+    Ok(privacy_filter_adapter_from_env()?
+        .map(|(_adapter, tag)| tag)
+        .unwrap_or(PrivacyFilterBackendTag::None))
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",
@@ -2177,11 +2435,7 @@ pub(crate) fn reset_legacy_privacy_env_warning_for_tests() {
 }
 
 fn privacy_filter_backend_label(backend: PrivacyFilterBackendTag) -> &'static str {
-    match backend {
-        PrivacyFilterBackendTag::None => "none",
-        PrivacyFilterBackendTag::Sidecar => "sidecar",
-        PrivacyFilterBackendTag::NearAi => "near_ai",
-    }
+    backend.label()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2242,13 +2496,8 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection when a secret cue is present.
-///
-/// Historically 16 (#157). #193 row 2 lowers it to 8: a cue plus a short
-/// opaque value is a strong enough signal that the old floor was leaking
-/// real API keys in the 8–15 range. The floor is still an FP control —
-/// below 8 even a cue is too noisy (see the #193 FP-budget fixtures).
-const ENTROPY_MIN_LEN: usize = 8;
+/// detection. Shorter tokens are too noisy to gate reliably.
+const ENTROPY_MIN_LEN: usize = 16;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -2432,11 +2681,7 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        // Floor matches [`ENTROPY_MIN_LEN`] (8): shorter tokens never become
-        // candidates. Cue + allowlist + entropy gates still reject the vast
-        // majority; lowering from 16 closes #193 row 2 without scanning
-        // sub-8 noise.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -2491,17 +2736,8 @@ fn is_pure_hex(s: &str) -> bool {
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, short git sha, or this module's own report-metric label) rather
+/// prefix, hex hash/sha, or this module's own report-metric label) rather
 /// than an opaque secret.
-///
-/// Content-hash shapes (lowercase hex ≥32, pure hex of length 40/64) are
-/// deliberately NOT allowlisted here. Those shapes are rarely cue-adjacent
-/// when they are real hashes, and when they *are* cue-adjacent they are
-/// indistinguishable from HMAC/AES key material (#193 row 4). Uncued hashes
-/// still survive because [`is_cued_secret`] requires a cue before any
-/// allowlist check runs. Short pure-hex of length 7 or 8 stays allowlisted
-/// even when cued: git short SHAs dominate that length and the FP cost of
-/// redacting them after a cue exceeds the recall gain.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -2515,9 +2751,16 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    // Git short SHAs (and similar). Longer pure-hex (40/64) used to live
-    // here too and is now redacted when cued — see #193 row 4.
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
+        return true;
+    }
+    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
+    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
+    if token.len() >= 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return true;
     }
     false
@@ -2602,9 +2845,8 @@ fn is_cued_secret(
 /// here. A literal zero-separator glue with no `=` at all (`api_keySECRET`,
 /// `BearerSECRET`) is NOT covered -- there is no `=` to split on, so the cue
 /// word and the value are one token and [`has_secret_cue`]'s window still
-/// never sees a cue word immediately before `start`. That is a deliberate
-/// accept under #193 row 1 (FP cost of splitting inside identifiers), not an
-/// untracked gap.
+/// never sees a cue word immediately before `start`. That is a separate,
+/// unaddressed gap, not a variant of the one this function fixes.
 fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     for candidate in entropy_candidate_regex().find_iter(content) {
@@ -2725,13 +2967,6 @@ impl Default for DeterministicTraceRedactor {
 }
 
 impl DeterministicTraceRedactor {
-    /// Build a deterministic-only redactor with explicit path prefixes.
-    ///
-    /// Unlike `new`/`try_default`, this never reads
-    /// `TRACE_PRIVACY_FILTER_BACKEND` or adapter-specific environment
-    /// variables and can never attach a network or process-backed filter.
-    /// Pre-enrollment previews use this constructor to keep local trace data
-    /// offline even when the parent environment requests another backend.
     pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
         let mut known_path_prefixes: Vec<String> = known_path_prefixes
             .into_iter()
@@ -2748,9 +2983,21 @@ impl DeterministicTraceRedactor {
         }
     }
 
-    /// Detection-only redactor with no known path prefixes.
+    /// A redactor with no attached privacy-filter adapter and no known path
+    /// prefixes, for detection-only work that never touches
+    /// `attached_privacy_filter`. Unlike `new`/`try_default`, this never
+    /// reads `TRACE_PRIVACY_FILTER_BACKEND` or its adapter-specific env
+    /// vars, so it cannot race concurrent env mutation elsewhere in the
+    /// process and cannot fail from missing/invalid privacy-filter config -
+    /// exactly what the residual scan needs, since it only calls the plain
+    /// `redact_text`, which never consults the attached adapter.
     fn bare() -> Self {
-        Self::deterministic_only(Vec::new())
+        Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes: Vec::new(),
+            privacy_filter: None,
+            privacy_filter_backend: PrivacyFilterBackendTag::None,
+        }
     }
 
     pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
@@ -3165,6 +3412,11 @@ pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
 ) {
+    // Consent flags are a factual declaration of what the envelope carries.
+    // Correct under-reported flags before risk derivation so residual_risk
+    // and the PII-backstop hold cannot be skipped by a false declaration.
+    reconcile_consent_declarations(envelope);
+
     let mut report = RedactionReport::default();
     let mut state = RedactionState::default();
 
@@ -3197,10 +3449,9 @@ pub fn rescrub_trace_envelope_with(
     // Detection-only backstop, run after every mutation above. The
     // typed traversal can only cover fields it knows about, and the
     // schema keeps growing; this catches whatever the traversal missed.
-    // It never mutates — anything it finds has already *survived*
-    // redaction, which is what makes it residual and why
-    // [`resolve_post_scrub_risk`] forces High on residual hits (not on
-    // secrets the scrub pass itself found and removed).
+    // It never mutates - anything it finds has already survived
+    // redaction, which is what makes it *residual* and why it forces
+    // High rather than Medium.
     let residual = residual_envelope_scan(redactor, envelope);
 
     // Derive the server-pass risk from what the pass actually found,
@@ -3450,6 +3701,10 @@ pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
 ) -> Result<(), TraceContributionError> {
+    // Same concordance floor as the sync server re-scrub: under-reported
+    // consent must not survive into residual_risk / status decisions.
+    reconcile_consent_declarations(envelope);
+
     let mut event_updates: Vec<(usize, String)> = Vec::new();
     let mut correction_update: Option<String> = None;
     let mut structured_updates: Vec<(usize, Value)> = Vec::new();
@@ -3866,25 +4121,13 @@ impl PostScrubAssessment {
 /// risk. Downgrade only when the assessment proves it is safe to do so;
 /// otherwise the prior risk is preserved (never lowered) via
 /// `max_residual_risk`, exactly as before this pass existed.
-///
-/// High is reserved for scrub *failure* / unredactable findings:
-/// - [`RedactionReport::key_finding_detected`] on the scrub pass (keys cannot
-///   be rewritten in place), or
-/// - any hit on the post-scrub residual scan (content that survived scrub).
-///
-/// A scrub-pass [`RedactionReport::blocked_secret_detected`] alone does **not**
-/// force High: that flag means a secret was found and removed. It flows
-/// through `derived_risk` as Medium so a proven-complete assessment can
-/// actually downgrade High → Medium (the contract #185 documented but which
-/// the previous `findings.blocked_secret_detected → High` short-circuit
-/// made unreachable for the dominant secret-bearing case). See issues
-/// #219 / #210.
 fn resolve_post_scrub_risk(
     prior_risk: ResidualPiiRisk,
     derived_risk: ResidualPiiRisk,
     assessment: &PostScrubAssessment,
 ) -> ResidualPiiRisk {
-    if assessment.findings.key_finding_detected
+    if assessment.findings.blocked_secret_detected
+        || assessment.findings.key_finding_detected
         || assessment.residual_findings.blocked_secret_detected
         || assessment.residual_findings.key_finding_detected
     {
@@ -3898,28 +4141,16 @@ fn resolve_post_scrub_risk(
 }
 
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    // Unredactable object-key findings still force High — keys cannot be
-    // rewritten without risking sibling collisions, so there is no scrub
-    // success to annotate.
-    if report.key_finding_detected {
+    if report.blocked_secret_detected || report.key_finding_detected {
         return ResidualPiiRisk::High;
     }
 
-    // PII / secrets the pass actually found and removed raise the floor to
-    // Medium regardless of what the consent flags claim. A contributor who
-    // under-reports risk should not land Accepted/Low just because the flags
-    // are clean; the pass has direct evidence the flags are wrong.
-    //
-    // `blocked_secret_detected` is included here (via counts, or alone) as
-    // Medium, not High: the detector's match ranges are collected and then
-    // `apply_redaction_ranges` removes them. Successful scrub is an
-    // annotation on a reviewable record, not terminal rejection. High is
-    // produced only by `key_finding_detected` above, or by a residual
-    // post-scrub scan hit in [`resolve_post_scrub_risk`]. Issue #219.
-    if report.blocked_secret_detected
-        || !report.counts.is_empty()
-        || !report.pii_labels_present.is_empty()
-    {
+    // PII the pass actually found and removed raises the floor to
+    // Medium regardless of what the consent flags claim. A contributor
+    // who under-reports risk should not be able to land in accepted
+    // storage with a Low classification just because the flags are
+    // clean; the pass has direct evidence the flags are wrong.
+    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
         return ResidualPiiRisk::Medium;
     }
 
@@ -3928,6 +4159,110 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     }
 
     ResidualPiiRisk::Low
+}
+
+/// What content-bearing surfaces an envelope actually carries.
+///
+/// Used to check `ConsentMetadata::{message_text_included,tool_payloads_included}`
+/// against the payload those flags claim to describe. The flags are a factual
+/// declaration (`docs/trace-spec.md`), not a client preference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnvelopeContentPresence {
+    pub message_text: bool,
+    pub tool_payloads: bool,
+}
+
+/// Inspect an envelope for content that must be declared in consent flags.
+///
+/// Minimum concordance rule (issue #208):
+/// - non-empty `redacted_content` on user / assistant / reasoning (and other
+///   prose event types), or `outcome.human_correction`, implies message text;
+/// - tool-call / tool-result / http content, or a non-null `structured_payload`,
+///   implies tool payloads.
+///
+/// A bare `tool_name` deliberately does NOT imply tool payloads. The name is
+/// metadata about which tool ran, not the payload the flag declares, and
+/// stripping payloads while keeping names is a supported privacy mode -- it is
+/// what keeps a trace structurally trainable when content is absent. Counting
+/// the name would correct every structure-preserved trace upward to
+/// `tool_payloads_included = true`, push it to Medium residual risk, and
+/// quarantine it on a default deployment for payloads it does not carry.
+///
+/// This matches the client-side derivation in the contributor crate, which
+/// makes the same call. The two halves must agree: if the client declares
+/// honestly and the server then corrects that declaration upward anyway, the
+/// contributor is penalised for telling the truth.
+///
+/// Does not mutate the envelope. Callers that need enforcement should use
+/// [`reconcile_consent_declarations`], which only corrects flags upward.
+pub fn derive_envelope_content_presence(
+    envelope: &TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let mut presence = EnvelopeContentPresence::default();
+
+    for event in &envelope.events {
+        if event
+            .redacted_content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty())
+        {
+            match event.event_type {
+                TraceContributionEventType::UserMessage
+                | TraceContributionEventType::AssistantMessage
+                | TraceContributionEventType::Reasoning
+                | TraceContributionEventType::RoutingDecision
+                | TraceContributionEventType::Feedback => presence.message_text = true,
+                TraceContributionEventType::ToolCall
+                | TraceContributionEventType::ToolResult
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
+            }
+        }
+        if !event.structured_payload.is_null() {
+            presence.tool_payloads = true;
+        }
+    }
+
+    if envelope
+        .outcome
+        .human_correction
+        .as_ref()
+        .is_some_and(|text| !text.is_empty())
+    {
+        presence.message_text = true;
+    }
+
+    presence
+}
+
+/// Correct under-reported consent declarations to match the envelope payload.
+///
+/// Only moves flags from `false` → `true`. Over-reporting (true flags on an
+/// empty payload) is left alone: that is a stricter declaration and does not
+/// open an acceptance path the payload did not earn.
+///
+/// Returns the presence that was derived, so callers can log or assert.
+pub fn reconcile_consent_declarations(
+    envelope: &mut TraceContributionEnvelope,
+) -> EnvelopeContentPresence {
+    let presence = derive_envelope_content_presence(envelope);
+    let mut corrected = false;
+    if presence.message_text && !envelope.consent.message_text_included {
+        envelope.consent.message_text_included = true;
+        corrected = true;
+    }
+    if presence.tool_payloads && !envelope.consent.tool_payloads_included {
+        envelope.consent.tool_payloads_included = true;
+        corrected = true;
+    }
+    if corrected {
+        let warning =
+            "Server corrected under-reported consent declarations to match envelope payload."
+                .to_string();
+        if !envelope.privacy.warnings.contains(&warning) {
+            envelope.privacy.warnings.push(warning);
+        }
+    }
+    presence
 }
 
 fn max_residual_risk(left: ResidualPiiRisk, right: ResidualPiiRisk) -> ResidualPiiRisk {
@@ -3951,10 +4286,10 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
+            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -5513,27 +5848,6 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_only_constructor_ignores_inherited_backend() {
-        use super::DeterministicTraceRedactor;
-
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: ENV_LOCK serializes process-environment mutation across
-        // every env-touching test in this crate.
-        unsafe {
-            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
-        }
-        let redactor =
-            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
-        let has_filter = redactor.attached_privacy_filter().is_some();
-        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
-        unsafe {
-            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
-        }
-        assert!(!has_filter);
-        assert!(!redacted.contains("/Users/preview/private"));
-    }
-
-    #[test]
     fn privacy_filter_adapter_from_env_requires_near_ai_key() {
         use super::{PrivacyFilterConfigError, privacy_filter_adapter_from_env};
         let _guard = ENV_LOCK.lock().unwrap();
@@ -5839,14 +6153,10 @@ mod tests {
         // unchanged on the pre-split code and proved nothing about the split
         // path. Assert directly on the split position instead: a cue IS
         // found there, and the allowlist excludes the narrowed value anyway.
-        //
-        // Content-hash hex is deliberately absent: #193 row 4 redacts cued
-        // lowercase hex ≥32 (including 40/64 shas). UUID and prefixed IDs
-        // stay allowlisted even when cued (~105k structural IDs vs ~20 real
-        // secrets in the prototype scan).
         for text in [
             "token=550e8400-e29b-41d4-a716-446655440000",
             "api_key=550e8400-e29b-41d4-a716-446655440000",
+            "secret=0123456789abcdef0123456789abcdef01234567",
             "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
         ] {
             let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
@@ -5965,16 +6275,27 @@ mod tests {
         assert!(rep.blocked_secret_detected);
     }
 
+    /// Payload size for the contextual-entropy tripwires below.
+    ///
+    /// Deliberately its own number rather than the deployed input cap. These
+    /// guard against superlinear cost, and a megabyte exposes that just as
+    /// well as sixteen -- a quadratic pass at this size already blows the
+    /// bound by orders of magnitude. Sizing them off the cap instead meant a
+    /// cap change silently made each tripwire 16x slower and pushed them
+    /// against their wall-clock bounds for reasons unrelated to the property
+    /// under test.
+    const ENTROPY_TRIPWIRE_PAYLOAD_BYTES: usize = 1024 * 1024;
+
     #[test]
     fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
-        // Thousands of separate glued assignments, at the sidecar input limit.
+        // Thousands of separate glued assignments, at the tripwire size.
         // Each one contributes a range, and comparing every new range against
         // every accumulated range was quadratic: a megabyte produced tens of
         // thousands of ranges and on the order of a billion comparisons.
         let unit = "api_key=Zx9Qk2Lm7Pv4Rt8Wy1 ";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -6017,21 +6338,18 @@ mod tests {
         // Every `=` in the input starts another reading in
         // `contextual_entropy_secret_ranges`, and the regex class
         // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
-        // spanning nearly the whole input, so a payload at the sidecar's 1
-        // MiB input limit produces on the order of half a million readings.
+        // spanning nearly the whole input, so a megabyte of them produces on
+        // the order of half a million readings.
         // There is no cue word anywhere in "x=", so `is_cued_secret` must
         // reject every one of them on the cheap length/cue/allowlist checks
         // BEFORE computing entropy: computing entropy first, even a bounded
         // sample, on every one of half a million readings is the CPU
         // denial-of-service this test guards against. 1024 repetitions (the
         // test above) is far too small to show the difference; this uses the
-        // real accepted maximum.
+        // full tripwire payload.
         let unit = "x=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
-        assert_eq!(
-            payload.len(),
-            PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES
-        );
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
+        assert_eq!(payload.len(), ENTROPY_TRIPWIRE_PAYLOAD_BYTES);
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -6068,7 +6386,7 @@ mod tests {
         // reusing one per-candidate entropy profile across every reading
         // instead of rebuilding it per `=`.
         let unit = "api_key=";
-        let payload = unit.repeat(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES / unit.len());
+        let payload = unit.repeat(ENTROPY_TRIPWIRE_PAYLOAD_BYTES / unit.len());
         let started = std::time::Instant::now();
         let (out, rep) = r.redact_text(&payload);
         let elapsed = started.elapsed();
@@ -6108,162 +6426,32 @@ mod tests {
             o1.contains("msg_01ABCDEFghijklmnopqrstuvwx"),
             "allowlisted id got redacted: {o1}"
         );
-        // git sha with NO secret cue nearby must survive. Bare "key" is not
-        // in the cue list; cued shas are redacted under #193 row 4 (covered
-        // separately).
+        // git sha after cue must survive (hex len 40)
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let (o2, _) = r.redact_text(&format!("commit {sha}"));
-        assert!(o2.contains(sha), "uncued git sha got redacted: {o2}");
+        let (o2, _) = r.redact_text(&format!("key {sha}"));
+        assert!(o2.contains(sha), "git sha got redacted: {o2}");
         // high-entropy token with NO cue nearby must survive (avoids shredding base64 content)
         let blob = "CAESabcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let (o3, _) = r.redact_text(&format!("the encoded value {blob} appears here"));
         assert!(o3.contains(blob), "uncued blob got redacted: {o3}");
     }
 
-    /// #193 decision matrix for the shapes deferred by #187.
-    ///
-    /// Defects (must redact): row 2 short cued opaque, row 4 cued lowercase
-    /// hex ≥32. Deliberate survivals (must not redact): row 1 zero-separator
-    /// glue, row 3 UUID even when cued, sub-threshold entropy. Row 5
-    /// (spaced padding) is covered by the windowed-entropy tests above.
-    /// Rows 6–7 live in `redaction.rs` (structured JSON).
-    #[test]
-    fn contextual_entropy_applies_cued_secret_shape_decisions() {
-        use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
-
-        // Row 1 — Accept, documented. No separator means no boundary without
-        // splitting inside arbitrary identifiers; FP cost is too high.
-        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
-        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
-            let (out, _) = r.redact_text(&text);
-            assert!(
-                out.contains(&secret[..secret.len().min(8)]),
-                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
-                 and the comment on contextual_entropy_secret_ranges): {out}"
-            );
-        }
-
-        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
-        let short = "Q7vM2xP9sL4nR8k"; // 15
-        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
-        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
-            let (out, rep) = r.redact_text(&text);
-            assert!(!out.contains(short), "short cued secret survived: {out}");
-            assert!(rep.blocked_secret_detected);
-        }
-
-        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
-        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
-
-        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
-        let hex40 = "0123456789abcdef0123456789abcdef01234567";
-        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
-        for text in [
-            format!("secret={hex40}"),
-            format!("api_key: {hex64}"),
-            format!("api_key={hex64}"),
-        ] {
-            let (out, rep) = r.redact_text(&text);
-            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
-            assert!(rep.blocked_secret_detected);
-        }
-
-        // Sub-threshold entropy — still not opaque enough, even when cued.
-        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
-        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
-    }
-
-    /// False-positive budget for the #193 row 2 / row 4 loosenings.
-    ///
-    /// Each fixture is a shape that must NOT be redacted after the floor and
-    /// hex-allowlist changes. If a future tweak makes any of these fire, the
-    /// FP cost has moved and needs an explicit decision — do not "fix" by
-    /// deleting the fixture.
-    #[test]
-    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
-        use super::*;
-        let r = DeterministicTraceRedactor::bare();
-
-        // Uncued content hashes / shas must still survive (row 4 narrows the
-        // allowlist to the *cued* case only; uncued path never reached it).
-        let sha40 = "0123456789abcdef0123456789abcdef01234567";
-        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
-        for text in [
-            format!("commit {sha40}"),
-            format!("digest {sha64}"),
-            format!("blob {sha64} verified"),
-        ] {
-            let (out, rep) = r.redact_text(&text);
-            assert_eq!(out, text, "uncued hash was redacted: {out}");
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // UUID stays allowlisted even when cued (row 3).
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
-            let (out, _) = r.redact_text(&text);
-            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
-        }
-
-        // Prefixed structural IDs stay allowlisted even when cued.
-        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
-        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
-
-        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
-        // rate on `api_key: deadbeef`-style short hex dominates recall here.
-        for sha in ["deadbee", "deadbeef"] {
-            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
-            assert!(
-                out.contains(sha),
-                "short git sha was redacted (FP budget): {out}"
-            );
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // Low-entropy short values after a cue must survive (row 2 lowers
-        // length, not the entropy floor).
-        for text in [
-            "password: password",
-            "api_key: staging1",
-            "token: aaaaaaaa",
-            "secret: none1234",
-        ] {
-            let (out, rep) = r.redact_text(text);
-            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
-            assert!(!rep.blocked_secret_detected);
-        }
-
-        // Sub-floor length even with a cue and high opacity — still too short.
-        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
-        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
-        assert_eq!(out, "api_key=Zx9Qk2L");
-
-        // Uncued short opaque tokens must survive (candidate class is wider
-        // now, but the cue gate is the FP control).
-        let short = "Q7vM2xP9sL4nR8k";
-        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
-        assert!(
-            out.contains(short),
-            "uncued short opaque was redacted: {out}"
-        );
-        assert!(!rep.blocked_secret_detected);
-    }
-
     /// This pass's re-anchoring after `=` only covers unspaced *assignment*
     /// glue (`api_key=<secret>`). It documents that boundary against the
-    /// pre-existing evasions/exclusions rather than leaving it assumed.
-    /// Shape-level redact-vs-accept decisions for the remaining gaps live in
-    /// `contextual_entropy_applies_cued_secret_shape_decisions` (#193).
+    /// pre-existing evasions/exclusions rather than leaving it assumed. None
+    /// of the five cases below are things this pass is meant to fix; each
+    /// comment says why. Do not "fix" these here -- they are separate
+    /// decisions with false-positive tradeoffs (see PR discussion for Fix 4).
     #[test]
     fn contextual_entropy_documents_the_glued_assignment_boundary() {
         use super::*;
         let r = DeterministicTraceRedactor::new(vec![]).unwrap();
 
-        // Zero-separator glue: no `=` between the cue word and the value,
-        // so there is nothing for this pass's re-anchoring to split on.
-        // Accepted as deliberate under #193 row 1.
+        // 1. Zero-separator glue: no `=` between the cue word and the value,
+        //    so there is nothing for this pass's re-anchoring to split on.
+        //    The cue and the value are one token and the cue-window check
+        //    never sees a cue word immediately before the candidate. NOT
+        //    addressed by this pass.
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
             let (out, _) = r.redact_text(&text);
@@ -6274,8 +6462,25 @@ mod tests {
             );
         }
 
-        // Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
-        // as not opaque enough, even when cued and long enough.
+        // 2. UUID-shaped value: intentionally allowlisted as a structural
+        //    identifier (`is_allowlisted_entropy_candidate`'s `uuid_regex`
+        //    check), even when cued.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // 3. Lowercase hex, length >= 32: intentionally treated as a content
+        //    hash (sha256/git blob), not a secret, even when cued.
+        let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
+
+        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
+        //    short to gate reliably, even when cued and opaque.
+        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
+        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+
+        // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
+        //    as not opaque enough, even when cued and long enough.
         let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
         assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
@@ -6922,9 +7127,429 @@ mod tests {
         );
     }
 
-    /// Issue #219 / #210: `blocked_secret_detected` means found-and-removed.
-    /// That must raise Medium (reviewable), never High by itself.
+    fn bare_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let now = Utc::now();
+        TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: false,
+                tool_payloads_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: Vec::new(),
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        }
+    }
+
+    fn message_event(content: &str) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::UserMessage,
+            timestamp: Utc::now(),
+            redacted_content: Some(content.to_string()),
+            structured_payload: Value::Null,
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
     #[test]
+    fn reconcile_consent_raises_message_text_for_prose_events() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+        assert!(
+            envelope
+                .privacy
+                .warnings
+                .iter()
+                .any(|w| w.contains("under-reported consent"))
+        );
+    }
+
+    #[test]
+    fn reconcile_consent_raises_tool_payloads_for_structured_payload_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::AssistantMessage,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls"}),
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn reconcile_consent_raises_tool_payloads_for_a_structured_payload() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"command": "ls -la"}),
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    /// A tool name without a payload must NOT be corrected upward.
+    ///
+    /// Stripping payloads while keeping tool names is a supported privacy
+    /// mode -- it is what keeps a trace structurally trainable when content is
+    /// absent. Raising the flag here would push every structure-preserved
+    /// trace to Medium residual risk and quarantine it on a default
+    /// deployment, for payloads it does not carry.
+    ///
+    /// The contributor client makes the same call when it builds the
+    /// declaration. The two halves must agree, or a client that declares
+    /// honestly gets corrected upward anyway and is penalised for it.
+    #[test]
+    fn reconcile_consent_leaves_a_bare_tool_name_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: Value::Null,
+            tool_name: Some("Bash".to_string()),
+            tool_category: Some("shell".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.tool_payloads, "a tool name is not a tool payload");
+        assert!(
+            !envelope.consent.tool_payloads_included,
+            "an honest false declaration must survive reconciliation"
+        );
+        assert!(!presence.message_text);
+    }
+
+    #[test]
+    fn reconcile_consent_raises_message_text_for_human_correction() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.outcome.human_correction = Some("use the other API key".to_string());
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.message_text);
+        assert!(envelope.consent.message_text_included);
+    }
+
+    #[test]
+    fn reconcile_consent_never_lowers_over_reported_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.consent.message_text_included = true;
+        envelope.consent.tool_payloads_included = true;
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(envelope.consent.message_text_included);
+        assert!(envelope.consent.tool_payloads_included);
+        assert!(envelope.privacy.warnings.is_empty());
+    }
+
+    #[test]
+    fn empty_content_does_not_force_consent_flags() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(message_event(""));
+        envelope.events.push(TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: Utc::now(),
+            redacted_content: Some(String::new()),
+            structured_payload: Value::Null,
+            tool_name: Some(String::new()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        });
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.message_text);
+        assert!(!presence.tool_payloads);
+        assert!(!envelope.consent.message_text_included);
+        assert!(!envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn rescrub_raises_risk_for_clean_prose_under_reported_as_low() {
+        use super::*;
+        // The reproduction from issue #208: ordinary prose matches no
+        // deterministic detector, consent says false/false, and without
+        // concordance residual_risk would stay Low → Accepted.
+        let mut envelope = bare_envelope();
+        envelope
+            .events
+            .push(message_event("Project Vega acquisition closes Friday"));
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+        assert!(!envelope.consent.message_text_included);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        assert!(
+            envelope.consent.message_text_included,
+            "server must correct the under-reported message-text declaration"
+        );
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "content-bearing prose must not stay Low after concordance"
+        );
+    }
+
+    fn deterministic_only_constructor_ignores_inherited_backend() {
+        use super::DeterministicTraceRedactor;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes process-environment mutation across
+        // every env-touching test in this crate.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/preview/private".into()]);
+        let has_filter = redactor.attached_privacy_filter().is_some();
+        let (redacted, _) = redactor.redact_text("open /Users/preview/private/file.txt");
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(!has_filter);
+        assert!(!redacted.contains("/Users/preview/private"));
+    }
+
+    fn contextual_entropy_applies_cued_secret_shape_decisions() {
+        use super::*;
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+
+        // Row 1 — Accept, documented. No separator means no boundary without
+        // splitting inside arbitrary identifiers; FP cost is too high.
+        let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [format!("api_key{secret}"), format!("Bearer{secret}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(
+                out.contains(&secret[..secret.len().min(8)]),
+                "zero-separator glue was unexpectedly caught (boundary moved, update this test \
+                 and the comment on contextual_entropy_secret_ranges): {out}"
+            );
+        }
+
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
+        let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
+
+        // Row 4 — Redact when cued. Hex allowlist narrowed to the uncued case.
+        let hex40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("secret={hex40}"),
+            format!("api_key: {hex64}"),
+            format!("api_key={hex64}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_ne!(out, text, "cued content-hash-shaped secret survived: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+
+        // Sub-threshold entropy — still not opaque enough, even when cued.
+        let (out, _) = r.redact_text("api_key=aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
+    }
+
+    fn contextual_entropy_fp_budget_for_cued_shape_changes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // Uncued content hashes / shas must still survive (row 4 narrows the
+        // allowlist to the *cued* case only; uncued path never reached it).
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let sha64 = "a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01";
+        for text in [
+            format!("commit {sha40}"),
+            format!("digest {sha64}"),
+            format!("blob {sha64} verified"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert_eq!(out, text, "uncued hash was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // UUID stays allowlisted even when cued (row 3).
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        for text in [format!("token: {uuid}"), format!("api_key={uuid}")] {
+            let (out, _) = r.redact_text(&text);
+            assert!(out.contains(uuid), "cued UUID was redacted: {out}");
+        }
+
+        // Prefixed structural IDs stay allowlisted even when cued.
+        let (out, _) = r.redact_text("token: msg_01ABCDEFghijklmnopqrstuvwx");
+        assert!(out.contains("msg_01ABCDEFghijklmnopqrstuvwx"));
+
+        // Git short SHAs (7–8 hex) stay allowlisted even when cued — the FP
+        // rate on `api_key: deadbeef`-style short hex dominates recall here.
+        for sha in ["deadbee", "deadbeef"] {
+            let (out, rep) = r.redact_text(&format!("api_key: {sha}"));
+            assert!(
+                out.contains(sha),
+                "short git sha was redacted (FP budget): {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Low-entropy short values after a cue must survive (row 2 lowers
+        // length, not the entropy floor).
+        for text in [
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            "secret: none1234",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "low-entropy cued value was redacted: {out}");
+            assert!(!rep.blocked_secret_detected);
+        }
+
+        // Sub-floor length even with a cue and high opacity — still too short.
+        assert!("Zx9Qk2L".len() < ENTROPY_MIN_LEN);
+        let (out, _) = r.redact_text("api_key=Zx9Qk2L");
+        assert_eq!(out, "api_key=Zx9Qk2L");
+
+        // Uncued short opaque tokens must survive (candidate class is wider
+        // now, but the cue gate is the FP control).
+        let short = "Q7vM2xP9sL4nR8k";
+        let (out, rep) = r.redact_text(&format!("the cursor {short} appears here"));
+        assert!(
+            out.contains(short),
+            "uncued short opaque was redacted: {out}"
+        );
+        assert!(!rep.blocked_secret_detected);
+    }
+
     fn successfully_redacted_secret_is_medium_not_high() {
         use super::*;
 
@@ -6952,8 +7577,6 @@ mod tests {
         );
     }
 
-    /// Key findings remain High — there is no scrub success to annotate.
-    #[test]
     fn unredactable_key_finding_still_forces_high() {
         use super::*;
 
@@ -6977,9 +7600,6 @@ mod tests {
         );
     }
 
-    /// Residual (post-scrub) secret hits still force High via the assessment
-    /// path — that is scrub *failure*, the polarity High is reserved for.
-    #[test]
     fn residual_secret_hit_still_forces_high() {
         use super::*;
 
@@ -7013,11 +7633,6 @@ mod tests {
         );
     }
 
-    /// Scrub-pass secret findings alone must not short-circuit High, so a
-    /// proven-complete assessment can actually land on the derived Medium
-    /// (the #185 downgrade contract that the old short-circuit made
-    /// unreachable for secret-bearing traces).
-    #[test]
     fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
         use super::*;
 
@@ -7045,8 +7660,6 @@ mod tests {
         );
     }
 
-    /// An envelope that differs only in residual privacy risk, for comparing
-    /// what the scorer does with each band.
     fn scoring_envelope(risk: super::ResidualPiiRisk) -> super::TraceContributionEnvelope {
         use super::*;
 
@@ -7211,9 +7824,6 @@ mod tests {
         );
     }
 
-    /// End-to-end: sync server re-scrub of an envelope whose only finding is a
-    /// successfully removed OpenAI key lands Medium, not High.
-    #[test]
     fn rescrub_of_successfully_redacted_secret_lands_medium() {
         use super::*;
 
@@ -7313,5 +7923,408 @@ mod tests {
             ResidualPiiRisk::Medium,
             "successful secret scrub must land Medium (quarantine-with-override), not High"
         );
+    }
+
+    /// A single large event -- an agent pasting a whole file, say -- must
+    /// reach the sidecar rather than being refused for length before it is
+    /// ever spawned. The guard used to sit at 1 MiB while a whole envelope
+    /// could be many times that, so one big event failed the entire
+    /// submission (the external-filter pass propagates with `?`, so there is
+    /// no partial success to fall back on).
+    ///
+    /// The adapter points at a command that does not exist, so the call
+    /// cannot succeed; what this asserts is WHICH failure comes back. Past
+    /// the guard means the spawn was attempted.
+    #[tokio::test]
+    async fn sidecar_input_guard_admits_a_field_the_envelope_cap_allows() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let at_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES);
+        let error = adapter
+            .redact_text(&at_cap)
+            .await
+            .expect_err("no such command, so this cannot succeed");
+        let reason = format!("{error:?}");
+        assert!(
+            !reason.contains("input exceeded limit"),
+            "a field the envelope cap allows must reach the sidecar: {reason}"
+        );
+        assert!(
+            reason.contains("failed to spawn"),
+            "expected the spawn failure that proves the guard was passed: {reason}"
+        );
+    }
+
+    /// The other direction: above the cap it is still a clean, label-only
+    /// length refusal, not a spawn of a doomed subprocess.
+    #[tokio::test]
+    async fn sidecar_input_guard_still_refuses_above_the_cap() {
+        use crate::trace_contribution::{
+            CommandPrivacyFilterAdapter, MAX_TRACE_ENVELOPE_BYTES, PrivacyFilterAdapter,
+        };
+        let adapter = CommandPrivacyFilterAdapter::new(
+            "/nonexistent/trace-commons-privacy-filter-does-not-exist",
+        );
+        let over_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES + 1);
+        let error = adapter
+            .redact_text(&over_cap)
+            .await
+            .expect_err("above the cap must refuse");
+        assert!(
+            format!("{error:?}").contains("input exceeded limit"),
+            "expected the length refusal: {error:?}"
+        );
+    }
+
+    // --- Replay sufficiency -------------------------------------------
+    //
+    // A downstream consumer measured 330 pilot envelopes and found every one
+    // scoring `replayability: 1.0` while none could be turned back into a
+    // runnable task. The old formula restated `replay.replayable`, an
+    // emitter-set boolean, so it could not fail. These pin the properties a
+    // replay score has to have instead: a task to issue, arguments to issue
+    // it with, and an answer to grade against.
+
+    fn replay_event(
+        event_type: super::TraceContributionEventType,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        content: Option<&str>,
+        payload: super::Value,
+    ) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type,
+            timestamp: Utc::now(),
+            redacted_content: content.map(str::to_string),
+            structured_payload: payload,
+            tool_name: tool_name.map(str::to_string),
+            tool_category: None,
+            tool_call_id: tool_call_id.map(str::to_string),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
+    /// The shape the web-history capture path actually emits: tool names and
+    /// nothing else, with `replayable` asserted true.
+    fn web_history_shaped_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                None,
+                serde_json::json!({"state": "Completed"}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                None,
+                None,
+                serde_json::json!({"has_result": true, "has_error": false}),
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                None,
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    /// The shape a benchmark item needs: a prompt, arguments on the call, and
+    /// a result carrying what the agent observed.
+    fn seedable_envelope() -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = vec!["gmail__list_messages".to_string()];
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                Some("summarise my unread mail"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                None,
+                serde_json::json!({"arguments": {"label": "UNREAD"}}),
+            ),
+            replay_event(
+                TraceContributionEventType::ToolResult,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                Some("2 unread threads"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::AssistantMessage,
+                None,
+                None,
+                Some("you have 2 unread threads"),
+                Value::Null,
+            ),
+        ];
+        envelope
+    }
+
+    #[test]
+    fn replayability_is_zero_when_nothing_replayable_survived_redaction() {
+        use super::*;
+        // The exact corpus finding: `replayable: true`, tool names recorded,
+        // no prompt, no arguments, no results. Nothing here can be replayed,
+        // so nothing here may score as replayable.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        assert_eq!(
+            scored.replayability, 0.0,
+            "a trace with no prompt, arguments or results is not replayable"
+        );
+    }
+
+    #[test]
+    fn replayability_is_one_for_a_seedable_trace() {
+        use super::*;
+        let scored = compute_value_scorecard(&seedable_envelope());
+        assert_eq!(
+            scored.replayability, 1.0,
+            "prompt + arguments + a result per call is everything replay needs"
+        );
+    }
+
+    #[test]
+    fn replayability_beats_the_metadata_only_shape() {
+        use super::*;
+        // The property that matters more than either endpoint: the metric has
+        // to separate these two at all. The old one scored them equal.
+        let seedable = compute_value_scorecard(&seedable_envelope());
+        let metadata_only = compute_value_scorecard(&web_history_shaped_envelope());
+        assert!(
+            seedable.replayability > metadata_only.replayability,
+            "seedable {} must out-score metadata-only {}",
+            seedable.replayability,
+            metadata_only.replayability
+        );
+    }
+
+    #[test]
+    fn replayability_degrades_when_only_some_calls_carry_arguments() {
+        use super::*;
+        // Partial coverage is partial credit, not all-or-nothing: a trace half
+        // of whose calls are seedable is worth more than one with none and
+        // less than one that is fully seedable.
+        let mut envelope = seedable_envelope();
+        envelope.events.push(replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("slack__post_message"),
+            Some("call-2"),
+            None,
+            serde_json::json!({"has_result": true}),
+        ));
+        let partial = compute_value_scorecard(&envelope).replayability;
+        let full = compute_value_scorecard(&seedable_envelope()).replayability;
+        assert!(
+            partial > 0.0 && partial < full,
+            "partial coverage must land strictly between: {partial} vs {full}"
+        );
+    }
+
+    #[test]
+    fn an_emitter_declaring_a_trace_unreplayable_is_still_believed() {
+        use super::*;
+        // Sufficiency can only ever lower the score. An emitter that knows the
+        // trace cannot be replayed keeps the last word.
+        let mut envelope = seedable_envelope();
+        envelope.replay.replayable = false;
+        assert_eq!(
+            compute_value_scorecard(&envelope).replayability,
+            0.0,
+            "replayable: false is authoritative"
+        );
+    }
+
+    #[test]
+    fn a_trace_with_no_tool_calls_needs_only_a_prompt() {
+        use super::*;
+        // The tool-free traces in the corpus: there are no calls to carry
+        // arguments, so the prompt is the whole of what replay needs. Absent
+        // guarding, dividing by zero calls would score them 0 or NaN.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.replay.required_tools = Vec::new();
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::UserMessage,
+            None,
+            None,
+            Some("what is the capital of France"),
+            Value::Null,
+        )];
+        let scored = compute_value_scorecard(&envelope);
+        assert!(
+            scored.replayability.is_finite(),
+            "a tool-free trace must not divide by zero calls"
+        );
+        assert_eq!(
+            scored.replayability, 1.0,
+            "a prompt is all a tool-free trace needs to be re-issued"
+        );
+    }
+
+    #[test]
+    fn quality_does_not_reward_redacted_length() {
+        use super::*;
+        // `quality` was `event_count / 8.0`, so the more content redaction
+        // stripped, the higher a trace scored. Forty empty events must not
+        // out-score four that carry what they claim to.
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        while padded.events.len() < 40 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        let substantive_quality = compute_value_scorecard(&seedable_envelope()).quality;
+        assert!(
+            substantive_quality > padded_quality,
+            "content must out-score length: {substantive_quality} vs {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn padding_a_trace_with_empty_events_cannot_raise_its_score() {
+        use super::*;
+        // The sharper form of the same property: appending contentless events
+        // is the cheapest thing an emitter can do, so it must never pay. This
+        // is what carried the pilot corpus to a 0.813 mean.
+        let base = compute_value_scorecard(&web_history_shaped_envelope()).quality;
+        let mut padded = web_history_shaped_envelope();
+        let filler = padded.events[1].clone();
+        for _ in 0..30 {
+            let mut event = filler.clone();
+            event.event_id = Uuid::new_v4();
+            padded.events.push(event);
+        }
+        let padded_quality = compute_value_scorecard(&padded).quality;
+        assert!(
+            padded_quality <= base,
+            "padding raised quality from {base} to {padded_quality}"
+        );
+    }
+
+    #[test]
+    fn the_scorecard_explains_which_replay_inputs_are_missing() {
+        use super::*;
+        // The consumer's complaint was not only the number but that "Replay
+        // metadata is present." told them nothing. Make the explanation name
+        // what is absent.
+        let scored = compute_value_scorecard(&web_history_shaped_envelope());
+        let explanation = scored.explanation.join(" ");
+        assert!(
+            explanation.contains("argument"),
+            "explanation must name the missing replay inputs, got: {explanation}"
+        );
+    }
+
+    // --- Privacy filter observability ---------------------------------
+    //
+    // An unset backend resolves to `Ok(None)` and builds a redactor that
+    // silently performs no prose-PII filtering. That is indistinguishable at
+    // runtime from a filter that ran and found nothing, and nothing anywhere
+    // reports which backend is live. These pin the two properties that make
+    // the difference observable: the backend can be asked for by name, and a
+    // deployment can demand that one exists.
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_none_when_unset() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        let backend = privacy_filter_backend_from_env().expect("unset is not an error");
+        assert_eq!(
+            backend,
+            PrivacyFilterBackendTag::None,
+            "an unset backend must be reportable as None rather than invisible"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_reports_the_configured_backend() {
+        use super::{PrivacyFilterBackendTag, privacy_filter_backend_from_env};
+        // Sidecar rather than near-ai: the near-ai adapter is behind an
+        // optional cargo feature that this crate's own test build does not
+        // enable, and the property under test is backend reporting, not which
+        // backend. The server crate compiles the near-ai feature in
+        // unconditionally.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::set_var("TRACE_PRIVACY_FILTER_COMMAND", "/bin/true");
+        }
+        let backend = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        assert_eq!(
+            backend.expect("configured backend must resolve"),
+            PrivacyFilterBackendTag::Sidecar,
+            "a configured backend must be reportable by name"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_from_env_surfaces_a_misconfigured_backend() {
+        use super::privacy_filter_backend_from_env;
+        // A backend named without its required configuration is the one
+        // combination that must never resolve quietly. Before this, it
+        // surfaced per-submission instead of at boot, which is how a filter
+        // stays broken unnoticed.
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+            std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        let result = privacy_filter_backend_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        assert!(
+            result.is_err(),
+            "a backend named without its configuration must be an error, not a silent None"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_backend_labels_are_stable() {
+        use super::PrivacyFilterBackendTag;
+        // These labels reach operational surfaces and stored envelope
+        // summaries, so they are a contract rather than a debug string.
+        assert_eq!(PrivacyFilterBackendTag::None.label(), "none");
+        assert_eq!(PrivacyFilterBackendTag::Sidecar.label(), "sidecar");
+        assert_eq!(PrivacyFilterBackendTag::NearAi.label(), "near_ai");
     }
 }

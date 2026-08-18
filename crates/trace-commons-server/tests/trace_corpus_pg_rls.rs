@@ -49,6 +49,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
         pii_backstop_driver_url:
             trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
+        invite_registry_url: None,
     })
 }
 
@@ -72,6 +73,7 @@ fn gate_driver_test_config() -> Option<DatabaseConfig> {
         login_resolver_url: None,
         gate_driver_url: Some(SecretString::from(url)),
         pii_backstop_driver_url: None,
+        invite_registry_url: None,
     })
 }
 
@@ -5331,6 +5333,219 @@ async fn gate_driver_role_reads_across_tenants_while_default_role_stays_isolated
     tx.commit()
         .await
         .expect("commit gate driver cleanup transaction");
+}
+
+/// V42 narrows `trace_gate_driver` from table-wide SELECT (V36) to the same
+/// column-scoped convention V38 established for `trace_pii_backstop_driver`.
+/// Cross-tenant USING(true) policies stay; this asserts grant *width*: the
+/// driver's enumeration columns remain readable, while object keys and other
+/// out-of-surface columns are not.
+#[tokio::test]
+async fn gate_driver_column_grants_exclude_object_keys_and_wide_columns() {
+    let database_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+    {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured"
+            );
+            return;
+        }
+    };
+
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend
+        .run_migrations()
+        .await
+        .expect("run migrations for gate driver column-grant test");
+
+    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping gate driver column-grant test: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    // has_column_privilege confirms the grant boundary directly, independent of
+    // SET ROLE / RLS. Granted surface first.
+    let granted: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_object_refs', 'artifact_kind', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_object_refs', 'invalidated_at', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_object_refs', 'deleted_at', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_submissions', 'auth_principal_ref', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_submissions', 'received_at', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_gate_decisions', 'credit_quality_micros', 'SELECT')
+             AND has_column_privilege('trace_gate_driver', 'trace_gate_evaluation_attempts', 'attempts', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("granted column privilege check runs")
+        .get(0);
+    assert!(
+        granted,
+        "trace_gate_driver must retain SELECT on the columns its queries use"
+    );
+
+    // Out-of-grant columns that a compromised credential must not enumerate.
+    let object_key_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_object_refs', 'object_key', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("object_key privilege check runs")
+        .get(0);
+    assert!(
+        !object_key_priv,
+        "trace_gate_driver must NOT have SELECT on object_key (V42 / #192)"
+    );
+
+    let encryption_key_ref_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_object_refs', 'encryption_key_ref', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("encryption_key_ref privilege check runs")
+        .get(0);
+    assert!(
+        !encryption_key_ref_priv,
+        "trace_gate_driver must NOT have SELECT on encryption_key_ref"
+    );
+
+    let redaction_hash_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_submissions', 'redaction_hash', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("redaction_hash privilege check runs")
+        .get(0);
+    assert!(
+        !redaction_hash_priv,
+        "trace_gate_driver must NOT have SELECT on redaction_hash"
+    );
+
+    let attestation_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_gate_decisions', 'attestation_chain_hash', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("attestation_chain_hash privilege check runs")
+        .get(0);
+    assert!(
+        !attestation_priv,
+        "trace_gate_driver must NOT have SELECT on attestation_chain_hash"
+    );
+
+    let last_error_priv: bool = client
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_gate_evaluation_attempts', 'last_error_label', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("last_error_label privilege check runs")
+        .get(0);
+    assert!(
+        !last_error_priv,
+        "trace_gate_driver must NOT have SELECT on last_error_label"
+    );
+
+    // Live SELECT under SET ROLE: granted columns succeed; object_key fails.
+    // Superuser test connections drop bypass on SET ROLE to a NOBYPASSRLS role.
+    match client.batch_execute("SET ROLE trace_gate_driver").await {
+        Ok(()) => {
+            client
+                .batch_execute("RESET ROLE")
+                .await
+                .expect("reset before seed");
+
+            let tenant_id = format!("gate-driver-cols-{}", Uuid::new_v4());
+            let submission_id = Uuid::new_v4();
+            backend
+                .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+                .await
+                .expect("seed submission via corpus store");
+            backend
+                .append_trace_object_ref(TraceObjectRefWrite {
+                    tenant_id: tenant_id.clone(),
+                    object_ref_id: Uuid::new_v4(),
+                    submission_id,
+                    artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+                    object_store: "s3://private-corpus".to_string(),
+                    object_key: "secret/object/key".to_string(),
+                    content_sha256: "sha256:gate-cols".to_string(),
+                    encryption_key_ref: "kms:gate-cols".to_string(),
+                    size_bytes: 1024,
+                    compression: None,
+                    created_by_job_id: None,
+                })
+                .await
+                .expect("seed object ref via corpus store");
+
+            client
+                .batch_execute("SET ROLE trace_gate_driver")
+                .await
+                .expect("re-assume gate driver role");
+
+            let granted_read = client
+                .query_opt(
+                    "SELECT artifact_kind FROM trace_object_refs WHERE submission_id = $1",
+                    &[&submission_id],
+                )
+                .await
+                .expect("granted column SELECT must succeed under SET ROLE");
+            assert!(
+                granted_read.is_some(),
+                "trace_gate_driver must read granted object_refs columns cross-tenant"
+            );
+
+            let object_key_read = client
+                .query_opt(
+                    "SELECT object_key FROM trace_object_refs WHERE submission_id = $1",
+                    &[&submission_id],
+                )
+                .await;
+            assert!(
+                object_key_read.is_err(),
+                "trace_gate_driver must be rejected when selecting object_key"
+            );
+
+            let _ = client.batch_execute("RESET ROLE").await;
+
+            let tx = client
+                .transaction()
+                .await
+                .expect("start column-grant cleanup transaction");
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant_id],
+            )
+            .await
+            .expect("set tenant context for cleanup");
+            let _ = tx
+                .execute(
+                    "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                    &[&tenant_id],
+                )
+                .await;
+            tx.commit()
+                .await
+                .expect("commit column-grant cleanup transaction");
+        }
+        Err(e) => {
+            eprintln!("skipping live SET ROLE column-grant assertion: cannot SET ROLE ({e})");
+        }
+    }
 }
 
 /// The perplexity scoring driver's enumeration query

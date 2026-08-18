@@ -52,6 +52,11 @@ fn session_rotation_grace_secs() -> i64 {
 /// audit-chain append, so the two can never alias.
 const NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID: i32 = 0x7472_6163u32 as i32; // "trac"
 
+/// Fixed advisory-lock namespace for live credit-settlement finalize. Distinct from
+/// the submit classid so a submit pass and a settlement pass never contend on the
+/// same key — they serialize different money-path races.
+const CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID: i32 = 0x7365_7474u32 as i32; // "sett"
+
 /// Owns the pooled connection that holds a session-level advisory lock for the
 /// duration of a NEAR settlement submit pass. Released explicitly via
 /// [`NearCreditSubmitAdvisoryLockInner::release`]; see the public
@@ -77,6 +82,25 @@ impl NearCreditSubmitAdvisoryLockInner {
     }
 }
 
+/// Owns the pooled connection holding the live credit-settlement advisory lock.
+pub struct CreditSettlementAdvisoryLockInner {
+    client: deadpool_postgres::Object,
+    objid: i32,
+}
+
+impl CreditSettlementAdvisoryLockInner {
+    pub(crate) async fn release(self) -> Result<(), DatabaseError> {
+        self.client
+            .execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &self.objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+}
+
 pub struct PgBackend {
     pool: Pool,
     /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
@@ -88,9 +112,9 @@ pub struct PgBackend {
     /// Narrow, SEPARATE pool for the cross-tenant gate-driver enumeration
     /// query. Built only when `gate_driver_url` is configured; its DB user is
     /// the operator-provisioned `trace_gate_driver` role (NOLOGIN base,
-    /// NOBYPASSRLS, permissive cross-tenant SELECT policies from migration
-    /// V36). `None` keeps the gate driver's enumeration path fail-closed.
-    /// NEVER aliased to `pool`.
+    /// NOBYPASSRLS, V36 USING(true) cross-tenant policies, V42 column-scoped
+    /// SELECT grants mirroring `trace_pii_backstop_driver`). `None` keeps the
+    /// gate driver's enumeration path fail-closed. NEVER aliased to `pool`.
     gate_driver_pool: Option<Pool>,
     /// Narrow, SEPARATE pool for the cross-tenant PII-backstop driver
     /// enumeration query (server-side NEAR AI PII backstop). Built only when
@@ -103,6 +127,12 @@ pub struct PgBackend {
     /// unused until then.
     #[allow(dead_code)]
     pii_backstop_driver_pool: Option<Pool>,
+    /// Narrow, SEPARATE pool for the invite registry cache refresh and the
+    /// admin invite API. Built only when `invite_registry_url` is configured;
+    /// its DB user is the operator-provisioned `trace_invite_registry` role
+    /// (NOLOGIN base, NOBYPASSRLS, permissive policy from V42). `None` keeps
+    /// invite redemption fail-closed. NEVER aliased to `pool`.
+    invite_registry_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -286,15 +316,41 @@ impl PgBackend {
             None => None,
         };
 
+        // Build a SEPARATE, small invite-registry pool only when a distinct
+        // invite-registry connection string is configured. This pool runs as
+        // the narrow `trace_invite_registry` role and is never aliased to the
+        // runtime pool. Mirrors the gate-driver pool above exactly.
+        let invite_registry_pool = match config.invite_registry_url() {
+            Some(invite_registry_url) => {
+                let invite_registry_config = invite_registry_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!("invalid invite-registry PostgreSQL URL: {e}"))
+                    })?;
+                let invite_registry_manager =
+                    deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
+                let invite_registry_pool =
+                    Pool::builder(invite_registry_manager).max_size(2).build()?;
+                Some(invite_registry_pool)
+            }
+            None => None,
+        };
+
         Ok(Self {
             pool,
             login_resolver_pool,
             gate_driver_pool,
             pii_backstop_driver_pool,
+            invite_registry_pool,
         })
     }
 
     pub(crate) fn trace_pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn trace_pool_for_test(&self) -> Pool {
         self.pool.clone()
     }
 
@@ -396,7 +452,344 @@ impl PgBackend {
             .await?;
         Ok(row.map(|r| r.get::<_, String>(0)))
     }
+
+    fn invite_registry_pool(&self) -> Result<Pool, DatabaseError> {
+        self.invite_registry_pool
+            .clone()
+            .ok_or_else(|| DatabaseError::Pool("invite registry pool not configured".to_string()))
+    }
+
+    fn invite_entry_from_row(
+        row: tokio_postgres::Row,
+    ) -> Result<crate::trace_invite_registry::InviteEntry, DatabaseError> {
+        let mode: String = row.get("tenant_mode");
+        let tenant_mode = match mode.as_str() {
+            "fixed" => crate::trace_invite_registry::InviteTenantMode::Fixed,
+            "derived" => crate::trace_invite_registry::InviteTenantMode::Derived,
+            other => {
+                return Err(DatabaseError::Serialization(format!(
+                    "unknown invite tenant_mode {other:?}"
+                )));
+            }
+        };
+        let max_uses: i32 = row.get("max_uses");
+        Ok(crate::trace_invite_registry::InviteEntry {
+            invite_subject_hash: row.get("invite_subject_hash"),
+            policy_label: row.get("policy_label"),
+            tenant_mode,
+            fixed_tenant_id: row.get("fixed_tenant_id"),
+            tenant_template_id: row.get("tenant_template_id"),
+            policy_version: row.get("policy_version"),
+            allowed_consent_scopes: row.get("allowed_consent_scopes"),
+            allowed_uses: row.get("allowed_uses"),
+            max_uses: max_uses as u32,
+            expires_at: row.get("expires_at"),
+            issuance_source: row.get("issuance_source"),
+            issued_by_label: row.get("issued_by_label"),
+            credential_binding_hash: row.get("credential_binding_hash"),
+            note_label: row.get("note_label"),
+            revoked_at: row.get("revoked_at"),
+        })
+    }
+
+    /// Cache-refresh and admin listing. Runs on the registry pool, whose
+    /// permissive V42 policy is what authorizes cross-invite reads. Excludes
+    /// revoked and expired rows: the cache only ever holds live invites.
+    pub async fn list_invite_grants(
+        &self,
+    ) -> Result<Vec<crate::trace_invite_registry::InviteEntry>, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}
+                       FROM onboarding_invite_grants
+                      WHERE revoked_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > NOW())"
+                ),
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        rows.into_iter().map(Self::invite_entry_from_row).collect()
+    }
+
+    /// Count live grants in one pool. Backs the self-serve claim cap and the
+    /// public remaining-count surface.
+    ///
+    /// "Live" matches `list_invite_grants`: not revoked, not expired. An
+    /// expired Legion grant therefore frees a slot, which is the intended
+    /// behaviour — an unredeemed allotment should not hold the cap down
+    /// forever.
+    ///
+    /// Runs on the registry pool, whose permissive V42 policy authorizes the
+    /// cross-invite read. The runtime pool cannot do this: its RLS predicate
+    /// confines it to the single invite hash the caller presented.
+    pub async fn count_live_invite_grants(&self, policy_label: &str) -> Result<u32, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS live
+                   FROM onboarding_invite_grants
+                  WHERE policy_label = $1
+                    AND revoked_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > NOW())",
+                &[&policy_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let live: i64 = row.get("live");
+        u32::try_from(live).map_err(|_| {
+            DatabaseError::Serialization("invite grant count out of range".to_string())
+        })
+    }
+
+    /// Count grants that occupy the V42 one-claim-per-account index, ignoring
+    /// expiry.
+    ///
+    /// [`count_live_invite_grants`] excludes expired rows, but the V42 index is
+    /// `WHERE credential_binding_hash IS NOT NULL AND revoked_at IS NULL` —
+    /// expiry is not in the predicate, and cannot be: Postgres requires index
+    /// predicates to be IMMUTABLE, so `NOW()` is not permitted there. An
+    /// expired grant therefore still blocks its account from claiming again
+    /// while no longer counting toward the cap. Counting the two differently
+    /// turns a fixed cap into a rolling window — after one TTL a fresh cohort
+    /// could claim the whole cap again, on top of everyone already holding a
+    /// binding.
+    ///
+    /// This counts what the index enforces, so a cap bounds total issuance.
+    pub async fn count_bound_invite_grants(
+        &self,
+        policy_label: &str,
+    ) -> Result<u32, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS bound
+                   FROM onboarding_invite_grants
+                  WHERE policy_label = $1
+                    AND revoked_at IS NULL
+                    AND credential_binding_hash IS NOT NULL",
+                &[&policy_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let bound: i64 = row.get("bound");
+        u32::try_from(bound).map_err(|_| {
+            DatabaseError::Serialization("invite grant count out of range".to_string())
+        })
+    }
+
+    /// True iff this credential already holds an unrevoked grant in any of
+    /// `policy_labels`.
+    ///
+    /// The V42 index is scoped `(policy_label, credential_binding_hash)`, so it
+    /// cannot see across pools. Where one cohort is split into several pools —
+    /// as the Legion ranks are — an account whose rank changes resolves to a
+    /// different label and the index does not fire. This is the cross-pool
+    /// check the index structurally cannot perform.
+    pub async fn credential_bound_in_any(
+        &self,
+        policy_labels: &[String],
+        credential_binding_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM onboarding_invite_grants
+                      WHERE policy_label = ANY($1)
+                        AND credential_binding_hash = $2
+                        AND revoked_at IS NULL
+                 ) AS bound",
+                &[&policy_labels, &credential_binding_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.get("bound"))
+    }
+
+    pub async fn insert_invite_grant(
+        &self,
+        write: crate::db::InviteGrantWrite,
+    ) -> Result<crate::db::InviteGrantInsertOutcome, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let tenant_mode = match write.tenant_mode {
+            crate::trace_invite_registry::InviteTenantMode::Fixed => "fixed",
+            crate::trace_invite_registry::InviteTenantMode::Derived => "derived",
+        };
+        let max_uses = i32::try_from(write.max_uses).map_err(|_| {
+            DatabaseError::Serialization("invite max_uses out of range".to_string())
+        })?;
+        let inserted = client
+            .query_opt(
+                "INSERT INTO onboarding_invite_grants (
+                    invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
+                    tenant_template_id, policy_version, allowed_consent_scopes,
+                    allowed_uses, max_uses, expires_at, issuance_source,
+                    issued_by_label, credential_binding_hash, note_label
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                 ON CONFLICT (invite_subject_hash) DO NOTHING
+                 RETURNING invite_subject_hash",
+                &[
+                    &write.invite_subject_hash,
+                    &write.policy_label,
+                    &tenant_mode,
+                    &write.fixed_tenant_id,
+                    &write.tenant_template_id,
+                    &write.policy_version,
+                    &write.allowed_consent_scopes,
+                    &write.allowed_uses,
+                    &max_uses,
+                    &write.expires_at,
+                    &write.issuance_source,
+                    &write.issued_by_label,
+                    &write.credential_binding_hash,
+                    &write.note_label,
+                ],
+            )
+            .await;
+
+        match inserted {
+            Ok(Some(_)) => Ok(crate::db::InviteGrantInsertOutcome::Inserted),
+            Ok(None) => Ok(crate::db::InviteGrantInsertOutcome::AlreadyExists),
+            Err(e) => {
+                // 23505 unique_violation from the partial credential index.
+                // Report it as a typed outcome, not an opaque 500, and never
+                // echo the credential hash into the error.
+                let is_unique_violation = e
+                    .code()
+                    .map(|c| c == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+                    .unwrap_or(false);
+                if is_unique_violation {
+                    Ok(crate::db::InviteGrantInsertOutcome::CredentialAlreadyBound)
+                } else {
+                    Err(DatabaseError::Postgres(e))
+                }
+            }
+        }
+    }
+
+    /// Soft revoke. Returns true only when this call is what revoked it, so a
+    /// second revoke is a reported no-op rather than an error.
+    pub async fn revoke_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let updated = client
+            .execute(
+                "UPDATE onboarding_invite_grants
+                    SET revoked_at = NOW(), updated_at = NOW()
+                  WHERE invite_subject_hash = $1 AND revoked_at IS NULL",
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(updated == 1)
+    }
+
+    /// Authoritative in-transaction re-check on the RUNTIME pool. Sets the
+    /// GUC the V42 invite_lookup policy reads, so this can only ever return
+    /// the invite whose code the caller presented.
+    pub async fn lookup_invite_grant_in_tx(
+        tx: &deadpool_postgres::Transaction<'_>,
+        invite_subject_hash: &str,
+    ) -> Result<Option<crate::trace_invite_registry::InviteEntry>, DatabaseError> {
+        tx.execute(
+            "SELECT set_config('trace_commons.invite_subject', $1, true)",
+            &[&invite_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}
+                       FROM onboarding_invite_grants
+                      WHERE invite_subject_hash = $1
+                        AND revoked_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > NOW())
+                      FOR SHARE"
+                ),
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row.map(Self::invite_entry_from_row).transpose()
+    }
+
+    /// Authoritative redemption resolve. Runs on the RUNTIME pool under the
+    /// V42 GUC policy, re-checks revocation and expiry inside the transaction,
+    /// and holds FOR SHARE so a concurrent revoke serializes behind it.
+    ///
+    /// This does NOT increment the V29 counter; the caller does that in the
+    /// same transaction via the existing onboard_device_key path.
+    /// `Ok(None)` means the invite is not redeemable -- absent, revoked, or
+    /// expired, deliberately indistinguishable to the caller. `Err` is
+    /// reserved for genuine database failures, so a backend outage is never
+    /// reported to a contributor as an invalid invite.
+    pub async fn redeem_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+        user_subject: &str,
+    ) -> Result<Option<InviteRedemption>, DatabaseError> {
+        let pool = self.trace_pool();
+        let mut client = pool.get().await.map_err(DatabaseError::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(entry) = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash).await? else {
+            return Ok(None);
+        };
+
+        let tenant_id = match entry.tenant_mode {
+            crate::trace_invite_registry::InviteTenantMode::Fixed => {
+                entry.fixed_tenant_id.clone().ok_or_else(|| {
+                    DatabaseError::Serialization("invite fixed_tenant_id missing".to_string())
+                })?
+            }
+            crate::trace_invite_registry::InviteTenantMode::Derived => {
+                let template = entry.tenant_template_id.as_deref().ok_or_else(|| {
+                    DatabaseError::Serialization("invite tenant_template_id missing".to_string())
+                })?;
+                trace_commons_protocol::onboarding::derive_user_tenant_id(template, user_subject)
+            }
+        };
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(InviteRedemption {
+            tenant_id,
+            policy_version: entry.policy_version,
+            allowed_consent_scopes: entry.allowed_consent_scopes,
+            allowed_uses: entry.allowed_uses,
+            max_uses: entry.max_uses,
+        }))
+    }
 }
+
+/// Resolved grant for a redeemed invite.
+#[derive(Debug, Clone)]
+pub struct InviteRedemption {
+    pub tenant_id: String,
+    pub policy_version: String,
+    pub allowed_consent_scopes: Vec<String>,
+    pub allowed_uses: Vec<String>,
+    pub max_uses: u32,
+}
+
+const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mode,
+    fixed_tenant_id, tenant_template_id, policy_version, allowed_consent_scopes,
+    allowed_uses, max_uses, expires_at, issuance_source, issued_by_label,
+    credential_binding_hash, note_label, revoked_at";
 
 #[async_trait]
 impl Database for PgBackend {
@@ -434,6 +827,45 @@ impl Database for PgBackend {
         Ok(Some(crate::db::NearCreditSubmitAdvisoryLock::new(
             NearCreditSubmitAdvisoryLockInner { client, objid },
         )))
+    }
+
+    async fn try_acquire_credit_settlement_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<crate::db::CreditSettlementAdvisoryLock>, DatabaseError> {
+        let client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let objid: i32 = client
+            .query_one("SELECT hashtext('credit-settlement:' || $1)", &[&tenant_id])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        let acquired: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1, $2)",
+                &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &objid],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if !acquired {
+            return Ok(None);
+        }
+        Ok(Some(crate::db::CreditSettlementAdvisoryLock::new(
+            CreditSettlementAdvisoryLockInner { client, objid },
+        )))
+    }
+
+    async fn upsert_credit_settlement_finalize(
+        &self,
+        batch: crate::trace_corpus_storage::TraceCreditSettlementBatchWrite,
+        outbox_items: Vec<crate::trace_corpus_storage::TraceNearCreditOutboxItemWrite>,
+    ) -> Result<(), DatabaseError> {
+        self.upsert_credit_settlement_finalize_tx(batch, &outbox_items)
+            .await
     }
 
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
@@ -1275,6 +1707,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V42 makes the database authoritative for contributor invites.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&42_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V42__onboarding_invite_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&42_i32, &"onboarding_invite_grants"],
+                )
+                .await?;
+        }
         // V43 (not V42: that number is held by the unmerged
         // db-authoritative-invites branch) adds the contributor-withdrawal
         // tombstone and the trace_submissions.withdrawn_at column.
@@ -1295,6 +1748,78 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&43_i32, &"trace_withdrawal"],
+                )
+                .await?;
+        }
+        // V44 widens the trace_sessions.client_kind CHECK to admit 'native',
+        // the client_kind of a loopback native-app session token.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&44_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V44__native_session_client_kind.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&44_i32, &"native_session_client_kind"],
+                )
+                .await?;
+        }
+        // V45 retrofits V36's table-wide SELECT grants to the V38
+        // column-scoped convention. Safe to apply after V36+; the USING(true)
+        // policies stay.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&45_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V45__trace_gate_driver_column_grants.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&45_i32, &"trace_gate_driver_column_grants"],
+                )
+                .await?;
+        }
+        // V46 evicts withdrawn contributors from published community
+        // snapshots.
+        //
+        // Renumbered from V42 on merge: V42 is held by the unmerged
+        // db-authoritative-invites branch, V43/V44 landed on main while this
+        // branch was open, and V45 is taken by the gate-driver column-grants
+        // branch.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&46_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V46__community_snapshot_withdrawal_eviction.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&46_i32, &"community_snapshot_withdrawal_eviction"],
                 )
                 .await?;
         }
@@ -1508,21 +2033,157 @@ impl Database for PgBackend {
         &self,
         tenant_id: &str,
         principal_ref: &str,
-    ) -> Result<bool, DatabaseError> {
+        window_label: &str,
+        metric: &str,
+    ) -> Result<Option<crate::db::CommunityWithdrawalEvictionRow>, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let affected = tx
-            .execute(
-                "UPDATE trace_contributor_profiles
-                    SET withdrawn_at = NOW(), last_updated_at = NOW()
-                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL",
+        let profile = tx
+            .query_opt(
+                "SELECT display_handle, handle_normalized
+                   FROM trace_contributor_profiles
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL
+                  FOR UPDATE",
                 &[&tenant_id, &principal_ref],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let Some(profile) = profile else {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let display_handle: String = profile.get("display_handle");
+        let handle_normalized: String = profile.get("handle_normalized");
+        let withdrawn = tx
+            .query_one(
+                "UPDATE trace_contributor_profiles
+                    SET withdrawn_at = NOW(), last_updated_at = NOW()
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL
+              RETURNING withdrawn_at",
+                &[&tenant_id, &principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let withdrawn_at: chrono::DateTime<chrono::Utc> = withdrawn.get("withdrawn_at");
+        // Coalesce by (window, metric): N withdrawals in a window share one
+        // rebuild. Keep the latest pending_requested_at so a snapshot that
+        // finished before the newest withdrawal stays refused.
+        let invalidation = tx
+            .query_one(
+                "INSERT INTO trace_community_snapshot_invalidations (
+                    window_label, metric, pending_requested_at, pending_withdrawal_count
+                 ) VALUES ($1, $2, $3, 1)
+                 ON CONFLICT (window_label, metric) DO UPDATE SET
+                    pending_requested_at = EXCLUDED.pending_requested_at,
+                    pending_withdrawal_count = CASE
+                        WHEN trace_community_snapshot_invalidations.pending_requested_at IS NULL
+                            THEN 1
+                        ELSE trace_community_snapshot_invalidations.pending_withdrawal_count + 1
+                    END
+                 RETURNING pending_requested_at",
+                &[&window_label, &metric, &withdrawn_at],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let invalidation_requested_at: chrono::DateTime<chrono::Utc> =
+            invalidation.get("pending_requested_at");
+        let eviction_id = uuid::Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_community_withdrawal_evictions (
+                eviction_id, tenant_id, principal_ref, display_handle, handle_normalized,
+                withdrawn_at, invalidation_requested_at, window_label, metric
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &eviction_id,
+                &tenant_id,
+                &principal_ref,
+                &display_handle,
+                &handle_normalized,
+                &withdrawn_at,
+                &invalidation_requested_at,
+                &window_label,
+                &metric,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(affected > 0)
+        Ok(Some(crate::db::CommunityWithdrawalEvictionRow {
+            eviction_id,
+            tenant_id: tenant_id.to_string(),
+            principal_ref: principal_ref.to_string(),
+            display_handle: Some(display_handle),
+            handle_normalized: Some(handle_normalized),
+            withdrawn_at,
+            invalidation_requested_at,
+            window_label: window_label.to_string(),
+            metric: metric.to_string(),
+        }))
+    }
+
+    async fn pending_community_snapshot_invalidation(
+        &self,
+        window_label: &str,
+        metric: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_opt(
+                "SELECT pending_requested_at
+                   FROM trace_community_snapshot_invalidations
+                  WHERE window_label = $1 AND metric = $2
+                    AND pending_requested_at IS NOT NULL",
+                &[&window_label, &metric],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| row.get("pending_requested_at")))
+    }
+
+    async fn drain_community_snapshot_invalidation(
+        &self,
+        window_label: &str,
+        metric: &str,
+        snapshot_id: uuid::Uuid,
+        snapshot_computed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let drained = tx
+            .execute(
+                "UPDATE trace_community_snapshot_invalidations
+                    SET pending_requested_at = NULL,
+                        pending_withdrawal_count = 0,
+                        last_drained_at = $3,
+                        last_drained_snapshot_id = $4
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND pending_requested_at IS NOT NULL
+                    AND pending_requested_at <= $3",
+                &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if drained > 0 {
+            tx.execute(
+                "UPDATE trace_community_withdrawal_evictions
+                    SET drained_at = $3,
+                        drained_snapshot_id = $4
+                  WHERE window_label = $1
+                    AND metric = $2
+                    AND drained_at IS NULL
+                    AND invalidation_requested_at <= $3",
+                &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(drained > 0)
     }
 
     async fn append_contributor_profile_audit(
@@ -1936,6 +2597,12 @@ impl Database for PgBackend {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        let resolved_allowed_consent_scopes = resolve_onboarding_scope_override(
+            &device_key.allowed_consent_scopes,
+            &default_allowed_consent_scopes,
+        );
+        let resolved_allowed_uses =
+            resolve_onboarding_scope_override(&device_key.allowed_uses, &default_allowed_uses);
         self.ensure_trace_tenant(&device_key.tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
@@ -1960,8 +2627,8 @@ impl Database for PgBackend {
                     &tx,
                     &device_key.tenant_id,
                     &device_key.device_key_id,
-                    &default_allowed_consent_scopes,
-                    &default_allowed_uses,
+                    &resolved_allowed_consent_scopes,
+                    &resolved_allowed_uses,
                 )
                 .await?;
                 tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2035,8 +2702,8 @@ impl Database for PgBackend {
                         &tx,
                         &device_key.tenant_id,
                         &device_key.device_key_id,
-                        &default_allowed_consent_scopes,
-                        &default_allowed_uses,
+                        &resolved_allowed_consent_scopes,
+                        &resolved_allowed_uses,
                     )
                     .await?;
                     tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -2071,8 +2738,8 @@ impl Database for PgBackend {
             &tx,
             &device_key.tenant_id,
             &device_key.device_key_id,
-            &default_allowed_consent_scopes,
-            &default_allowed_uses,
+            &resolved_allowed_consent_scopes,
+            &resolved_allowed_uses,
         )
         .await?;
 
@@ -2942,6 +3609,58 @@ impl Database for PgBackend {
         Ok(())
     }
 
+    async fn issue_native_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: no ensure_trace_tenant, for the same reason as
+        // issue_passkey_session. The tenant here came from a login link a human
+        // just redeemed in a browser; the session insert is FK-bound to
+        // (tenant_id, account_id), so a bogus pair fails the insert rather than
+        // writing a tenant row.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // auth_credential_id is left NULL: a native session is authenticated by
+        // the browser login that approved it, not by a passkey or wallet key.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), now(), $5
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account_id),
+        );
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn issue_passkey_session(
         &self,
         tenant_id: &str,
@@ -3765,8 +4484,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's submissions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's submissions.
         let rows = client
             .query(
                 // DISTINCT: a submission can carry more than one active
@@ -3876,8 +4596,9 @@ impl Database for PgBackend {
             .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
         let client = pool.get().await.map_err(DatabaseError::from)?;
         // No tenant context is set on this connection: the trace_gate_driver
-        // role's permissive cross-tenant SELECT policies (migration V36) are
-        // what authorize this read across every tenant's decisions.
+        // role's permissive cross-tenant SELECT policies (migration V36) plus
+        // column-scoped grants (migration V42) authorize this read across
+        // every tenant's decisions.
         //
         // DISTINCT + `received_at` in the projection mirrors the sibling
         // `list_submissions_needing_gate_decision` query: `received_at` is a
@@ -4167,6 +4888,22 @@ fn normalize_provision_scope_values(value: &serde_json::Value, defaults: &[&str]
     normalized
 }
 
+/// Resolve the scopes to grant on `/v1/onboard`: an invite-supplied override
+/// when present and non-empty, otherwise the process-wide default. Empty is
+/// deliberately treated the same as absent -- invites imported from the file
+/// allowlist carry empty scope vectors (the file format never had a scopes
+/// column), and provisioning them with zero consent scopes would silently
+/// strip permissions the pilot already grants those invites.
+fn resolve_onboarding_scope_override(
+    override_scopes: &Option<Vec<String>>,
+    default: &[String],
+) -> Vec<String> {
+    match override_scopes {
+        Some(scopes) if !scopes.is_empty() => scopes.clone(),
+        _ => default.to_vec(),
+    }
+}
+
 async fn upsert_onboarding_device_tenant_access_grant(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
@@ -4327,6 +5064,32 @@ mod tests {
             normalize_provision_scope_values(&json!([1, "x"]), &d),
             d.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn onboarding_scope_override_wins_when_non_empty() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        let overridden =
+            resolve_onboarding_scope_override(&Some(vec!["model_training".to_string()]), &default);
+        assert_eq!(overridden, vec!["model_training".to_string()]);
+    }
+
+    #[test]
+    fn onboarding_scope_override_falls_back_on_empty_or_absent() {
+        let default = vec![
+            "debugging_evaluation".to_string(),
+            "public_attribution".to_string(),
+        ];
+        // Imported file invites carry `Some(vec![])`, not `None` -- both
+        // must resolve to the default, not to "grant nothing".
+        assert_eq!(
+            resolve_onboarding_scope_override(&Some(vec![]), &default),
+            default
+        );
+        assert_eq!(resolve_onboarding_scope_override(&None, &default), default);
     }
 
     #[test]

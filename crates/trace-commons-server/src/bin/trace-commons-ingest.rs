@@ -27,12 +27,19 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
-    ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
-    ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
-    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
-    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    ConsentScope, EmbeddingAnalysisMetadata, PrivacyFilterBackendTag, ProcessEvalRating,
+    ProcessEvaluationLabels, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
     rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
     retention_policy_for_trace, run_privacy_filter_canary,
+};
+use trace_commons_server::account_native_auth::{
+    IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
+    NATIVE_SESSION_CLIENT_KIND, NATIVE_SESSION_TTL_HOURS, PendingNativeAuth,
+    challenge_for_verifier, challenge_is_wellformed, is_native_token, native_token_parts,
+    native_token_value, secret_eq, validate_loopback_redirect_uri, verifier_is_wellformed,
 };
 use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
@@ -51,7 +58,8 @@ use trace_commons_server::account_passkey::{
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{
-    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
+    TraceCorpusRlsDiagnostics,
 };
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -180,7 +188,19 @@ use trace_commons_server::trace_score_attestation::{
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
-const MAX_INGEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Request-body ceiling. Derived from the shared envelope cap plus framing
+/// headroom (JSON wrapper, headers) so ingest always admits an envelope the
+/// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
+const MAX_INGEST_BODY_BYTES: usize =
+    trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Ingest must accept every envelope the contributor is willing to build.
+/// These were independent constants once and they drifted -- the client
+/// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
+/// client alone would only have moved the refusal to a 413. Compile-time, so
+/// the ordering cannot be broken by a later edit to either side.
+const _: () = assert!(
+    MAX_INGEST_BODY_BYTES >= trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES
+);
 const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
@@ -465,13 +485,13 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
     "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
 const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
 const TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS: &str =
     "TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS";
-const TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS: &str =
-    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -555,6 +575,7 @@ const TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS: &str =
     "TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS";
 const TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS: &str =
     "TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS";
+const TRACE_COMMONS_REQUIRE_PRIVACY_FILTER: &str = "TRACE_COMMONS_REQUIRE_PRIVACY_FILTER";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
@@ -1054,6 +1075,9 @@ SUBCOMMANDS:
     --generate-attestation-keypair    Print a fresh Ed25519 keypair and kid for
                                       score attestations, as env-var
                                       assignments. Requires no configuration.
+    -V, --version                     Print the version, the commit this binary
+                                      was built from, and the build time. The
+                                      same identity is on GET /health.
     -h, --help                        Print this help text
 ";
 
@@ -1067,6 +1091,16 @@ async fn main() -> anyhow::Result<()> {
         Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
         Some("-h") | Some("--help") => {
             print!("{INGEST_HELP_TEXT}");
+            return Ok(());
+        }
+        Some("-V") | Some("--version") => {
+            println!(
+                "{}",
+                trace_commons_build_info::identity(
+                    env!("CARGO_BIN_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
             return Ok(());
         }
         Some(other) => {
@@ -1128,6 +1162,10 @@ async fn main() -> anyhow::Result<()> {
         state.revocation_propagation_scheduler.as_ref(),
     )
     .await?;
+    validate_community_snapshot_invalidation_scheduler_config(
+        state.as_ref(),
+        state.community_snapshot_invalidation_scheduler.as_ref(),
+    )?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     // Say it out loud at boot. Publishing aggregates without a mechanism is
     // a deliberate choice, and an operator reading the log should not have to
@@ -1171,6 +1209,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_revocation_propagation_scheduler_task(
         &state,
         state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
     );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
@@ -1293,6 +1335,10 @@ struct AppState {
     credit_settlement_scheduler: Option<TraceCreditSettlementSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
+    /// When the community surface is enabled, drain coalesced withdrawal
+    /// invalidations by recomputing the published snapshot on this interval.
+    community_snapshot_invalidation_scheduler:
+        Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -1336,6 +1382,17 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Loopback native-app sign-in: pending authorization requests, keyed by
+    /// `request_id`, holding only the PKCE challenge and the validated loopback
+    /// redirect. Single-use and TTL-bounded, same in-process store and same
+    /// single-instance limitation as `account_ceremony_store`. Deliberately
+    /// carries no account/tenant: starting a flow is unauthenticated and confers
+    /// nothing.
+    account_native_requests: Arc<CeremonyStore<PendingNativeAuth>>,
+    /// Loopback native-app sign-in: issued one-time authorization codes, keyed
+    /// by the raw code's sha256. Single-use and TTL-bounded; the first
+    /// successful `take` removes the entry, so a replayed code finds nothing.
+    account_native_codes: Arc<CeremonyStore<IssuedNativeCode>>,
     /// Slice 3a login-with-NEAR: the NEAR sign-in config, present only when
     /// `NearConfig` is fully configured. `None` makes the NEAR sign-in surface
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
@@ -1630,6 +1687,15 @@ struct TraceRevocationPropagationSchedulerConfig {
     limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+/// In-process drain for community-snapshot invalidations enqueued by
+/// withdrawal. No worker token: the tick calls `recompute_community_snapshot`
+/// directly (the same function the admin handler uses), so contributor
+/// traffic never reaches a full rebuild.
+#[derive(Clone)]
+struct TraceCommunitySnapshotInvalidationSchedulerConfig {
+    interval: StdDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2529,7 +2595,11 @@ impl TraceEncryptedObjectStoreKind {
 struct TenantAuth {
     tenant_id: String,
     role: TokenRole,
+    /// Canonical method-bound principal (#209). Written on new submissions.
     principal_ref: String,
+    /// Pre-#209 derivation for the same credential. Dual-read only — never
+    /// written to new submissions, grants, or allowlists after this change.
+    legacy_principal_ref: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     auth_method: TraceAuthMethod,
     signed_claim_issuer: Option<String>,
@@ -2537,6 +2607,24 @@ struct TenantAuth {
     signed_claim_subject: Option<String>,
     allowed_consent_scopes: BTreeSet<ConsentScope>,
     allowed_uses: BTreeSet<TraceAllowedUse>,
+}
+
+impl TenantAuth {
+    /// Canonical ref plus optional pre-#209 alias for the same credential.
+    fn principal_aliases(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.principal_ref.as_str()).chain(self.legacy_principal_ref.as_deref())
+    }
+
+    fn matches_stored_principal(&self, stored_principal_ref: &str) -> bool {
+        self.principal_aliases()
+            .any(|principal_ref| principal_ref == stored_principal_ref)
+    }
+
+    fn matches_any_allowlisted_principal(&self, allowlist: &BTreeSet<String>) -> bool {
+        allowlist
+            .iter()
+            .any(|allowed| self.matches_stored_principal(allowed))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2658,6 +2746,55 @@ impl TraceAuthMethod {
             Self::SignedClaim => "signed_claim",
         }
     }
+}
+
+/// Length-prefixed method+material binding so StaticToken and SignedClaim cannot
+/// share a principal namespace (#209). Mirrors the injectivity approach used by
+/// `submit_principal_rate_limit_key`.
+fn method_bound_principal_material(method: TraceAuthMethod, identity_material: &str) -> String {
+    let method_name = method.storage_name();
+    format!(
+        "{}:{}:{}:{}",
+        method_name.len(),
+        method_name,
+        identity_material.len(),
+        identity_material
+    )
+}
+
+fn method_bound_principal_ref(method: TraceAuthMethod, identity_material: &str) -> String {
+    principal_storage_ref(&method_bound_principal_material(method, identity_material))
+}
+
+fn static_token_principal_refs(token: &str) -> (String, String) {
+    (
+        method_bound_principal_ref(TraceAuthMethod::StaticToken, token),
+        principal_storage_ref(token),
+    )
+}
+
+fn signed_claim_identity_material(tenant_id: &str, actor_ref: &str) -> String {
+    format!("signed:{tenant_id}:{actor_ref}")
+}
+
+fn signed_claim_principal_refs(tenant_id: &str, actor_ref: &str) -> (String, String) {
+    let identity_material = signed_claim_identity_material(tenant_id, actor_ref);
+    (
+        method_bound_principal_ref(TraceAuthMethod::SignedClaim, &identity_material),
+        principal_storage_ref(&identity_material),
+    )
+}
+
+/// The method-bound ref alone, without its legacy alias.
+///
+/// Only the test module calls this -- production paths need both halves and
+/// use `static_token_principal_refs` directly. It is `cfg(test)` rather than
+/// deleted because `cargo check --bins` does not compile tests, so without
+/// the gate it reads as dead code under `-D warnings` while 201 call sites in
+/// the extracted test module depend on it.
+#[cfg(test)]
+fn static_token_principal_ref(token: &str) -> String {
+    static_token_principal_refs(token).0
 }
 
 type SharedTraceCommonsSignedTokenVerifier = Arc<RwLock<TraceCommonsSignedTokenVerifier>>;
@@ -3082,6 +3219,19 @@ impl AppState {
                 db_tenant_policy_reads,
             },
         )?;
+        // Resolve and announce the privacy-filter backend at boot. The label
+        // is the only operational signal that prose-PII filtering is live:
+        // nothing else distinguishes a filter that ran from one that was never
+        // configured.
+        let privacy_filter_backend = resolve_privacy_filter_backend()?;
+        validate_privacy_filter_config(
+            env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER),
+            privacy_filter_backend,
+        )?;
+        tracing::info!(
+            privacy_filter_backend = privacy_filter_backend.label(),
+            "Trace Commons privacy filter backend resolved"
+        );
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
@@ -3330,6 +3480,9 @@ impl AppState {
             parse_trace_process_evaluation_scheduler_config_from_env()?;
         let revocation_propagation_scheduler =
             parse_trace_revocation_propagation_scheduler_config_from_env()?;
+        let community_leaderboard_enabled = env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED);
+        let community_snapshot_invalidation_scheduler =
+            parse_community_snapshot_invalidation_scheduler_config(community_leaderboard_enabled)?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -3482,6 +3635,8 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
+        let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
         // Score attestations: `from_env` fails startup on a partial
         // configuration (a signing key with no matching public key/kid is an
@@ -3519,7 +3674,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
-            community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            community_leaderboard_enabled,
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             community_analytics_publication_basis:
                 parse_community_analytics_publication_basis_from_env()?,
@@ -3592,6 +3747,7 @@ impl AppState {
             credit_settlement_scheduler,
             process_evaluation_scheduler,
             revocation_propagation_scheduler,
+            community_snapshot_invalidation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3614,6 +3770,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_native_requests,
+            account_native_codes,
             account_near_config,
             attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -6286,6 +6444,25 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
     }))
 }
 
+/// When the community surface is enabled, schedule coalesced withdrawal
+/// invalidation drains on the published snapshot interval (default 900s).
+fn parse_community_snapshot_invalidation_scheduler_config(
+    community_leaderboard_enabled: bool,
+) -> anyhow::Result<Option<TraceCommunitySnapshotInvalidationSchedulerConfig>> {
+    if !community_leaderboard_enabled {
+        return Ok(None);
+    }
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_COMMUNITY_LEADERBOARD_SNAPSHOT_INTERVAL_SECONDS,
+        900,
+        30,
+        86_400,
+    )?;
+    Ok(Some(TraceCommunitySnapshotInvalidationSchedulerConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+    }))
+}
+
 fn parse_trace_allowed_use_env(name: &'static str, value: &str) -> anyhow::Result<TraceAllowedUse> {
     serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
         .with_context(|| format!("{name} must be a valid trace allowed use"))
@@ -6844,6 +7021,18 @@ fn app(state: Arc<AppState>) -> Router {
         //  - The redeem + passkey-login flows are the credential themselves (the
         //    single-use code / the WebAuthn assertion).
         .route("/v1/account/login-links", post(mint_login_link_handler))
+        // Loopback native-app sign-in. BOTH endpoints are unauthenticated by
+        // necessity, and neither confers anything on its own:
+        //  - `native/authorize` only parks a PKCE challenge and a validated
+        //    loopback redirect. No account, no tenant, no credential.
+        //  - `native/token` cannot require a session: it CREATES one. Its
+        //    credentials are the one-time code (minted only by a human
+        //    completing the browser redeem) plus the PKCE verifier.
+        .route(
+            "/v1/account/native/authorize",
+            post(native_authorize_start_handler),
+        )
+        .route("/v1/account/native/token", post(native_token_handler))
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -9144,6 +9333,84 @@ fn spawn_trace_revocation_propagation_scheduler_task(
     });
 }
 
+fn validate_community_snapshot_invalidation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(_) = config else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        state.community_leaderboard_enabled,
+        "community snapshot invalidation scheduler requires {TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED}"
+    );
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "community snapshot invalidation scheduler requires the DB mirror"
+    );
+    Ok(())
+}
+
+fn spawn_community_snapshot_invalidation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCommunitySnapshotInvalidationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        "Trace Commons community snapshot invalidation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_community_snapshot_invalidation_scheduler_tick(state.as_ref()).await {
+                Ok(drained) => {
+                    if drained {
+                        tracing::info!(
+                            "Trace Commons community snapshot invalidation drain completed"
+                        );
+                    }
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons community snapshot invalidation drain failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn run_community_snapshot_invalidation_scheduler_tick(
+    state: &AppState,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community snapshot invalidation drain requires the DB mirror",
+        )
+    })?;
+    let pending = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if pending.is_none() {
+        return Ok(false);
+    }
+    // Recompute is admin-authored in code but scheduler-triggered; contributors
+    // only enqueue the coalesced invalidation watermark.
+    let row = recompute_community_snapshot(state).await?;
+    Ok(row.snapshot_id != uuid::Uuid::nil())
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -9595,10 +9862,13 @@ fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResu
         .filter(|subject| !subject.is_empty())
         .map(ToOwned::to_owned);
 
+    let (principal_ref, legacy_principal_ref) = signed_claim_principal_refs(tenant_id, actor_ref);
+
     Ok(TenantAuth {
         tenant_id: tenant_id.to_string(),
         role,
-        principal_ref: principal_storage_ref(&format!("signed:{tenant_id}:{actor_ref}")),
+        principal_ref,
+        legacy_principal_ref: Some(legacy_principal_ref),
         expires_at: None,
         auth_method: TraceAuthMethod::SignedClaim,
         signed_claim_issuer,
@@ -9870,6 +10140,38 @@ fn parse_credit_settlement_issuer_approval_max_age(
     } else {
         Ok(Some(Duration::hours(hours)))
     }
+}
+
+/// Resolve the configured privacy-filter backend once, at boot.
+///
+/// The adapter is otherwise built per submission, so a backend named without
+/// its credentials surfaces as a failed submission rather than a failed
+/// start. Resolving here turns that into a boot refusal.
+fn resolve_privacy_filter_backend() -> anyhow::Result<PrivacyFilterBackendTag> {
+    privacy_filter_backend_from_env()
+        .map_err(|err| anyhow::anyhow!("privacy filter backend is configured but unusable: {err}"))
+}
+
+/// Refuse to start when a deployment requires prose-PII filtering and no
+/// backend is configured.
+///
+/// An unset backend resolves to "no filter" with no error, the redactor built
+/// from it performs deterministic redaction only, and a runtime filter failure
+/// falls back to the unfiltered text. A deployment can therefore run with no
+/// prose-PII filtering while every external signal looks healthy — the service
+/// is active, the journal is clean, submissions succeed. Opt-in so existing
+/// deployments keep their current boot behaviour.
+fn validate_privacy_filter_config(
+    require_privacy_filter: bool,
+    backend: PrivacyFilterBackendTag,
+) -> anyhow::Result<()> {
+    if require_privacy_filter && backend == PrivacyFilterBackendTag::None {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_PRIVACY_FILTER} is set but no privacy filter backend is \
+             configured (missing control: privacy_filter_backend)"
+        );
+    }
+    Ok(())
 }
 
 fn validate_credit_settlement_issuer_approval_freshness_config(
@@ -10356,12 +10658,14 @@ fn insert_token_with_expiry(
             "duplicate Trace Commons tenant token configured for multiple tenants or roles"
         );
     }
+    let (principal_ref, legacy_principal_ref) = static_token_principal_refs(token);
     tokens.insert(
         token.to_string(),
         TenantAuth {
             tenant_id: tenant_id.to_string(),
             role,
-            principal_ref: principal_storage_ref(token),
+            principal_ref,
+            legacy_principal_ref: Some(legacy_principal_ref),
             expires_at,
             auth_method: TraceAuthMethod::StaticToken,
             signed_claim_issuer: None,
@@ -10378,12 +10682,24 @@ fn insert_token_with_expiry(
 struct HealthResponse {
     status: &'static str,
     schema_version: &'static str,
+    /// The commit this binary was built from, or `unknown`. Additive: it makes
+    /// "what is deployed here?" a curl rather than an SSH session and a file
+    /// mtime, which is what it took the day this was added.
+    build_commit: &'static str,
+    /// When this binary was built, ISO-8601 in UTC.
+    build_time: &'static str,
+    /// The crate version. Reported alongside the commit, never instead of it:
+    /// it does not move when a deploy does.
+    build_version: &'static str,
 }
 
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
+        build_commit: trace_commons_build_info::COMMIT,
+        build_time: trace_commons_build_info::BUILD_TIME,
+        build_version: env!("CARGO_PKG_VERSION"),
     })
 }
 
@@ -10751,6 +11067,9 @@ struct TraceCommonsConfigStatusResponse {
     revocation_propagation_scheduler_interval_seconds: Option<u64>,
     revocation_propagation_scheduler_limit: Option<u32>,
     revocation_propagation_scheduler_dry_run: Option<bool>,
+    community_snapshot_invalidation_scheduler_configured: bool,
+    community_snapshot_invalidation_scheduler_interval_seconds: Option<u64>,
+    community_snapshot_max_age_seconds: u64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -11268,6 +11587,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .revocation_propagation_scheduler
             .as_ref()
             .map(|config| config.dry_run),
+        community_snapshot_invalidation_scheduler_configured: state
+            .community_snapshot_invalidation_scheduler
+            .is_some(),
+        community_snapshot_invalidation_scheduler_interval_seconds: state
+            .community_snapshot_invalidation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        community_snapshot_max_age_seconds: COMMUNITY_SNAPSHOT_MAX_AGE.num_seconds() as u64,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -12229,6 +12556,20 @@ async fn revoke_submission(
             "revocation",
         )?;
     }
+    // Fail closed before anything is mutated. Revocation must leave the trace
+    // body unreachable, so a record that carries an encrypted artifact receipt
+    // can only be revoked on a deployment that can reach the store holding that
+    // ciphertext. Refusing here is preferable to tombstoning the record and
+    // silently leaving the payload in a store this process cannot delete from.
+    if let Some(record) = record.as_ref()
+        && record.artifact_receipt.is_some()
+        && state.artifact_store.is_none()
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation refused: missing control trace_artifact_store_unconfigured",
+        ));
+    }
     let revocation_reason =
         trace_revocation_reason_for_request(tenant.auth(), owner_self_revocation, reason)?;
     let mut derived = tenant
@@ -12248,9 +12589,17 @@ async fn revoke_submission(
             .map(|record| record.canonical_summary_hash.clone()),
     };
 
+    // Revocation flips status only. `credit_points_final` is deliberately left
+    // as-is: withdrawing a trace is a contributor's right, not an offence, and
+    // zeroing the awarded figure made the receipt read like a penalty. Nothing
+    // selects for settlement by this value -- `run_credit_settlement` gates on
+    // `status == Accepted` plus `!record.is_terminal()`, and the tenant credit
+    // summary only sums `credit_points_final` for Accepted records -- so the
+    // field is a display value here, not a control. Credit that has already
+    // settled is likewise left alone: revocation removes the trace from the
+    // commons and deletes its content, it does not reach back onto the chain.
     let mirrored_record = record.take().map(|mut record| {
         record.status = TraceCorpusStatus::Revoked;
-        record.credit_points_final = Some(0.0);
         record
     });
     let revoked_derived = derived.take().map(|mut derived| {
@@ -12363,6 +12712,18 @@ async fn revoke_submission(
         }
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+
+    // Revoked means the content is gone, not merely relabelled. This runs last,
+    // after every hash-only tombstone, mirror, and invalidation has been written
+    // from the still-readable record -- `redaction_hash_for_record` reads the
+    // stored envelope, so deleting earlier would strip the tombstone of the very
+    // hashes it exists to carry. Errors propagate: a store that refuses deletion
+    // (a disabled remote object store returns an error) fails the request rather
+    // than leaving the payload behind under a revoked label. Deleting an object
+    // that is already gone is a no-op, so re-revoking is idempotent.
+    if let Some(record) = mirrored_record.as_ref() {
+        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -12516,6 +12877,11 @@ const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
 /// all. It is a placeholder, not a mechanism identifier: snapshots
 /// carrying it are refused on both the recompute and the serve path.
 const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+/// Published withdrawal bound for community snapshots. Matches the
+/// design/docs ≤15-minute removal promise: serve refuses a snapshot
+/// older than this, converting a silent privacy failure into an
+/// availability failure when the drain queue is wedged.
+const COMMUNITY_SNAPSHOT_MAX_AGE: Duration = Duration::seconds(900);
 
 /// Minimum aggregate cell size enforced before any community aggregate
 /// is published. A cell of size one is the contributor.
@@ -12713,6 +13079,22 @@ fn community_snapshot_missing_controls(
         cohort_size,
         community_noise_mechanism_approved(&row.noise_seed_hash),
     )
+}
+
+/// Freshness / invalidation refusal reasons for a published community
+/// snapshot. Label-only: safe for error bodies and audit rows.
+fn community_snapshot_freshness_failure(
+    computed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    pending_invalidation_at: Option<DateTime<Utc>>,
+) -> Option<&'static str> {
+    if now.signed_duration_since(computed_at) > COMMUNITY_SNAPSHOT_MAX_AGE {
+        return Some("snapshot_exceeds_published_bound");
+    }
+    if pending_invalidation_at.is_some_and(|pending| computed_at < pending) {
+        return Some("snapshot_invalidated_by_withdrawal");
+    }
+    None
 }
 
 /// Privacy provenance recorded on every snapshot, so a published
@@ -12972,9 +13354,23 @@ async fn recompute_community_snapshot(
         min_cell_count: state.analytics_min_cell_count as i32,
         noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
     };
-    db.insert_leaderboard_snapshot(write)
+    let row = db
+        .insert_leaderboard_snapshot(write)
         .await
-        .map_err(internal_error)
+        .map_err(internal_error)?;
+    // A successful recompute is the drain path for coalesced withdrawal
+    // invalidations. Concurrent withdrawals that requested after this
+    // snapshot's computed_at leave the pending watermark set.
+    let _ = db
+        .drain_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+            row.snapshot_id,
+            row.computed_at,
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(row)
 }
 
 /// Fetch the latest snapshot for the public read handlers and refuse to
@@ -13025,6 +13421,21 @@ async fn latest_publishable_community_snapshot(
                 "community snapshot is withheld by missing privacy controls: {}",
                 missing_controls.join(", ")
             ),
+        ));
+    }
+    let pending_invalidation = db
+        .pending_community_snapshot_invalidation(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?;
+    if let Some(reason) =
+        community_snapshot_freshness_failure(snapshot.computed_at, Utc::now(), pending_invalidation)
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("community snapshot is withheld: {reason}"),
         ));
     }
     Ok(snapshot)
@@ -13216,27 +13627,32 @@ async fn delete_community_profile_handler(
     let db = community_profile_db(state.as_ref())?;
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     enforce_public_attribution_scope(&tenant)?;
-    let withdrew = db
-        .withdraw_contributor_profile(tenant.tenant_id(), &tenant.auth().principal_ref)
+    let eviction = db
+        .withdraw_contributor_profile(
+            tenant.tenant_id(),
+            &tenant.auth().principal_ref,
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
         .await
         .map_err(internal_error)?;
     db.append_contributor_profile_audit(
         tenant.tenant_id(),
         &tenant.auth().principal_ref,
         "withdraw",
-        None,
+        eviction
+            .as_ref()
+            .and_then(|row| row.handle_normalized.as_deref()),
         Some("public_attribution"),
     )
     .await
     .map_err(internal_error)?;
-    if withdrew {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        // Idempotent: nothing to withdraw means the caller's view is
-        // already "not public." 204 keeps the API simple and
-        // matches the spec's "withdrawal is idempotent" property.
-        Ok(StatusCode::NO_CONTENT)
-    }
+    // Idempotent: nothing to withdraw means the caller's view is
+    // already "not public." 204 keeps the API simple and
+    // matches the spec's "withdrawal is idempotent" property.
+    // A successful withdrawal enqueued a coalesced snapshot invalidation
+    // in the same DB transaction as withdrawn_at + the eviction receipt.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn credit_handler(
@@ -13616,17 +14032,40 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_cookie_value) =
+    let (ctx, rotated_secret_value) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
             Err(err) => return err.into_response(),
         };
 
+    // A native token rotates exactly like a cookie session, but a native client
+    // has no cookie jar. Hand the new token back in a response header — the
+    // bearer analogue of `Set-Cookie`, on the same channel, to the same
+    // already-authenticated caller — and return early so no `Set-Cookie` is
+    // ever emitted for a native client.
+    let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
+    if native_rotation {
+        request.extensions_mut().insert(ctx);
+        let mut response = next.run(request).await;
+        if let Some(token) = rotated_secret_value {
+            if let Ok(value) = HeaderValue::from_str(&token) {
+                response
+                    .headers_mut()
+                    .insert(ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, value);
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+            }
+        }
+        return response;
+    }
+
     request.extensions_mut().insert(ctx);
     let mut response = next.run(request).await;
 
-    if let Some(cookie_value) = rotated_cookie_value {
+    if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -13678,63 +14117,115 @@ async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
 ) -> ApiResult<(AccountCtx, Option<String>)> {
-    let has_bearer = headers
+    let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim_start().starts_with("Bearer "))
-        .unwrap_or(false);
+        .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+        .map(str::trim);
     let cookie = cookie_value_from_headers(headers, ACCOUNT_SESSION_COOKIE);
 
-    match (has_bearer, cookie) {
-        (true, Some(_)) => Err(api_error(
+    match (bearer, cookie) {
+        (Some(_), Some(_)) => Err(api_error(
             StatusCode::BAD_REQUEST,
             "ambiguous credentials: present both a session cookie and a bearer token",
         )),
-        (true, None) => resolve_account_ctx_bearer(state, headers)
-            .await
-            .map(|ctx| (ctx, None)),
-        (false, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
-        (false, None) => Err(api_error(
+        // A `tcn1_`-prefixed bearer is a NATIVE ACCOUNT SESSION, not a device
+        // upload claim. The prefix is the whole dispatch: a device claim never
+        // carries it, so the two credential kinds cannot be confused in either
+        // direction, and a native token is never fed to the device authenticator.
+        (Some(bearer), None) if is_native_token(bearer) => {
+            resolve_account_ctx_native(state, bearer).await
+        }
+        // A device upload claim is NOT an account credential.
+        //
+        // This arm used to resolve one to a full `AccountCtx`, which meant a
+        // device key reached every `/v1/account/*` route -- withdrawal and
+        // account history included. A device key is provisioned to upload; a
+        // stolen one should not also be able to withdraw a contributor's
+        // traces or read their history, and the loopback native-session flow
+        // exists precisely so a native client never needs that authority.
+        //
+        // Nothing depends on the old behaviour: the contributor client
+        // authenticates these routes with a `tcn1_` native session, and no
+        // other caller in the tree sends a device bearer here.
+        (Some(_), None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
-            "account session cookie or device bearer token required",
+            "account session required: a device upload claim is not an account credential",
+        )),
+        (None, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
+        (None, None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session cookie or native session token required",
         )),
     }
 }
 
-/// Bearer path: device token → linked account → active-membership set.
-async fn resolve_account_ctx_bearer(
+/// Native-token path: the SAME session validation as the cookie path, reached
+/// through an `Authorization: Bearer tcn1_...` header instead of a cookie.
+///
+/// Everything that governs a browser session governs this one, because it IS a
+/// browser-session row: expiry, the idle cap, revocation (`revoke-all` sets
+/// `revoked_at`, and `validate_session` refuses a revoked row), and
+/// rotation-on-use. The only differences are the transport and the resulting
+/// `auth_method`.
+///
+/// The session's own `client_kind` is NOT propagated into `AccountCtx`: a native
+/// token is pinned WEAK (`'native'`) for the strong-authenticator gate no matter
+/// what browser session approved it, so it can read and withdraw but can never
+/// change authenticators or redirect a payout.
+async fn resolve_account_ctx_native(
     state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountCtx> {
-    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
-    let db = account_db(state)?;
-    let tenant_id = tenant.tenant_id().to_string();
-    let principal_ref = tenant.principal_ref().to_string();
+    bearer: &str,
+) -> ApiResult<(AccountCtx, Option<String>)> {
+    let invalid = || {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired account session",
+        )
+    };
 
-    let account_id = db
-        .resolve_account_for_principal(&tenant_id, &principal_ref)
+    let (tenant_id, token_hash) = native_token_parts(bearer).ok_or_else(invalid)?;
+
+    let db = account_db(state)?;
+    let session = db
+        .validate_session(&tenant_id, &token_hash)
         .await
         .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
+        .ok_or_else(invalid)?;
+    // A session row that is not a native session must NOT be reachable through
+    // this transport: that would mean a browser cookie's secret had been
+    // presented as a bearer, which is exactly the "make the browser session
+    // reachable by a native client" property this design forbids.
+    if session.client_kind != NATIVE_SESSION_CLIENT_KIND {
+        return Err(invalid());
+    }
+    let account_id = session.account_id;
     let account = AccountId::from_uuid(account_id);
     let principal_set = db
         .expand_account_principals(&tenant_id, account_id)
         .await
         .map_err(internal_error)?;
 
-    Ok(AccountCtx {
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::DeviceBearer,
-        tenant_id,
-        actor_ref: principal_ref,
-        // The bearer path is a device token, not a passkey assertion: there is no
-        // authenticating credential to flag as `this_device`.
-        auth_credential_id: None,
-        // A device bearer is NOT a strong authenticator for the authenticator-change
-        // gate: mark it weak so it is gated like a device-link cookie session.
-        client_kind: "device".to_string(),
-    })
+    // Rotation-on-use fires for native sessions exactly as for cookies. The
+    // middleware hands the new secret back in a response header (the bearer
+    // analogue of `Set-Cookie`) so the client can swap before the short
+    // prev-token grace lapses.
+    let rotated = session
+        .rotated_secret
+        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+
+    Ok((
+        AccountCtx {
+            account_id: account,
+            principal_set,
+            auth_method: AccountAuthMethod::NativeToken,
+            tenant_id,
+            actor_ref: account_actor_ref(&account),
+            auth_credential_id: None,
+            client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+        },
+        rotated,
+    ))
 }
 
 /// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
@@ -13810,7 +14301,20 @@ const ACCOUNT_TRACES_MAX_LIMIT: usize = 200;
 /// is buffered and decrypted in memory before this check, so a body above the
 /// ceiling cannot be returned at all — it collapses to a single generic error
 /// that carries no size signal (no partial/streamed response is ever emitted).
-const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+///
+/// Derived from the shared envelope cap with headroom, so a trace that was
+/// accepted at submission can always be read back by the contributor who
+/// submitted it; a fixed ceiling below that cap would strand large traces.
+const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize =
+    trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Read-back must be able to return what submission accepted: a stored
+/// envelope above this ceiling collapses to a generic error, which would
+/// leave a large trace accepted but permanently unreadable by the
+/// contributor who submitted it.
+const _: () = assert!(
+    ACCOUNT_TRACE_CONTENT_MAX_BYTES
+        >= trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES
+);
 
 /// Query string for `GET /v1/account/traces`. Keyset pagination only: no offset
 /// is accepted. `account_id` / `principal_ref` are NEVER client input — the
@@ -13843,6 +14347,7 @@ fn account_audit_tenant(ctx: &AccountCtx) -> TenantAuth {
         tenant_id: ctx.tenant_id.clone(),
         role: TokenRole::Contributor,
         principal_ref: ctx.actor_ref.clone(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -14603,6 +15108,325 @@ async fn mint_login_link_handler(
     }))
 }
 
+// --- Loopback native-app sign-in -------------------------------------------
+//
+// See `trace_commons_server::account_native_auth` for the threat model. The
+// shape here is deliberately the standard authorization-code + PKCE dance,
+// grafted onto the EXISTING login-link redeem rather than built beside it:
+//
+//   1. app  -> POST /v1/account/native/authorize  (PKCE challenge + loopback
+//              redirect; unauthenticated, confers nothing)
+//   2. app  -> POST /v1/account/login-links       (existing device-authenticated
+//              mint, unchanged)
+//   3. human-> GET  /account/login?code=..&native=<request_id>
+//              POST /account/login/confirm        (existing redeem, unchanged
+//              except that it now also honours `native`)
+//   4. server 303s the BROWSER to http://127.0.0.1:<port>/...?code=<one-time>
+//   5. app  -> POST /v1/account/native/token      (code + PKCE verifier)
+//              -> short-lived `tcn1_` bearer backed by a trace_sessions row
+//
+// What the device key gains: nothing. Step 2 is an authority it already has,
+// and the session it can ultimately reach is the same account its bearer token
+// already resolves to through `resolve_account_ctx_bearer`. See the report in
+// docs/superpowers/plans/account-loopback-auth-report.md.
+
+/// Response header carrying a rotated native session token. The bearer
+/// analogue of `Set-Cookie`, emitted by `account_auth_middleware` on the one
+/// response where rotation fired, to the already-authenticated caller that
+/// presented the old token.
+const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
+
+/// Query/form field naming the pending native authorization request that the
+/// browser redeem should complete. Optional everywhere: a plain browser login
+/// never carries it.
+const NATIVE_REQUEST_FIELD: &str = "native";
+
+/// Per-IP cap on `POST /v1/account/native/authorize` per window. Starting a
+/// flow is cheap and confers nothing, but it does consume store space.
+const NATIVE_AUTHORIZE_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native authorize-starts per window.
+const NATIVE_AUTHORIZE_GLOBAL_LIMIT: u32 = 600;
+/// Per-IP cap on `POST /v1/account/native/token` per window.
+const NATIVE_TOKEN_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on native token exchanges per window.
+const NATIVE_TOKEN_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`code_hash` ceiling on exchange attempts per window. A code is
+/// single-use, so more than a couple of attempts against one code is a replay
+/// or a guess; this caps it independently of the source IP.
+const NATIVE_TOKEN_PER_CODE_LIMIT: u32 = 5;
+
+/// Request body for `POST /v1/account/native/authorize`.
+#[derive(Debug, Deserialize)]
+struct NativeAuthorizeStartRequest {
+    /// `base64url(sha256(code_verifier))`, unpadded.
+    code_challenge: String,
+    /// Must be `S256`. `plain` is refused: with `plain` the challenge IS the
+    /// verifier, so anyone who sees the start request can complete the flow.
+    code_challenge_method: String,
+    /// Must be exactly `http://127.0.0.1:{port}/trace-commons/native-auth/callback`.
+    redirect_uri: String,
+}
+
+/// Response for `POST /v1/account/native/authorize`. `request_id` is a
+/// 160-bit CSPRNG value; it is a flow handle, not a credential (holding it
+/// without the verifier gets you nothing).
+#[derive(Debug, Serialize)]
+struct NativeAuthorizeStartResponse {
+    request_id: String,
+    expires_in_secs: u64,
+}
+
+/// Request body for `POST /v1/account/native/token`.
+#[derive(Debug, Deserialize)]
+struct NativeTokenRequest {
+    request_id: String,
+    /// The one-time code delivered to the loopback listener.
+    code: String,
+    /// The PKCE verifier whose sha256 was registered at authorize-start.
+    code_verifier: String,
+}
+
+/// Response for `POST /v1/account/native/token`.
+///
+/// `access_token` is a SECRET. It is returned exactly once, is never persisted
+/// server-side in raw form (only `sha256` of its secret part reaches the
+/// database), and appears in no log line, error string, or audit row.
+#[derive(Debug, Serialize)]
+struct NativeTokenResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_in_secs: i64,
+    account_id: String,
+}
+
+/// The single uniform deny for the whole native flow.
+///
+/// Every failure mode — malformed body, bad redirect, unknown or expired or
+/// replayed code, wrong `request_id`, wrong verifier, rate limit, DB error —
+/// returns this identical response, so nothing about which of them occurred is
+/// observable. It carries no detail an attacker could use and no secret.
+fn native_generic_deny() -> axum::response::Response {
+    let mut response = (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "native sign-in could not be completed" })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `POST /v1/account/native/authorize` — park a PKCE challenge and a loopback
+/// redirect, and hand back the `request_id` that names them.
+///
+/// UNAUTHENTICATED, and safe to be: nothing is created but an entry in a
+/// short-TTL in-process map, bound to no account and no tenant. An attacker who
+/// floods this endpoint gets rate-limited and learns nothing.
+async fn native_authorize_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeAuthorizeStartRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-authorize-ip:{client_ip}"),
+        NATIVE_AUTHORIZE_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    if body.code_challenge_method != NATIVE_CODE_CHALLENGE_METHOD {
+        return native_generic_deny();
+    }
+    if !challenge_is_wellformed(&body.code_challenge) {
+        return native_generic_deny();
+    }
+    let Some(redirect) = validate_loopback_redirect_uri(&body.redirect_uri) else {
+        return native_generic_deny();
+    };
+
+    let request_id = generate_login_code();
+    state.account_native_requests.put(
+        request_id.clone(),
+        PendingNativeAuth {
+            code_challenge: body.code_challenge.clone(),
+            redirect,
+        },
+    );
+
+    let mut response = Json(NativeAuthorizeStartResponse {
+        request_id,
+        expires_in_secs: NATIVE_AUTH_REQUEST_TTL.as_secs(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Complete the native half of a browser redeem: mint the one-time code and
+/// return the absolute loopback `Location` the browser should be sent to.
+///
+/// Returns `None` when there is no live pending request under `request_id` (it
+/// expired, it was already completed, or it never existed). The caller then
+/// falls through to the ordinary post-login redirect: the human's browser login
+/// genuinely succeeded, so denying it would be wrong, and the native app simply
+/// times out waiting on its listener and reports a failed sign-in.
+fn issue_native_authorization_code(
+    state: &AppState,
+    request_id: &str,
+    tenant_id: &str,
+    account_id: uuid::Uuid,
+) -> Option<String> {
+    let pending = state.account_native_requests.take(request_id)?;
+    let code = generate_login_code();
+    // Keyed by the code's HASH so the store never holds the raw code.
+    state.account_native_codes.put(
+        hash_secret(&code),
+        IssuedNativeCode {
+            request_id: request_id.to_string(),
+            code_challenge: pending.code_challenge,
+            tenant_id: tenant_id.to_string(),
+            account_id,
+        },
+    );
+    // `code` and `request_id` are both unpadded base64url, so neither needs
+    // percent-encoding, and the redirect itself was validated to be an exact
+    // loopback URI with no query of its own.
+    Some(format!(
+        "{}?code={code}&request_id={request_id}",
+        pending.redirect.as_str()
+    ))
+}
+
+/// `POST /v1/account/native/token` — exchange a one-time code plus its PKCE
+/// verifier for a short-lived native session token.
+///
+/// UNAUTHENTICATED by necessity: this endpoint CREATES the session, so it
+/// cannot require one. Its credentials are the code (which only a human
+/// completing the browser redeem can cause to exist) and the verifier (which
+/// only the app that started the flow holds).
+async fn native_token_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    // Same fixed-latency floor as the login redeem, for the same reason: erase
+    // the found-vs-not-found (and rate-limited-vs-not) timing oracle across
+    // every branch below.
+    let start = std::time::Instant::now();
+    let response = native_token_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+async fn native_token_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NativeTokenRequest>, axum::extract::rejection::JsonRejection>,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-ip:{client_ip}"),
+        NATIVE_TOKEN_PER_IP_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+        return native_generic_deny();
+    }
+
+    let Ok(Json(body)) = body else {
+        return native_generic_deny();
+    };
+    // Reject a malformed verifier before it is hashed, so nothing outside RFC
+    // 7636's shape can ever participate in the binding.
+    if !verifier_is_wellformed(&body.code_verifier) {
+        return native_generic_deny();
+    }
+
+    let code_hash = hash_secret(&body.code);
+    // Per-code ceiling, IP-independent: caps replay/guessing against one
+    // specific code even from rotating sources. The key is a sha256, so the
+    // limiter holds no cleartext secret.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("native-token-code:{code_hash}"),
+        NATIVE_TOKEN_PER_CODE_LIMIT,
+    ) {
+        return native_generic_deny();
+    }
+
+    // SINGLE USE: `take` removes the entry, so a replay of this exact code
+    // finds nothing here regardless of whether the first attempt succeeded.
+    let Some(issued) = state.account_native_codes.take(&code_hash) else {
+        return native_generic_deny();
+    };
+    // The code must be presented against the flow it was minted for.
+    if !secret_eq(&issued.request_id, &body.request_id) {
+        return native_generic_deny();
+    }
+    // PKCE: the verifier must hash to the challenge registered BEFORE the
+    // browser step. This is the check that makes an intercepted code useless.
+    if !secret_eq(
+        &issued.code_challenge,
+        &challenge_for_verifier(&body.code_verifier),
+    ) {
+        return native_generic_deny();
+    }
+
+    let Ok(db) = account_db(state.as_ref()) else {
+        return native_generic_deny();
+    };
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS);
+    if db
+        .issue_native_session(
+            &issued.tenant_id,
+            issued.account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at,
+            },
+            trace_commons_server::db::RedeemAudit {
+                action: "account_native_session_issue".to_string(),
+                outcome: "success".to_string(),
+                metadata: serde_json::json!({ "client_kind": NATIVE_SESSION_CLIENT_KIND }),
+            },
+        )
+        .await
+        .is_err()
+    {
+        return native_generic_deny();
+    }
+
+    // The raw token is built here and returned once. It is never logged and
+    // never audited; only `token_hash` above reached the database.
+    let mut response = Json(NativeTokenResponse {
+        access_token: native_token_value(&issued.tenant_id, &secret),
+        token_type: "Bearer",
+        expires_in_secs: NATIVE_SESSION_TTL_HOURS * 3600,
+        account_id: issued.account_id.to_string(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// Body extractor for the confirm POST. Accepts both a browser form post
 /// (`application/x-www-form-urlencoded`, the default) and a JSON body. On ANY
 /// extraction failure it rejects with the uniform redeem deny so a malformed
@@ -14655,6 +15479,12 @@ const ACCOUNT_VIEW_PATH: &str = "/account";
 #[derive(Debug, Deserialize)]
 struct LoginInterstitialQuery {
     code: String,
+    /// Optional pending native-authorization request id. Present only when a
+    /// native application opened this link; carried through to the confirm POST
+    /// so one human action both signs the browser in and releases the app's
+    /// one-time code. A plain browser login never sets it.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 /// Body for `POST /account/login/confirm`. Accepts either a form post (browser
@@ -14662,6 +15492,16 @@ struct LoginInterstitialQuery {
 #[derive(Debug, Deserialize)]
 struct ConfirmLoginBody {
     code: String,
+    /// Proof that this confirmation came from a browser that actually rendered
+    /// the interstitial. See [`LOGIN_CEREMONY_COOKIE`].
+    #[serde(default)]
+    ceremony: Option<String>,
+    /// Optional pending native-authorization request id (see
+    /// [`LoginInterstitialQuery::native`]). When present and still live, a
+    /// successful redeem ALSO mints the app's one-time authorization code and
+    /// redirects to the registered loopback URI instead of the account view.
+    #[serde(default)]
+    native: Option<String>,
 }
 
 // --- Task 11: account-surface hardening (rate limit, timing floor) ----------
@@ -15014,6 +15854,53 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
 /// vary status or body by cause (timing uniformity is Task 11).
+/// Cookie carrying the login-ceremony nonce.
+///
+/// `GET /account/login` mints a nonce, sets it here, and embeds the SAME value
+/// in the form it renders. `POST /account/login/confirm` requires both and
+/// requires them to match.
+///
+/// This is a possession proof, not a header check. Header-based origin
+/// signals (`Origin`, `Sec-Fetch-Site`) are absent on a plain HTTP client, and
+/// `confirm_is_same_origin` treats "neither signal present" as same-origin
+/// because a browser without fetch metadata must still work. That is the right
+/// call for compatibility and the wrong one for proving a browser was
+/// involved: anything that can reach the endpoint can satisfy it by sending
+/// nothing. A cookie set by the interstitial response cannot be produced by a
+/// caller that never fetched the interstitial.
+///
+/// `confirm_is_same_origin` is deliberately kept as well. This does not
+/// replace it; it covers what it cannot.
+const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+
+/// How long a rendered interstitial stays confirmable. Long enough for a human
+/// to read the page and click, short enough that a leaked nonce is not a
+/// standing credential.
+const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
+
+/// A fresh, unguessable ceremony nonce.
+fn new_login_ceremony_nonce() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    // Same source as session secrets.
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Constant-time comparison, so a mismatched nonce cannot be recovered by
+/// timing the deny.
+fn ceremony_nonce_matches(cookie: &str, submitted: &str) -> bool {
+    if cookie.is_empty() || submitted.is_empty() || cookie.len() != submitted.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in cookie.bytes().zip(submitted.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn redeem_generic_deny() -> axum::response::Response {
     // Fixed status + body; no-store / no-referrer so nothing about the attempt
     // leaks via cache or Referer.
@@ -15064,6 +15951,17 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
     true
 }
 
+/// Escape a client-supplied string for use inside a double-quoted HTML
+/// attribute. Shared by every hidden field the interstitial renders so no field
+/// can be added later that forgets to escape.
+fn html_escape_attribute(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 /// `GET /account/login?code=...` — minimal "Activate" interstitial.
 ///
 /// Renders a self-contained HTML page with a form that POSTs the code to
@@ -15091,25 +15989,56 @@ async fn login_interstitial_handler(
     }
     // Minimal, self-contained HTML; the code rides in a hidden field. HTML-escape
     // it so a crafted code cannot break out of the attribute context.
-    let escaped_code = query
-        .code
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;");
+    let escaped_code = html_escape_attribute(&query.code);
+    // A native request id rides in a second hidden field, escaped identically.
+    // It is echoed back to the client that supplied it and is not otherwise
+    // trusted: the confirm handler looks it up in the pending-request store and
+    // ignores it when there is no live entry.
+    let native_field = match query.native.as_deref() {
+        Some(native) => format!(
+            "<input type=\"hidden\" name=\"{NATIVE_REQUEST_FIELD}\" value=\"{}\">",
+            html_escape_attribute(native)
+        ),
+        None => String::new(),
+    };
+    // When a native app opened this link, say so plainly: the human is being
+    // asked to grant an application on this computer access to their account,
+    // which is a different question from "sign this browser in".
+    let heading = if query.native.is_some() {
+        "<h1>Sign in an application</h1>\
+<p>An application on this computer asked to sign in to your account. \
+Confirm only if you started this.</p>"
+    } else {
+        "<h1>Activate your account</h1><p>Confirm to sign in on this browser.</p>"
+    };
+    // The ceremony nonce: embedded in the form AND set as a cookie on this
+    // response. Confirm requires both, and requires them to match, so a caller
+    // that never rendered this page cannot confirm.
+    let ceremony = new_login_ceremony_nonce();
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Activate account</title></head><body>\
-<main><h1>Activate your account</h1>\
-<p>Confirm to sign in on this browser.</p>\
+<main>{heading}\
 <form method=\"post\" action=\"/account/login/confirm\">\
-<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">\
-<button type=\"submit\">Activate</button></form></main></body></html>"
+<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">{native_field}\
+<input type=\"hidden\" name=\"ceremony\" value=\"{}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>",
+        html_escape_attribute(&ceremony)
     );
     let mut response = axum::response::Html(body).into_response();
+    let ceremony_cookie = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ceremony))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/account/login")
+        .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
+        .build()
+        .to_string();
     let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&ceremony_cookie) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -15152,10 +16081,35 @@ async fn confirm_login_inner(
     body: ConfirmLoginForm,
 ) -> axum::response::Response {
     let code = body.0.code;
+    let native_request_id = body.0.native;
+    let submitted_ceremony = body.0.ceremony;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
         return redeem_generic_deny();
+    }
+
+    // Browser-possession enforcement.
+    //
+    // The check above cannot establish that a browser was involved: it reads
+    // `Origin` / `Sec-Fetch-Site`, and a plain HTTP client simply omits both,
+    // which `confirm_is_same_origin` treats as same-origin so that browsers
+    // without fetch metadata keep working. Satisfying it therefore requires
+    // sending nothing.
+    //
+    // The ceremony nonce is different in kind: it is minted by
+    // `GET /account/login`, returned in a `Secure` `HttpOnly` `SameSite=Strict`
+    // cookie AND embedded in the form that page renders. Confirming requires
+    // both halves and requires them to match, so a caller that never fetched
+    // the interstitial in a browser cannot produce it -- possession, not a
+    // self-asserted header.
+    //
+    // Fails into the SAME uniform deny as every other branch, so it adds no
+    // new distinguishable outcome and the timing floor still applies.
+    let cookie_ceremony = cookie_value_from_headers(&headers, LOGIN_CEREMONY_COOKIE);
+    match (cookie_ceremony, submitted_ceremony.as_deref()) {
+        (Some(from_cookie), Some(from_form)) if ceremony_nonce_matches(from_cookie, from_form) => {}
+        _ => return redeem_generic_deny(),
     }
 
     // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
@@ -15226,6 +16180,16 @@ async fn confirm_login_inner(
     };
     let _ = redeemed.session_id; // server-assigned; not surfaced to the client.
 
+    // If a native app opened this link, this ONE human action also releases the
+    // app's one-time authorization code, delivered by redirecting the browser to
+    // the loopback URI the app registered (and the server validated) at
+    // authorize-start. A missing or stale `native` id is not an error: the
+    // browser login itself succeeded, so we fall through to the ordinary
+    // account-view redirect and the app times out on its listener.
+    let native_location = native_request_id.as_deref().and_then(|request_id| {
+        issue_native_authorization_code(state.as_ref(), request_id, &tenant, redeemed.account_id)
+    });
+
     // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
     // Max-Age matching the 7d TTL. The VALUE encodes the tenant alongside the
     // secret as `{b64url(tenant_id)}.{secret}` so that browser session
@@ -15254,10 +16218,18 @@ async fn confirm_login_inner(
     // secret never leaks via cache or Referer.
     let mut response = StatusCode::SEE_OTHER.into_response();
     let resp_headers = response.headers_mut();
-    resp_headers.insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
-    );
+    // Either the code-free account view, or the app's exact loopback URI when a
+    // native flow was completed. Both are server-built: the loopback URI came
+    // from `validate_loopback_redirect_uri`, so this is not an open redirect —
+    // the only reachable off-view destination is 127.0.0.1 on one fixed path.
+    let location = match native_location.as_deref() {
+        Some(loopback) => match HeaderValue::from_str(loopback) {
+            Ok(value) => value,
+            Err(_) => return redeem_generic_deny(),
+        },
+        None => HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    };
+    resp_headers.insert(axum::http::header::LOCATION, location);
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
@@ -15306,6 +16278,24 @@ async fn account_logout_handler(
                 .await
                 .map_err(internal_error)?
         }
+        // Native token: there IS a session row behind this bearer, so logout
+        // must actually revoke it (a documented no-op here would leave a signed
+        // -out app holding a live token for the rest of its 12h TTL). Re-derive
+        // the hash from the presented bearer with the same shared parser the
+        // resolver used, and revoke exactly that row.
+        AccountAuthMethod::NativeToken => {
+            let bearer = headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim_start().strip_prefix("Bearer "))
+                .map(str::trim)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            let (_token_tenant, token_hash) = native_token_parts(bearer)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            db.revoke_current_session(&ctx.tenant_id, &token_hash)
+                .await
+                .map_err(internal_error)?
+        }
         // Bearer path: no browser session row to revoke. Documented 200 no-op.
         AccountAuthMethod::DeviceBearer => 0,
     };
@@ -15321,6 +16311,7 @@ async fn account_logout_handler(
             "auth_method": match ctx.auth_method {
                 AccountAuthMethod::SessionCookie => "session_cookie",
                 AccountAuthMethod::DeviceBearer => "device_bearer",
+                AccountAuthMethod::NativeToken => "native_token",
             },
             "revoked": revoked,
         }),
@@ -22572,6 +23563,35 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    // Live settlement serializes per tenant so two overlapping runs cannot both
+    // pass the source-event conflict check and finalize divergent batches (or
+    // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
+    let settlement_locks = if body.dry_run {
+        None
+    } else {
+        Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
+    };
+    let result = run_credit_settlement_unlocked(state, tenant, body, limit).await;
+    if let Some(locks) = settlement_locks {
+        // Settlement may already be durable; never convert a successful finalize into
+        // a caller-visible failure because advisory unlock hiccuped.
+        if let Err(error) = locks.release().await {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                tenant_id = %tenant.tenant_id,
+                "failed to release credit settlement run locks after settlement"
+            );
+        }
+    }
+    result
+}
+
+async fn run_credit_settlement_unlocked(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
     require_credit_settlement_policy_version_allowed_for_live(
@@ -22993,14 +24013,9 @@ async fn run_credit_settlement(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
+        append_credit_settlement_finalize_with_db_mirror(state, tenant, &batch, &near_outbox_items)
             .await
             .map_err(internal_error)?;
-        for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
-                .await
-                .map_err(internal_error)?;
-        }
     }
 
     Ok(TraceCreditSettlementRunResponse {
@@ -23717,9 +24732,8 @@ fn require_credit_settlement_central_issuer_principal_if_configured(
     {
         return Ok(());
     }
-    if state
-        .credit_settlement_central_issuer_principal_refs
-        .contains(&tenant.principal_ref)
+    if tenant
+        .matches_any_allowlisted_principal(&state.credit_settlement_central_issuer_principal_refs)
     {
         return Ok(());
     }
@@ -23736,9 +24750,9 @@ fn require_credit_settlement_approval_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23757,9 +24771,9 @@ fn require_near_credit_outbox_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23778,9 +24792,9 @@ fn require_benchmark_registry_outbox_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23797,9 +24811,9 @@ fn require_near_credit_outbox_status_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23816,9 +24830,9 @@ fn require_benchmark_registry_outbox_status_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23835,9 +24849,9 @@ fn require_credit_hold_control_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23856,9 +24870,9 @@ fn require_positive_credit_issuance_principal_if_configured(
         || state
             .credit_settlement_central_issuer_principal_refs
             .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -23875,9 +24889,9 @@ fn require_near_credit_hold_account_transition_principal_if_configured(
     if state
         .credit_settlement_central_issuer_principal_refs
         .is_empty()
-        || state
-            .credit_settlement_central_issuer_principal_refs
-            .contains(&tenant.principal_ref)
+        || tenant.matches_any_allowlisted_principal(
+            &state.credit_settlement_central_issuer_principal_refs,
+        )
     {
         return Ok(());
     }
@@ -26498,6 +27512,14 @@ async fn append_utility_attestation_with_db_mirror(
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
 
+/// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
+/// which writes the batch and its NEAR outbox rows in one transaction. This
+/// batch-only variant is retained because it is the narrowest way to exercise
+/// `ensure_credit_settlement_batch_has_no_finalized_source_conflict` on its own;
+/// see the finalized-source-conflict test in the sibling test module. Without
+/// the allow, `-D warnings` fails the non-test build, since the only remaining
+/// caller is `#[cfg(test)]`.
+#[allow(dead_code)]
 async fn append_credit_settlement_batch_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -26526,6 +27548,237 @@ async fn append_credit_settlement_batch_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+/// Persist a finalized settlement batch and every NEAR outbox row it expects as
+/// one durability unit.
+///
+/// Design (#198):
+/// - When a DB mirror is required, batch + outbox rows commit in one Postgres
+///   transaction (`Database::upsert_credit_settlement_finalize`), then the file
+///   journal is updated. A process death cannot finalize the ledger without its
+///   payout work.
+/// - Across stores / process death after the batch is durable, each line item's
+///   `near_outbox_id` is the repair invariant: `repair_missing_near_credit_outbox_items_for_finalized_batches`
+///   re-emits any missing row. Finalize invokes that repair immediately if a
+///   post-batch outbox write fails, so the same request converges when the
+///   failure is transient.
+async fn append_credit_settlement_finalize_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    outbox_items: &[TraceNearCreditOutboxItem],
+) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
+    let outbox_writes = outbox_items
+        .iter()
+        .map(near_credit_outbox_item_to_storage_write)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if state.require_db_mirror_writes {
+        let Some(db) = state.db_mirror.as_ref() else {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for credit settlement finalize"
+            );
+        };
+        db.upsert_credit_settlement_finalize(
+            credit_settlement_batch_to_storage_write(batch)?,
+            outbox_writes,
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: credit settlement finalize")?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        let mut file_outbox_error: Option<anyhow::Error> = None;
+        for item in outbox_items {
+            if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            {
+                file_outbox_error = Some(error);
+                break;
+            }
+        }
+        if file_outbox_error.is_some() {
+            // DB already has the full set. Repair the file journal from the
+            // expected ids without going through the admin reader (which may be
+            // DB-authoritative and would otherwise skip already-mirrored rows).
+            let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                .into_iter()
+                .map(|item| item.near_outbox_id)
+                .collect::<BTreeSet<_>>();
+            let mut repaired = 0usize;
+            for item in outbox_items {
+                if present.contains(&item.near_outbox_id) {
+                    continue;
+                }
+                append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item).with_context(
+                    || {
+                        format!(
+                            "failed to repair file NEAR outbox item {} after DB-authoritative finalize",
+                            item.near_outbox_id
+                        )
+                    },
+                )?;
+                repaired += 1;
+            }
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired_outbox_count = repaired,
+                    settlement_batch_id = %batch.settlement_batch_id,
+                    tenant_id = %tenant.tenant_id,
+                    "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
+                );
+            }
+            if let Some(error) = file_outbox_error {
+                let expected = outbox_items.len();
+                let present = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?
+                    .iter()
+                    .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                    .count();
+                if present < expected {
+                    return Err(error.context(format!(
+                        "settlement finalize left incomplete file NEAR outbox ({present}/{expected} present after repair)"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // File-primary path: batch is the commit marker (carries expected outbox
+    // ids). Append outbox rows next; on any failure, repair from the durable
+    // batch before propagating so callers do not observe a silent half-write.
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    let mut outbox_error: Option<anyhow::Error> = None;
+    for item in outbox_items {
+        if let Err(error) = append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item) {
+            outbox_error = Some(error);
+            break;
+        }
+    }
+    if outbox_error.is_some() {
+        let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state,
+            tenant,
+            std::slice::from_ref(batch),
+        )
+        .await
+        .context("settlement outbox repair after partial finalize failed")?;
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_outbox_count = repaired,
+                settlement_batch_id = %batch.settlement_batch_id,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items after partial settlement finalize"
+            );
+        }
+        if let Some(error) = outbox_error {
+            // Prefer reporting the original failure; repair ran best-effort so the
+            // next settlement / outbox tick can still converge if repair itself
+            // could not complete every row in this request.
+            let expected = outbox_items.len();
+            let existing = read_near_credit_outbox_items_for_admin(state, tenant)
+                .await
+                .unwrap_or_default();
+            let present = existing
+                .iter()
+                .filter(|item| item.settlement_batch_id == batch.settlement_batch_id)
+                .count();
+            if present < expected {
+                return Err(error.context(format!(
+                    "settlement finalize left incomplete NEAR outbox ({present}/{expected} present after repair)"
+                )));
+            }
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let mirror_result = db
+            .upsert_credit_settlement_finalize(
+                credit_settlement_batch_to_storage_write(batch)?,
+                outbox_writes,
+            )
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement finalize mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+    }
+    Ok(())
+}
+
+struct CreditSettlementRunLocks {
+    _in_process: tokio::sync::OwnedMutexGuard<()>,
+    advisory: Option<CreditSettlementAdvisoryLock>,
+}
+
+impl CreditSettlementRunLocks {
+    async fn release(self) -> anyhow::Result<()> {
+        if let Some(advisory) = self.advisory {
+            advisory
+                .release()
+                .await
+                .context("failed to release credit settlement advisory lock")?;
+        }
+        Ok(())
+    }
+}
+
+fn credit_settlement_in_process_lock(tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(tenant_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn acquire_credit_settlement_run_locks(
+    state: &AppState,
+    tenant_id: &str,
+) -> ApiResult<CreditSettlementRunLocks> {
+    let in_process = credit_settlement_in_process_lock(tenant_id);
+    let _in_process = match in_process.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "credit settlement already in progress for this tenant",
+            ));
+        }
+    };
+
+    let advisory = if let Some(db) = state.db_mirror.as_ref() {
+        match db
+            .try_acquire_credit_settlement_lock(tenant_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(lock) => Some(lock),
+            None => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "credit settlement already in progress for this tenant",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(CreditSettlementRunLocks {
+        _in_process,
+        advisory,
+    })
 }
 
 async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
@@ -37618,6 +38871,29 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     config: &TraceNearCreditOutboxSchedulerConfig,
 ) -> ApiResult<TraceNearCreditOutboxSchedulerTickSummary> {
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    // Before draining, repair any finalized settlement whose expected outbox rows
+    // are missing (crash between batch commit and outbox append). Settlement runs
+    // already repair on entry; the outbox scheduler is the continuous path that
+    // must converge even when nobody re-triggers settlement (#198).
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        state.as_ref(),
+        &tenant,
+        &batches,
+    )
+    .await
+    .map_err(internal_error)?;
+    if repaired > 0 {
+        tracing::warn!(
+            repaired_outbox_count = repaired,
+            tenant_id = %tenant.tenant_id,
+            "repaired missing NEAR credit outbox items before outbox scheduler drain"
+        );
+    }
     let Json(submit) = near_credit_outbox_submit_worker_handler(
         State(state.clone()),
         headers.clone(),
@@ -40294,8 +41570,15 @@ async fn run_revocation_effects_drill(
                 })
         })
         .count();
-    let delayed_credit_reversal_ready = credit_reversal_item_count > 0
-        && credit_reversal_done_count == credit_reversal_item_count
+    // Revocation no longer claws back settled credit, so the expected item
+    // count for a canary revocation is zero and zero is the ready state: the
+    // check now proves the contributor was NOT charged for withdrawing. It is
+    // not vacuous -- any `ReverseCreditSettlement` item that does exist (an
+    // operator reversal of fraudulent or mistakenly settled credit, or an item
+    // enqueued before this policy change) must still be fully drained, with its
+    // reversal credit event and NEAR reverse receipt present, before the check
+    // reads ready.
+    let delayed_credit_reversal_ready = credit_reversal_done_count == credit_reversal_item_count
         && reversed_credit_event_count >= credit_reversal_item_count
         && near_reversal_outbox_count >= near_reversal_outbox_expected_count;
 
@@ -41958,6 +43241,7 @@ fn canary_contributor_auth_from_record(record: &TraceCommonsSubmissionRecord) ->
         tenant_id: record.tenant_id.clone(),
         role: TokenRole::Contributor,
         principal_ref: record.auth_principal_ref.clone(),
+        legacy_principal_ref: None,
         expires_at: None,
         auth_method: TraceAuthMethod::StaticToken,
         signed_claim_issuer: None,
@@ -49875,14 +51159,27 @@ async fn authorize_tenant_access_grant(
         .db_mirror
         .as_ref()
         .ok_or_else(|| internal_error("tenant access grant enforcement requires DB mirror"))?;
-    let grants = db
-        .list_active_trace_tenant_access_grants_for_principal(
-            &auth.tenant_id,
-            &auth.principal_ref,
-            Utc::now(),
-        )
-        .await
-        .map_err(internal_error)?;
+    let mut grants = Vec::new();
+    for principal_ref in auth.principal_aliases() {
+        let matched = db
+            .list_active_trace_tenant_access_grants_for_principal(
+                &auth.tenant_id,
+                principal_ref,
+                Utc::now(),
+            )
+            .await
+            .map_err(internal_error)?;
+        for grant in matched {
+            if grants
+                .iter()
+                .all(|existing: &StorageTraceTenantAccessGrantRecord| {
+                    existing.grant_id != grant.grant_id
+                })
+            {
+                grants.push(grant);
+            }
+        }
+    }
     let expected_role = trace_tenant_access_grant_role_for_token(auth.role);
     let matching_grants = grants
         .iter()
@@ -50116,7 +51413,9 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
             .iter()
             .filter(|record| submission_counts_toward_quota(record))
             .filter(|record| {
-                record.auth_principal_ref == tenant.principal_ref()
+                tenant
+                    .auth()
+                    .matches_stored_principal(&record.auth_principal_ref)
                     && record.received_at >= window_start
             })
             .count();
@@ -51043,7 +52342,7 @@ fn require_admin(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
-    auth.role.can_review() || principal_owns_submission(&auth.principal_ref, record)
+    auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
 /// Owned quarantined submissions may be superseded by a corrected envelope on
@@ -51058,27 +52357,27 @@ fn principal_can_remediate_quarantined(
 }
 
 fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
-    auth.role.can_review() || principal_owns_storage_submission(&auth.principal_ref, record)
+    auth.role.can_review() || principal_owns_storage_submission(auth, record)
 }
 
-fn principal_owns_submission(principal_ref: &str, record: &TraceCommonsSubmissionRecord) -> bool {
+fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
     record.auth_principal_ref == legacy_principal_ref()
-        || record.auth_principal_ref == principal_ref
+        || auth.matches_stored_principal(&record.auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
-    principal_ref: &str,
+    auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
     record.auth_principal_ref == legacy_principal_ref()
-        || record.auth_principal_ref == principal_ref
+        || auth.matches_stored_principal(&record.auth_principal_ref)
 }
 
 fn principal_can_self_revoke_submission(
     auth: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> bool {
-    record.auth_principal_ref == auth.principal_ref
+    auth.matches_stored_principal(&record.auth_principal_ref)
         || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
 }
 
@@ -51086,7 +52385,7 @@ fn principal_can_self_revoke_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
-    record.auth_principal_ref == auth.principal_ref
+    auth.matches_stored_principal(&record.auth_principal_ref)
         || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
 }
 
@@ -51178,7 +52477,7 @@ fn visible_submission_records_for_account(
 fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRecord) -> bool {
     auth.role.can_review()
         || event.auth_principal_ref == legacy_principal_ref()
-        || event.auth_principal_ref == auth.principal_ref
+        || auth.matches_stored_principal(&event.auth_principal_ref)
 }
 
 /// Account-scope broadening for the contributor credit surface (Slice 3b). An
@@ -51538,12 +52837,18 @@ async fn caller_credit_account_scope(
         // No DB mirror => no account linkage to broaden from. Own-principal only.
         return Ok(None);
     };
-    let caller_principal = &tenant.principal_ref;
+    let aliases = tenant
+        .principal_aliases()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let resolved = db
-        .resolve_principals_to_accounts(&tenant.tenant_id, std::slice::from_ref(caller_principal))
+        .resolve_principals_to_accounts(&tenant.tenant_id, &aliases)
         .await
         .context("failed to resolve contributor principal to account for credit visibility")?;
-    let Some(account_id) = resolved.get(caller_principal).copied() else {
+    let Some(account_id) = aliases
+        .iter()
+        .find_map(|alias| resolved.get(alias).copied())
+    else {
         // Caller has no active account link: unchanged own-principal scope.
         return Ok(None);
     };
@@ -53278,14 +54583,15 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
-    let credit_reversal_items_enqueued = enqueue_credit_settlement_reversal_items_for_revocation(
-        db.as_ref(),
-        &tenant.tenant_id,
-        submission_id,
-        revocation_reason,
-    )
-    .await
-    .context("failed to enqueue credit settlement reversal propagation items")?;
+    // Revocation does NOT claw back credit that has already settled. Credit
+    // earned and settled stays earned: a contributor who is uneasy about a
+    // trace must be able to pull it back without being financially penalised,
+    // or the trace stays in the commons out of fear. Revocation removes the
+    // trace from the corpus and deletes its content -- it does not reach back
+    // onto the chain. The `ReverseCreditSettlement` propagation action and its
+    // worker remain, so an operator can still reverse a fraudulent or
+    // mistakenly settled credit and so any item enqueued before this change
+    // still drains; nothing on the revocation path enqueues one.
     let object_delete_items_enqueued = enqueue_object_payload_delete_items_for_revocation(
         db.as_ref(),
         &tenant.tenant_id,
@@ -53335,7 +54641,6 @@ async fn mirror_revocation_to_db(
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
-            || credit_reversal_items_enqueued > 0
             || object_delete_items_enqueued > 0
             || worker_queue_items_enqueued > 0
             || vector_entry_items_enqueued > 0)
@@ -53347,12 +54652,6 @@ async fn mirror_revocation_to_db(
             export_manifests_invalidated,
             export_manifest_items_invalidated,
         );
-        if credit_reversal_items_enqueued > 0 {
-            action_counts.insert(
-                "credit_reversal_items_enqueued".to_string(),
-                credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
-            );
-        }
         if object_delete_items_enqueued > 0 {
             action_counts.insert(
                 "object_delete_items_enqueued".to_string(),
@@ -53622,92 +54921,6 @@ async fn enqueue_object_payload_delete_items_for_revocation(
         })
         .await
         .context("failed to upsert object payload delete propagation item")?;
-        enqueued += 1;
-    }
-    Ok(enqueued)
-}
-
-async fn enqueue_credit_settlement_reversal_items_for_revocation(
-    db: &dyn Database,
-    tenant_id: &str,
-    submission_id: Uuid,
-    revocation_reason: &str,
-) -> anyhow::Result<usize> {
-    let existing_idempotency_keys = db
-        .list_trace_revocation_propagation_items(tenant_id, submission_id)
-        .await
-        .context("failed to read existing revocation propagation items")?
-        .into_iter()
-        .map(|item| item.idempotency_key)
-        .collect::<BTreeSet<_>>();
-    let settled_event_ids = db
-        .list_trace_credit_settlement_batches(tenant_id)
-        .await
-        .context("failed to read credit settlement batches for revocation propagation")?
-        .into_iter()
-        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
-        .flat_map(|batch| batch.source_credit_event_ids)
-        .collect::<BTreeSet<_>>();
-    if settled_event_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut enqueued = 0usize;
-    for event in db
-        .list_trace_credit_events(tenant_id)
-        .await
-        .context("failed to read credit events for revocation propagation")?
-        .into_iter()
-        .filter(|event| event.submission_id == submission_id)
-        .filter(|event| event.settlement_state == StorageTraceCreditSettlementState::Final)
-        .filter(|event| settled_event_ids.contains(&event.credit_event_id))
-    {
-        let Ok(points_delta) = event.points_delta.parse::<f32>() else {
-            continue;
-        };
-        if !points_delta.is_finite() || points_delta <= 0.0 {
-            continue;
-        }
-        let idempotency_key = sha256_prefixed(&format!(
-            "trace_revocation_credit_settlement_reversal:v1:{tenant_id}:{submission_id}:{}",
-            event.credit_event_id
-        ));
-        if existing_idempotency_keys.contains(&idempotency_key) {
-            continue;
-        }
-        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
-            tenant_id: tenant_id.to_string(),
-            propagation_item_id: deterministic_trace_uuid_for_external_ref(
-                "revocation-credit-settlement-reversal",
-                tenant_id,
-                submission_id,
-                &event.credit_event_id.to_string(),
-            ),
-            source_submission_id: submission_id,
-            target: StorageTraceRevocationPropagationTarget::CreditSettlement {
-                credit_event_id: event.credit_event_id,
-                credit_account_ref: event.credit_account_ref,
-                settlement_state_at_selection: event.settlement_state,
-            },
-            action: StorageTraceRevocationPropagationAction::ReverseCreditSettlement,
-            status: StorageTraceRevocationPropagationItemStatus::Pending,
-            idempotency_key,
-            reason: format!(
-                "revoked trace settled credit reversal;reason_hash={}",
-                sha256_prefixed(revocation_reason)
-            ),
-            attempt_count: 0,
-            last_error: None,
-            next_attempt_at: None,
-            completed_at: None,
-            evidence_hash: None,
-            metadata: BTreeMap::from([(
-                "source".to_string(),
-                "mirror_revocation_to_db".to_string(),
-            )]),
-        })
-        .await
-        .context("failed to upsert credit settlement reversal propagation item")?;
         enqueued += 1;
     }
     Ok(enqueued)
@@ -60149,8 +61362,10 @@ async fn run_maintenance(
                 .or_insert_with(|| TRACE_DEFAULT_REVOCATION_REASON.to_string())
                 .clone();
             if !request.dry_run {
+                // Same decision as `revoke_submission`: reconciling a record
+                // against an existing tombstone marks it revoked and leaves the
+                // awarded credit figure untouched.
                 record.status = TraceCorpusStatus::Revoked;
-                record.credit_points_final = Some(0.0);
                 write_submission_record(&state.root, record)?;
                 mirror_revocation_to_db(
                     state,
@@ -67807,10 +69022,9 @@ impl TraceCommonsTenantCreditResponse {
             }
         }
 
-        let principal_ref = auth.principal_ref.as_str();
         let tenant_wide_credit_view = auth.role.can_review();
-        let legacy_principal_ref = legacy_principal_ref();
-        let legacy_principal_ref = legacy_principal_ref.as_str();
+        let legacy_wildcard_principal_ref = legacy_principal_ref();
+        let legacy_wildcard_principal_ref = legacy_wildcard_principal_ref.as_str();
         // Slice 3b: a credit `account_ref` is visible to this caller iff it is the
         // caller's own principal, the legacy wildcard, a principal on the caller's
         // account (active links only), OR the caller's own account-settlement key.
@@ -67831,8 +69045,8 @@ impl TraceCommonsTenantCreditResponse {
             account_id.map(|id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{id}"));
         let account_ref_visible = |account_ref: &str| -> bool {
             tenant_wide_credit_view
-                || account_ref == principal_ref
-                || account_ref == legacy_principal_ref
+                || auth.matches_stored_principal(account_ref)
+                || account_ref == legacy_wildcard_principal_ref
                 || account_scope.is_some_and(|scope| scope.contains(account_ref))
                 || account_settlement_key
                     .as_deref()

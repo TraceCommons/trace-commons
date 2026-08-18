@@ -277,6 +277,29 @@ const char* tc_preview_summary_json(const tc_preview*);  /* counts, sizes, openi
  */
 int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matches_json);
 
+/* The turn index over a redacted preview body:
+ *   {entry_id, body_digest, envelope_digest, turn_count,
+ *    turns: [{index, role, tool_name, byte_offset, byte_len}]}
+ *
+ * An OVERLAY on the body, never a replacement for it. Render the bytes
+ * tc_preview_body returned verbatim and draw a separator at each
+ * byte_offset; the offsets index that exact string. The daemon does not
+ * re-render the transcript, because a prose re-render would drop the fields
+ * that have no prose form (structured_payload, token_counts, latency_ms,
+ * cost_usd, failure_modes) and so would show less than the artifact an
+ * approval covers.
+ *
+ * body_digest is required and is the anchor: "sha256:<lowercase hex>" over
+ * the exact UTF-8 bytes of the body being displayed. A body that is not
+ * that one is refused with preview-body-changed rather than indexed --
+ * offsets against the wrong string still look like a transcript.
+ *
+ * Returns an OWNED JSON string; free with tc_string_free. Returns NULL and
+ * sets *err (owned; also freed with tc_string_free) on failure.
+ */
+char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
+                                  const char* body_digest, char** err);
+
 /* Free a preview handle. Safe to call with NULL. Invalidates every
  * const char* previously returned by tc_preview_body /
  * tc_preview_summary_json for this handle.

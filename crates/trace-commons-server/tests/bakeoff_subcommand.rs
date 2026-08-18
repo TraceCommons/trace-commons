@@ -9,7 +9,9 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -34,22 +36,37 @@ fn build_synthetic_corpus(
     dup_n: usize,
     para_n: usize,
 ) -> PathBuf {
+    let novel = (0..novel_n)
+        .map(|i| format!("novel-{i}-body"))
+        .collect::<Vec<_>>();
+    let duplicate = (0..dup_n)
+        .map(|i| format!("dup-{i}-body"))
+        .collect::<Vec<_>>();
+    build_synthetic_corpus_from_rows(dir, &novel, &duplicate, para_n)
+}
+
+fn build_synthetic_corpus_from_rows(
+    dir: &tempfile::TempDir,
+    novel_rows: &[String],
+    duplicate_rows: &[String],
+    para_n: usize,
+) -> PathBuf {
     let staging = dir.path().join("staging");
     fs::create_dir_all(staging.join("novel")).unwrap();
     fs::create_dir_all(staging.join("duplicate")).unwrap();
     fs::create_dir_all(staging.join("paraphrase")).unwrap();
 
     let mut novel_files: Vec<(String, Vec<u8>)> = Vec::new();
-    for i in 0..novel_n {
+    for (i, body) in novel_rows.iter().enumerate() {
         let name = format!("novel-{i:04}.txt");
-        let body = format!("novel-{i}-body").into_bytes();
+        let body = body.as_bytes().to_vec();
         fs::write(staging.join("novel").join(&name), &body).unwrap();
         novel_files.push((name, body));
     }
     let mut dup_files: Vec<(String, Vec<u8>)> = Vec::new();
-    for i in 0..dup_n {
+    for (i, body) in duplicate_rows.iter().enumerate() {
         let name = format!("dup-{i:04}.txt");
-        let body = format!("dup-{i}-body").into_bytes();
+        let body = body.as_bytes().to_vec();
         fs::write(staging.join("duplicate").join(&name), &body).unwrap();
         dup_files.push((name, body));
     }
@@ -165,43 +182,46 @@ fn bake_off_subcommand_writes_mock_report() {
         report.get("mock_scorer").and_then(|v| v.as_bool()),
         Some(true)
     );
-    // Rule version 2 added the discrimination floor ahead of the throughput
-    // floor. Pinned so a rule change cannot land without updating the reports
-    // that consumers key off.
+    // Rule version 3 adds the baseline-dominance floor ahead of throughput.
+    // Pinned so a rule change cannot land without updating report consumers.
     assert_eq!(
         report.get("decision_rule_version").and_then(|v| v.as_u64()),
-        Some(2)
+        Some(3)
     );
     let cands = report
         .get("candidates")
         .and_then(|v| v.as_array())
         .expect("candidates array");
     assert_eq!(cands.len(), 2);
-    // The mock scorer derives AUC from a hash, so it does not discriminate
-    // in any real sense. Under decision rule v2 that means it usually fails
-    // the discrimination floor and the run has no winner, which is the
-    // honest outcome for a scorer whose own report carries a
-    // NOT-VALID-FOR-PRODUCTION banner. This smoke test covers report
-    // emission, not winner selection -- the decision rule itself is tested
-    // directly in `bakeoff_report::tests` against the archived A2.6 numbers.
-    // So: a winner is optional here, but if one is present it must be a
-    // manifest candidate that cleared the floor.
-    if let Some(winner) = report.get("winner_id").and_then(|v| v.as_str()) {
-        assert!(
-            winner == "qwen-2.5-7b" || winner == "llama-3.1-8b-instruct",
-            "winner must be one of the manifest candidates, got {winner}"
-        );
-        let winner_auc = cands
-            .iter()
-            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(winner))
-            .and_then(|c| c.get("discrimination_auc"))
-            .and_then(|v| v.as_f64())
-            .expect("winner appears in candidates with an auc");
-        assert!(
-            winner_auc > 0.5,
-            "a recorded winner must clear the discrimination floor, got {winner_auc}"
-        );
-    }
+    let baselines = report.get("baselines").expect("baselines object");
+    assert_eq!(
+        baselines.get("strongest_name").and_then(|v| v.as_str()),
+        Some("utf8_byte_count")
+    );
+    assert_eq!(
+        baselines
+            .get("required_discrimination_auc")
+            .and_then(|v| v.as_f64()),
+        Some(1.05)
+    );
+    assert_eq!(
+        baselines
+            .get("measures")
+            .and_then(|v| v.as_array())
+            .map(Vec::len),
+        Some(4)
+    );
+    assert!(cands.iter().all(|candidate| {
+        candidate
+            .get("passed_baseline_dominance")
+            .and_then(|v| v.as_bool())
+            == Some(false)
+    }));
+    assert!(
+        report
+            .get("winner_id")
+            .is_some_and(serde_json::Value::is_null)
+    );
 
     // Companion markdown must include the loud mock banner.
     let md_bytes = fs::read(report_json.with_extension("md")).expect("markdown companion exists");
@@ -211,6 +231,81 @@ fn bake_off_subcommand_writes_mock_report() {
         "markdown report must carry the mock banner, got: {md}"
     );
     assert!(md.contains("Winner: "));
+    assert!(md.contains("Strongest baseline: utf8_byte_count (1.000000)"));
+    assert!(md.contains("Required discrimination AUC: 1.050000"));
+    assert!(md.contains("passed_baseline_dominance"));
+}
+
+#[test]
+fn eligible_candidate_sets_baseline_flag_in_json_and_markdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let novel = vec!["H".to_string(); 20];
+    let duplicate = vec!["D".to_string(); 20];
+    let corpus = build_synthetic_corpus_from_rows(&dir, &novel, &duplicate, 20);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("eligible-report.json");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let out = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .output()
+        .expect("invoke binary");
+    assert!(
+        out.status.success(),
+        "bake-off must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
+    let baselines = report.get("baselines").expect("baselines object");
+    assert_eq!(
+        baselines.get("strongest_auc").and_then(|v| v.as_f64()),
+        Some(0.5)
+    );
+    assert_eq!(
+        baselines
+            .get("required_discrimination_auc")
+            .and_then(|v| v.as_f64()),
+        Some(0.55)
+    );
+    let candidates = report
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .expect("candidates array");
+    let json_passed = candidates.iter().all(|candidate| {
+        candidate
+            .get("passed_baseline_dominance")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+            && candidate.get("dropped_novel_rows").and_then(|v| v.as_u64()) == Some(0)
+            && candidate
+                .get("dropped_duplicate_rows")
+                .and_then(|v| v.as_u64())
+                == Some(0)
+    });
+    assert!(report.get("winner_id").is_some_and(|v| !v.is_null()));
+
+    let md = fs::read_to_string(report_json.with_extension("md")).unwrap();
+    let markdown_passed = candidates.iter().all(|candidate| {
+        let id = candidate.get("id").and_then(|v| v.as_str()).unwrap();
+        md.lines()
+            .find(|line| line.starts_with(&format!("| {id} |")))
+            .is_some_and(|line| line.ends_with("| 0 | 0 | 0 | true |"))
+    });
+    assert!(
+        json_passed && markdown_passed,
+        "eligible candidates must persist true in JSON and markdown: {md}"
+    );
 }
 
 // The third real-scorer-path test that would exercise the
@@ -343,6 +438,172 @@ fn bake_off_writes_incremental_report_after_each_candidate() {
     assert!(!tmp_path.exists(), "stray tmp file: {}", tmp_path.display());
 }
 
+#[cfg(unix)]
+#[test]
+fn start_of_run_tombstone_supersedes_complete_report_before_first_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("report.json");
+    fs::write(
+        &report_json,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "winner_id": "stale-winner",
+            "partial": false,
+            "candidates": [{"id": "stale-winner"}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // The JSON rename happens before the companion Markdown write. A FIFO with
+    // no reader therefore pauses the child after the tombstone is authoritative
+    // but before run_bakeoff can start its first candidate.
+    let report_md = report_json.with_extension("md");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&report_md)
+        .status()
+        .expect("invoke mkfifo");
+    assert!(mkfifo.success(), "mkfifo failed with {mkfifo}");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let mut child = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn bake-off");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let tombstone = loop {
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_json).unwrap())
+            .expect("authoritative report remains valid JSON");
+        if report.get("partial").and_then(|value| value.as_bool()) == Some(true) {
+            break report;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("start-of-run tombstone was not written before timeout");
+        }
+        if let Some(status) = child.try_wait().expect("poll bake-off") {
+            panic!("bake-off exited before the tombstone was observed: {status}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    child.kill().expect("kill before first candidate");
+    child.wait().expect("reap killed bake-off");
+
+    assert!(
+        tombstone
+            .get("winner_id")
+            .is_some_and(serde_json::Value::is_null),
+        "a start-of-run tombstone cannot retain the stale winner: {tombstone}"
+    );
+    assert_eq!(
+        tombstone
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "the process was killed before the first candidate write: {tombstone}"
+    );
+}
+
+#[test]
+fn incremental_report_write_failure_stops_before_next_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("report.json");
+    let report_md = report_json.with_extension("md");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&report_md)
+        .status()
+        .expect("invoke mkfifo");
+    assert!(mkfifo.success(), "mkfifo failed with {mkfifo}");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let mut child = Command::new(bin)
+        .env("RUST_LOG", "info")
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn binary");
+
+    // Pause the initial Markdown companion write, wait until the JSON
+    // tombstone is visible, then replace the JSON destination with a directory.
+    // The initial write returns after the FIFO gets a reader; the first
+    // candidate completes, and its incremental atomic rename fails.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if report_json.exists() {
+            let report: serde_json::Value =
+                serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
+            if report.get("partial").and_then(|value| value.as_bool()) == Some(true) {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("initial tombstone was not written before timeout");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    fs::rename(&report_json, dir.path().join("initial-report.json")).unwrap();
+    fs::create_dir(&report_json).unwrap();
+    let _fifo_reader = fs::File::open(&report_md).expect("unblock initial markdown write");
+    let out = child.wait_with_output().expect("wait for binary");
+
+    assert!(
+        !out.status.success(),
+        "an incremental write failure must abort"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // `tracing` emits ANSI styling around every field name and separator, so a
+    // literal `candidate_id=<value>` never appears in captured output. Strip the
+    // escapes before matching rather than asserting on a spelling that depends
+    // on whether colour happened to be enabled for this run.
+    let logs = strip_ansi(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        stderr
+    ));
+    assert!(
+        strip_ansi(&stderr).contains("BakeoffIncrementalWriteFailed"),
+        "stderr must name the failed control: {stderr}"
+    );
+    assert!(
+        logs.contains("candidate_id=llama-3.1-8b-instruct"),
+        "the first candidate must complete before the write fails: {logs}"
+    );
+    assert!(
+        !logs.contains("candidate_id=qwen-2.5-7b"),
+        "the second candidate must not run after an authoritative write failure: {logs}"
+    );
+}
+
 #[test]
 fn bake_off_subcommand_respects_skip_models() {
     let dir = tempfile::tempdir().unwrap();
@@ -379,4 +640,26 @@ fn bake_off_subcommand_respects_skip_models() {
         cands[0].get("id").unwrap().as_str().unwrap(),
         "llama-3.1-8b-instruct"
     );
+}
+
+/// Remove ANSI SGR escape sequences so assertions can match the logical text
+/// `tracing` emitted rather than its styled rendering.
+fn strip_ansi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        let ch_len = input[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
 }

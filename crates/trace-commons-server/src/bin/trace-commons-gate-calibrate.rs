@@ -44,6 +44,9 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "trace-commons-gate-calibrate")]
 #[command(about = "Offline gate calibration + bake-off harness", long_about = None)]
+// The semver does not move when a deploy does, so --version carries the commit
+// the binary was built from as well.
+#[command(version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")))]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -546,6 +549,9 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         tracing::warn!(warning = %w, "bakeoff_manifest_warning");
     }
     let corpus = bakeoff_corpus::load_corpus(&args.corpus)?;
+    // Compute the preregistered no-model controls once, before any scorer or
+    // candidate is loaded. They depend only on the already-resident corpus.
+    let baselines = bakeoff_report::BaselineResults::from_corpus(&corpus.novel, &corpus.duplicate);
     let manifest_sha = sha256_of_file(&args.candidates)?;
     let corpus_sha = sha256_of_file(&args.corpus)?;
 
@@ -687,9 +693,18 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             mock_scorer: args.mock_scorer,
             ctx_max_tokens: 4096,
             determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+            baselines: baselines.clone(),
             partial: true,
         }
     };
+
+    // Supersede any complete report from an earlier run before the first
+    // candidate starts. If the process is killed during candidate evaluation,
+    // consumers see this authoritative partial tombstone instead of stale
+    // results for a different corpus or rule invocation.
+    let initial_report = snapshot(&results);
+    bakeoff_report::write_report_atomic(&initial_report, &args.report_out)
+        .map_err(|e| anyhow::anyhow!("BakeoffInitialWriteFailed: {}", hash_err(&e)))?;
 
     // Shared mock scorers for the --mock-scorer path; built lazily so the
     // real-scorer arm doesn't pay for them. Constructed per-selection so
@@ -941,7 +956,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             }
         };
 
-        let candidate_result = match result {
+        let mut candidate_result = match result {
             Ok(r) => r,
             Err((class, e)) => {
                 tracing::warn!(
@@ -950,15 +965,11 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                     error_class = class,
                     "bakeoff_candidate_failed"
                 );
-                bakeoff_report::CandidateResult::failed(
-                    c.id.clone(),
-                    run_candidate_eval::map_license(&c.license),
-                    c.params_b.unwrap_or(0),
-                    c.release_date_unix.unwrap_or(0),
-                    class,
-                )
+                run_candidate_eval::failed_candidate_result(c, class, &e)
             }
         };
+        candidate_result.passed_baseline_dominance =
+            bakeoff_report::is_v3_candidate_eligible(&candidate_result, &baselines);
 
         results.push(candidate_result);
 
@@ -966,20 +977,17 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         // Atomic-rename so a process kill mid-write cannot leave a half-
         // written report.json on disk.
         let partial_report = snapshot(&results);
-        if let Err(e) = bakeoff_report::write_report_atomic(&partial_report, &args.report_out) {
-            tracing::warn!(
-                err = %hash_err(&e),
-                error_class = "BakeoffIncrementalWriteFailed",
-                "incremental report write failed; continuing"
-            );
-        }
+        // Fail the run immediately. Continuing could leave a stale complete
+        // report from an earlier run at this authoritative path.
+        bakeoff_report::write_report_atomic(&partial_report, &args.report_out)
+            .map_err(|e| anyhow::anyhow!("BakeoffIncrementalWriteFailed: {}", hash_err(&e)))?;
     }
 
     // Final write: compute winner and flip partial=false. `pick_winner`
     // already excludes any candidate with `passed_determinism_gate = false`,
     // which covers every failed-load row (they're constructed with that
     // flag false), so failed candidates never win.
-    let winner_id = bakeoff_report::pick_winner(&results).map(|w| w.id.clone());
+    let winner_id = bakeoff_report::pick_winner(&results, &baselines).map(|w| w.id.clone());
     let report = bakeoff_report::Report {
         generated_at: chrono::Utc::now().to_rfc3339(),
         corpus_sha256: corpus_sha,
@@ -990,6 +998,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         mock_scorer: args.mock_scorer,
         ctx_max_tokens: 4096,
         determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+        baselines,
         partial: false,
     };
 

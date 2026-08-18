@@ -30,6 +30,12 @@ use crate::config::{ConfigStore, DAEMON_HISTORY_FILE, Receipt};
 pub const STATUS_QUARANTINED: &str = "quarantined";
 pub const STATUS_ACCEPTED: &str = "accepted";
 pub const STATUS_SUBMITTED: &str = "submitted";
+/// Local status this cache stamps onto a record once `daemon::withdraw` has
+/// had the server confirm a withdrawal. Not a status the server itself ever
+/// returns from submission-status read-back -- `join` only ever writes the
+/// four statuses above from the server's response, so a record can only
+/// carry this one by going through `mark_withdrawn`.
+pub const STATUS_WITHDRAWN: &str = "withdrawn";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryRecord {
@@ -45,6 +51,11 @@ pub struct HistoryRecord {
     /// The server's own prose about this submission, e.g. why it was held.
     pub explanations: Vec<String>,
     pub last_refreshed_at: Option<DateTime<Utc>>,
+    /// Set locally by `mark_withdrawn` once the server has confirmed a
+    /// withdrawal for this submission. `#[serde(default)]` so a cache file
+    /// written before this field existed still parses.
+    #[serde(default)]
+    pub withdrawn_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -135,11 +146,49 @@ pub fn join(
                     })
                     .unwrap_or_default(),
                 last_refreshed_at: update.map(|_| refreshed_at),
+                // `join` rebuilds every record from receipts + the server's
+                // own status read-back, which does not yet report a
+                // withdrawn status of its own (the server endpoint that
+                // would is being built separately -- see
+                // `docs/superpowers/specs/2026-08-08-trace-withdrawal-design.md`).
+                // A caller that refreshes history after `mark_withdrawn` set
+                // this must re-apply it; `join` cannot know about it here
+                // because it has no access to the cache it is about to
+                // replace.
+                withdrawn_at: None,
             }
         })
         .collect();
     records.sort_by_key(|r| std::cmp::Reverse(r.submitted_at));
     records
+}
+
+/// Stamp a local-only withdrawal marker onto every record for
+/// `submission_id`: `status` becomes [`STATUS_WITHDRAWN`] and `withdrawn_at`
+/// is set to `at`. Returns whether any record matched.
+///
+/// This is local bookkeeping only -- it does not call the server. Callers in
+/// `daemon::withdraw` call this after the server has already confirmed the
+/// withdrawal, so the history a contributor sees reflects it without needing
+/// a full `refresh_history` round trip.
+///
+/// In the ordinary case exactly one record matches (submission ids are
+/// unique), but every matching record is stamped rather than assuming that,
+/// so this stays correct if that ever changes.
+pub fn mark_withdrawn(
+    records: &mut [HistoryRecord],
+    submission_id: Uuid,
+    at: DateTime<Utc>,
+) -> bool {
+    let mut changed = false;
+    for r in records.iter_mut() {
+        if r.submission_id == submission_id {
+            r.status = STATUS_WITHDRAWN.to_string();
+            r.withdrawn_at = Some(at);
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
@@ -257,6 +306,7 @@ mod tests {
             credit_points_final: None,
             explanations: vec![],
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
+            withdrawn_at: None,
         }
     }
 
@@ -404,5 +454,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(HistoryCache::load(&store).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_cache_line_written_before_withdrawn_at_existed_still_parses() {
+        // `#[serde(default)]` on `withdrawn_at`: a line with no such field
+        // (an older cache file) must still load, not be silently skipped as
+        // a corrupt line.
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(record("accepted", "2026-08-08T10:00:00Z")).unwrap();
+        v.as_object_mut().unwrap().remove("withdrawn_at");
+        store
+            .write_daemon_file(
+                DAEMON_HISTORY_FILE,
+                format!("{}\n", serde_json::to_string(&v).unwrap()).as_bytes(),
+            )
+            .unwrap();
+        let loaded = HistoryCache::load(&store).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].withdrawn_at, None);
+    }
+
+    #[test]
+    fn mark_withdrawn_stamps_the_matching_record_and_reports_it_changed() {
+        let id = Uuid::new_v4();
+        let mut recs = vec![record("quarantined", "2026-08-08T10:00:00Z")];
+        recs[0].submission_id = id;
+        let at_time = at("2026-08-08T13:00:00Z");
+        assert!(mark_withdrawn(&mut recs, id, at_time));
+        assert_eq!(recs[0].status, STATUS_WITHDRAWN);
+        assert_eq!(recs[0].withdrawn_at, Some(at_time));
+    }
+
+    #[test]
+    fn mark_withdrawn_reports_false_when_nothing_matches() {
+        let mut recs = vec![record("accepted", "2026-08-08T10:00:00Z")];
+        assert!(!mark_withdrawn(&mut recs, Uuid::new_v4(), Utc::now()));
+        assert_eq!(recs[0].status, "accepted");
     }
 }

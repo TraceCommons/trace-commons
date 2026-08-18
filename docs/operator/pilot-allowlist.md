@@ -36,110 +36,160 @@ Onboarding refusals use these public labels:
 |---|---|---|
 | `InviteMalformed` | 400 | Invite schema/version/format is invalid |
 | `DeviceKeyMalformed` | 400 | Device public key is not base64 Ed25519 public-key bytes |
-| `InviteNotValid` | 403 | Invite hash is not allowlisted or revoked |
+| `InviteNotValid` | 403 | Invite hash is not allowlisted, revoked, or expired |
 | `InviteAlreadyConsumed` | 403 | Invite is valid but its retry budget is exhausted |
 | `OnboardAllowlistNotConfigured` | 503 | Issuer has no allowlist source |
 | `OnboardRegistryNotConfigured` | 503 | Device-key registry DB is not enabled |
 | `OnboardTenantConfigMissing` | 503 | Issuer is missing the onboarding URL config returned to clients |
 | `OnboardAllowlistStale` | 503 | Cached snapshot is stale and the source has not reloaded successfully |
+| `InviteRegistryNotConfigured` | 503 | Authoritative mode is on (`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true`) but `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is not set, so there is no registry to redeem against |
+| `InviteRegistryStale` | 503 | Authoritative mode is on and the registry's in-process cache has not refreshed within its staleness window |
+
+An expired invite is refused with the same `InviteNotValid` (403) as a
+revoked or unknown invite — deliberately. A caller cannot use the response
+to learn whether a guessed code was ever real, only that it does not
+currently work. If a contributor reports a failed onboard, `InviteNotValid`
+alone does not tell you which of the three it was; check
+`/v1/admin/invite-registry-status` and, if you have the hash, the invite's
+row directly.
 
 ## Provisioning invite codes
 
-Prefer the batch helper for pilot operations. It generates unambiguous
-16-character invite codes, writes only hash-only allowlist entries, defaults
-each invite to a retry budget of three device registrations, and prints the
-shareable links for Slack/DM handoff:
+Invites live in PostgreSQL. The allowlist file no longer carries them; it
+keeps only `kind: "instance"` TEE entries and the `policy_label`.
 
-```bash
-sudo python3 scripts/operator/generate-pilot-invites.py \
-  --count 5 \
-  --tenant-id tenant-zaki-pilot \
-  --allowlist /etc/tracecommons/allowlist.json \
-  --write \
-  --links-out /tmp/tracecommons-invite-links.txt
-sudo systemctl restart trace-commons-upload-claim-issuer.service
-cat /tmp/tracecommons-invite-links.txt
+### One-time role provisioning
+
+The registry pool runs as a narrow role that cannot bypass RLS. Migration
+`V42` creates the base `trace_invite_registry` role (`NOLOGIN`,
+`NOBYPASSRLS`, permissive row policy scoped to that role); provision a
+login role and grant it membership:
+
+```sql
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_invite_registry_login') THEN
+        CREATE ROLE trace_invite_registry_login LOGIN PASSWORD '<generated>' NOBYPASSRLS;
+    END IF;
+END $$;
+GRANT trace_invite_registry TO trace_invite_registry_login;
 ```
 
-Run the helper on the pilot host, or run it locally with
-`--entries-out /tmp/allowlist-entries.json` if you want to review the
-hash-only entries before applying them. The `--links-out` file contains raw
-invite links; keep it local to the operator and delete it after sending DMs.
+Point `TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` at that login role.
+Without it, the admin invite routes (`/v1/admin/invites*`,
+`/v1/admin/invite-registry-status`) do not mount at all, and redemption
+under authoritative mode fails closed with `InviteRegistryNotConfigured`.
+Once that variable IS set, an unreachable database aborts issuer startup —
+the same fail-closed posture as every other `configure_*_from_env` gate in
+this issuer, not a bug. Do not set it against a database you have not
+provisioned.
 
-The issuer can refresh the file on its timer, but restarting only
-`trace-commons-upload-claim-issuer.service` after an operator batch makes
-new invites ready immediately and fails fast if the edited file is malformed.
+### Minting a batch
+
+```bash
+trace-commons-upload-claim-issuer --mint-invites 5 \
+  --policy-label pilot-2026-08 \
+  --mint-tenant-template pilot-2026-08 \
+  --mint-max-uses 3 \
+  --mint-expires-in-days 30 \
+  > /tmp/tracecommons-invite-codes.txt
+```
+
+Each line is one raw code. It is never stored and cannot be recovered: only
+its hash reaches the database. Delete the file after handing the codes out.
+This connects directly to the database via `DATABASE_URL` and
+`TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` — no running issuer or admin
+token required, so an operator can mint before the issuer is even up.
+
+No issuer restart is needed, but codes minted this way are NOT immediately
+redeemable: `--mint-invites` writes to the database directly and the
+running issuer's cache only picks it up on its next refresh
+(`TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS`, default 60). An
+operator who mints via the CLI and immediately tests redemption will see it
+fail for up to one refresh interval — that is expected, not a bug. Minting
+through the admin API instead (`POST /v1/admin/invites`, below) is
+redeemable immediately, because the handler invalidates the in-process
+cache on write, in the same request that committed the insert.
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_mode":"derived","tenant_template_id":"pilot-2026-08","max_uses":3}' \
+  "http://127.0.0.1:3918/v1/admin/invites"
+```
+
+### Revoking
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:3918/v1/admin/invites/$INVITE_HASH/revoke"
+```
+
+Revocation takes effect immediately: the database refuses the redemption and
+the cache entry is dropped in the same request.
+
+### Checking registry health
+
+```bash
+curl -sS -H "Authorization: Bearer $ADMIN_JWT" \
+  "http://127.0.0.1:3918/v1/admin/invite-registry-status"
+```
+
+`stale: true` means the cache has not reloaded within `max_stale_seconds`
+and redemption is failing closed with `InviteRegistryStale`.
 
 ## Manual single-invite flow
 
-Two steps: pick a code, hash it, append to the allowlist JSON.
-
-### 1. Pick a code
-
-Anything operator-meaningful works — the contributor pastes it back via
-their workload-token signer. Suggest 16 chars `[A-Z0-9]`, no leading
-zero, no ambiguous glyphs:
-
-```bash
-LC_ALL=C tr -dc 'A-Z2-9' </dev/urandom | head -c 16
-```
-
-Example: `INV9K3RT5FBQ72JX`.
-
-### 2. Hash it
-
-Use the issuer's own helper so the hashing function never drifts from
-the issuance handler:
+For hashing a code you already have (e.g. one an operator generated by
+hand, or when cross-checking a `--mint-invites` output), use the issuer's
+own helper so the hashing function never drifts from the issuance handler:
 
 ```bash
 trace-commons-upload-claim-issuer --hash-invite-code INV9K3RT5FBQ72JX
 # → sha256:8b1a... (64 hex chars)
 ```
 
-### 3. Append to the allowlist JSON
+There is no manual JSON-editing path anymore once the invite registry is
+authoritative — see "Cutover" below. Mint through `--mint-invites` or
+`POST /v1/admin/invites` instead.
 
-```json
-{
-  "version": 1,
-  "generated_at": "2026-05-17T18:00:00Z",
-  "policy_label": "pilot-2026-05",
-  "entries": [
-    {
-      "subject_hash": "sha256:8b1a...",
-      "tenant_id": "tenant-zaki-pilot",
-      "note_label": "closed-alpha-batch-1",
-      "max_uses": 3
-    }
-  ]
-}
-```
+## Cutover
 
-- `version`: must be 1. Anything else is rejected as
-  `PilotAllowlistMalformed`.
-- `policy_label`: appears in minted JWTs as the `policy_label` claim and
-  in `/v1/admin/allowlist-status` responses. Use it to mark the batch
-  ("pilot-2026-05", "closed-alpha-q3").
-- `subject_hash`: must be lowercase canonical `sha256:<64 hex>`. The
-  schema rejects uppercase hex on purpose so the operator notices if
-  they generated the hash with a different tool.
-- `tenant_id`: the tenant the contributor will be attributed to. The
-  issuer does not currently force tenant equality against this field —
-  the existing workload-claim flow already resolves the minted tenant —
-  but it's stored for future cross-checks and operator-side auditing of
-  "who is allowed where".
-- `note_label`: optional pseudonymous/batch label. It is returned as
-  `contributor_label` from `/v1/onboard` and never appears in logs or
-  admin responses. Do not put a legal name, email, account id, Slack
-  handle, or any identifying reference here.
-- `max_uses`: positive integer. Defaults to `3` when omitted. The
-  workload-claim path treats this as metadata, while `/v1/onboard`
-  enforces it through the PostgreSQL `onboarding_invites` counter. Use
-  `3` for pilot invites so ordinary client retries do not consume the only
-  chance; use `1` only for deliberately single-use tests.
+This release ships redemption authority and file-rejection together, both
+driven by the single `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` flag.
+`FileAllowlistSource` reads that exact same env var, so the moment it is
+set, a leftover `kind: "invite"` entry in the allowlist file is not merely
+ignored — it fails the issuer's startup `warm()` load outright. There is no
+staged rollout where the flag is on and file entries can safely remain:
+**stripping invite entries from the file is mandatory in the same step as
+setting the flag, not optional and not deferrable.** An operator who sets
+the flag and leaves the entries in place, expecting a grace period, takes a
+full issuer outage — the process will not start.
 
-The issuer re-reads the file every
-`TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS` (default 60), so a
-file edit takes effect within a minute without a restart.
+The rollout is two steps:
+
+1. **Run `--import-file-invites`.** One-time migration of the file's
+   existing `kind: "invite"` entries into the database. Idempotent on the
+   invite hash, so a partial or repeated run is safe. Instance entries stay
+   in the file and are counted, not imported. Do this before the next step
+   — there is no window where an existing contributor's invite becomes
+   unredeemable, because the file is still authoritative for redemption
+   until the flag flips.
+2. **In the same deploy: set the flag AND strip invite entries from the
+   file.** Remove every `kind: "invite"` entry from the allowlist JSON
+   (instance entries stay) and set
+   `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true`, then restart the
+   issuer. Verify the restart succeeds before considering the cutover done
+   — a successful startup is your confirmation the file no longer carries
+   any invite entries.
+
+Rollback is unsetting `TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE` and
+restarting. `--import-file-invites` is idempotent, so nothing needs to be
+replayed. Re-adding entries to the allowlist file is only relevant if you
+are also rolling back to an issuer build from before this release — on a
+current build, file entries and the flag cannot coexist regardless of
+which way the flag is set.
 
 ## Running the issuer with the allowlist enabled
 
@@ -242,12 +292,12 @@ If step 3 returns 200, the allowlist source is not wired up — confirm
 
 ## Adding a contributor mid-pilot
 
-1. Run `scripts/operator/generate-pilot-invites.py` with `--count 1` or a
-   larger batch count.
-2. Restart only `trace-commons-upload-claim-issuer.service` so the issuer
-   warm-loads the new file immediately.
-3. Confirm the service is active and the allowlist entry count increased.
-4. Send the contributor the fresh invite link through whatever recruitment
+1. Mint one invite (or a small batch) through `--mint-invites` or
+   `POST /v1/admin/invites` — see "Provisioning invite codes" above. Prefer
+   the admin API if you plan to hand the code out immediately: it is
+   redeemable the moment the request returns, with no refresh-interval wait.
+2. Confirm `GET /v1/admin/invite-registry-status` reports `stale: false`.
+3. Send the contributor the fresh invite code through whatever recruitment
    channel the pilot uses (form, DM, signed announcement).
 
 ## Agent-driven onboarding smoke

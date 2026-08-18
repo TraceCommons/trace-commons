@@ -1,0 +1,157 @@
+# Flatpak manifest for the Linux contributor shell.
+#
+# UNBUILT. This manifest has not been run through flatpak-builder anywhere
+# in this pass -- not in the container this crate otherwise builds and runs
+# in (it has no flatpak-builder, no Flatpak runtimes, and no `flatpak`
+# command at all), and not on the macOS host, which cannot build Flatpaks
+# at all. It has been checked for shape and internal consistency against
+# the crate's actual Cargo.toml, the daemon's actual default session roots,
+# and the actual D-Bus surfaces this pass added (portal, notifications,
+# tray) -- not validated end to end. See
+# docs/superpowers/plans/linux-integration-report.md for exactly what would
+# need to run, on a real Linux machine with flatpak-builder installed, to
+# find out whether it actually builds.
+#
+# The one constraint that shapes this file: a Flatpak-confined process
+# cannot read `~/.claude/projects` or `~/.codex/sessions` -- the daemon's
+# actual default session roots (see
+# `trace-commons-contributor/src/source/mod.rs`) -- without an explicit
+# filesystem permission, and the whole point of Flatpak confinement is that
+# it must not get a blanket grant of `home` to do it. So `finish-args` below
+# names exactly those two directories, read-only, and nothing wider. The
+# design spec's wording for why -- "Trace Commons needs to read your Claude
+# Code and Codex session files. It asks for access to those folders only."
+# -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
+# ready for onboarding to show once onboarding exists (it does not yet;
+# see the report).
+#
+# A contributor who points the daemon at a non-default session root (the
+# `claude_root` / `codex_root` settings this app's own Settings view already
+# shows as configured-or-not, never as a path) would need a matching custom
+# `--filesystem` grant this manifest cannot predict. That is a real,
+# unresolved limitation of shipping this as a Flatpak, not an oversight;
+# the tarball distribution the design spec also asks for has no such limit,
+# because it is not confined.
+app-id: ai.tracecommons.Contributor
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+# No sdk-extensions entry for rust-stable here anymore. The first real
+# release run (app-v0.1.0, run 31959830328) proved org.gnome.Sdk//46
+# resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
+# the newer //24.08 branch only reaches 1.89.0, still 3 minors short of this
+# crate's rust-version = "1.92" floor. The build is network-sandboxed, so
+# rustup cannot fetch a newer toolchain at build time either. The
+# trace-commons-shell module below bundles its own pinned 1.92.0 toolchain
+# as a source instead, so the build no longer depends on the SDK
+# extension's version at all.
+command: trace-commons-shell
+
+finish-args:
+  # GTK 4 display access. Wayland first, X11 as the fallback the runtime
+  # itself recommends; no direct device access is needed.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # Talks to org.freedesktop.Notifications (libnotify), the
+  # org.freedesktop.portal.* surfaces (background, and file-chooser if
+  # onboarding ever needs one), and org.kde.StatusNotifierWatcher for the
+  # bonus tray. All of these are session-bus services, not portals with
+  # their own finish-arg, except Notifications and the SNI watcher, which
+  # need this socket explicitly.
+  - --socket=session-bus
+  # The two session roots this daemon reads by default, and nothing wider.
+  # Read-only: this application only ever reads session files, and the
+  # queue/redaction/upload pipeline holds its own working state entirely
+  # under the app's private, automatically-writable config directory
+  # (`dirs::config_dir()`, which Flatpak already remaps to the sandboxed
+  # per-app location with no extra permission needed).
+  - --filesystem=~/.claude/projects:ro
+  - --filesystem=~/.codex/sessions:ro
+
+modules:
+  - name: trace-commons-shell
+    buildsystem: simple
+    build-options:
+      # Bundled toolchain's bin dir, replacing the SDK extension's rust bin
+      # dir -- see the sdk-extensions comment above for why that's gone.
+      # This path is build-time only: it lives under the module's own build
+      # directory (flatpak-builder's convention is /run/build/<module-name>),
+      # never under /app, so none of it ends up in the shipped app image.
+      append-path: /run/build/trace-commons-shell/rust-toolchain-install/bin
+      env:
+        CARGO_HOME: /run/build/trace-commons-shell/cargo
+    build-commands:
+      # Install the pinned rust 1.92.0 toolchain (fetched as a source below)
+      # into a prefix under the build directory -- deliberately NOT /app.
+      # The app image must not ship a Rust compiler; that would add hundreds
+      # of megabytes to what a contributor downloads for a GTK shell binary
+      # that needs none of it at runtime. `dest: rust-toolchain` on the
+      # archive sources below extracts the tarball's contents (including
+      # install.sh) directly into rust-toolchain/, not into a nested
+      # rust-1.92.0-<arch>/ subdirectory -- verified against a real
+      # flatpak-builder run; an earlier version of this command assumed a
+      # nested dir and failed with "No such file or directory".
+      # --without=rust-docs keeps the install itself small and fast;
+      # nothing here touches /app regardless.
+      - |
+        set -euo pipefail
+        rust-toolchain/install.sh --prefix="$PWD/rust-toolchain-install" --without=rust-docs
+      # --offline requires a vendored source tree; see cargo-sources.json
+      # below and the report for the exact command that generates it. This
+      # manifest does not fabricate that file -- a plausible-looking but
+      # wrong one is worse than an honest gap, since it would silently
+      # pin the wrong checksums.
+      # crates/trace-commons-contributor-gtk/Cargo.toml declares its own
+      # `[workspace]` -- it is deliberately excluded from the root
+      # workspace because it links GTK and does not build on macOS. Without
+      # --target-dir, cargo infers the target dir from that crate's own
+      # workspace root and writes to
+      # crates/trace-commons-contributor-gtk/target/release/, not
+      # target/release/ at the source tree root that the install command
+      # below reads from. Pinning --target-dir here keeps the output
+      # location fixed even if the workspace layout changes again.
+      - cargo --offline build --release --target-dir target --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
+      - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
+    sources:
+      - type: dir
+        path: ../../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
+      # Pinned rust 1.92.0, matching this crate's rust-version floor exactly
+      # -- not newer -- so the build proves the crate honours its own
+      # minimum instead of quietly depending on something later. Two
+      # arch-scoped sources, each fetched only on its own arch via
+      # `only-arches`, so an x86_64 build never pulls the aarch64 tarball
+      # and vice versa. Extracted under `dest: rust-toolchain`, a
+      # subdirectory of the build dir, so it never collides with the `dir`
+      # source above (which maps to the build dir root); flatpak-builder
+      # extracts the tarball's contents straight into that directory
+      # (install.sh lands at rust-toolchain/install.sh), not into a nested
+      # rust-1.92.0-<arch>/ directory.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz
+        sha256: d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c
+        dest: rust-toolchain
+      - type: archive
+        only-arches: [aarch64]
+        url: https://static.rust-lang.org/dist/rust-1.92.0-aarch64-unknown-linux-gnu.tar.xz
+        sha256: 3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822
+        dest: rust-toolchain
+      # Generated, not written by hand: run
+      #   pip install aiohttp tomlkit
+      #   python3 flatpak-cargo-generator.py \
+      #     crates/trace-commons-contributor-gtk/Cargo.lock \
+      #     -o crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json
+      # (flatpak-cargo-generator.py comes from
+      # https://github.com/flatpak/flatpak-builder-tools, and needs network
+      # access -- it downloads nothing itself, but resolves checksums for
+      # everything in the lockfile). Absent that file, the build-commands
+      # above will fail at the network-sandboxed `cargo build` step, which
+      # is the correct, honest failure rather than a silent full-network
+      # build that defeats the point of a reproducible Flatpak.
+      - cargo-sources.json
