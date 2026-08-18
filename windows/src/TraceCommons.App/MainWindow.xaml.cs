@@ -37,6 +37,17 @@ public sealed partial class MainWindow : Window
 
     private bool _quitConfirmed;
 
+    /// <summary>
+    /// Whether the quit confirmation is already on screen.
+    /// </summary>
+    /// <remarks>
+    /// A second close request while the dialog is up would try to open a
+    /// second <c>ContentDialog</c>, which throws. The close button is a
+    /// system caption button and stays live behind a dialog, so this is a
+    /// click away rather than a theoretical race.
+    /// </remarks>
+    private bool _quitDialogOpen;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -110,6 +121,11 @@ public sealed partial class MainWindow : Window
         // and start another one from the answer.
         args.Cancel = true;
 
+        if (_quitDialogOpen)
+        {
+            return;
+        }
+
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -120,7 +136,31 @@ public sealed partial class MainWindow : Window
             DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
         };
 
-        Microsoft.UI.Xaml.Controls.ContentDialogResult result = await dialog.ShowAsync();
+        Microsoft.UI.Xaml.Controls.ContentDialogResult result;
+
+        _quitDialogOpen = true;
+        try
+        {
+            result = await dialog.ShowAsync();
+        }
+        catch (Exception)
+        {
+            // WinUI allows one ContentDialog per XamlRoot, and this window now
+            // has two other callers -- WithdrawDialog and GoPublicDialog. If
+            // one of them is open, ShowAsync throws, and this handler is
+            // `async void`, so the throw would take the process down.
+            //
+            // The close stays cancelled. That is the only safe direction:
+            // quitting is what stops the watcher, so an unaskable quit must
+            // not become a silent one. The contributor dismisses the dialog
+            // that is already up and closes again, which is how a modal
+            // behaves everywhere else.
+            return;
+        }
+        finally
+        {
+            _quitDialogOpen = false;
+        }
 
         if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
         {
