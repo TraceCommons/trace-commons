@@ -2521,6 +2521,102 @@ pub fn daemon_uninstall() -> Result<()> {
     crate::daemon::install::uninstall()
 }
 
+/// The one human-readable line for each update outcome. A function rather
+/// than inline `println!`s so it is testable without capturing stdout.
+pub(crate) fn update_outcome_line(outcome: &crate::update::run::UpdateOutcome) -> String {
+    use crate::update::run::UpdateOutcome;
+    match outcome {
+        UpdateOutcome::DeferredToWinget => format!(
+            "winget installed this copy, so winget updates it:\n  {}",
+            crate::update::source::WINGET_UPGRADE_COMMAND
+        ),
+        // Nothing was installed here either, but unlike winget we have no
+        // idea how this copy got here (Homebrew, a distro package, a
+        // read-only Nix path, `install.sh --dir`), so there is no single
+        // command to point at.
+        UpdateOutcome::DeferredUnrecognized => "this copy was not installed by \
+            trace-commons-contributor's own updater, so it will not replace it; \
+            update it the same way you installed it"
+            .to_string(),
+        UpdateOutcome::UpToDate { version } => format!("already up to date ({version})"),
+        UpdateOutcome::NoArtifactForPlatform => {
+            "no update is published for this platform yet".to_string()
+        }
+        UpdateOutcome::Staged { version } => format!(
+            "{version} verified and staged; it is applied at the daemon's next start, \
+             or now with `trace-commons-contributor update`"
+        ),
+        UpdateOutcome::Applied { version } => format!("installed {version}"),
+        UpdateOutcome::QuiesceTimedOutStaged { version } => format!(
+            "{version} verified and staged, but an upload is still in flight; \
+             nothing was replaced. Try again shortly."
+        ),
+    }
+}
+
+/// The machine-readable name for each outcome, for `--json` callers.
+fn update_outcome_kind(outcome: &crate::update::run::UpdateOutcome) -> &'static str {
+    use crate::update::run::UpdateOutcome;
+    match outcome {
+        UpdateOutcome::DeferredToWinget => "deferred_to_winget",
+        UpdateOutcome::DeferredUnrecognized => "deferred_unrecognized",
+        UpdateOutcome::UpToDate { .. } => "up_to_date",
+        UpdateOutcome::NoArtifactForPlatform => "no_artifact_for_platform",
+        UpdateOutcome::Staged { .. } => "staged",
+        UpdateOutcome::Applied { .. } => "applied",
+        UpdateOutcome::QuiesceTimedOutStaged { .. } => "quiesce_timed_out_staged",
+    }
+}
+
+/// Check for, verify, and install an update.
+///
+/// Verification is not optional and there is no flag that skips it: this tool
+/// reads coding transcripts, so an updater that can be talked into installing
+/// something unverified is worse than no updater.
+///
+/// Every outcome here -- including "nothing to do" ones like `UpToDate`,
+/// `NoArtifactForPlatform`, and the two deferred variants -- is `Ok(())`, so
+/// the process exits 0. Only an `UpdateError` (a verification, fetch, or
+/// swap failure) is `Err`, which exits non-zero. That is the intended
+/// distinction: declining to update because there is nothing to do is not a
+/// failure, but failing to verify or apply one is.
+pub async fn update(store: &ConfigStore, stage_only: bool, json: bool) -> Result<()> {
+    use crate::update::run::{UpdateMode, check_and_install};
+
+    let mode = if stage_only {
+        UpdateMode::Stage
+    } else {
+        UpdateMode::Apply
+    };
+    let outcome = check_and_install(store, mode)
+        .await
+        // The error labels are fixed and carry no path, URL, or signature.
+        .map_err(|e| anyhow::anyhow!("update refused: {e}"))?;
+
+    if json {
+        let version = match &outcome {
+            crate::update::run::UpdateOutcome::UpToDate { version }
+            | crate::update::run::UpdateOutcome::Staged { version }
+            | crate::update::run::UpdateOutcome::Applied { version }
+            | crate::update::run::UpdateOutcome::QuiesceTimedOutStaged { version } => {
+                Some(version.clone())
+            }
+            crate::update::run::UpdateOutcome::DeferredToWinget
+            | crate::update::run::UpdateOutcome::DeferredUnrecognized
+            | crate::update::run::UpdateOutcome::NoArtifactForPlatform => None,
+        };
+        let out = serde_json::json!({
+            "schema_version": "trace_commons.cli_update.v1",
+            "outcome": update_outcome_kind(&outcome),
+            "version": version,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("{}", update_outcome_line(&outcome));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod daemon_command_tests {
     use super::*;
@@ -2668,5 +2764,59 @@ mod daemon_command_tests {
             .unwrap(),
             crate::daemon::policy::UNKNOWN_PROJECT_KEY
         );
+    }
+
+    #[test]
+    fn a_winget_install_is_told_the_winget_command_and_nothing_else() {
+        use crate::update::run::UpdateOutcome;
+        let text = crate::commands::update_outcome_line(&UpdateOutcome::DeferredToWinget);
+        assert!(
+            text.contains("winget upgrade TraceCommons.Contributor"),
+            "{text}"
+        );
+        // Never suggest a manual replacement to somebody whose package
+        // manager owns the file: doing it would leave winget offering a
+        // phantom upgrade forever.
+        assert!(!text.contains("install.ps1"), "{text}");
+    }
+
+    #[test]
+    fn an_unrecognized_install_is_not_told_to_run_winget() {
+        use crate::update::run::UpdateOutcome;
+        let text = crate::commands::update_outcome_line(&UpdateOutcome::DeferredUnrecognized);
+        // Telling a Homebrew (or distro package, or Nix, or install.ps1
+        // --dir) install to run `winget upgrade` would be actively wrong.
+        assert!(!text.contains("winget"), "{text}");
+        assert!(!text.to_lowercase().contains("install.ps1"), "{text}");
+    }
+
+    #[test]
+    fn an_up_to_date_install_says_so_without_a_version_bump_claim() {
+        use crate::update::run::UpdateOutcome;
+        let text = crate::commands::update_outcome_line(&UpdateOutcome::UpToDate {
+            version: "0.1.0".to_string(),
+        });
+        assert!(text.contains("0.1.0"), "{text}");
+        assert!(!text.contains("installed"), "{text}");
+    }
+
+    #[test]
+    fn a_quiesce_timeout_is_reported_as_staged_not_as_installed() {
+        use crate::update::run::UpdateOutcome;
+        let text = crate::commands::update_outcome_line(&UpdateOutcome::QuiesceTimedOutStaged {
+            version: "0.2.0".to_string(),
+        });
+        assert!(text.contains("staged"), "{text}");
+        assert!(!text.contains("installed"), "{text}");
+    }
+
+    #[test]
+    fn an_applied_update_names_the_version_installed() {
+        use crate::update::run::UpdateOutcome;
+        let text = crate::commands::update_outcome_line(&UpdateOutcome::Applied {
+            version: "0.2.0".to_string(),
+        });
+        assert!(text.contains("installed"), "{text}");
+        assert!(text.contains("0.2.0"), "{text}");
     }
 }

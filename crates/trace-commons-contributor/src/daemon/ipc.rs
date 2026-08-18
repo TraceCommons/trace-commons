@@ -100,7 +100,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use anyhow::bail;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -175,9 +175,22 @@ pub const ERR_BODY_DIGEST_REQUIRED: &str = "body-digest-required";
 /// distinguishable.
 pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 
+/// `quiesce` gave up waiting for in-flight uploads to finish. The caller
+/// leaves the update staged and tries again later; the swap never forces its
+/// way past active work, because a half-uploaded trace is not an acceptable
+/// cost for an update.
+pub const ERR_QUIESCE_TIMEOUT: &str = "quiesce-timeout";
+
+/// How long `quiesce` waits for in-flight uploads by default.
+pub const DEFAULT_QUIESCE_TIMEOUT_SECS: u64 = 60;
+/// The longest a caller may ask `quiesce` to park uploads for.
+pub const MAX_QUIESCE_TIMEOUT_SECS: u64 = 300;
+/// How often the drain is re-checked while waiting.
+const QUIESCE_POLL_MS: u64 = 200;
+
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 31] = [
+pub const METHODS: [&str; 32] = [
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
@@ -198,6 +211,7 @@ pub const METHODS: [&str; 31] = [
     "preview_body",
     "preview_turns",
     "queue_outcome_counts",
+    "quiesce",
     "refresh_history",
     "resume",
     "set_consent_scopes",
@@ -289,6 +303,16 @@ pub struct DaemonShared {
     pub settings: Mutex<DaemonSettings>,
     pub health: Mutex<HealthState>,
     pub paused: AtomicBool,
+    /// Uploads are parked for an update swap.
+    ///
+    /// Deliberately *not* `paused`. Pause is the contributor's own setting
+    /// and is persisted in `daemon-state.json`; an update that set it would
+    /// be rewriting their preference, and a crash between quiescing and
+    /// swapping would leave the daemon paused forever with nothing to say
+    /// why. This flag is in-memory only and dies with the process, which is
+    /// exactly the lifetime an update swap needs: after the swap there is a
+    /// new process and nothing left to un-quiesce.
+    pub quiesced: AtomicBool,
     pub shutdown: AtomicBool,
     /// Wakes the supervisor immediately on a shutdown request. Without it the
     /// daemon would not notice until its next poll, which is a minute away --
@@ -348,6 +372,7 @@ impl DaemonShared {
             settings: Mutex::new(settings),
             health: Mutex::new(HealthState::default()),
             paused: AtomicBool::new(paused),
+            quiesced: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
@@ -929,6 +954,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // than a partial answer. No real caller reaches it -- see the module
         // doc's "Sync vs. async dispatch" section.
         "preview_body" => Response::err(req.id, ERR_UNAVAILABLE, "preview-body-requires-async"),
+        // Waiting for a drain is async by nature; the synchronous dispatcher
+        // cannot do it and says so rather than claiming a quiesce it did not
+        // perform. See the module doc's "Sync vs. async dispatch" section.
+        "quiesce" => Response::err(req.id, ERR_UNAVAILABLE, "quiesce-requires-async"),
         // The turn index is resolved from the same envelope as the body, by
         // the same async path, so it refuses here for the same reason.
         "preview_turns" => Response::err(req.id, ERR_UNAVAILABLE, "preview-turns-requires-async"),
@@ -1150,17 +1179,19 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 /// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"preview_body"`, `"preview_turns"`, `"enroll"`, `"withdraw"`,
-/// `"withdraw_bulk"`, `"set_public_profile"`, `"clear_public_profile"`) for real
-/// and delegates every other method, unchanged, to the synchronous
-/// `handle_request`. See the module doc's "Sync vs. async dispatch" section
-/// for why this is the only place that decides which methods are async, and
-/// why both real callers (the socket loop and `handle_local`) always go
-/// through this function rather than `handle_request` directly.
+/// `"preview_body"`, `"preview_turns"`, `"quiesce"`, `"enroll"`,
+/// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
+/// `"clear_public_profile"`) for real and delegates every other method,
+/// unchanged, to the synchronous `handle_request`. See the module doc's
+/// "Sync vs. async dispatch" section for why this is the only place that
+/// decides which methods are async, and why both real callers (the socket
+/// loop and `handle_local`) always go through this function rather than
+/// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
+        "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
@@ -1168,6 +1199,58 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "set_public_profile" => super::profile::handle_set_public_profile(shared, req).await,
         "clear_public_profile" => super::profile::handle_clear_public_profile(shared, req).await,
         _ => handle_request(shared, req),
+    }
+}
+
+/// The timeout `quiesce` will actually honour.
+///
+/// A caller cannot park uploads for a week, and a caller that asks for zero
+/// gets the default rather than an instant refusal.
+fn clamp_quiesce_timeout(requested: Option<u64>) -> u64 {
+    match requested {
+        Some(0) | None => DEFAULT_QUIESCE_TIMEOUT_SECS,
+        Some(n) => n.min(MAX_QUIESCE_TIMEOUT_SECS),
+    }
+}
+
+/// Park the upload queue and wait for anything already in flight to finish.
+///
+/// The flag is set first, so nothing new is claimed while the wait runs, and
+/// then in-flight work is allowed to complete on its own terms. On timeout
+/// the flag is cleared and the caller is refused: the update stays staged and
+/// retries later. There is no forced path -- a half-uploaded trace is not an
+/// acceptable cost for an update.
+async fn handle_quiesce(shared: &DaemonShared, req: &Request) -> Response {
+    let requested = match req.params.get("timeout_secs") {
+        None => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "timeout-secs-invalid"),
+        },
+    };
+    let timeout = std::time::Duration::from_secs(clamp_quiesce_timeout(requested));
+
+    shared.quiesced.store(true, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    loop {
+        let in_flight = {
+            let queue = shared.queue.lock().expect("queue lock");
+            queue.all().iter().any(|e| e.state == QueueState::Uploading)
+        };
+        if !in_flight {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "quiesced": true,
+                    "waited_ms": started.elapsed().as_millis() as u64,
+                }),
+            );
+        }
+        if started.elapsed() >= timeout {
+            shared.quiesced.store(false, Ordering::Relaxed);
+            return Response::err(req.id, ERR_BUSY, ERR_QUIESCE_TIMEOUT);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(QUIESCE_POLL_MS)).await;
     }
 }
 
@@ -2767,6 +2850,12 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    // `bind`'s socket-path-length refusal and `ensure_private_dir`'s 0700
+    // check are both properties of the unix-socket transport specifically:
+    // Windows has no socket path to overflow and no directory-mode access
+    // control (see `win_pipe.rs`, whose DACL plays that role instead), so
+    // there is no Windows equivalent of either function to test here.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bind_failure_never_names_a_local_path() {
         // These errors are returned to `daemon run`, which under a service
@@ -2774,7 +2863,6 @@ mod tests {
         // path carries the OS username.
         let deep = std::env::temp_dir().join("a".repeat(120));
         std::fs::create_dir_all(&deep).unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&deep, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2790,6 +2878,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&deep);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_state_directory_permissions_failure_never_names_a_local_path() {
         let missing = std::env::temp_dir().join("trace-commons-no-such-dir-xyz");
@@ -3375,5 +3464,130 @@ mod tests {
             via_async.error.map(|e| e.code),
             via_local.error.map(|e| e.code)
         );
+    }
+
+    #[tokio::test]
+    async fn quiesce_parks_the_queue_when_nothing_is_in_flight() {
+        let s = shared();
+        let r = handle_request_async(&s, &req("quiesce", serde_json::json!({}))).await;
+        let v = r.result.expect("quiesce should succeed with an idle queue");
+        assert_eq!(v["quiesced"], true);
+        assert!(s.quiesced.load(Ordering::Relaxed), "the flag must be set");
+    }
+
+    #[tokio::test]
+    async fn quiesce_times_out_rather_than_forcing_its_way_past_an_upload() {
+        let s = shared();
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Uploading,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+        let r =
+            handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 1}))).await;
+        let err = r.error.expect("an in-flight upload must not be abandoned");
+        assert_eq!(err.code, ERR_BUSY);
+        assert_eq!(err.message, ERR_QUIESCE_TIMEOUT);
+        // A failed quiesce must leave the daemon working: the update stays
+        // staged and retries, rather than parking uploads indefinitely.
+        assert!(!s.quiesced.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn quiesce_completes_once_the_in_flight_upload_finishes() {
+        let s = std::sync::Arc::new(shared());
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Uploading,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+        let finisher = std::sync::Arc::clone(&s);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mut queue = finisher.queue.lock().unwrap();
+            queue.set_state(entry_id, QueueState::Uploaded, None);
+        });
+        let r = handle_request_async(&s, &req("quiesce", serde_json::json!({"timeout_secs": 10})))
+            .await;
+        assert_eq!(r.result.expect("drained")["quiesced"], true);
+    }
+
+    #[test]
+    fn a_synchronous_quiesce_is_refused_rather_than_answered_wrongly() {
+        let s = shared();
+        let r = handle_request(&s, &req("quiesce", serde_json::json!({})));
+        let err = r.error.unwrap();
+        assert_eq!(err.code, ERR_UNAVAILABLE);
+        assert_eq!(err.message, "quiesce-requires-async");
+    }
+
+    #[tokio::test]
+    async fn an_absurd_quiesce_timeout_is_capped_rather_than_honoured() {
+        let s = shared();
+        let r = handle_request_async(
+            &s,
+            &req("quiesce", serde_json::json!({"timeout_secs": 999_999})),
+        )
+        .await;
+        // The queue is idle, so this returns immediately; the point is that a
+        // caller cannot ask the daemon to park uploads for a week.
+        assert_eq!(r.result.expect("idle")["quiesced"], true);
+        assert_eq!(
+            clamp_quiesce_timeout(Some(999_999)),
+            MAX_QUIESCE_TIMEOUT_SECS
+        );
+        assert_eq!(clamp_quiesce_timeout(None), DEFAULT_QUIESCE_TIMEOUT_SECS);
+        assert_eq!(clamp_quiesce_timeout(Some(0)), DEFAULT_QUIESCE_TIMEOUT_SECS);
+        assert_eq!(clamp_quiesce_timeout(Some(5)), 5);
     }
 }

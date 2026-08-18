@@ -893,6 +893,66 @@ pub fn reason_sentence(label: &str) -> &'static str {
     }
 }
 
+// --- Updating ------------------------------------------------------------
+//
+// The one platform this app is forbidden to update itself on, so a flatpak
+// portal does the work and this window only ever narrates it -- see
+// `update.rs`. Nothing below names the portal, D-Bus, or a monitor; every
+// sentence says what happens to the machine and the queue instead.
+
+/// The offer, with the commit a person is being moved to.
+///
+/// The commit is named because "an update is available" with nothing else
+/// is unfalsifiable -- there is no way for a contributor to check they got
+/// what they were shown. Twelve characters of an ostree commit is enough to
+/// compare against `flatpak info ai.tracecommons.Contributor` and short
+/// enough to read.
+pub fn update_offer_line(short_commit: &str) -> String {
+    format!(
+        "A newer Trace Commons is available ({short_commit}). Installing it replaces this app; \
+         your queue and everything already waiting in it are untouched."
+    )
+}
+
+/// The banner's button while an update is merely offered.
+pub const UPDATE_AVAILABLE_ACTION: &str = "Install";
+
+/// Kept as a constant so the banner body and the dialog body cannot drift
+/// apart, since the dialog is the second time a person reads the same fact.
+pub const UPDATE_AVAILABLE_BODY: &str = "A newer Trace Commons is available.";
+
+/// The confirmation, which is where the actual decision is made.
+pub const UPDATE_CONFIRM_HEADING: &str = "Install the newer version?";
+pub const UPDATE_CONFIRM_BODY: &str = "Flatpak installs it. This app does not change while it is open -- you keep running this \
+     version until you quit and reopen. Nothing in your queue is sent, removed or re-scanned.";
+pub const UPDATE_CONFIRM_ACCEPT: &str = "Install";
+pub const UPDATE_CONFIRM_CANCEL: &str = "Not now";
+
+/// Progress. One sentence, because a progress bar carries the rest.
+pub fn update_installing_line(percent: u32) -> String {
+    format!("Installing the update -- {percent}% done. You can keep using this window.")
+}
+
+/// Installed but not yet running.
+pub const UPDATE_READY_BODY: &str = "The update is installed. Quit and reopen Trace Commons to start using it. Your queue stays \
+     exactly where it is.";
+pub const UPDATE_READY_ACTION: &str = "Quit now";
+
+/// Refused or failed. States the data consequence, names no mechanism, and
+/// does not ask anyone to retry -- the portal re-checks on its own.
+pub const UPDATE_FAILED_BODY: &str = "The update did not install. This copy is unchanged and nothing in your queue was affected. \
+     It will be offered again.";
+
+/// Built from source, so nothing here manages it. Honest about the fact
+/// that this app is not checking anything in that case -- there is no
+/// version check pending, only one that will never happen on this build.
+pub const UPDATE_UNMANAGED_BODY: &str = "This copy was built from source, so updates are not managed here and nothing is being \
+     checked. Rebuild from the repository to move to a newer version.";
+
+/// Under flatpak, but nothing answered.
+pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this desktop's Flatpak service did not answer. Use your \
+     software centre, or run flatpak update, to move to a newer version.";
+
 // --- Onboarding --------------------------------------------------------
 //
 // Six screens, one decision each. Every string below is verbatim from
@@ -1115,6 +1175,31 @@ mod tests {
             for b in &conclusive[i + 1..] {
                 assert_ne!(a, b);
             }
+        }
+    }
+
+    #[test]
+    fn update_copy_never_names_the_portal_or_dbus() {
+        // Contributor-facing copy talks about the app, the queue and the
+        // machine -- never the mechanism doing the work underneath.
+        let all = [
+            UPDATE_AVAILABLE_BODY,
+            UPDATE_CONFIRM_HEADING,
+            UPDATE_CONFIRM_BODY,
+            UPDATE_READY_BODY,
+            UPDATE_FAILED_BODY,
+            UPDATE_UNMANAGED_BODY,
+            UPDATE_UNAVAILABLE_BODY,
+            &update_offer_line("beefbeefbeef"),
+            &update_installing_line(50),
+        ]
+        .join(" ")
+        .to_lowercase();
+        for forbidden in ["d-bus", "dbus", "portal", "monitor", "commit", "ostree"] {
+            assert!(
+                !all.contains(forbidden),
+                "update copy names {forbidden}: {all}"
+            );
         }
     }
 

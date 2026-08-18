@@ -122,17 +122,31 @@ It may be rate-limiting you. Pass a version explicitly instead:
   .\install.ps1 -Version 0.1.0
 "@
     }
+    # Check the SHAPE before reading it. A rate-limited GitHub returns a JSON
+    # object, {message, documentation_url}, rather than an array of releases,
+    # so nothing in it carries tag_name. Reporting that as "no release found"
+    # would send the reader looking for a missing release instead of telling
+    # them they were throttled. The unauthenticated limit is 60 requests/hour
+    # PER IP, so anyone behind a shared address can hit it without having run
+    # this script before.
+    $usable = @($releases | Where-Object { $_.PSObject.Properties.Name -contains 'tag_name' })
+    if ($usable.Count -eq 0) {
+        Die @"
+GitHub did not return a release list. It is most likely rate-limiting you.
+The unauthenticated limit is 60 requests/hour for everyone sharing your IP
+address. Pass a version explicitly to skip this lookup entirely:
+  .\install.ps1 -Version 0.2.0
+"@
+    }
 
     # Bind the matched release before reading anything off it. Under
     # `Set-StrictMode -Version Latest` a pipeline that matches nothing yields
     # $null, and `$null.tag_name` throws "The property 'tag_name' cannot be
-    # found on this object" -- which fired BEFORE the guard below could report
-    # it, replacing a plain explanation with a stack trace about a property
-    # name. The API answering with an empty list is a real case, not
-    # a hypothetical: it is what an over-limit or briefly inconsistent
-    # response looks like, and it is precisely when someone needs the
-    # explanation rather than the trace.
-    $release = $releases |
+    # found on this object" before the guard below can report it, replacing a
+    # plain explanation with a stack trace about a property name. The shape
+    # check above cannot stand in for this: a well-formed list with no
+    # contributor-v* release in it is exactly the case this catches.
+    $release = $usable |
         Where-Object { $_.tag_name -like 'contributor-v*' } |
         Select-Object -First 1
     if (-not $release) {

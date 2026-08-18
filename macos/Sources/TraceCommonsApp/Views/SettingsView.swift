@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import TCUpdates
 
 /// What this machine is doing, and what permissions traces carry.
 ///
@@ -34,6 +36,7 @@ struct SettingsView: View {
 /// is a surface that has to be looked at to be checked.
 struct SettingsContent: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var updates = UpdateController.shared
 
     // Read fresh on appear rather than cached across the view's lifetime:
     // the user can flip this in System Settings -> General -> Login Items
@@ -60,6 +63,7 @@ struct SettingsContent: View {
         VStack(alignment: .leading, spacing: TC.Space.lg) {
             connection
             loginItem
+            updatesSection
             consent
             publicProfile
             watching
@@ -180,6 +184,111 @@ struct SettingsContent: View {
             }
         }
         loginItemState = LoginItemManager.currentState
+    }
+
+    // MARK: - Updates
+
+    /// Version, update state, and -- when Homebrew owns this copy -- the one
+    /// command that actually works.
+    ///
+    /// The Homebrew branch is not an apology for a missing feature. Homebrew
+    /// placed these bytes and Homebrew replaces them; an app that offered a
+    /// "Check Now" button here would be offering to fight the package
+    /// manager over the same file.
+    private var updatesSection: some View {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            TCSectionHeader(title: "Updates")
+
+            HStack(spacing: TC.Space.s) {
+                TCFieldLabel("Version")
+                Text(updates.currentVersion)
+                    .font(TC.Font_.ledger)
+                    .textSelection(.enabled)
+            }
+
+            switch updates.mode {
+            case .selfUpdating:
+                TCTag(text: "Checks daily", tone: .clear, symbol: "arrow.triangle.2.circlepath")
+                Text(lastCheckSentence)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                // Deliberately does NOT claim the download already happened.
+                // With SUAutomaticallyUpdate false, Sparkle's stock driver
+                // finds the update in the background and then asks; the
+                // download follows the yes. Copy that promised an
+                // already-downloaded update would be describing a
+                // configuration this app does not ship.
+                Text("""
+                    Trace Commons looks for new versions on its own. Nothing on \
+                    disk changes until you say yes.
+                    """)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Check Now") { updates.checkNow() }
+                    .buttonStyle(.bordered)
+                    .disabled(!updates.canCheckNow)
+
+            case .managedByHomebrew(let command):
+                TCTag(text: "Updates managed by Homebrew", tone: .held, symbol: "shippingbox")
+                Text("""
+                    Homebrew installed this copy, so Homebrew replaces it. Run \
+                    this in a terminal:
+                    """)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: TC.Space.s) {
+                    Text(command)
+                        .font(TC.Font_.ledger)
+                        .textSelection(.enabled)
+                        .padding(TC.Space.s)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .tcCard()
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+            case .disabled(let reason):
+                TCTag(text: "Updates unavailable", tone: .refused, symbol: "arrow.down.circle")
+                Text(disabledSentence(reason))
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var lastCheckSentence: String {
+        guard let date = updates.lastCheckDate else {
+            return "Not checked yet on this machine."
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "Last checked \(formatter.localizedString(for: date, relativeTo: Date()))."
+    }
+
+    /// Turns the policy's stable label into a sentence. The label itself is
+    /// what gets logged; this is what a person reads.
+    private func disabledSentence(_ reason: String) -> String {
+        switch reason {
+        case UpdatePolicy.noFeedReason:
+            return """
+                This build has no update feed configured, so it will not look \
+                for new versions. Development builds are like this. Install \
+                from a release DMG to receive updates.
+                """
+        case UpdatePolicy.insecureFeedReason:
+            return """
+                This build's update feed is not HTTPS, so it has been refused. \
+                Reinstall from a release DMG.
+                """
+        default:
+            return "Updates are turned off for this build."
+        }
     }
 
     // MARK: - Consent

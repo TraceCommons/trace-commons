@@ -3,10 +3,10 @@
 Builds the MSIX package for the Windows contributor app. Does not sign it.
 
 .DESCRIPTION
-The only thing in this repository that passes TcPackaged=true. The default
-build -- CI's `windows contributor app` job, and the release job's publish step
-that produces the shipping zip -- is unpackaged and is not affected by anything
-here.
+The release helper that passes TcPackaged=true. The default build and the
+release job's publish step that produces the shipping zip remain unpackaged;
+CI and the signed-MSIX release job opt into the same packaged flavour to verify
+it independently.
 
 Signing is deliberately NOT done in this script. The release workflow signs
 with Azure Trusted Signing through signtool, driven by an explicit allowlist

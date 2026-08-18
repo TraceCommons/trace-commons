@@ -1,0 +1,26 @@
+{
+  "schema_version": "trace_commons.update_conformance.version.v1",
+  "comment": "Shared by the Swift updater (macos/Tests/TCUpdatesTests) and the Rust updater (crates/trace-commons-contributor/src/update/version.rs). A case removed here is a check silently dropped from both implementations at once; add, do not delete.",
+  "comparisons": [
+    { "current": "0.1.0", "offered": "0.1.1", "newer": true },
+    { "current": "0.1.9", "offered": "0.2.0", "newer": true },
+    { "current": "0.9.9", "offered": "1.0.0", "newer": true },
+    { "current": "0.9.0", "offered": "0.10.0", "newer": true },
+    { "current": "0.10.0", "offered": "0.9.0", "newer": false },
+    { "current": "1.2.3", "offered": "1.2.3", "newer": false },
+    { "current": "1.2.3", "offered": "1.2.2", "newer": false },
+    { "current": "2.0.0", "offered": "1.9.9", "newer": false },
+    { "current": "1.0.0", "offered": "1.0.10", "newer": true },
+    { "current": "10.0.0", "offered": "9.99.99", "newer": false }
+  ],
+  "malformed": [
+    { "current": "1.2", "offered": "1.2.3" },
+    { "current": "1.2.3", "offered": "1.2.3.4" },
+    { "current": "1.2.3", "offered": "v1.2.4" },
+    { "current": "1.2.3", "offered": "1.2.x" },
+    { "current": "", "offered": "1.2.3" },
+    { "current": "1.2.3", "offered": "" },
+    { "current": "1.2.3", "offered": "1.-2.3" },
+    { "current": "1.2.3", "offered": " 1.2.4" }
+  ]
+}

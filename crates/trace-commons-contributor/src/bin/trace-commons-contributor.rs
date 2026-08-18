@@ -120,6 +120,20 @@ enum Command {
     },
     /// Print local identity (no network)
     Whoami,
+    /// Check for a newer release, verify it, and install it
+    ///
+    /// Refuses anything it cannot verify: the manifest signature, the
+    /// sha256, and on Windows the Authenticode signer must all check out,
+    /// and the offered version must be strictly newer. There is no flag
+    /// that skips any of that. When a package manager installed this copy
+    /// (winget, Homebrew, a distro package, etc.), this prints how to
+    /// update it that way instead and installs nothing.
+    Update {
+        /// Verify and stage the update without replacing anything; the
+        /// daemon applies it at its next start
+        #[arg(long)]
+        stage_only: bool,
+    },
     /// Delete local keystore, config, and receipts
     Logout,
     /// Sign in to your account (needed to withdraw traces), or check/end that session
@@ -356,6 +370,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Whoami => commands::whoami(&store, cli.json),
+        Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout => commands::logout(&store),
         Command::Account { action } => match action {
             AccountAction::Login { no_browser } => {

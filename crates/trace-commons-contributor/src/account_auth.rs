@@ -402,6 +402,11 @@ mod tests {
     /// are in this workspace, and `trace-commons-server` is a dev-dependency
     /// here, so this is a real cross-check rather than two hand-maintained
     /// copies that can drift.
+    ///
+    /// Non-Windows only: `trace-commons-server` is not a dev-dependency on
+    /// Windows (see its Cargo.toml comment) because its dependency chain
+    /// reaches openssl-sys, which is unusable on the CI Windows runner.
+    #[cfg(not(windows))]
     #[test]
     fn constants_match_the_server() {
         use trace_commons_server::account_native_auth as server;
@@ -417,6 +422,7 @@ mod tests {
     /// The verifier this client generates must satisfy the server's own
     /// well-formedness check, and the challenge must be the one the server
     /// derives.
+    #[cfg(not(windows))]
     #[test]
     fn generated_pkce_satisfies_the_server() {
         use trace_commons_server::account_native_auth as server;
@@ -428,6 +434,7 @@ mod tests {
     }
 
     /// The redirect this client registers must be one the server accepts.
+    #[cfg(not(windows))]
     #[test]
     fn the_registered_redirect_is_one_the_server_accepts() {
         use trace_commons_server::account_native_auth as server;

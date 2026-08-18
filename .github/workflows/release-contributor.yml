@@ -77,10 +77,28 @@ jobs:
       # builds win-pipe-acl-probe, which its own doc comment calls a test
       # tool. Building it here would hand it a public-trust signature and
       # ship it to contributors.
+      # TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX is read at COMPILE time by
+      # crates/trace-commons-contributor/src/update/endpoint.rs via option_env!,
+      # so it has to be present on this build step -- setting it anywhere later
+      # does nothing. It is the raw 32-byte Ed25519 public key, hex-encoded,
+      # whose private half lives in GCP Secret Manager as
+      # update-manifest-signing-key and signs updates/latest.json.
+      #
+      # It is a PUBLIC key and is deliberately a repository variable rather than
+      # a secret: masking it would only make CI logs harder to read while
+      # protecting nothing. What matters is that changing it is a visible,
+      # audited action.
+      #
+      # If it is unset, the build still succeeds and every shipped CLI refuses
+      # EVERY update with update_endpoint_no_pinned_key. That is the correct
+      # failure direction -- a client that trusts nothing is safe, one that
+      # trusts a placeholder is not -- but it does mean a release cut without
+      # this variable ships an updater that can never update.
       - name: Build
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX: ${{ vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX }}
         run: cargo build --release --bin trace-commons-contributor --target "$TARGET"
 
       # The checksum is published beside the binary so a contributor can
@@ -492,3 +510,46 @@ jobs:
           git commit -am "trace-commons-contributor $V"
           git push -u origin "bump-formula-$V"
           gh pr create --fill --repo TraceCommons/homebrew-tap
+
+  winget-bump:
+    name: bump the winget manifest
+    needs: [publish]
+    # Matches the publish job's own gate: a dispatch can satisfy
+    # startsWith(github.ref, 'refs/tags/') alone, so the push event is
+    # required too. The generator downloads the published release asset to
+    # compute its hash, so it cannot run before publish has created the
+    # release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Opens a pull request rather than pushing, matching the Homebrew
+      # formula bump above: winget-pkgs is a third-party repository with its
+      # own review, and a bad manifest reaches everyone who runs
+      # `winget upgrade`.
+      #
+      # No artifact download and no hash argument here: generate-manifests.sh
+      # fetches the published asset itself and computes InstallerSha256 from
+      # the bytes it got. A hash passed in by hand is exactly the value that
+      # gets copied from the wrong release.
+      - name: Generate and submit
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#contributor-v}"
+          ./scripts/winget/generate-manifests.sh "$V"
+          gh repo clone microsoft/winget-pkgs winget-pkgs -- --depth 1
+          # The generator already wrote the partitioned path winget-pkgs
+          # expects, so copy the tree across rather than individual files.
+          cp -R "manifests/t" "winget-pkgs/manifests/"
+          cd winget-pkgs
+          git switch -c "TraceCommons.Contributor-$V"
+          git config user.name "trace-commons-release"
+          git config user.email "ops@tracecommons.ai"
+          git add "manifests/t/TraceCommons/Contributor/$V"
+          git commit -m "New version: TraceCommons.Contributor version $V"
+          git push -u origin "TraceCommons.Contributor-$V"
+          gh pr create --fill --repo microsoft/winget-pkgs

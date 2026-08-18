@@ -83,6 +83,52 @@ path length.
 `NativeRoundTripTests.ShortTempDir` keeps the path short for this reason.
 Windows is unaffected, since its transport is a named pipe.
 
+## Packaging
+
+The app ships as an MSIX built by single-project packaging, signed through the
+same Azure Trusted Signing account the contributor CLI uses, and distributed
+through a `.appinstaller` feed that Windows polls on its own schedule.
+
+```powershell
+# From windows/. Packaging is off by default; a plain msbuild is a compile
+# check. dist/msix/ is the output directory.
+msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore `
+  -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true
+```
+
+The package is deliberately unsigned at build time. `AppxPackageSigningEnabled`
+is `false` because Trusted Signing holds no local key and the signature is
+applied afterwards by `signtool` against a short-lived certificate issued to
+the release job's OIDC token. There is no `.pfx` in this repository and there
+must never be one.
+
+Package identity is `Iqlusion.TraceCommons`, application id `App`. Both are
+permanent: changing either produces a different app
+that installs alongside the old one instead of updating it.
+
+### Distribution
+
+The release job publishes two objects to the public bucket:
+
+| Object | Content type | Cache-Control |
+| --- | --- | --- |
+| `windows/<MSBuild-produced package filename>.msix` | `application/msix` | `public, max-age=31536000, immutable` |
+| `windows/TraceCommons.appinstaller` | `application/appinstaller` | `no-cache, max-age=0` |
+
+The package is uploaded before the feed, so there is never a window in which
+the feed names an object that is not there yet. The feed is uncacheable on
+purpose: a cached `.appinstaller` is a release nobody receives.
+
+Contributors install once from
+`https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller`.
+After that Windows checks the feed on app launch, at most once every 8 hours,
+and again every 8 hours in the background whether or not the app was opened.
+The app additionally surfaces a banner and an apply-now action, which drains
+any in-flight upload before handing the update to the deployment service.
+
+The app never replaces its own bytes. That is the same rule Homebrew, flatpak
+and winget enforce on the other three paths.
+
 ## What is not here yet
 
 Deliberately absent, and each is its own piece of work:

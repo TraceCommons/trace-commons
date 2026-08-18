@@ -68,6 +68,10 @@ private struct Launcher: View {
             openWindow(id: WindowID.main)
         }
         model.start()
+        // Update checks begin here and nowhere else. UpdateController itself
+        // decides whether Sparkle runs at all: under a Homebrew install this
+        // call constructs no updater and schedules nothing.
+        UpdateController.shared.start()
         Notifier.shared.configure()
         // The only thing a notification action may do is open this window.
         Notifier.shared.onReview = { OpenMainWindow.request() }

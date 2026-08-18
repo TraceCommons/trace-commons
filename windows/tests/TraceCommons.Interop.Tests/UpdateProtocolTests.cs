@@ -1,0 +1,187 @@
+using TraceCommons.Interop;
+using Xunit;
+
+namespace TraceCommons.Interop.Tests;
+
+/// <summary>
+/// Tests for reading the daemon's answer to <c>quiesce</c>.
+///
+/// This mapping is the gate in front of an update: everything except a
+/// confirmed quiesce must refuse, because the alternative is App Installer
+/// terminating the process while an upload is on the wire. So each refusal
+/// shape gets its own test rather than being lumped into a catch-all --
+/// a refusal misread as success is the one failure that costs a contributor
+/// a half-uploaded trace.
+///
+/// Pure JSON, no native library and no daemon, so these run anywhere.
+/// </summary>
+public class UpdateProtocolTests
+{
+    [Fact]
+    public void AConfirmedQuiesceAllowsTheUpdate()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse("{\"id\":1,\"result\":{\"quiesced\":true,\"waited_ms\":1200}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Quiesced, outcome.Outcome);
+        Assert.Equal(1200, outcome.WaitedMs);
+        Assert.True(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void ATimeoutIsDistinguishedFromAPlainRefusal()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse(
+                "{\"id\":1,\"error\":{\"code\":\"busy\",\"message\":\"quiesce-timeout\"}}"));
+
+        Assert.Equal(TcQuiesceOutcome.TimedOut, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void ABusyDaemonRefusesWithoutTimingOut()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse(
+                "{\"id\":1,\"error\":{\"code\":\"busy\",\"message\":\"another-quiesce-in-flight\"}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Busy, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void ADaemonTooOldToKnowTheMethodIsUnsupportedNotBroken()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse(
+                "{\"id\":1,\"error\":{\"code\":\"unknown_method\",\"message\":\"quiesce\"}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Unsupported, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    // The daemon's actual sync-dispatch refusal
+    // (crates/trace-commons-contributor/src/daemon/ipc.rs:892, asserted by a
+    // Rust test at ipc.rs:3158-3163) is code "unavailable", not "bad_params".
+    // tc_call never reaches this path -- it always hits the async dispatcher
+    // -- but the shape modelled here must still match what the daemon really
+    // sends, not an invented one, so this stays trustworthy as documentation
+    // of the wire contract even though it is presently unreachable.
+    [Fact]
+    public void TheSynchronousRefusalIsAlsoUnsupported()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse(
+                "{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"quiesce-requires-async\"}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Unsupported, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void AStoppedDaemonIsUnavailable()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse(
+                "{\"error\":{\"code\":\"unavailable\",\"message\":\"daemon-not-started\"}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Unavailable, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void AResultFrameThatDoesNotClaimQuiescedIsNotTreatedAsSuccess()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(
+            DaemonResponse.Parse("{\"id\":1,\"result\":{\"quiesced\":false,\"waited_ms\":0}}"));
+
+        Assert.Equal(TcQuiesceOutcome.Unavailable, outcome.Outcome);
+        Assert.False(outcome.CanUpdate);
+    }
+
+    [Fact]
+    public void MalformedJsonRefusesRatherThanThrowing()
+    {
+        QuiesceOutcome outcome = UpdateProtocol.ReadQuiesce(DaemonResponse.Parse("not json"));
+
+        Assert.Equal(TcQuiesceOutcome.Unavailable, outcome.Outcome);
+    }
+
+    [Fact]
+    public void EveryRefusalHasAContributorFacingSentence()
+    {
+        foreach (TcQuiesceOutcome value in new[]
+                 {
+                     TcQuiesceOutcome.Busy,
+                     TcQuiesceOutcome.TimedOut,
+                     TcQuiesceOutcome.Unsupported,
+                     TcQuiesceOutcome.Unavailable,
+                 })
+        {
+            string text = UpdateProtocol.DescribeRefusal(value);
+            Assert.False(string.IsNullOrWhiteSpace(text));
+            Assert.EndsWith(".", text);
+        }
+    }
+
+    [Fact]
+    public void TheQuiesceMethodNameMatchesTheDaemonContract()
+    {
+        Assert.Equal("quiesce", DaemonProtocol.Methods.Quiesce);
+    }
+
+    [Theory]
+    [InlineData(TcUpdateAvailability.Available, true)]
+    [InlineData(TcUpdateAvailability.Required, true)]
+    [InlineData(TcUpdateAvailability.NoUpdates, false)]
+    [InlineData(TcUpdateAvailability.Unknown, false)]
+    [InlineData(TcUpdateAvailability.Error, false)]
+    public void OnlyARealOfferPutsTheBannerOnScreen(
+        TcUpdateAvailability availability, bool expected)
+    {
+        Assert.Equal(expected, UpdateProtocol.ShouldOfferUpdate(availability));
+    }
+
+    [Fact]
+    public void UnknownIsNotAnErrorMessage()
+    {
+        // Unknown is what a build with no .appinstaller association reports,
+        // which is a normal state for a locally built app rather than a
+        // fault worth alarming a contributor about.
+        Assert.Equal(
+            "Updates are not managed for this installation.",
+            UpdateProtocol.DescribeAvailability(TcUpdateAvailability.Unknown));
+    }
+
+    [Fact]
+    public void EveryAvailabilityHasASentence()
+    {
+        foreach (TcUpdateAvailability value in new[]
+                 {
+                     TcUpdateAvailability.Unknown,
+                     TcUpdateAvailability.NoUpdates,
+                     TcUpdateAvailability.Available,
+                     TcUpdateAvailability.Required,
+                     TcUpdateAvailability.Error,
+                 })
+        {
+            string text = UpdateProtocol.DescribeAvailability(value);
+            Assert.False(string.IsNullOrWhiteSpace(text));
+            Assert.EndsWith(".", text);
+        }
+    }
+
+    [Fact]
+    public void TheEnumMirrorsTheWinRtNumbering()
+    {
+        // Task 7 maps WinRT's PackageUpdateAvailability onto this enum with
+        // an explicit switch, but the numbering is asserted here so the two
+        // cannot quietly disagree if anyone reaches for a cast.
+        Assert.Equal(0, (int)TcUpdateAvailability.Unknown);
+        Assert.Equal(1, (int)TcUpdateAvailability.NoUpdates);
+        Assert.Equal(2, (int)TcUpdateAvailability.Available);
+        Assert.Equal(3, (int)TcUpdateAvailability.Required);
+        Assert.Equal(4, (int)TcUpdateAvailability.Error);
+    }
+}

@@ -7,6 +7,8 @@ using System.Globalization;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using TraceCommons.App;
+
 using Microsoft.UI.Dispatching;
 using TraceCommons.Interop;
 
@@ -40,10 +42,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public const string ApprovedNoUndo = "Approved. It goes out on the next pass.";
 
     private readonly DaemonHost _host;
+    private readonly AppUpdater? _updater;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly DispatcherQueueTimer _undoTick;
     private string _statusText = "Starting…";
+    private string _updateStatusText = string.Empty;
     private bool _isBusy;
+    private bool _isUpdateBannerVisible;
+    private bool _isUpdateApplyEnabled;
+
     private string _notice = string.Empty;
     private ApprovalHold? _undoHold;
     private string _undoEntryId = string.Empty;
@@ -52,9 +59,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HealthCopy? _health;
     private HistoryRollup _rollup = new();
 
-    public MainViewModel(DaemonHost host)
+    /// <summary>
+    /// <paramref name="updater"/> is optional so the view model stays
+    /// constructible without package identity. An unpackaged developer build
+    /// then simply never shows the banner, rather than throwing at launch.
+    /// </summary>
+    public MainViewModel(DaemonHost host, AppUpdater? updater = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        _updater = updater;
         _host.QueueChanged += OnQueueChanged;
         _host.StatusChanged += OnStatusChanged;
         _host.Lagged += OnLagged;
@@ -232,6 +245,38 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>True when there is nothing pending, for an empty-state view.</summary>
     public bool IsEmpty => Pending.Count == 0;
+
+    /// <summary>
+    /// Whether the update banner is on screen. Only ever true for a
+    /// confirmed offer -- see <c>UpdateProtocol.ShouldOfferUpdate</c>.
+    /// </summary>
+    public bool IsUpdateBannerVisible
+    {
+        get => _isUpdateBannerVisible;
+        private set => Set(ref _isUpdateBannerVisible, value);
+    }
+
+    /// <summary>
+    /// Whether the banner's action button is live. Goes false for the
+    /// duration of an apply so a second click cannot start a second
+    /// handoff.
+    /// </summary>
+    public bool IsUpdateApplyEnabled
+    {
+        get => _isUpdateApplyEnabled;
+        private set => Set(ref _isUpdateApplyEnabled, value);
+    }
+
+    /// <summary>
+    /// The banner's message. Fixed labels only, from
+    /// <c>UpdateProtocol</c> -- nothing the deployment service or the daemon
+    /// said reaches this string.
+    /// </summary>
+    public string UpdateStatusText
+    {
+        get => _updateStatusText;
+        private set => Set(ref _updateStatusText, value);
+    }
 
     /// <summary>
     /// A one-line result of the last decision, for the cases with no undo to
@@ -521,6 +566,72 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             IsBusy = false;
             _refreshGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Asks the deployment service whether the feed offers something newer,
+    /// and raises the banner if it does.
+    ///
+    /// Never surfaces a failed check. Windows checks the feed on its own
+    /// schedule regardless of what this call returns, so a check that could
+    /// not complete costs a contributor nothing and telling them about it
+    /// buys nothing either.
+    /// </summary>
+    public async Task CheckForUpdateAsync()
+    {
+        if (_updater is null)
+        {
+            return;
+        }
+
+        TcUpdateAvailability availability = await _updater.CheckAsync().ConfigureAwait(true);
+        if (!UpdateProtocol.ShouldOfferUpdate(availability))
+        {
+            IsUpdateBannerVisible = false;
+            return;
+        }
+
+        UpdateStatusText = UpdateProtocol.DescribeAvailability(availability);
+        IsUpdateApplyEnabled = true;
+        IsUpdateBannerVisible = true;
+    }
+
+    /// <summary>
+    /// Drains, tears the daemon down, and hands the update to Windows.
+    ///
+    /// The order is the whole point. Quiesce first, because App Installer
+    /// terminates this process and a half-uploaded trace must never be the
+    /// cost of an update. Then dispose the host, so the C ABI's ordered
+    /// teardown runs while there is still a process to run it in. Only then
+    /// hand off -- and on the success path control does not return from that
+    /// call, because the process is gone.
+    /// </summary>
+    public async Task ApplyUpdateAsync()
+    {
+        if (_updater is null)
+        {
+            return;
+        }
+
+        IsUpdateApplyEnabled = false;
+        UpdateStatusText = "Finishing any upload in progress…";
+
+        QuiesceOutcome quiesce = await _updater.QuiesceAsync().ConfigureAwait(true);
+        if (!quiesce.CanUpdate)
+        {
+            UpdateStatusText = UpdateProtocol.DescribeRefusal(quiesce.Outcome);
+            return;
+        }
+
+        UpdateStatusText = "Installing the update…";
+        await _host.DisposeAsync().ConfigureAwait(true);
+
+        bool handedOff = await _updater.ApplyAsync().ConfigureAwait(true);
+        if (!handedOff)
+        {
+            UpdateStatusText =
+                "The update could not be installed. Windows will try again on its own schedule.";
         }
     }
 

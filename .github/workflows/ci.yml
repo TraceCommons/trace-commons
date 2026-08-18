@@ -255,6 +255,86 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
 
+  windows-update-conformance:
+    name: windows update conformance
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # crates/trace-commons-contributor/src/update/authenticode.rs has a
+    # #[cfg(windows)] body -- the real Authenticode verification call -- that
+    # has never been compiled anywhere: cross-checking from macOS fails
+    # inside ring's C build for lack of a Windows SDK, so
+    # `cargo check --target x86_64-pc-windows-msvc` cannot serve as the gate.
+    # The upcoming binary-swap code (rename + MoveFileEx +
+    # PendingFileRenameOperations) is the same story. A Windows runner is the
+    # only thing that can compile, let alone exercise, either of those paths,
+    # so this job is what stands behind the claim that they work at all.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-update-conformance-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-update-conformance-
+      # Proven on a real Windows host (the tc-win-dev GCE box) on 2026-08-17:
+      # this compiles every #[cfg(windows)] body under -D warnings. It is the
+      # load-bearing step of this job. It uses --bins and needs no OpenSSL,
+      # because nothing here pulls the dev-dependency graph.
+      - name: Build trace-commons-contributor for Windows
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p trace-commons-contributor --bins
+      # The test steps below DO pull dev-dependencies, and that graph reaches
+      # OpenSSL: trace-commons-contributor dev-depends on trace-commons-server,
+      # which depends on webauthn-rs -> webauthn-rs-core ->
+      # webauthn-attestation-ca -> openssl -> openssl-sys. On the real Windows
+      # box that build script fails with "Could not find directory of OpenSSL
+      # installation", so the tests cannot run without pointing it at one.
+      # windows-latest ships OpenSSL; this locates it rather than assuming a
+      # hardcoded path, and fails loudly if the image ever stops shipping it.
+      - name: Point openssl-sys at the runner's OpenSSL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "C:\Program Files\OpenSSL",
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\Strawberry\c"
+          ) | Where-Object { Test-Path (Join-Path $_ "include\openssl\ssl.h") }
+          if (-not $candidates) {
+            throw "No OpenSSL installation found on this runner. openssl-sys cannot build, so the update tests cannot run. Install one or adjust this step."
+          }
+          $dir = $candidates[0]
+          Write-Host "using OPENSSL_DIR=$dir"
+          "OPENSSL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run the update unit tests
+        run: cargo test -p trace-commons-contributor --lib "update::"
+      # Includes the_platform_verifier_refuses_the_unsigned_fixture, the only
+      # #[cfg(windows)] test in this file -- it is a plain #[test] behind that
+      # cfg, so it compiles and runs here as part of the normal test binary;
+      # nothing filters it out.
+      - name: Run the update conformance fixtures
+        run: cargo test -p trace-commons-contributor --test update_conformance
+      # update_manifest_roundtrip.rs is deliberately NOT run here. It shells
+      # out to the real scripts/updates/generate-manifest.sh, and that script
+      # (a) has a `#!/usr/bin/env bash` shebang -- Windows CreateProcess does
+      # not interpret shebangs, so invoking the .sh path directly the way the
+      # test does (`Command::new(path)`) has no reliable interpreter behind
+      # it on windows-latest even though Git for Windows ships a bash.exe --
+      # and (b) pipes its output through `jq`, an unpinned external
+      # dependency of the script rather than of this crate. Failing this test
+      # here would prove something about the runner's shell associations and
+      # tool cache, not about the update code this job exists to gate. The
+      # roundtrip is still exercised on Linux via cargo-test-default.
+      - name: Note on the manifest roundtrip test
+        shell: pwsh
+        run: Write-Host "update_manifest_roundtrip.rs intentionally skipped on Windows -- see job comment"
+
   windows-install-script:
     name: install.ps1 against the real release
     runs-on: windows-latest
@@ -280,11 +360,26 @@ jobs:
       # fail. Asserting the refusal leaves ZERO files behind is the point --
       # an installer that reports failure after writing the binary has already
       # lost.
+      # -Version is passed explicitly so this job never calls the GitHub REST
+      # API. Resolving "latest" costs an unauthenticated request, which is
+      # limited to 60/hour PER IP -- shared across every Actions runner leaving
+      # the same egress address. This job failed exactly that way
+      # ("The property 'tag_name' cannot be found on this object": the API
+      # returned a rate-limit body instead of a release list), and it failed on
+      # main as well as on PRs, so it was flaking for reasons that had nothing
+      # to do with the change under test.
+      #
+      # Pinning also makes the job deterministic: it asserts install.ps1's
+      # verify-and-refuse behavior against a known published artifact rather
+      # than against whatever was cut most recently. The cost is that this
+      # version must be bumped when contributor-v0.1.0's assets are eventually
+      # removed; the job will fail loudly if that happens, which is the right
+      # way to find out.
       - name: It installs the real, verified binary
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
-          ./scripts/install.ps1 -Dir $dir
+          ./scripts/install.ps1 -Dir $dir -Version 0.1.0
           $exe = Join-Path $dir 'trace-commons-contributor.exe'
           if (-not (Test-Path $exe)) { throw "no binary at $exe" }
           $v = & $exe --version
@@ -301,7 +396,13 @@ jobs:
             Replace("'O=Iqlusion Inc'", "'O=Somebody Else Entirely'") |
             Set-Content -Path $bad -Encoding UTF8
 
-          $out = & pwsh -File $bad -Dir $dir 2>&1 | Out-String
+          # -Version here for the same reason as the step above, and for one
+          # more: this step asserts the installer fails ON THE SIGNATURE CHECK
+          # specifically. A rate-limited API call would make it fail earlier,
+          # for an unrelated reason, and the guard below would then correctly
+          # report that the test proved nothing. Removing the network variable
+          # keeps a red result here meaning what it claims to mean.
+          $out = & pwsh -File $bad -Dir $dir -Version 0.1.0 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
 
@@ -426,6 +527,11 @@ jobs:
       # The GTK crate is its own workspace, excluded from the root one.
       - name: Build the shell
         run: cargo build --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --bin trace-commons-shell
+      # The GTK crate is its own workspace, so the root workspace's test job
+      # never touches it. Its update, portal-parsing and copy logic is all
+      # pure and needs no display -- but without this step nothing runs it.
+      - name: Test the shell
+        run: cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
 
@@ -436,21 +542,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # The MSIX manifest is checked but NOT built here, and that is a
-      # deliberate limitation rather than an oversight.
-      #
-      # Packaging a WinUI 3 project produces an .msix that must be signed, and
-      # this job has no signing identity -- pull requests do not get one, by
-      # design. An unsigned package cannot be installed or meaningfully
-      # verified, so building one here would cost several minutes to prove
-      # almost nothing, and would put an unproven packaging path in front of
-      # every pull request. The MSIX build lives behind an opt-in
-      # workflow_dispatch input on release-apps.yml instead.
-      #
-      # What IS worth asserting on every pull request is that the shipping
-      # build did not quietly become the packaged one. The zip is the artifact
-      # contributors get; MSIX is additive. If TcPackaged ever defaults to true
-      # that is a change to what ships, and it should not arrive unannounced.
+      # The project defaults to its unpackaged flavour, and that remains worth
+      # asserting because changing the default changes what contributors get.
+      # Later in this job CI explicitly opts into the packaged flavour so the
+      # manifest, assets and App Installer feed are exercised too. The package
+      # stays unsigned and is never installed: pull-request runners hold no
+      # signing authority.
       - name: Check the MSIX manifest and that the default build is still unpackaged
         shell: pwsh
         run: |
@@ -559,8 +656,53 @@ jobs:
       # failures on a clean Windows box.
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Build the WinUI app
+      # Packaging, not just compiling. Package.appxmanifest, MakePri and the
+      # visual assets are only exercised by a packaging build, and every one
+      # of them can break without touching a line of C#. The package is
+      # unsigned here -- this runner holds no signing authority and must not.
+      - name: Build and package the WinUI app
         working-directory: windows
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
-        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
+        run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
+
+      - name: Confirm exactly one package was produced
+        working-directory: windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $found = @(Get-ChildItem -Recurse -Filter *.msix -Path dist\msix)
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
+          }
+          Write-Host $found[0].Name
+
+      # The feed generator runs against the same identity the manifest
+      # carries, so a rename on either side fails here rather than at
+      # release time.
+      - name: Generate and parse the appinstaller feed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./windows/scripts/make-appinstaller.ps1 `
+            -PackageName Iqlusion.TraceCommons `
+            -Publisher "CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US" `
+            -Version 0.0.1.0 -ProcessorArchitecture x64 `
+            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
+            -PackageFileName probe.msix `
+            -OutputPath "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          [xml]$feed = Get-Content "$env:RUNNER_TEMP\TraceCommons.appinstaller"
+          $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
+          $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
+          $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
+          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/s4:AutomaticBackgroundTask', $ns)) {
+            throw "the feed lost its background update task"
+          }
+          if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
+            throw "the feed allows downgrades, which this project forbids"
+          }
+          $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
+          [xml]$manifest = Get-Content windows\packaging\Package.appxmanifest
+          if ($main.Name -ne $manifest.Package.Identity.Name) {
+            throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
+          }

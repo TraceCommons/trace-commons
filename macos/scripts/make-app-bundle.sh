@@ -98,11 +98,70 @@ OLD_ID="$(otool -D "${DYLIB_PATHS[0]}" | tail -1)"
 install_name_tool -change "$OLD_ID" "@rpath/$DYLIB_NAME" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
 
+# --- Sparkle ---------------------------------------------------------------
+#
+# SwiftPM LINKS Sparkle but does not EMBED it. In an Xcode project that is
+# the "Embed & Sign" build phase; this bundle is assembled by hand, so the
+# copy has to happen here. Skipping it produces an app that builds, signs and
+# notarizes cleanly and then dies on launch with
+#   Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle
+# The rpath added just above is what makes @rpath resolve to Frameworks/.
+SPARKLE_MATCHES=()
+while IFS= read -r match; do
+  SPARKLE_MATCHES+=("$match")
+done < <(find "$PACKAGE_DIR/.build/artifacts" -maxdepth 4 -type d -name 'Sparkle.xcframework' 2>/dev/null)
+
+if [ "${#SPARKLE_MATCHES[@]}" -ne 1 ]; then
+  echo "FATAL: expected exactly one Sparkle.xcframework under .build/artifacts," >&2
+  echo "found ${#SPARKLE_MATCHES[@]}. Run 'swift package resolve' first." >&2
+  printf '  %s\n' ${SPARKLE_MATCHES[@]+"${SPARKLE_MATCHES[@]}"} >&2
+  exit 1
+fi
+SPARKLE_XCFRAMEWORK="${SPARKLE_MATCHES[0]}"
+
+# The XCFramework carries one directory per platform slice. Naming the slice
+# explicitly means a Sparkle release that renames or splits it fails here,
+# loudly, instead of shipping a thin framework that passes signing and
+# notarization and then fails to launch on whichever architecture was left
+# out -- the same hazard verify_universal already guards for our own code.
+SPARKLE_SLICE="$SPARKLE_XCFRAMEWORK/macos-arm64_x86_64/Sparkle.framework"
+if [ ! -d "$SPARKLE_SLICE" ]; then
+  echo "FATAL: no macos-arm64_x86_64 slice in $SPARKLE_XCFRAMEWORK" >&2
+  echo "Slices present:" >&2
+  ls -1 "$SPARKLE_XCFRAMEWORK" >&2
+  exit 1
+fi
+
+# ditto, not cp: Sparkle.framework/Sparkle, Versions/Current, Resources and
+# Headers are symlinks into Versions/B. A copy that dereferences them yields
+# a bundle codesign rejects as malformed.
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework"
+ditto "$SPARKLE_SLICE" "$APP/Contents/Frameworks/Sparkle.framework"
+
+SPARKLE_FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
+verify_universal "Sparkle framework" "$SPARKLE_FRAMEWORK/Versions/B/Sparkle"
+
 # An ad-hoc signature is what makes a DEVELOPMENT bundle launchable. The
 # release path signs with a Developer ID immediately afterwards, so doing it
 # here first is wasted work that also makes the release path read as if it
 # might ship an ad-hoc signature.
+#
+# The ORDER below is the same order make-release-dmg.sh uses, and it is not
+# arbitrary: codesign seals nested code, so anything inside must be signed
+# before the thing that contains it. `--deep` is never used -- it re-signs
+# Sparkle's Downloader XPC service without its entitlements, which is the
+# single most common way a Sparkle integration breaks.
 if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
+  codesign --force --sign - --timestamp=none \
+    "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Installer.xpc" >/dev/null
+  codesign --force --sign - --timestamp=none --preserve-metadata=entitlements \
+    "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Downloader.xpc" >/dev/null
+  codesign --force --sign - --timestamp=none \
+    "$SPARKLE_FRAMEWORK/Versions/B/Autoupdate" >/dev/null
+  codesign --force --sign - --timestamp=none \
+    "$SPARKLE_FRAMEWORK/Versions/B/Updater.app" >/dev/null
+  codesign --force --sign - --timestamp=none \
+    "$SPARKLE_FRAMEWORK" >/dev/null
   codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$DYLIB_NAME" >/dev/null 2>&1 || true
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 fi

@@ -78,7 +78,7 @@
             banner can sit above whichever pane is showing. See the banner
             itself for why it lives here rather than inside the queue.
         -->
-        <Grid Grid.Row="1" ColumnDefinitions="184,*" RowDefinitions="Auto,*">
+        <Grid Grid.Row="1" ColumnDefinitions="184,*" RowDefinitions="Auto,Auto,*">
 
             <!--
                 Nav rail.
@@ -242,6 +242,33 @@
             </Border>
 
             <!--
+                The update offer.
+
+                An InfoBar rather than a dialog: an available update is
+                not an interruption, and a contributor who came here to
+                approve a session should be able to finish doing that.
+                IsClosable is false because the banner is already
+                conditional on a real offer (see
+                UpdateProtocol.ShouldOfferUpdate), and a dismissed
+                banner is an update that quietly never happens.
+            -->
+            <InfoBar Grid.Row="1"
+                    Grid.Column="1"
+                     IsOpen="{x:Bind ViewModel.IsUpdateBannerVisible, Mode=OneWay}"
+                     IsClosable="False"
+                     Severity="Informational"
+                     Title="Update available"
+                     Message="{x:Bind ViewModel.UpdateStatusText, Mode=OneWay}">
+                <InfoBar.ActionButton>
+                    <Button Content="Update and restart"
+                            Style="{StaticResource TcPrimaryButtonStyle}"
+                            Click="OnApplyUpdateClick"
+                            IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}"
+                            AutomationProperties.Name="Install the update and restart Trace Commons" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!--
                 The health banner.
 
                 It sits above both panes rather than inside the queue, so a
@@ -329,7 +356,7 @@
                 navigation.
             -->
             <ContentPresenter x:Name="HistoryPane"
-                              Grid.Row="1"
+                              Grid.Row="2"
                               Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
 
@@ -343,13 +370,13 @@
                 act this window ever gives.
             -->
             <ContentPresenter x:Name="SettingsPane"
-                              Grid.Row="1"
+                              Grid.Row="2"
                               Grid.Column="1"
                               Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}" />
 
             <!-- Header, queue, recovery bar, decision notice, caveat, week
                  band, progress. -->
-            <Grid Grid.Row="1"
+            <Grid Grid.Row="2"
                   Grid.Column="1"
                   Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
                   RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto">
@@ -436,8 +463,9 @@
                     </Button>
                 </Grid>
 
+
                 <!-- The queue, one session card per waiting session. -->
-                <ListView Grid.Row="1"
+                <ListView Grid.Row="2"
                           ItemsSource="{x:Bind ViewModel.Pending, Mode=OneWay}"
                           ItemContainerStyle="{StaticResource TcQueueCardContainerStyle}"
                           SelectionMode="None"
@@ -626,7 +654,7 @@
                      thing, and this app's own wording ("Sessions appear here
                      after they settle") was the only one of the three that
                      did not also say nothing is sent unless you say so. -->
-                <StackPanel Grid.Row="1"
+                <StackPanel Grid.Row="2"
                             Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
                             VerticalAlignment="Center"
                             HorizontalAlignment="Center"

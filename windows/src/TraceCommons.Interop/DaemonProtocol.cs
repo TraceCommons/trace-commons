@@ -48,6 +48,15 @@ public static class DaemonProtocol
         public const string Cancel = "cancel";
         public const string Shutdown = "shutdown";
 
+        /// <summary>
+        /// Drains in-flight uploads and parks the queue, bounded by
+        /// <c>timeout_secs</c>. Answered only by the async dispatcher, which
+        /// is what <c>tc_call</c> reaches: it routes through
+        /// <c>ipc::handle_local</c> to <c>handle_request_async</c>, so the
+        /// socket path's "quiesce-requires-async" refusal never applies here.
+        /// </summary>
+        public const string Quiesce = "quiesce";
+
         // Onboarding. Every one of these was already in the daemon's pinned
         // METHODS array before this app could call any of them: the gap on
         // Windows was never protocol, only that nothing here asked.

@@ -296,56 +296,71 @@ fn every_rust_toolchain_usage_pins_a_toolchain_input() {
     }
 }
 
-/// Both workflows sign Windows binaries with the same duplicated dlib block,
+/// Both workflows sign Windows binaries with the same duplicated dlib logic,
 /// so both must be pinned. Reading only one leaves the other free to drop the
 /// timestamp -- and an untimestamped Trusted Signing signature keeps validating
 /// for about three days, so no same-day run would catch it.
+///
+/// `release-apps.yml`'s windows job no longer inlines this logic: it calls
+/// out to `scripts/windows/setup-trusted-signing.ps1` and
+/// `scripts/windows/sign-with-trusted-signing.ps1`. `release-contributor.yml`
+/// still inlines it. So for `release-apps.yml` the label under test is the
+/// workflow text PLUS both extracted scripts' text -- the properties this
+/// test pins are properties of what that job actually runs, wherever the
+/// text for it now lives -- while `release-contributor.yml` is checked
+/// against its own (still-inline) text alone.
 #[test]
 fn windows_signing_is_timestamped() {
-    for path in [
-        ".github/workflows/release-apps.yml",
-        ".github/workflows/release-contributor.yml",
-    ] {
-        assert_windows_signing_is_hardened(path);
-    }
+    let apps = format!(
+        "{}\n{}\n{}",
+        read(".github/workflows/release-apps.yml"),
+        read("scripts/windows/setup-trusted-signing.ps1"),
+        read("scripts/windows/sign-with-trusted-signing.ps1"),
+    );
+    assert_windows_signing_is_hardened(
+        ".github/workflows/release-apps.yml (+ scripts/windows/*.ps1)",
+        &apps,
+    );
+
+    let contributor = read(".github/workflows/release-contributor.yml");
+    assert_windows_signing_is_hardened(".github/workflows/release-contributor.yml", &contributor);
 }
 
-fn assert_windows_signing_is_hardened(path: &str) {
-    let workflow = read(path);
+fn assert_windows_signing_is_hardened(label: &str, text: &str) {
     // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
     // client can be verified by content before it runs in a job that holds
     // signing authority.
     assert!(
-        workflow.contains("Azure.CodeSigning.Dlib.dll"),
-        "{path}: Windows signing drives Microsoft's Trusted Signing dlib via signtool"
+        text.contains("Azure.CodeSigning.Dlib.dll"),
+        "{label}: Windows signing drives Microsoft's Trusted Signing dlib via signtool"
     );
     assert!(
-        !workflow.contains("azure/trusted-signing-action"),
-        "{path}: the marketplace action was deliberately replaced by the SHA-verified \
+        !text.contains("azure/trusted-signing-action"),
+        "{label}: the marketplace action was deliberately replaced by the SHA-verified \
          dlib; reintroducing it drops the content check"
     );
     assert!(
-        workflow.contains("TRUSTED_SIGNING_CLIENT_SHA256")
-            && workflow.contains("Refusing to expand a potentially tampered"),
-        "{path}: the signing client must be verified by SHA-256 and fail closed before \
+        text.contains("TRUSTED_SIGNING_CLIENT_SHA256")
+            && text.contains("Refusing to expand a potentially tampered"),
+        "{label}: the signing client must be verified by SHA-256 and fail closed before \
          extraction"
     );
     // Trusted Signing certificates are valid for roughly three days. Without
     // an RFC3161 countersignature the signature stops validating days after
     // release -- a failure no same-day test would catch.
     assert!(
-        workflow.contains("/tr http://timestamp.acs.microsoft.com"),
-        "{path}: every sign invocation needs an RFC3161 timestamp server: Trusted \
+        text.contains("/tr http://timestamp.acs.microsoft.com"),
+        "{label}: every sign invocation needs an RFC3161 timestamp server: Trusted \
          Signing certificates carry ~3-day validity, so the countersignature \
          is the only reason a signature outlives them"
     );
     assert!(
-        workflow.contains("/td SHA256"),
-        "{path}: the timestamp digest algorithm must be pinned alongside /tr"
+        text.contains("/td SHA256"),
+        "{label}: the timestamp digest algorithm must be pinned alongside /tr"
     );
     assert!(
-        workflow.contains("signtool") || workflow.contains("Get-AuthenticodeSignature"),
-        "{path}: the signature must be verified in the job, not assumed"
+        text.contains("signtool") || text.contains("Get-AuthenticodeSignature"),
+        "{label}: the signature must be verified in the job, not assumed"
     );
     // Each real `signtool ... sign` invocation must carry its own /tr
     // timestamp flag. A `contains("/tr ")` check alone (as above) only
@@ -353,7 +368,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
     // a second `signtool sign` added later without one, which would pass
     // that check while shipping an untimestamped binary. Comments mention
     // "/tr " in prose (see above), so count only non-comment lines.
-    let executable_lines: Vec<&str> = workflow
+    let executable_lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .collect();
@@ -374,7 +389,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
         .count();
     assert!(
         sign_invocations > 0,
-        "{path}: found no signtool sign invocation at all -- either the \
+        "{label}: found no signtool sign invocation at all -- either the \
          Windows signing step was removed or this detector no longer matches it"
     );
     let tr_flags = executable_lines
@@ -383,7 +398,7 @@ fn assert_windows_signing_is_hardened(path: &str) {
         .count();
     assert!(
         tr_flags >= sign_invocations,
-        "{path}: found {sign_invocations} `signtool sign` invocation(s) but \
+        "{label}: found {sign_invocations} `signtool sign` invocation(s) but \
          only {tr_flags} /tr flag(s) -- every sign call must be timestamped"
     );
 }
@@ -406,6 +421,20 @@ fn extract_between<'a>(haystack: &'a str, prefix: &str, suffix: char) -> &'a str
 /// byte-identical today, which makes the gap latent rather than visible: a
 /// bump to one file without the other would sign with mismatched
 /// expectations and nothing here would catch it.
+///
+/// The hash constant is still duplicated directly between the two workflow
+/// files: `release-apps.yml`'s windows job passes its
+/// `TRUSTED_SIGNING_CLIENT_SHA256` env var into
+/// `scripts/windows/setup-trusted-signing.ps1` as `-ExpectedSha256` rather
+/// than hardcoding it, but `release-contributor.yml` still hardcodes its own
+/// copy inline -- so the two workflow-level values must still agree.
+///
+/// The nuget version pin moved when `release-apps.yml`'s windows job was
+/// wired to the extracted scripts: it no longer sets `$nugetVersion` itself
+/// and instead relies on `setup-trusted-signing.ps1`'s own default
+/// (`-NuGetVersion`, unset by the caller). `release-contributor.yml` still
+/// sets `$nugetVersion` inline. The duplication that must not drift is now
+/// between the script's default and the contributor workflow's inline value.
 #[test]
 fn duplicated_windows_signing_constants_do_not_drift_between_workflows() {
     let apps = read(".github/workflows/release-apps.yml");
@@ -421,12 +450,20 @@ fn duplicated_windows_signing_constants_do_not_drift_between_workflows() {
          workflow is trusting a different signing-client binary than the \
          other"
     );
+    assert!(
+        !apps.contains("$nugetVersion"),
+        "release-apps.yml's windows job inlines $nugetVersion again -- it \
+         should be relying on setup-trusted-signing.ps1's -NuGetVersion \
+         default instead, or this test is checking the wrong value"
+    );
 
-    let apps_version = extract_between(&apps, "$nugetVersion = \"", '"');
+    let script = read("scripts/windows/setup-trusted-signing.ps1");
+    let apps_version = extract_between(&script, "NuGetVersion = '", '\'');
     let contributor_version = extract_between(&contributor, "$nugetVersion = \"", '"');
     assert_eq!(
         apps_version, contributor_version,
-        "release-apps.yml and release-contributor.yml pin different \
+        "scripts/windows/setup-trusted-signing.ps1's default -NuGetVersion \
+         and release-contributor.yml's inline $nugetVersion pin different \
          Microsoft.Trusted.Signing.Client nuget versions -- these must \
          agree, since the pinned SHA-256 is only valid for one version"
     );
@@ -958,4 +995,498 @@ fn flatpak_manifest_pinned_toolchain_meets_the_crates_rust_version_floor() {
          requires rust-version = \"{required}\"; bump the pinned tarball \
          (url + sha256, both arches) before releasing"
     );
+}
+
+/// Runs info-plist.sh with a given TC_SPARKLE_PUBLIC_ED_KEY (None = unset).
+fn info_plist_with_key(key: Option<&str>) -> String {
+    let script = repo_root().join("macos/scripts/info-plist.sh");
+    let mut command = Command::new("bash");
+    command.arg(&script).args(["0.4.2", "17"]);
+    match key {
+        Some(value) => {
+            command.env("TC_SPARKLE_PUBLIC_ED_KEY", value);
+        }
+        None => {
+            command.env_remove("TC_SPARKLE_PUBLIC_ED_KEY");
+        }
+    }
+    let output = command.output().expect("failed to run info-plist.sh");
+    assert!(
+        output.status.success(),
+        "info-plist.sh failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn info_plist_carries_the_approved_sparkle_configuration() {
+    let plist = info_plist_with_key(Some("dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ=="));
+
+    assert!(
+        plist.contains(
+            "<key>SUFeedURL</key><string>\
+             https://storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml</string>"
+        ),
+        "the appcast feed URL is wrong or missing:\n{plist}"
+    );
+    assert!(
+        plist.contains(
+            "<key>SUPublicEDKey</key><string>dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ==</string>"
+        ),
+        "the EdDSA public key was not injected:\n{plist}"
+    );
+    // Checks on, install off. Sparkle checks in the background without ever
+    // asking permission to check, and nothing is replaced until a person
+    // says yes. Flipping SUAutomaticallyUpdate to true would make this app
+    // swap its own bytes silently, which the design forbids.
+    assert!(
+        plist.contains("<key>SUEnableAutomaticChecks</key><true/>"),
+        "automatic checks are not enabled:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUAutomaticallyUpdate</key><false/>"),
+        "automatic install must stay off:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUScheduledCheckInterval</key><integer>86400</integer>"),
+        "the daily check interval is wrong or missing:\n{plist}"
+    );
+}
+
+#[test]
+fn info_plist_ships_no_feed_at_all_without_a_public_key() {
+    // Fail closed. A bundle with a feed but no key would ask Sparkle to
+    // fetch an appcast it cannot authenticate; a bundle with neither simply
+    // has no update path, which is the correct state for a dev build.
+    let plist = info_plist_with_key(None);
+    assert!(
+        !plist.contains("SUFeedURL"),
+        "a keyless bundle must not carry a feed URL:\n{plist}"
+    );
+    assert!(
+        !plist.contains("SUPublicEDKey"),
+        "a keyless bundle must not carry an empty key:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>SUEnableAutomaticChecks</key><false/>"),
+        "a keyless bundle must not enable automatic checks:\n{plist}"
+    );
+}
+
+#[test]
+fn the_release_script_refuses_without_the_sparkle_public_key() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+    assert!(
+        script.contains("TC_SPARKLE_PUBLIC_ED_KEY"),
+        "make-release-dmg.sh must require TC_SPARKLE_PUBLIC_ED_KEY. A release \
+         built without it ships an app that can never receive an update, and \
+         nothing about the DMG would look wrong."
+    );
+}
+
+#[test]
+fn the_release_workflow_passes_the_sparkle_public_key() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(
+        workflow.contains("TC_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"),
+        "the macOS release job must pass the Sparkle public key through"
+    );
+}
+
+#[test]
+fn the_bundle_script_embeds_sparkle_with_ditto() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    assert!(
+        script.contains("Sparkle.xcframework"),
+        "make-app-bundle.sh must locate the Sparkle XCFramework. SwiftPM \
+         links it but never embeds it; without a copy step the signed, \
+         notarized app crashes on launch with 'Library not loaded'."
+    );
+    assert!(
+        script.contains("macos-arm64_x86_64"),
+        "the universal XCFramework slice must be named explicitly"
+    );
+    assert!(
+        script.contains("ditto"),
+        "a framework must be copied with ditto: Versions/Current, Resources \
+         and the top-level binary are symlinks, and a copy that dereferences \
+         them produces a bundle codesign rejects"
+    );
+}
+
+#[test]
+fn no_script_signs_sparkle_with_deep() {
+    for path in [
+        "macos/scripts/make-app-bundle.sh",
+        "macos/scripts/make-release-dmg.sh",
+    ] {
+        let script = read(path);
+        for line in script.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.contains("codesign") && trimmed.contains("--sign") {
+                assert!(
+                    !line.contains("--deep"),
+                    "{path}: codesign --sign --deep re-signs Sparkle's Downloader \
+                     XPC service without its entitlements. Sign inside-out \
+                     instead. Offending line: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_bundle_script_signs_sparkle_inside_out() {
+    let script = read("macos/scripts/make-app-bundle.sh");
+    let order = [
+        "XPCServices/Installer.xpc",
+        "XPCServices/Downloader.xpc",
+        "Versions/B/Autoupdate",
+        "Versions/B/Updater.app",
+    ];
+    let mut previous = 0usize;
+    for needle in order {
+        let at = script
+            .find(needle)
+            .unwrap_or_else(|| panic!("make-app-bundle.sh never mentions {needle}"));
+        assert!(
+            at > previous,
+            "{needle} is signed out of order; nested code must be signed \
+             before the framework that seals it"
+        );
+        previous = at;
+    }
+    assert!(
+        script.contains("--preserve-metadata=entitlements"),
+        "Downloader.xpc must be signed with --preserve-metadata=entitlements \
+         (Sparkle >= 2.6), or it loses the entitlement it needs"
+    );
+}
+
+#[test]
+fn the_release_script_signs_every_sparkle_component_for_notarization() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+    for needle in [
+        "XPCServices/Installer.xpc",
+        "XPCServices/Downloader.xpc",
+        "Versions/B/Autoupdate",
+        "Versions/B/Updater.app",
+        "--preserve-metadata=entitlements",
+    ] {
+        assert!(
+            script.contains(needle),
+            "make-release-dmg.sh must sign {needle}. Notarization rejects the \
+             whole submission when any nested Mach-O lacks a Developer ID \
+             signature, a secure timestamp, or the hardened runtime."
+        );
+    }
+    // Everything nested must be signed before the app bundle that seals it.
+    let last_sparkle = script
+        .rfind("Sparkle.framework")
+        .expect("make-release-dmg.sh never mentions Sparkle.framework");
+    let outer_sign = script
+        .find("--sign \"$MACOS_SIGNING_IDENTITY\" \"$APP\"")
+        .expect("the outer app signing call changed shape");
+    assert!(
+        last_sparkle < outer_sign,
+        "Sparkle is signed after the app bundle; signing the outer bundle \
+         first is invalidated the moment anything inside it is touched"
+    );
+}
+
+#[test]
+fn the_release_workflow_publishes_the_appcast() {
+    let wf = read(".github/workflows/release-apps.yml");
+    assert!(
+        wf.contains("generate-appcast.sh"),
+        "release-apps.yml must run generate-appcast.sh. Without it SUFeedURL \
+         404s and every Sparkle check fails closed and silently -- the app \
+         reports no update forever and nothing logs an error."
+    );
+    assert!(
+        wf.contains("sparkle-signing-key"),
+        "the appcast must be signed with the Sparkle EdDSA key from Secret Manager"
+    );
+    assert!(
+        wf.contains("appcast.xml"),
+        "the generated appcast must be uploaded to the bucket"
+    );
+}
+
+/// Extracts the text of one top-level job block from a workflow file: from
+/// `\n  <name>:` up to (but not including) the next line matching `\n  <ident>:`
+/// at the same two-space indent, or end of file.
+fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let marker = format!("\n  {name}:");
+    let start = workflow
+        .find(&marker)
+        .unwrap_or_else(|| panic!("expected to find job {name}"));
+    let body_start = start + marker.len();
+    let rest = &workflow[body_start..];
+    let end = rest
+        .lines()
+        .scan(0usize, |pos, line| {
+            let this_pos = *pos;
+            *pos += line.len() + 1;
+            Some((this_pos, line))
+        })
+        .find(|(_, line)| {
+            !line.is_empty()
+                && line.starts_with("  ")
+                && !line.starts_with("    ")
+                && line.trim_end().ends_with(':')
+        })
+        .map(|(pos, _)| pos)
+        .unwrap_or(rest.len());
+    &workflow[start..body_start + end]
+}
+
+/// The MSIX build's own layout puts the package one directory deeper and
+/// under the MSBuild project's name, not the packaging identity -- so the
+/// filename discovered on disk is NOT assumed to be
+/// `Iqlusion.TraceCommons_<quad>_x64.msix`. If the job published under
+/// a name it invented (or a hardcoded one) while the feed's MainPackage@Uri
+/// named something else, every client would resolve the feed successfully
+/// and then 404 fetching the package -- a silent no-op with no error surface
+/// anywhere. The fix is architectural: exactly one source of truth for the
+/// filename (`steps.pkg.outputs.name`, itself discovered via a glob rather
+/// than assumed), threaded unchanged into the feed generator's
+/// `-PackageFileName` and the `gcloud storage cp` destination object name.
+/// This test pins that architecture in text so a future edit that
+/// reintroduces a second, divergent name is caught here instead of first
+/// being noticed by a contributor's update silently doing nothing.
+#[test]
+fn windows_msix_publish_name_matches_appinstaller_feed_name() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&workflow, "windows-app");
+
+    // The package name is discovered from disk, never spelled out as a
+    // literal `Iqlusion.TraceCommons_...msix` anywhere in the job.
+    assert!(
+        job.contains("Get-ChildItem -Recurse -Filter *.msix -Path windows\\dist\\msix"),
+        "the job must discover the built package's name by globbing the \
+         real output directory rather than assuming a filename"
+    );
+    assert!(
+        !job.contains("Iqlusion.TraceCommons_"),
+        "the job must never hardcode a package filename derived from the \
+         packaging identity -- MSBuild's Test-layout output is named after \
+         the project, not the identity, and the two can diverge"
+    );
+
+    // steps.pkg.outputs.name is the single source of truth: it must appear
+    // in a `PKG_NAME` env binding at least twice -- once for the step that
+    // builds the feed (which sets -PackageFileName from it) and once for the
+    // step that uploads the package to the bucket (which uses it as the
+    // destination object name). If either step invented its own name, this
+    // count would drop to a value that no longer entails they're the same
+    // string.
+    let pkg_name_bindings = job
+        .matches("PKG_NAME: ${{ steps.pkg.outputs.name }}")
+        .count();
+    assert!(
+        pkg_name_bindings >= 2,
+        "expected at least 2 steps to bind PKG_NAME from steps.pkg.outputs.name \
+         (found {pkg_name_bindings}) -- the feed-generation step and the \
+         publish step must both derive the object name from the same \
+         discovered value, or the feed's Uri and the uploaded object name \
+         can silently diverge"
+    );
+
+    // The feed generator must be invoked with -PackageFileName bound to
+    // that same env var, not a literal or a differently-derived value.
+    let feed_step_start = job
+        .find("Generate the appinstaller feed")
+        .expect("the feed-generation step must exist");
+    let feed_step = &job[feed_step_start..];
+    let make_appinstaller_end = feed_step
+        .find("make-appinstaller.ps1")
+        .expect("the feed step must call make-appinstaller.ps1")
+        + "make-appinstaller.ps1".len();
+    let call_block_end = feed_step[make_appinstaller_end..]
+        .find("-OutputPath")
+        .expect("the make-appinstaller.ps1 call must set -OutputPath")
+        + make_appinstaller_end
+        + "-OutputPath".len();
+    let call_block = &feed_step[..call_block_end];
+    assert!(
+        call_block.contains("-PackageFileName $env:PKG_NAME"),
+        "make-appinstaller.ps1 must be called with -PackageFileName bound to \
+         $env:PKG_NAME (steps.pkg.outputs.name), not a literal filename"
+    );
+
+    // The publish step must upload under that same PKG_NAME, to
+    // windows/$PKG_NAME in the bucket -- exactly what the feed just named.
+    let publish_step_start = job
+        .rfind("name: Publish")
+        .expect("the publish step must exist");
+    let publish_step = &job[publish_step_start..];
+    assert!(
+        publish_step.contains("gs://$env:BUCKET/windows/$env:PKG_NAME"),
+        "the publish step must upload the package to windows/$PKG_NAME in \
+         the bucket -- the exact filename the feed's MainPackage@Uri names. \
+         Uploading under any other name leaves the feed pointing at an \
+         object that does not exist."
+    );
+
+    // And the package must go up before the feed: a feed naming an object
+    // not yet present is a window where every update check 404s.
+    let pkg_upload_pos = publish_step
+        .find("gs://$env:BUCKET/windows/$env:PKG_NAME")
+        .unwrap();
+    let feed_upload_pos = publish_step
+        .find("gs://$env:BUCKET/windows/TraceCommons.appinstaller")
+        .expect("the publish step must also upload the feed");
+    assert!(
+        pkg_upload_pos < feed_upload_pos,
+        "the package must be uploaded before the feed, so there is never a \
+         window in which the feed names an object that is not there yet"
+    );
+}
+
+#[test]
+fn windows_msix_job_installs_and_verifies_before_publishing() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&workflow, "windows-app");
+
+    assert!(job.contains("environment: release"));
+    for needle in [
+        "Add-AppxPackage -Path $env:PKG",
+        "the package did not register",
+        "does not match the stamped",
+        "Confirm the state directory is not virtualized",
+        "Invoke-CommandInDesktopPackage",
+        "Write virtualization is still on",
+    ] {
+        assert!(
+            job.contains(needle),
+            "windows-app job is missing expected content: {needle}"
+        );
+    }
+
+    // Publication must only happen on a push (tag release), never on a
+    // workflow_dispatch -- but the build/sign/install/verify steps above
+    // must run unconditionally so the whole path is provable without ever
+    // moving what an installed client actually pulls.
+    let publish_gcp_auth = job
+        .find("Authenticate to GCP")
+        .expect("the publish path must authenticate to GCP");
+    let auth_step = &job[publish_gcp_auth..];
+    let if_line = auth_step
+        .lines()
+        .find(|l| l.trim_start().starts_with("if:"))
+        .expect("the GCP auth step must be gated");
+    assert!(
+        if_line.contains("github.event_name == 'push'"),
+        "publication must be gated to push events only, found: {if_line}"
+    );
+}
+
+#[test]
+fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(
+        workflow.contains("\n  windows-app:"),
+        "release-apps.yml must define the windows-app job"
+    );
+
+    let publish_job = extract_job(&workflow, "publish");
+
+    assert!(
+        publish_job.contains("needs: [version, macos, windows, windows-app, linux-flatpak]"),
+        "the publish job must depend on windows-app"
+    );
+    assert!(
+        publish_job.contains("needs.windows-app.result == 'success'"),
+        "the publish job's gate must treat windows-app as a platform whose \
+         success alone justifies running publish"
+    );
+    assert!(
+        publish_job.contains("windows-msix"),
+        "the publish job must download the windows-msix artifact"
+    );
+    assert!(
+        publish_job.contains("WINDOWS_APP_RESULT"),
+        "the publish job's release-notes step must branch on WINDOWS_APP_RESULT"
+    );
+    assert!(
+        publish_job.contains("TraceCommons.appinstaller"),
+        "the release notes must point contributors at the .appinstaller feed"
+    );
+}
+
+#[test]
+fn ci_packages_and_validates_the_windows_app_feed_identity() {
+    let ci = read(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("-p:TcPackaged=true"),
+        "CI must opt into the packaged WinUI flavour; setting only \
+         GenerateAppxPackageOnBuild cannot override WindowsPackageType=None"
+    );
+    assert!(
+        ci.contains("-p:GenerateAppxPackageOnBuild=true"),
+        "CI must build a real package (not just compile) so \
+         Package.appxmanifest, MakePri and the visual assets are exercised \
+         on every pull request"
+    );
+    assert!(
+        ci.contains("Confirm exactly one package was produced"),
+        "CI must assert exactly one .msix was produced, the same shape as \
+         the release job's own check"
+    );
+    assert!(
+        ci.contains("make-appinstaller.ps1"),
+        "CI must exercise the feed generator against the real manifest \
+         identity so a rename on either side fails on every PR, not just \
+         at release time"
+    );
+    assert!(
+        ci.contains("feed package name $($main.Name) does not match manifest identity"),
+        "CI must assert the feed's MainPackage name matches \
+         Package.appxmanifest's Identity/@Name"
+    );
+
+    let project = read("windows/src/TraceCommons.App/TraceCommons.App.csproj");
+    assert_eq!(
+        project.matches("<AppxManifest Include=").count(),
+        1,
+        "the WinUI project must register exactly one package manifest"
+    );
+    assert!(
+        project.contains("../../packaging/Package.appxmanifest"),
+        "the WinUI project must use the canonical packaging manifest"
+    );
+    assert!(
+        project.contains("<TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>"),
+        "MSIX's 19041 floor must not narrow the default unpackaged build's support"
+    );
+
+    let manifest = read("windows/packaging/Package.appxmanifest");
+    assert!(
+        manifest.contains("Name=\"Iqlusion.TraceCommons\""),
+        "the canonical manifest must retain the established package identity"
+    );
+    assert!(
+        manifest.contains("<rescap:Capability Name=\"packageManagement\" />"),
+        "the packaged app needs packageManagement to apply updates on demand"
+    );
+
+    let release = read(".github/workflows/release-apps.yml");
+    let job = extract_job(&release, "windows-app");
+    for expected in [
+        "-ManifestPath windows\\packaging\\Package.appxmanifest",
+        "-p:TcPackaged=true",
+        "Get-AppxPackage -Name Iqlusion.TraceCommons",
+        "-AppId App",
+        "-PackageName Iqlusion.TraceCommons",
+    ] {
+        assert!(
+            job.contains(expected),
+            "the Windows release job must consistently use the canonical MSIX identity: {expected}"
+        );
+    }
 }

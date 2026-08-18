@@ -152,6 +152,26 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         );
     }
 
+    // A verified update parked by an earlier check is applied here, at the
+    // daemon's natural start, rather than swapped underneath a running
+    // process. The binary this process is executing is unaffected -- on unix
+    // it holds the old inode, and on Windows the old image is renamed aside
+    // -- so the new code runs from the following start. `trace-commons-
+    // contributor update` is the path for applying one immediately.
+    //
+    // Failures here are never fatal to starting the daemon: not updating is
+    // always better than not running. The label is fixed, and no path is
+    // logged.
+    if let Ok(exe) = std::env::current_exe() {
+        match crate::update::run::apply_staged(&exe) {
+            Ok(Some(_version)) => {
+                tracing::info!("applied a staged update; it takes effect at the next start");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(reason = %e, "staged update was refused"),
+        }
+    }
+
     let shared = Arc::new(ipc::DaemonShared::load(store)?);
     // The two transports are the same protocol over different plumbing: a
     // unix socket guarded by its 0700 state directory, or a Windows named
@@ -302,6 +322,14 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     // pause -- kept uploading while `status` said paused. Pause has to mean
     // "nothing leaves this machine", or it means nothing.
     if shared.is_paused(now) {
+        return Ok(());
+    }
+    // Quiesced for an update swap. Same gate as pause and for the same
+    // reason -- this is the one place "nothing leaves this machine" is
+    // enforced -- but a separate, in-memory flag, so an update never rewrites
+    // the contributor's own persisted pause setting. See `DaemonShared::
+    // quiesced`.
+    if shared.quiesced.load(Ordering::Relaxed) {
         return Ok(());
     }
 

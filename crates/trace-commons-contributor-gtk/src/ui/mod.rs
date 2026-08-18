@@ -13,6 +13,7 @@ pub mod preview;
 pub mod queue;
 pub mod settings;
 pub mod style;
+pub mod update;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -86,6 +87,10 @@ pub struct App {
     pub queue: queue::QueueView,
     pub history: history::HistoryView,
     pub settings: settings::SettingsView,
+    /// The update banner. Above the health banner is deliberate: an update
+    /// is a standing fact about this machine, while health is about the
+    /// current run.
+    pub update: update::UpdateView,
 
     /// Health is rendered from `status.health.last_error_label` and nothing
     /// else: the daemon owns the precedence order and a client that
@@ -172,6 +177,7 @@ impl App {
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
         let settings = settings::SettingsView::new();
+        let update = update::UpdateView::new();
 
         // Pages and switcher items are built from the same list, in the same
         // order, so a screen cannot be renamed in one place and not the
@@ -250,6 +256,7 @@ impl App {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
+        content.append(&update.root);
         content.append(&banner_column);
         content.append(&stack);
         stack.set_vexpand(true);
@@ -266,6 +273,7 @@ impl App {
             queue,
             history,
             settings,
+            update,
             health_banner: banner_column,
             health_label,
             health_button,
@@ -292,6 +300,7 @@ impl App {
         queue::wire(&app);
         history::wire(&app);
         settings::wire(&app);
+        update::wire(&app);
         app.refresh();
 
         // Best-effort and platform-optional, in the order the design spec
