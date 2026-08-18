@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The History screen, drawn to section 5.3 of the design spec.
+
+    Four reads back it (list_history, history_rollup, refresh_history,
+    queue_outcome_counts) and one write (withdraw). Every one of them was
+    already in the daemon's pinned METHODS array; this screen adds no method.
+
+    Three things on this page are contract rather than layout, and each is
+    commented where it appears: held is reported separately from everything
+    else and never as a failure; credit figures give way to a staleness line
+    rather than being drawn as a confident zero from a cache that has never
+    been filled; and withdrawal reports the tier the server applied rather
+    than a generic success.
+
+    XML comments cannot contain a double hyphen, so the prose here uses commas
+    and parentheses where the C# files use dashes.
+-->
+<UserControl
+    x:Class="TraceCommons.App.Controls.HistoryView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid RowDefinitions="Auto,*,Auto,Auto">
+
+        <!-- Header. The "Check for updates" control sits here because these
+             figures are what a contributor is looking at when they wonder
+             whether the screen is current. -->
+        <Grid Grid.Row="0"
+              ColumnDefinitions="*,Auto"
+              ColumnSpacing="12"
+              Padding="20,9"
+              BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+              BorderThickness="0,0,0,1">
+            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                <TextBlock Text="History" Style="{StaticResource TcTitleScreenTextStyle}" />
+                <TextBlock Text="Everything this account has sent, and what became of it."
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+            <Button Grid.Column="1"
+                    Style="{StaticResource TcSecondaryButtonStyle}"
+                    Content="Check for updates"
+                    VerticalAlignment="Center"
+                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                    Click="OnCheckForUpdates" />
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
+            <StackPanel Spacing="16">
+
+                <!-- The three states, as stat cards. Never one column of mixed
+                     semantics: held is its own figure because a contributor
+                     who sees it grouped with failures reads it as rejection. -->
+                <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
+                    <Border Grid.Column="0"
+                            Background="{ThemeResource TcSurfaceCardBrush}"
+                            BorderBrush="{ThemeResource TcHairlineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Padding="14,12">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="{x:Bind ViewModel.InTheCommonsLabel}"
+                                       Style="{StaticResource TcEyebrowTextStyle}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.InTheCommonsCountText, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoFigureTextStyle}" />
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="1"
+                            Background="{ThemeResource TcSurfaceCardBrush}"
+                            BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Padding="14,12">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="{x:Bind ViewModel.HeldLabel}"
+                                       Style="{StaticResource TcEyebrowTextStyle}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.HeldCountText, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoFigureTextStyle}" />
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="2"
+                            Background="{ThemeResource TcSurfaceCardBrush}"
+                            BorderBrush="{ThemeResource TcHairlineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Padding="14,12">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="{x:Bind ViewModel.WaitingLabel}"
+                                       Style="{StaticResource TcEyebrowTextStyle}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind ViewModel.WaitingCountText, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoFigureTextStyle}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Held for privacy review, as a disclosure. It exists so a
+                     contributor can see what is sitting still without it
+                     being mixed into the accepted column, and it never states
+                     a turnaround time, because nobody can. -->
+                <Expander Visibility="{x:Bind ViewModel.HasHeld, Mode=OneWay}"
+                          IsExpanded="True"
+                          HorizontalAlignment="Stretch"
+                          HorizontalContentAlignment="Stretch">
+                    <Expander.Header>
+                        <TextBlock Text="{x:Bind ViewModel.HeldGroupHeading, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </Expander.Header>
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.QuarantineBody}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!-- The shared design draws a "Withdraw these traces"
+                             button here and this shell does not offer one.
+                             Withdrawal itself is reachable (every record below
+                             carries its own button), but the bulk call reports
+                             only counts, so it could never say afterwards what
+                             happened to any one trace. That is said here in
+                             words rather than left as a drawn affordance
+                             missing with no explanation. -->
+                        <TextBlock Text="{x:Bind ViewModel.NoBulkNote}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Expander>
+
+                <!-- Credit. A record, not a currency: the figures are set in
+                     the ledger face, unadorned, with no symbol and nothing
+                     that could read as a score. The prose beneath is what
+                     stops the number being mistaken for one. -->
+                <TextBlock Text="Credit" Style="{StaticResource TcTitleSectionTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="16,14">
+                    <StackPanel Spacing="10">
+
+                        <!-- last_refreshed_at of null renders as staleness,
+                             never as a confident zero: a stale cache presented
+                             as current is a lie about a number people care
+                             about. -->
+                        <Grid Visibility="{x:Bind ViewModel.HasFigures, Mode=OneWay}"
+                              ColumnDefinitions="Auto,Auto,*"
+                              ColumnSpacing="32">
+                            <StackPanel Grid.Column="0" Spacing="2">
+                                <TextBlock Text="Recorded" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CreditRecordedText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoFigureTextStyle}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Text="Still being scored" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CreditPendingText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoFigureTextStyle}"
+                                           Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="2"
+                                       Text="{x:Bind ViewModel.RefreshedText, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                       HorizontalAlignment="Right"
+                                       VerticalAlignment="Bottom" />
+                        </Grid>
+
+                        <TextBlock Visibility="{x:Bind ViewModel.HasNoFigures, Mode=OneWay}"
+                                   Text="{x:Bind ViewModel.NotSyncedYet}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   Foreground="{ThemeResource TcInkTertiaryBrush}" />
+
+                        <TextBlock Text="{x:Bind ViewModel.CreditBody}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Community, drawn only for a roster member. Absent means no
+                     standing, and absent is not null: the contract omits the
+                     object entirely in every case where there is nothing to
+                     say, and all of them are rendered the same way here, by
+                     drawing nothing. There is no empty state for this. -->
+                <Border Visibility="{x:Bind ViewModel.HasCommunity, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="16,14">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Community" Style="{StaticResource TcTitleCardTextStyle}" />
+                        <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="16">
+                            <StackPanel Grid.Column="0" Spacing="2">
+                                <TextBlock Text="Rank" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CommunityRankText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Text="Novelty credit" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CommunityCreditText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Spacing="2">
+                                <TextBlock Text="Accepted" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CommunityAcceptedText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="3" Spacing="2">
+                                <TextBlock Text="Accept rate" Style="{StaticResource TcEyebrowTextStyle}" />
+                                <TextBlock Text="{x:Bind ViewModel.CommunityAcceptRateText, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}" />
+                            </StackPanel>
+                        </Grid>
+                        <!-- Analytics that are withheld are stated in words,
+                             never as an empty chart. -->
+                        <TextBlock Visibility="{x:Bind ViewModel.ShowsAnalyticsWithheld, Mode=OneWay}"
+                                   Text="{x:Bind ViewModel.AnalyticsWithheldText}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Sessions that reached the queue and did not go out. The
+                     footnote is load bearing: this method cannot explain a
+                     session the watcher discarded before a queue entry ever
+                     existed, and the contract says in as many words not to
+                     present it as though it can. -->
+                <StackPanel Visibility="{x:Bind ViewModel.HasOutcomes, Mode=OneWay}" Spacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.OutcomesHeading}"
+                               Style="{StaticResource TcTitleSectionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Outcomes}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:OutcomeCountViewModel">
+                                <Grid ColumnDefinitions="*,Auto" Padding="0,3">
+                                    <TextBlock Grid.Column="0"
+                                               Text="{x:Bind Label}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{x:Bind CountText}"
+                                               Style="{StaticResource TcMonoBadgeTextStyle}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.OutcomesFootnote}"
+                               Style="{StaticResource TcCaptionSmallTextStyle}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <TextBlock Text="Everything you've contributed"
+                           Style="{StaticResource TcTitleSectionTextStyle}" />
+
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Records}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:HistoryRecordViewModel">
+                            <Border Margin="0,0,0,12"
+                                    Padding="16,14"
+                                    Background="{ThemeResource TcSurfaceCardBrush}"
+                                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                                <StackPanel Spacing="8">
+
+                                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{x:Bind ProjectLabel}"
+                                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{x:Bind SubmittedText}"
+                                                   Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                   VerticalAlignment="Center" />
+
+                                        <!-- Four chips rather than one tinted
+                                             chip, because the four states are
+                                             drawn from four exclusive flags and
+                                             a status this build has never heard
+                                             of has to land in the neutral one
+                                             rather than in no chip at all. A
+                                             record with no chip would read as a
+                                             record with no state.
+
+                                             The withdrawn chip is toned as the
+                                             contributor's own act. It is never
+                                             drawn as a failure, and the record
+                                             is never dropped from this list. -->
+                                        <Border Grid.Column="2"
+                                                Visibility="{x:Bind IsAccepted}"
+                                                BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="{StaticResource TcPillCornerRadius}"
+                                                Padding="8,2"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind StatusWord}"
+                                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcGreenTextBrush}" />
+                                        </Border>
+                                        <Border Grid.Column="2"
+                                                Visibility="{x:Bind IsHeld}"
+                                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="{StaticResource TcPillCornerRadius}"
+                                                Padding="8,2"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind StatusWord}"
+                                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcGoldTextBrush}" />
+                                        </Border>
+                                        <Border Grid.Column="2"
+                                                Visibility="{x:Bind IsWithdrawn}"
+                                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="{StaticResource TcPillCornerRadius}"
+                                                Padding="8,2"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind StatusWord}"
+                                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcCoralTextBrush}" />
+                                        </Border>
+                                        <Border Grid.Column="2"
+                                                Visibility="{x:Bind IsWaiting}"
+                                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="{StaticResource TcPillCornerRadius}"
+                                                Padding="8,2"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind StatusWord}"
+                                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                                        </Border>
+                                    </Grid>
+
+                                    <!-- The server's own prose, verbatim.
+                                         "Held because a passage looked like a
+                                         personal address" is enormously better
+                                         than a status word, and it is the
+                                         server's sentence to write, not this
+                                         window's to paraphrase. -->
+                                    <ItemsControl Visibility="{x:Bind HasExplanations}"
+                                                  ItemsSource="{x:Bind Explanations}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="x:String">
+                                                <TextBlock Text="{x:Bind}"
+                                                           Style="{StaticResource TcBodyDenseTextStyle}"
+                                                           TextWrapping="Wrap"
+                                                           Margin="0,0,0,3" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <TextBlock Visibility="{x:Bind ShowsHeldExplanation}"
+                                               Text="{x:Bind HeldExplanation}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+
+                                    <!-- A withdrawn record keeps whatever it
+                                         recorded. Withdrawal does not reverse
+                                         settled credit, so there is no branch
+                                         here on status and there must not be. -->
+                                    <TextBlock Visibility="{x:Bind HasCredit}"
+                                               Text="{x:Bind CreditText}"
+                                               Style="{StaticResource TcMonoBadgeTextStyle}"
+                                               Foreground="{ThemeResource TcInkTertiaryBrush}" />
+
+                                    <!-- Withdrawal, which the shared design
+                                         calls first class and always
+                                         available. It is the one promise on
+                                         this screen that is the contributor's
+                                         to make about their own trace, so it
+                                         is on the row rather than behind a
+                                         menu. -->
+                                    <Button Visibility="{x:Bind OffersWithdrawal}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="Withdraw"
+                                            HorizontalAlignment="Left"
+                                            Tag="{x:Bind}"
+                                            Click="OnWithdraw" />
+
+                                    <TextBlock Visibility="{x:Bind IsWithdrawing}"
+                                               Text="{x:Bind WithdrawingText}"
+                                               Style="{StaticResource TcCaptionTextStyle}" />
+
+                                    <!-- What the attempt actually did. Never a
+                                         generic "withdrawn": on success this
+                                         names the tier the server applied, and
+                                         on failure it opens by saying nothing
+                                         happened, so nobody walks away from a
+                                         failure believing their trace was
+                                         taken back. -->
+                                    <TextBlock Visibility="{x:Bind HasWithdrawOutcome}"
+                                               Text="{x:Bind WithdrawOutcomeText}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Visibility="{x:Bind ShowsWithdrawCreditNote}"
+                                               Text="{x:Bind WithdrawCreditNote}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- The empty state. Not a failure, and it does not read as
+                     one: it says what will put something here. -->
+                <StackPanel Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
+                            Spacing="8"
+                            Padding="0,24"
+                            HorizontalAlignment="Center">
+                    <TextBlock Text="Nothing has been sent yet"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Text="Once you approve a session it appears here, with what became of it and what it earned."
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap"
+                               MaxWidth="360"
+                               TextAlignment="Center" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="2"
+                   Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                   Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                   Style="{StaticResource TcCaptionTextStyle}"
+                   TextWrapping="Wrap"
+                   Padding="22,0,22,10" />
+
+        <ProgressBar Grid.Row="3"
+                     IsIndeterminate="True"
+                     Foreground="{ThemeResource TcGreenFillBrush}"
+                     Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+    </Grid>
+</UserControl>

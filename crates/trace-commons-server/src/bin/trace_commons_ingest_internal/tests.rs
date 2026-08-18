@@ -7,6 +7,23 @@ use trace_commons_protocol::trace_contribution::{
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
 
+/// `/health` is the surface an operator curls to answer "what is deployed
+/// here?", so the build identity has to be on it, and the fields that were
+/// already there have to keep their names.
+#[tokio::test]
+async fn health_endpoint_reports_build_identity_additively() {
+    let Json(health) = health_handler().await;
+    let value = serde_json::to_value(&health).expect("health serialises");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(
+        value["schema_version"],
+        serde_json::json!(TRACE_CONTRIBUTION_SCHEMA_VERSION)
+    );
+    assert_eq!(value["build_commit"], trace_commons_build_info::COMMIT);
+    assert_eq!(value["build_time"], trace_commons_build_info::BUILD_TIME);
+    assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
+}
+
 fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
@@ -83707,4 +83724,41 @@ async fn settlement_outbox_repair_converges_after_partial_outbox_crash() {
         recovered_ids,
         outbox_ids.into_iter().collect::<BTreeSet<_>>()
     );
+}
+
+// --- Privacy filter boot validation -----------------------------------
+//
+// The privacy filter resolves per submission, not at boot, and an unset
+// backend resolves to "no filter" without an error. A deployment can
+// therefore run indefinitely with no prose-PII filtering while looking
+// entirely healthy: the service is active, the journal is clean, and every
+// submission succeeds. These pin the boot-time check that makes that state
+// impossible to enter unnoticed.
+
+#[test]
+fn a_deployment_requiring_a_privacy_filter_refuses_to_start_without_one() {
+    let error = validate_privacy_filter_config(true, PrivacyFilterBackendTag::None)
+        .expect_err("a required filter that is absent must refuse the boot");
+    let rendered = format!("{error}");
+    assert!(
+        rendered.contains("privacy_filter_backend"),
+        "the refusal must name the missing control, got: {rendered}"
+    );
+}
+
+#[test]
+fn a_deployment_requiring_a_privacy_filter_starts_when_one_is_configured() {
+    validate_privacy_filter_config(true, PrivacyFilterBackendTag::NearAi)
+        .expect("a configured backend satisfies the requirement");
+    validate_privacy_filter_config(true, PrivacyFilterBackendTag::Sidecar)
+        .expect("any real backend satisfies the requirement");
+}
+
+#[test]
+fn a_deployment_not_requiring_a_privacy_filter_still_starts_without_one() {
+    // The flag is opt-in. Existing deployments that have never set it keep
+    // booting exactly as before, so this can ship without a coordinated
+    // config change everywhere.
+    validate_privacy_filter_config(false, PrivacyFilterBackendTag::None)
+        .expect("an unset requirement must not change existing boot behaviour");
 }

@@ -968,20 +968,50 @@ enum ScopeCopy {
     }
 }
 
+/// Recent searches, kept for the life of the process and never written to
+/// disk.
+///
+/// They used to persist in `UserDefaults`, on the reasoning that the second
+/// trace should be one keystroke. That reasoning is sound; the storage was
+/// not. A recent-search list is the contributor's list of the things they
+/// were afraid of leaking -- a client name, an employer, an unreleased
+/// product, the name of a person. It is assembled precisely because those
+/// strings are sensitive, which makes it a worse thing to leave on disk
+/// than most of what the search was checking for.
+///
+/// Nothing else in this product writes that class of string down. The Linux
+/// and Windows shells both hold theirs in memory for the same reason, so
+/// this is also what makes the three agree.
+///
+/// In memory it still does its job: a contributor checking six traces in one
+/// sitting types each term once. It only stops helping across a restart,
+/// which is the trade being made deliberately.
 enum RecentSearches {
-    private static let key = "trace-commons.recent-searches"
+    private static let legacyKey = "trace-commons.recent-searches"
+
+    private static var terms: [String] = []
 
     static func load() -> [String] {
-        UserDefaults.standard.stringArray(forKey: key) ?? []
+        // Earlier builds wrote this list to disk. Stopping the writes does
+        // not unwrite what they already stored, and an install that has been
+        // upgraded would otherwise keep those terms indefinitely with no
+        // surface left in the app to clear them. So the key is removed the
+        // first time this is read, rather than merely ignored.
+        purgeLegacyStore()
+        return terms
     }
 
-    /// Recent searches persist so the second trace is one keystroke. They
-    /// are the contributor's own words, kept locally, and never sent.
     static func remember(_ term: String) -> [String] {
-        var terms = load().filter { $0 != term }
-        terms.insert(term, at: 0)
+        terms = [term] + terms.filter { $0 != term }
         terms = Array(terms.prefix(6))
-        UserDefaults.standard.set(terms, forKey: key)
         return terms
+    }
+
+    /// Removes the old on-disk list. Idempotent, and safe when absent.
+    static func purgeLegacyStore() {
+        guard UserDefaults.standard.object(forKey: legacyKey) != nil else {
+            return
+        }
+        UserDefaults.standard.removeObject(forKey: legacyKey)
     }
 }

@@ -183,6 +183,12 @@ enum SelfTest {
             lines.append("  waiting: \(row.label) count=\(row.count) bytes=\(row.bytes)")
         }
         lines.append("consent options: \(model.consentScopes.map(\.name).joined(separator: ", "))")
+        // A count and the fixed action labels only. `project_label` is a
+        // daemon-derived display name, but this report is written to a path
+        // the caller chose, and a project name is more than a count needs to
+        // prove the call round-trips.
+        lines.append("audit entries: \(model.audit.count) "
+            + "actions=\(model.audit.map(\.action).joined(separator: ","))")
 
         guard let entry = model.awaitingDecision.first else {
             lines.append("FAIL: nothing pending, so nothing else can be exercised")

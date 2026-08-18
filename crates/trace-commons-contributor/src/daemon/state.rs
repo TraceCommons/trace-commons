@@ -68,6 +68,24 @@ pub struct DaemonState {
     /// When history was last refreshed from the server.
     #[serde(default)]
     pub last_history_poll_at: Option<DateTime<Utc>>,
+    /// When the public community roster was last fetched.
+    #[serde(default)]
+    pub last_community_poll_at: Option<DateTime<Utc>>,
+    /// This contributor's line on the public roster, as the last poll found
+    /// it. `None` means there is no standing to report -- no handle, no
+    /// snapshot, or not on the roster -- and the clients then draw no
+    /// community section at all.
+    ///
+    /// Cached here rather than in a file of its own so it lands inside the
+    /// state that `ConfigStore::wipe` already removes: a public handle and
+    /// the standing attached to it must not survive a wipe in a file nothing
+    /// sweeps. It survives a restart on purpose, so the section is drawn
+    /// immediately rather than after the first poll interval; the serve path
+    /// re-checks its age (`community::CommunityStanding::is_fresh`) so a
+    /// standing restored from disk can never outlive the roster's withdrawal
+    /// bound.
+    #[serde(default)]
+    pub community: Option<super::community::CommunityStanding>,
 }
 
 impl Default for DaemonState {
@@ -90,6 +108,8 @@ impl DaemonState {
             paused: false,
             paused_until: None,
             last_history_poll_at: None,
+            last_community_poll_at: None,
+            community: None,
         }
     }
 

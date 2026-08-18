@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_handle,
-    tc_handle_free, tc_last_error, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free, tc_subscribe,
+    tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -1133,4 +1134,45 @@ fn tc_daemon_start_with_settings_null_config_dir_is_an_error() {
     assert!(h.is_null());
     assert!(!err.is_null());
     unsafe { tc_string_free(err) };
+}
+
+/// The instance a shell shows before committing to an invite.
+///
+/// Owned string out, freed by the caller, NULL for anything unusable --
+/// including a bare code and a URL with no code in it, which the interface
+/// must not tell apart because the whole invite path has one failure
+/// sentence.
+#[test]
+fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
+    let invite = cstr_str("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6");
+    let out = unsafe { tc_invite_issuer_host(invite.as_ptr()) };
+    assert!(!out.is_null(), "a well-formed invite resolves");
+    let host = unsafe { std::ffi::CStr::from_ptr(out) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    unsafe { tc_string_free(out) };
+
+    assert_eq!(host, "issuer.tracecommons.ai");
+    // The point of the narrow return: the credential does not cross.
+    assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
+}
+
+#[test]
+fn tc_invite_issuer_host_is_null_for_anything_unusable() {
+    for bad in [
+        "VQWWPGYSG8Y4LTP6",
+        "https://issuer.tracecommons.ai/onboard",
+        "not a url",
+    ] {
+        let arg = cstr_str(bad);
+        let out = unsafe { tc_invite_issuer_host(arg.as_ptr()) };
+        assert!(out.is_null(), "{bad} must not resolve");
+    }
+}
+
+#[test]
+fn tc_invite_issuer_host_tolerates_null() {
+    let out = unsafe { tc_invite_issuer_host(std::ptr::null()) };
+    assert!(out.is_null());
 }

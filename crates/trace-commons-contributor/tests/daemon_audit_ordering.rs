@@ -50,6 +50,9 @@ fn cfg(device_key_id: String) -> ContributorConfig {
         consent_scopes: vec!["debugging_evaluation".into()],
         pii_filter: None,
         allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
     }
 }
 
@@ -101,6 +104,8 @@ impl Harness {
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
         };
         let mut q = self.shared.queue.lock().unwrap();
         q.upsert(entry.clone(), 100).unwrap();

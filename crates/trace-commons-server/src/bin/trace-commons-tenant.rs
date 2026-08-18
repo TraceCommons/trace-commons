@@ -36,7 +36,9 @@ const DEFAULT_BEARER_ENV: &str = "TRACE_COMMONS_TENANT_BEARER";
 #[command(
     name = "trace-commons-tenant",
     about = "Tenant-audience CLI for trace-commons-server.",
-    version
+    // The semver does not move when a deploy does, so --version carries the
+    // commit the binary was built from as well.
+    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 pub(crate) struct Cli {
     /// Hosted endpoint. Reads `TRACE_COMMONS_ENDPOINT` when unset on the CLI.

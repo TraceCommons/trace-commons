@@ -28,3 +28,10 @@ scripts/operator/*.csv
 # microsoft/winget-pkgs, not carried here -- the InstallerSha256 is only valid
 # for one specific published artifact.
 manifests/
+
+# CPython bytecode, written beside any script under scripts/ the moment it is
+# run or imported. One of these reached main because it was sitting untracked
+# in a working tree when a broad `git add` swept it up; ignoring it stops the
+# next one, and stops the churn of a regenerated .pyc showing as a change.
+__pycache__/
+*.py[cod]

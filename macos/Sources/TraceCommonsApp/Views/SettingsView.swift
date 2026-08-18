@@ -19,6 +19,20 @@ import SwiftUI
 /// point: per §7.3 the black frame is the exact boundary of what becomes
 /// public. See `CommunityBrand` for why those values are not `TC` tokens.
 struct SettingsView: View {
+    var body: some View {
+        ScrollView {
+            SettingsContent()
+        }
+        .tcScreen()
+    }
+}
+
+/// The screen's content, split out of its `ScrollView` for the same reason
+/// `QueueContent` and `ConsentScopesContent` are: `ImageRenderer` renders a
+/// `ScrollView` as blank, so the screenshot hook can only rasterize what
+/// lives outside one -- and the local change log at the foot of this screen
+/// is a surface that has to be looked at to be checked.
+struct SettingsContent: View {
     @EnvironmentObject private var model: AppModel
 
     // Read fresh on appear rather than cached across the view's lifetime:
@@ -28,6 +42,11 @@ struct SettingsView: View {
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
     @State private var loginItemActionError: String?
     @State private var showingGoPublic = false
+    /// The panel's two editable fields. Seeded from the daemon's answer --
+    /// see `seedProfileDraft` -- rather than bound straight to it, so a
+    /// background refresh cannot rewrite what is being typed.
+    @State private var handleDraft = ""
+    @State private var bioDraft = ""
 
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
@@ -36,26 +55,35 @@ struct SettingsView: View {
     private static let proseColumn: CGFloat = 520
 
     var body: some View {
-        ScrollView {
-            // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
-            // 28 this screen used before.
-            VStack(alignment: .leading, spacing: TC.Space.lg) {
-                connection
-                loginItem
-                consent
-                publicProfile
-                watching
-                projects
-            }
-            .padding(.top, TC.Space.Content.top)
-            .padding(.horizontal, TC.Space.Content.horizontal)
-            .padding(.bottom, TC.Space.Content.bottom)
-            .tcColumn(Self.proseColumn)
+        // Spec §5.4 gap: 18 between sections (`TC.Space.lg`), not the
+        // 28 this screen used before.
+        VStack(alignment: .leading, spacing: TC.Space.lg) {
+            connection
+            loginItem
+            consent
+            publicProfile
+            watching
+            projects
+            audit
         }
-        .tcScreen()
-        .onAppear { loginItemState = LoginItemManager.currentState }
+        .padding(.top, TC.Space.Content.top)
+        .padding(.horizontal, TC.Space.Content.horizontal)
+        .padding(.bottom, TC.Space.Content.bottom)
+        .tcColumn(Self.proseColumn)
+        .onAppear {
+            loginItemState = LoginItemManager.currentState
+            // Same reason the login-item state is read fresh here: the log
+            // can have grown since launch (the CLI writes to it too), and
+            // the daemon publishes no event when it does.
+            model.refreshAudit()
+        }
         .sheet(isPresented: $showingGoPublic) {
+            // Handed the model explicitly rather than relying on the sheet
+            // inheriting it: the dialog now makes a daemon call, and an
+            // environment object it did not get would be a crash on the one
+            // button that matters.
             GoPublicDialog(onDismiss: { showingGoPublic = false })
+                .environmentObject(model)
         }
     }
 
@@ -165,12 +193,11 @@ struct SettingsView: View {
         model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }
     }
 
-    /// Whether this contributor is on the public roster, derived from the
-    /// daemon's granted scope list rather than from any local flag.
-    private var listedPublicly: Bool {
-        let granted = Set(model.status.consentScopes)
-        return creditScopes.contains { granted.contains($0.name) }
-    }
+    // Whether this contributor is on the roster used to be inferred from
+    // the granted scope list. It is now read from `get_public_profile`,
+    // which is the only thing that knows: `public_attribution` is a
+    // permission to be listed, and claiming a handle is the separate act
+    // that actually puts a row on the roster.
 
     private var consent: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
@@ -202,15 +229,14 @@ struct SettingsView: View {
                 ForEach(creditScopes) { scope in
                     scopeRow(scope, checked: granted.contains(scope.name), alwaysOn: false)
                 }
-                if !listedPublicly {
-                    // The one door into the community-brand surface. Going
-                    // public is a consent dialog, not a toggle flip (§5.7),
-                    // so the private tool's own button opens it and the
-                    // foreign visual language starts at the sheet's edge.
-                    Button("Go public") { showingGoPublic = true }
-                        .buttonStyle(.bordered)
-                        .font(TC.Font_.labelControl)
-                }
+                // The door into the community-brand surface used to be
+                // here, gated on this scope list. It has moved to the
+                // public-profile section below, because the roster is not
+                // what this list describes: the daemon deliberately does
+                // not pre-check `consent_scopes` before a claim -- the
+                // local list can be narrower than what the credential
+                // carries, and refusing here would refuse contributors the
+                // server would have allowed.
             }
             Text("""
             Changing permissions needs an enrolled account, which this build does \
@@ -255,100 +281,198 @@ struct SettingsView: View {
 
     // MARK: - Public profile (spec §5.6)
 
-    /// The brand panel that draws the exact boundary of what is public.
+    /// The public surface: an opt-in row off the roster, the community-brand
+    /// panel on it.
     ///
-    /// It renders only while the daemon reports the attribution scope as
-    /// granted, matching 2a's own rule: "Shown only while 'List my handle
-    /// publicly' is on. Turn it off in Settings and this section disappears
-    /// with it."
+    /// Two surfaces rather than two states of one. Per §7.3 the black frame
+    /// is the exact boundary of what becomes public, so the change of visual
+    /// language is the statement and the two are built separately.
     ///
-    /// The handle, the bio and the roster date are all mockup fixtures in the
-    /// spec, and the daemon contract carries none of them -- `DaemonStatus`
-    /// has no handle, `HistoryRollup` has no roster date, and there is no
-    /// profile call to save a bio through. The frame, its labels and its byte
-    /// counter are therefore drawn against empty values rather than against
-    /// invented ones, and the controls that would write are disabled.
-    /// Empty until the daemon carries a profile. Named rather than inlined so
-    /// the byte counter is visibly derived from the value it counts, and so
-    /// there is one place to bind when the contract grows these fields.
-    private var publishedHandle: String { "" }
-    private var publishedBio: String { "" }
-
-    @ViewBuilder
+    /// Filled from `get_public_profile`, which reports the daemon's local
+    /// cache of the last claim this device made. There is no
+    /// `GET /v1/community/profile` for a contributor's own row, so a cache is
+    /// what any shell has: it says what this machine last published, not what
+    /// the roster holds this second.
     private var publicProfile: some View {
-        if listedPublicly {
-            VStack(alignment: .leading, spacing: TC.Space.sm) {
-                communityBrandPanel {
-                    Text("Your public profile".uppercased())
-                        .font(CommunityBrand.Font_.displayPanel)
-                        .tracking(CommunityBrand.Font_.displayPanelTracking)
-                        .foregroundStyle(CommunityBrand.ink)
-
-                    profileField(label: "Handle", value: publishedHandle, mono: true, minHeight: nil)
-
-                    VStack(alignment: .leading, spacing: TC.Space.xs) {
-                        profileField(
-                            label: "Bio — 280 bytes, plaintext, no HTML",
-                            value: publishedBio,
-                            mono: false,
-                            minHeight: 56
-                        )
-                        // Counted off the value above, not the mockup's
-                        // "74/280": a counter that does not count is worse
-                        // than no counter. Bytes, because the limit is
-                        // stated in bytes.
-                        Text("\(publishedBio.utf8.count)/280")
-                            .font(CommunityBrand.Font_.labelMono)
-                            .tracking(CommunityBrand.Font_.monoTracking)
-                            .foregroundStyle(CommunityBrand.muted)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-
-                    HStack(spacing: TC.Space.sm) {
-                        Button("Save profile") {}
-                            .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.accent))
-                            .disabled(true)
-                        Button("Leave the roster") {}
-                            .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.paper))
-                            .disabled(true)
-                    }
-                }
-                Text("""
-                Attribution only — being listed grants no data use at all. Leaving \
-                the roster removes you from future snapshots.
-                """)
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            if let profile = model.publicProfile, let handle = profile.handle {
+                profilePanel(profile, handle: handle)
+            } else {
+                TCSectionHeader(title: PublicProfileCopy.heading)
+                optInRow
+            }
+            if let sentence = profileOutcomeSentence {
+                Text(sentence)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(PublicProfileCopy.footnote)
                 .font(TC.Font_.caption)
                 .lineSpacing(TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption))
                 .foregroundStyle(.secondary)
-                Text("""
-                This build cannot read or change a public profile -- the daemon \
-                reports no handle, bio or roster date yet -- so this shows what is \
-                published rather than offering to edit it.
-                """)
-                .font(TC.Font_.caption)
-                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            profileCopyDefects
+        }
+        // Seeded from the daemon's answer whenever it changes, so the fields
+        // show what is actually published -- including the trimmed display
+        // form the server stored, which need not be the string that was
+        // typed. Keyed on the published values rather than on every render,
+        // so a refresh cannot overwrite an edit in progress.
+        .onAppear { seedProfileDraft() }
+        .onChange(of: publishedSignature) { _, _ in seedProfileDraft() }
+    }
+
+    /// The public-profile copy's own assertions, rendered where a
+    /// contributor and a developer both see them -- the same arrangement
+    /// `HistoryView` uses for the withdrawal wording, and for the same
+    /// reason: there is no Swift test target here, so an assertion that is
+    /// not rendered is an assertion nobody runs. Empty in every healthy
+    /// build.
+    @ViewBuilder
+    private var profileCopyDefects: some View {
+        let problems = PublicProfileCopyCheck.failures()
+        if !problems.isEmpty {
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                Text("Do not trust the public-profile wording on this screen.")
+                    .font(TC.Font_.cardTitle)
+                ForEach(problems, id: \.self) { problem in
+                    Text(problem).font(TC.Font_.footnote)
+                }
             }
+            .foregroundStyle(TC.coralText)
+            .padding(TC.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .tcCard()
         }
     }
 
+    /// Off the roster. The row §5.4 names, and a button that opens the
+    /// consent dialog rather than doing anything itself: going public is a
+    /// consent dialog, not a toggle flip (§5.7), and the foreign visual
+    /// language starts at the sheet's edge.
+    private var optInRow: some View {
+        HStack(alignment: .center, spacing: TC.Space.m) {
+            Text(PublicProfileCopy.listHandlePublicly)
+                .font(TC.Font_.body)
+            Spacer(minLength: 0)
+            Button(PublicProfileCopy.goPublicConfirm) { showingGoPublic = true }
+                .buttonStyle(.bordered)
+                .font(TC.Font_.labelControl)
+        }
+        .padding(TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard()
+    }
+
+    /// On the roster: §5.6's brand panel, editable.
+    private func profilePanel(
+        _ profile: DaemonClient.PublicProfile,
+        handle: String
+    ) -> some View {
+        communityBrandPanel {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                Text(PublicProfileCopy.heading.uppercased())
+                    .font(CommunityBrand.Font_.displayPanel)
+                    .tracking(CommunityBrand.Font_.displayPanelTracking)
+                    .foregroundStyle(CommunityBrand.ink)
+                Spacer(minLength: 0)
+                if let since = profile.publicSince {
+                    Text(PublicProfileCopy.onRosterSince(Self.rosterDate.string(from: since)))
+                        .font(CommunityBrand.Font_.labelMono)
+                        .tracking(CommunityBrand.Font_.monoTracking)
+                        .foregroundStyle(CommunityBrand.muted)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            profileEditor(label: PublicProfileCopy.handleLabel, text: $handleDraft, mono: true)
+
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                profileBioEditor(label: PublicProfileCopy.bioLabel, text: $bioDraft)
+                // Counted off the value above, not the mockup's "74/280": a
+                // counter that does not count is worse than no counter.
+                // Bytes, because the limit is stated in bytes.
+                Text("\(bioDraft.utf8.count)/280")
+                    .font(CommunityBrand.Font_.labelMono)
+                    .tracking(CommunityBrand.Font_.monoTracking)
+                    .foregroundStyle(CommunityBrand.muted)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+
+            HStack(spacing: TC.Space.sm) {
+                // Save re-publishes the whole profile, because that is what
+                // the PUT does: the handle and the bio as they stand, both
+                // of them, every time. There is no partial update to offer.
+                Button(PublicProfileCopy.saveProfile) {
+                    model.claimHandle(handleDraft, bio: bioDraft)
+                }
+                .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.accent))
+                .disabled(model.profileBusy || handleDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty)
+                Button(PublicProfileCopy.leaveRoster) { model.leaveRoster() }
+                    .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.paper))
+                    .disabled(model.profileBusy)
+            }
+        }
+        // The handle is what is published; the panel says so to VoiceOver
+        // rather than leaving the fields to be read as unlabelled boxes.
+        .accessibilityLabel("\(PublicProfileCopy.heading): \(handle)")
+    }
+
+    /// What the last claim or withdrawal did, in words.
+    ///
+    /// `published(cached: false)` is a **success**: the server has taken the
+    /// handle, and only this device's copy of it is missing. It gets the
+    /// sentence that says so rather than a refusal sentence -- a shell that
+    /// reported it as a failure would tell a contributor their handle is
+    /// private when it is public.
+    private var profileOutcomeSentence: String? {
+        switch model.profileOutcome {
+        case .none: return nil
+        case .published(let cached):
+            return cached ? PublicProfileCopy.published : PublicProfileCopy.publishedNotCached
+        case .left(let cached):
+            return cached ? PublicProfileCopy.leftRoster : PublicProfileCopy.leftRosterNotCached
+        case .refused(let label):
+            return PublicProfileCopy.failureSentence(label)
+        case .leaveRefused(let label):
+            return PublicProfileCopy.leaveFailureSentence(label)
+        }
+    }
+
+    /// The published values, as one string, so the drafts are re-seeded when
+    /// and only when the daemon's answer actually changes.
+    private var publishedSignature: String {
+        "\(model.publicProfile?.handle ?? "")\u{1}\(model.publicProfile?.bio ?? "")"
+    }
+
+    private func seedProfileDraft() {
+        handleDraft = model.publicProfile?.handle ?? ""
+        bioDraft = model.publicProfile?.bio ?? ""
+    }
+
+    private static let rosterDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .long
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
     /// Spec §6.10: a brand field box is `border:1px solid #000`,
     /// `padding:8px 12px`, no radius, with its `label.mono` above it.
-    private func profileField(
+    private func profileEditor(
         label: String,
-        value: String,
-        mono: Bool,
-        minHeight: CGFloat?
+        text: Binding<String>,
+        mono: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: TC.Space.xs) {
-            Text(label.uppercased())
-                .font(CommunityBrand.Font_.labelMono)
-                .tracking(CommunityBrand.Font_.monoTracking)
-                .foregroundStyle(CommunityBrand.muted)
-            Text(value)
+            brandFieldLabel(label)
+            TextField("", text: text)
+                .textFieldStyle(.plain)
                 .font(mono ? CommunityBrand.Font_.fieldValueMono : CommunityBrand.Font_.fieldValue)
                 .tracking(CommunityBrand.Font_.fieldValueTracking)
                 .foregroundStyle(CommunityBrand.ink)
-                .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
                 .padding(.vertical, TC.Space.s)
                 .padding(.horizontal, TC.Space.m)
                 .overlay(
@@ -357,7 +481,39 @@ struct SettingsView: View {
                         lineWidth: CommunityBrand.Metric.rule
                     )
                 )
+                .accessibilityLabel(label)
         }
+    }
+
+    private func profileBioEditor(label: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.xs) {
+            brandFieldLabel(label)
+            TextEditor(text: text)
+                .font(CommunityBrand.Font_.fieldValue)
+                .foregroundStyle(CommunityBrand.ink)
+                // The editor paints its own ground, which would be the
+                // system's rather than the brand's paper inside a black
+                // frame.
+                .scrollContentBackground(.hidden)
+                .background(CommunityBrand.paper)
+                .frame(minHeight: 56)
+                .padding(.vertical, TC.Space.s)
+                .padding(.horizontal, TC.Space.m)
+                .overlay(
+                    Rectangle().strokeBorder(
+                        CommunityBrand.ink,
+                        lineWidth: CommunityBrand.Metric.rule
+                    )
+                )
+                .accessibilityLabel(label)
+        }
+    }
+
+    private func brandFieldLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(CommunityBrand.Font_.labelMono)
+            .tracking(CommunityBrand.Font_.monoTracking)
+            .foregroundStyle(CommunityBrand.muted)
     }
 
     // MARK: - Watching and projects
@@ -425,6 +581,84 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - The local change log
+
+    /// What has been changed on this machine, from the daemon's `list_audit`.
+    ///
+    /// The shared design spec does not draw this surface -- the Linux shell
+    /// is the only prior art -- so the section heading, the empty sentence
+    /// and every action sentence below are the Linux shell's own words
+    /// (`crates/trace-commons-contributor-gtk/src/ui/settings.rs`) rather
+    /// than new copy. Two shells narrating the same log differently is a
+    /// worse outcome than either wording on its own.
+    ///
+    /// Every value drawn here is a fixed label by contract: the instant, the
+    /// action name mapped to a sentence, and the daemon-derived project
+    /// label. Nothing on this screen may be enriched with a path, a token, a
+    /// tenant, a session hash or a trace body -- see `AuditEntry`. And per
+    /// the contract this is a record, not a guard: nothing in this app
+    /// decides anything on the strength of what is listed here.
+    private var audit: some View {
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            TCSectionHeader(title: "What has been changed on this machine")
+            if model.audit.isEmpty {
+                Text("Nothing has been changed.")
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
+            // The rows carry no id on the wire, and two entries can legally
+            // agree on every field they do carry (the same action, on the
+            // same project, within the same second), so the offset in a
+            // newest-first list is the only stable identity available.
+            ForEach(Array(model.audit.enumerated()), id: \.offset) { _, entry in
+                auditRow(entry)
+            }
+        }
+    }
+
+    private func auditRow(_ entry: AuditEntry) -> some View {
+        // The instant is a figure, so it is set as one, and the column of
+        // them lines up down the section -- same reasoning as the Linux
+        // shell's ledger treatment.
+        HStack(alignment: .firstTextBaseline, spacing: TC.Space.m) {
+            Text(Self.instant(entry.at))
+                .font(TC.Font_.ledger)
+                .foregroundStyle(.secondary)
+            Text(Self.auditSentence(entry.action, project: entry.projectLabel))
+                .font(TC.Font_.meta)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The Linux shell prints the raw RFC 3339 instant because GTK has it as
+    /// a string; this layer has already decoded it to a `Date`, so it is
+    /// shown in the reader's own locale and time zone. Same fact, stated the
+    /// way the platform states dates elsewhere in this app.
+    private static func instant(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+
+    /// Fixed action labels to sentences. The wording is the Linux shell's
+    /// `audit_sentence`, verbatim, including its catch-all: an action this
+    /// build does not know still gets a row, because a change that happened
+    /// and is not listed is exactly what this log exists to prevent.
+    private static func auditSentence(_ action: String, project: String?) -> String {
+        let sentence: String
+        switch action {
+        case "armed-auto-upload": sentence = "Automatic contributing turned on for"
+        case "disarmed-auto-upload": sentence = "Automatic contributing turned off for"
+        case "queue-bulk-approved": sentence = "The whole queue was approved"
+        case "consent-scopes-changed": sentence = "Permissions changed"
+        case "near-ai-notice-acknowledged": sentence = "The extra privacy scan was confirmed"
+        default: sentence = "Changed"
+        }
+        guard let project, !project.isEmpty else { return sentence }
+        return "\(sentence) \(project)"
+    }
+
     private func modeSentence(_ mode: ProjectMode) -> String {
         switch mode {
         case .ask: return "Asks you first"
@@ -460,21 +694,37 @@ struct SettingsView: View {
 private struct GoPublicDialog: View {
     var onDismiss: () -> Void
 
+    @EnvironmentObject private var model: AppModel
     @State private var acknowledged = false
+    @State private var handle = ""
+    @State private var bio = ""
 
     /// Spec §4.6: the dialog is drawn at 560px.
     private static let width: CGFloat = 560
 
-    /// This build has no path that writes consent -- see the Settings
-    /// consent section's own note -- so the primary action stays disabled
-    /// even once the acknowledgement is on, and the dialog says why rather
-    /// than accepting a decision it cannot carry out. §5.7 draws only the
-    /// disabled state, so nothing depicted is lost by that.
-    private var canGoPublic: Bool { false }
+    /// The acknowledgement gate, plus the one thing the call cannot be made
+    /// without. Both are the same rule stated twice: the primary does
+    /// nothing until there is something to consent to and a consent to it.
+    private var canGoPublic: Bool {
+        acknowledged
+            && !handle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !model.profileBusy
+    }
+
+    /// A refusal stays in the dialog, next to the field it is about: the one
+    /// thing wanted after "that handle is reserved" is the box it was typed
+    /// into. A success closes the sheet, and the Settings panel behind it
+    /// reports what was published.
+    private var refusal: String? {
+        if case .refused(let label) = model.profileOutcome {
+            return PublicProfileCopy.failureSentence(label)
+        }
+        return nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.l) {
-            Text("Put your handle on the public roster?".uppercased())
+            Text(PublicProfileCopy.goPublicHeadline.uppercased())
                 .font(CommunityBrand.Font_.displayDialog)
                 .tracking(CommunityBrand.Font_.displayDialogTracking)
                 .foregroundStyle(CommunityBrand.ink)
@@ -482,37 +732,113 @@ private struct GoPublicDialog: View {
 
             consentColumns
 
+            // The handle itself, inside the consent dialog rather than
+            // behind it: the thing being consented to is this exact string
+            // becoming public, and nobody can meaningfully acknowledge "my
+            // handle becomes public" and then be asked afterwards what the
+            // handle is.
+            fields
+
             acknowledgement
+
+            if let refusal {
+                Text(refusal)
+                    .font(CommunityBrand.Font_.body)
+                    .tracking(CommunityBrand.Font_.bodyTracking)
+                    .foregroundStyle(CommunityBrand.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: TC.Space.sm) {
                 Spacer(minLength: 0)
-                Button("Not now") { onDismiss() }
+                Button(PublicProfileCopy.notNow) { onDismiss() }
                     .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.paper))
-                Button("Go public") { onDismiss() }
-                    .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.accent))
-                    .disabled(!(acknowledged && canGoPublic))
+                Button(PublicProfileCopy.goPublicConfirm) {
+                    model.claimHandle(handle, bio: bio)
+                }
+                .buttonStyle(CommunityBrandButtonStyle(fill: CommunityBrand.accent))
+                .disabled(!canGoPublic)
             }
 
-            Text("""
-            Nothing is pre-checked, and Go public stays off until the \
-            acknowledgement is on. This changes attribution only — it grants no \
-            data use.
-            """)
-            .font(CommunityBrand.Font_.footnote)
-            .foregroundStyle(CommunityBrand.muted)
-            .fixedSize(horizontal: false, vertical: true)
-
-            Text("""
-            Joining the roster needs an enrolled account, which this build does \
-            not set up yet, so Go public stays off here.
-            """)
-            .font(CommunityBrand.Font_.footnote)
-            .foregroundStyle(CommunityBrand.muted)
-            .fixedSize(horizontal: false, vertical: true)
+            Text(PublicProfileCopy.goPublicFootnote)
+                .font(CommunityBrand.Font_.footnote)
+                .foregroundStyle(CommunityBrand.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(TC.Space.xl)
         .frame(width: Self.width, alignment: .leading)
         .background(CommunityBrand.paper)
+        // Any outcome that is not a refusal is a claim the server accepted,
+        // including one this device failed to cache: the handle is on the
+        // roster either way, so the dialog's work is done and the sentence
+        // for it belongs on the panel behind, not here.
+        .onChange(of: outcomeIsSettled) { _, settled in
+            if settled { onDismiss() }
+        }
+        // A stale refusal from an earlier attempt must not greet the next
+        // opening of this sheet.
+        .onAppear { model.clearProfileOutcome() }
+    }
+
+    private var outcomeIsSettled: Bool {
+        switch model.profileOutcome {
+        case .published, .left: return true
+        case .none, .refused, .leaveRefused: return false
+        }
+    }
+
+    /// Spec §6.10's brand field boxes, empty and waiting.
+    private var fields: some View {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                fieldLabel(PublicProfileCopy.goPublicHandleLabel)
+                TextField("", text: $handle)
+                    .textFieldStyle(.plain)
+                    .font(CommunityBrand.Font_.fieldValueMono)
+                    .tracking(CommunityBrand.Font_.fieldValueTracking)
+                    .foregroundStyle(CommunityBrand.ink)
+                    .padding(.vertical, TC.Space.s)
+                    .padding(.horizontal, TC.Space.m)
+                    .overlay(
+                        Rectangle().strokeBorder(
+                            CommunityBrand.ink,
+                            lineWidth: CommunityBrand.Metric.rule
+                        )
+                    )
+                    .accessibilityLabel(PublicProfileCopy.goPublicHandleLabel)
+            }
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                fieldLabel(PublicProfileCopy.goPublicBioLabel)
+                TextEditor(text: $bio)
+                    .font(CommunityBrand.Font_.fieldValue)
+                    .foregroundStyle(CommunityBrand.ink)
+                    .scrollContentBackground(.hidden)
+                    .background(CommunityBrand.paper)
+                    .frame(minHeight: 56)
+                    .padding(.vertical, TC.Space.s)
+                    .padding(.horizontal, TC.Space.m)
+                    .overlay(
+                        Rectangle().strokeBorder(
+                            CommunityBrand.ink,
+                            lineWidth: CommunityBrand.Metric.rule
+                        )
+                    )
+                    .accessibilityLabel(PublicProfileCopy.goPublicBioLabel)
+                // Bytes, because the limit is stated in bytes.
+                Text("\(bio.utf8.count)/280")
+                    .font(CommunityBrand.Font_.labelMono)
+                    .tracking(CommunityBrand.Font_.monoTracking)
+                    .foregroundStyle(CommunityBrand.muted)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(CommunityBrand.Font_.labelMono)
+            .tracking(CommunityBrand.Font_.monoTracking)
+            .foregroundStyle(CommunityBrand.muted)
     }
 
     /// A single 2px box split by one 1px rule, per §5.7. The two columns are
@@ -521,7 +847,7 @@ private struct GoPublicDialog: View {
     private var consentColumns: some View {
         HStack(alignment: .top, spacing: 0) {
             column(
-                title: "What gets published",
+                title: PublicProfileCopy.publishedHeading,
                 lines: [
                     "Your handle — real handles only, no pseudonyms.",
                     "Aggregate counts: accepted, novelty credit, accept rate.",
@@ -531,7 +857,7 @@ private struct GoPublicDialog: View {
             )
             Rectangle().fill(CommunityBrand.ink).frame(width: CommunityBrand.Metric.rule)
             column(
-                title: "What never does",
+                title: PublicProfileCopy.neverHeading,
                 lines: [
                     "Your traces or anything in them.",
                     "Per-trace data of any kind.",
@@ -589,10 +915,7 @@ private struct GoPublicDialog: View {
                 }
                 .frame(width: 14, height: 14)
                 .padding(.top, 1)
-                Text("""
-                I understand my handle and aggregate counts become public. Leaving \
-                the roster removes me from future snapshots.
-                """)
+                Text(PublicProfileCopy.goPublicAcknowledgement)
                 .font(CommunityBrand.Font_.body)
                 .tracking(CommunityBrand.Font_.bodyTracking)
                 .foregroundStyle(CommunityBrand.ink)

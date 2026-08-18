@@ -36,6 +36,9 @@ fn enrolled_store(dir: &std::path::Path) -> ConfigStore {
             consent_scopes: vec!["debugging_evaluation".into()],
             pii_filter: None,
             allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
         })
         .unwrap();
     store

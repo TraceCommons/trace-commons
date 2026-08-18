@@ -40,9 +40,11 @@ const BIO_BYTE_LIMIT: usize = 280;
 /// hardcoded; the panel renders whatever this carries and does not render
 /// at all when there is nothing to render.
 ///
-/// There is no daemon method that fills this in yet: the IPC contract has
-/// no public-profile call, and adding one is a feature change, not a
-/// design pass. `render_public` is the seam it will arrive through.
+/// Filled from `get_public_profile`, which reports the daemon's local
+/// cache of the last claim this device made. There is no
+/// `GET /v1/community/profile` to read the server's own row from, so this
+/// is what a shell has, and it is a cache: it says what this machine last
+/// published, not what the roster holds this second.
 #[derive(Debug, Clone)]
 pub struct PublicProfile {
     pub handle: String,
@@ -66,7 +68,21 @@ pub struct SettingsView {
     connection_checks: gtk::Box,
     pause_button: gtk::Button,
     projects: gtk::Box,
-    knobs: gtk::Box,
+    /// The three `set_settings` knobs, built once and only ever refilled.
+    ///
+    /// Everything else on this screen is torn down and rebuilt on each
+    /// render, which is fine for labels and fatal for a control: a refresh
+    /// runs on every daemon event, and rebuilding a spin button would
+    /// destroy the one the contributor is in the middle of typing into.
+    quiescence_minutes: gtk::SpinButton,
+    approval_hold_seconds: gtk::SpinButton,
+    /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
+    approval_hold_note: gtk::Label,
+    digest_hours: gtk::SpinButton,
+    /// Set while `render_knobs` is writing the daemon's own values into
+    /// those three, so the `value-changed` they emit is not mistaken for a
+    /// contributor turning a dial and echoed straight back as a write.
+    filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
     autostart_switch: gtk::Switch,
@@ -80,9 +96,9 @@ pub struct SettingsView {
     /// is two different surfaces -- the native opt-in toggle and the brand
     /// panel -- rather than one surface in two states.
     public: gtk::Box,
-    /// `None` means "not on the roster", which is also the state every
-    /// build ships in today: no daemon method fills this in. See
-    /// `PublicProfile`.
+    /// `None` means "not on the roster". Filled from `get_public_profile`
+    /// on every refresh, and from the answer to a claim or a withdrawal
+    /// the moment one lands. See `PublicProfile`.
     public_profile: RefCell<Option<PublicProfile>>,
     audit: gtk::Box,
 }
@@ -140,6 +156,52 @@ impl SettingsView {
 
         content.append(&style::section("How it behaves"));
         let knobs = style::card(gtk::Orientation::Vertical, space::M);
+        // Ranges, not free numbers. The daemon accepts any `u64` for all
+        // three, and a contributor who typed one into a text field could
+        // set a quiet period of a year and then wonder why nothing was
+        // ever offered. The bounds below are wide enough to be nobody's
+        // ceiling and narrow enough that no value inside them breaks the
+        // loop -- and the hold's floor of zero is a real setting (no undo
+        // window), which is why it is not one.
+        let quiescence_minutes = knob_row(
+            &knobs,
+            copy::KNOB_QUIESCENCE_TITLE,
+            copy::KNOB_QUIESCENCE_UNIT,
+            1.0,
+            240.0,
+        );
+        let approval_hold_seconds = knob_row(
+            &knobs,
+            copy::KNOB_HOLD_TITLE,
+            copy::KNOB_HOLD_UNIT,
+            0.0,
+            300.0,
+        );
+        // A hold of zero is not a small undo window, it is none, and that
+        // is a different statement from the number beside it. It gets its
+        // own line, shown only when it is true.
+        let approval_hold_note = gtk::Label::builder()
+            .label(copy::KNOB_HOLD_ZERO)
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        approval_hold_note.add_css_class("tc-caveat");
+        knobs.append(&approval_hold_note);
+        let digest_hours = knob_row(
+            &knobs,
+            copy::KNOB_DIGEST_TITLE,
+            copy::KNOB_DIGEST_UNIT,
+            1.0,
+            24.0,
+        );
+        let knobs_note = gtk::Label::builder()
+            .label(copy::KNOBS_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        knobs_note.add_css_class("tc-caveat");
+        knobs.append(&knobs_note);
         content.append(&knobs);
 
         content.append(&style::section(copy::AUTOSTART_HEADING));
@@ -208,7 +270,11 @@ impl SettingsView {
             connection_checks,
             pause_button,
             projects,
-            knobs,
+            quiescence_minutes,
+            approval_hold_seconds,
+            approval_hold_note,
+            digest_hours,
+            filling_knobs: std::cell::Cell::new(false),
             autostart_body,
             autostart_row,
             autostart_switch,
@@ -236,6 +302,29 @@ pub fn wire(app: &Rc<App>) {
             offer_pause(&a);
         }
     });
+
+    // The three knobs, each writing exactly the one key it owns.
+    //
+    // `set_settings` rejects an object holding a key it does not recognise
+    // rather than ignoring it, and it applies every key present -- so
+    // sending all three on every turn of one dial would make this window
+    // re-assert two values it was not asked to change, over whatever a
+    // concurrent `trace-commons-contributor settings --set` had just
+    // written. One key per write keeps this window's edits to what the
+    // contributor actually edited.
+    wire_knob(app, &app.settings.quiescence_minutes, "quiescence_secs", 60);
+    wire_knob(
+        app,
+        &app.settings.approval_hold_seconds,
+        "approval_hold_secs",
+        1,
+    );
+    wire_knob(
+        app,
+        &app.settings.digest_hours,
+        "digest_interval_secs",
+        3600,
+    );
 
     render_autostart(app);
     render_public(app);
@@ -500,6 +589,17 @@ pub fn refresh(app: &Rc<App>) {
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
     });
+    // The roster state, from the daemon rather than from what this window
+    // last did. A failure -- `not-logged-in` on a device that has never
+    // enrolled, most of all -- draws the off-the-roster surface, which is
+    // the true one: an unenrolled device has claimed nothing.
+    app.call(
+        "get_public_profile",
+        serde_json::json!({}),
+        |app, result| {
+            set_public_profile(app, result.ok().and_then(|v| parse_public_profile(&v)));
+        },
+    );
     app.call(
         "list_audit",
         serde_json::json!({ "limit": 20 }),
@@ -693,31 +793,123 @@ fn set_mode(app: &Rc<App>, project_id: &str, mode: &str) {
     );
 }
 
-fn render_knobs(app: &Rc<App>, settings: &Settings) {
-    let view = &app.settings.knobs;
-    while let Some(child) = view.first_child() {
-        view.remove(&child);
-    }
+/// Send one knob's value to the daemon whenever the contributor changes it.
+///
+/// `scale` converts the unit on screen into the unit on the wire -- minutes
+/// and hours are what a person sets, seconds are what the contract takes.
+///
+/// The result is not applied optimistically. `set_settings` answers with the
+/// settings as they now stand, and that answer is what fills the controls
+/// back in, so a refused write leaves the knob showing what the daemon
+/// actually holds rather than what this window hoped it would.
+fn wire_knob(app: &Rc<App>, spin: &gtk::SpinButton, key: &'static str, scale: u64) {
+    let app = Rc::clone(app);
+    spin.connect_value_changed(move |spin| {
+        // `render_knobs` writing the daemon's own answer back in is not a
+        // contributor turning a dial, and echoing it would be this window
+        // arguing with the daemon about a value it just supplied.
+        if app.settings.filling_knobs.get() {
+            return;
+        }
+        let seconds = knob_seconds(spin.value_as_int(), scale);
+        app.call(
+            "set_settings",
+            serde_json::json!({ key: seconds }),
+            |app, result| match result {
+                Ok(value) => {
+                    if let Ok(settings) = serde_json::from_value::<Settings>(value) {
+                        render_knobs(app, &settings);
+                    }
+                }
+                // The label is a fixed one by contract; it is not shown,
+                // because none of them is a sentence a contributor can act
+                // on. What they need to know is that nothing changed.
+                Err(_) => {
+                    app.toast(copy::KNOB_NOT_CHANGED);
+                    refresh(app);
+                }
+            },
+        );
+    });
+}
 
-    view.append(&super::titled_paragraph(
-        "Quiet time before a session counts as finished",
-        &format!("{} minutes", settings.quiescence_secs / 60),
-    ));
-    view.append(&super::titled_paragraph(
-        "How long you can take something back",
-        &if settings.approval_hold_secs == 0 {
-            "No undo window. Approving sends on the next pass.".to_string()
-        } else {
-            format!("{} seconds after you approve", settings.approval_hold_secs)
-        },
-    ));
-    view.append(&super::titled_paragraph(
-        "How often you can be interrupted",
-        &format!(
-            "At most once every {} hours",
-            settings.digest_interval_secs / 3600
-        ),
-    ));
+/// The unit on screen, converted to the unit on the wire.
+///
+/// Clamped at zero rather than cast: `set_settings` takes a `u64`, and a
+/// negative value would wrap to an enormous quiet period rather than being
+/// refused. The spin buttons cannot produce one today; this is the reason
+/// they cannot start to.
+fn knob_seconds(shown: i32, scale: u64) -> u64 {
+    shown.max(0) as u64 * scale
+}
+
+/// The unit on the wire, converted back to the unit on screen.
+///
+/// Integer division on purpose: the controls step in whole minutes and
+/// whole hours, so a value between two steps is shown as the step below it
+/// -- and is only ever written back if the contributor turns that dial,
+/// which is them choosing the rounded value rather than this window
+/// choosing it for them.
+fn knob_shown(seconds: u64, scale: u64) -> f64 {
+    (seconds / scale.max(1)) as f64
+}
+
+/// One editable knob: an eyebrow, a spin button, and the unit it counts in.
+///
+/// Appended to `card` here rather than returned as a row, because the only
+/// thing the caller ever wants back is the control it has to read and
+/// write.
+fn knob_row(card: &gtk::Box, title: &str, unit: &str, lower: f64, upper: f64) -> gtk::SpinButton {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    row.append(&style::eyebrow(title));
+    let control = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let spin = gtk::SpinButton::with_range(lower, upper, 1.0);
+    spin.set_numeric(true);
+    // Snaps to the step, so a typed half-minute cannot become a value the
+    // daemon was never offered.
+    spin.set_snap_to_ticks(true);
+    spin.set_valign(gtk::Align::Center);
+    // The eyebrow above is the visible label, and it is not a control, so
+    // it is pointed at the spin button for a screen reader rather than
+    // left as loose text over an unnamed field.
+    spin.update_property(&[gtk::accessible::Property::Label(title)]);
+    control.append(&spin);
+    let unit_label = gtk::Label::builder().label(unit).xalign(0.0).build();
+    unit_label.add_css_class("tc-body");
+    unit_label.set_valign(gtk::Align::Center);
+    control.append(&unit_label);
+    row.append(&control);
+    card.append(&row);
+    spin
+}
+
+/// Fill the three knobs from the daemon's own answer.
+///
+/// Never from this shell's idea of what it just wrote: `set_settings`
+/// returns the settings as they now stand, and both that and `get_settings`
+/// land here, so what is on screen is always what the daemon holds.
+///
+/// `local_notifications` is deliberately not offered. It is a
+/// `set_settings` key, and turning it on would have the daemon render its
+/// own OS notifications alongside the ones this window already posts --
+/// two notifications for one digest, on the desktop of whoever went
+/// looking for the setting. A window that cannot avoid that should not
+/// offer the switch.
+fn render_knobs(app: &Rc<App>, settings: &Settings) {
+    let view = &app.settings;
+    // Writing a value emits `value-changed`. Marked as ours so the handler
+    // does not echo the daemon's own answer straight back at it.
+    view.filling_knobs.set(true);
+    view.quiescence_minutes
+        .set_value(knob_shown(settings.quiescence_secs, 60));
+    view.approval_hold_seconds
+        .set_value(knob_shown(settings.approval_hold_secs, 1));
+    view.digest_hours
+        .set_value(knob_shown(settings.digest_interval_secs, 3600));
+    view.filling_knobs.set(false);
+
+    view.approval_hold_note
+        .set_visible(settings.approval_hold_secs == 0);
 
     // The extra privacy scan and the two session folders used to be
     // restated here as well. §5.4 puts all three in the Connection section
@@ -736,13 +928,150 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
 // built separately rather than restyled into each other.
 
 /// Hand the view a public profile, or the absence of one, and redraw.
-///
-/// This is the seam the daemon will arrive through. The IPC contract has no
-/// public-profile method today, so nothing calls this with `Some` yet and
-/// the section renders its off-the-roster state in every shipped build.
 pub fn set_public_profile(app: &Rc<App>, profile: Option<PublicProfile>) {
     *app.settings.public_profile.borrow_mut() = profile;
     render_public(app);
+}
+
+/// Read the daemon's profile shape.
+///
+/// All three profile methods answer with the same object -- that is
+/// deliberate on the daemon's side, so a client parses one thing whichever
+/// call it made -- and all three land here.
+///
+/// `on_roster` is the daemon's own verdict and is what decides, rather than
+/// this window inferring one from the presence of a handle: the field
+/// exists to answer exactly this question, and a shell that answered it
+/// some other way would be a second opinion about who is public.
+fn parse_public_profile(value: &serde_json::Value) -> Option<PublicProfile> {
+    if !value
+        .get("on_roster")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(PublicProfile {
+        handle: value.get("handle").and_then(|v| v.as_str())?.to_string(),
+        // Absent and empty are the same thing here: no bio was published.
+        bio: value
+            .get("bio")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        on_roster_since: value
+            .get("public_since")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok()),
+        // Null by contract today: the daemon knows the origin it uploads
+        // to, not the origin the community site serves profiles from, and
+        // says so rather than inventing a link that would not resolve. Read
+        // anyway, so the affordance appears the day something supplies one.
+        public_url: value
+            .get("public_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// What to say about a claim the server accepted.
+///
+/// `handle_persisted` is NOT whether the claim worked. The server has
+/// taken the handle by the time this flag exists at all; the flag reports
+/// whether the daemon managed to write its local copy of it. So both
+/// branches report a published profile, and the false branch adds the
+/// weaker thing that is actually true -- that this window will show the
+/// contributor as unlisted again until the next successful save.
+fn published_sentence(handle_persisted: bool) -> &'static str {
+    if handle_persisted {
+        copy::PROFILE_PUBLISHED
+    } else {
+        copy::PROFILE_PUBLISHED_NOT_CACHED
+    }
+}
+
+/// The mirror, for a withdrawal the server accepted.
+fn left_roster_sentence(handle_persisted: bool) -> &'static str {
+    if handle_persisted {
+        copy::PROFILE_LEFT_ROSTER
+    } else {
+        copy::PROFILE_LEFT_ROSTER_NOT_CACHED
+    }
+}
+
+/// The bio as the wire wants it.
+///
+/// An empty box is `null`, not `""`: the `PUT` replaces the whole profile,
+/// so "leave the bio alone" is not something the server can be asked for,
+/// and the daemon refuses an omitted `bio` outright rather than guessing.
+/// An empty box is a contributor saying they want no bio, and that is what
+/// this sends.
+fn bio_param(text: &str) -> serde_json::Value {
+    match text.trim() {
+        "" => serde_json::Value::Null,
+        bio => serde_json::Value::String(bio.to_string()),
+    }
+}
+
+/// Claim or update the handle, and report what happened.
+///
+/// `done` is handed the daemon's fixed error label on a refusal and
+/// `None` on success, so the two call sites can put the refusal where the
+/// contributor can act on it: the dialog keeps it beside the field being
+/// corrected, the panel toasts it. Nothing here validates the handle
+/// first -- the daemon and the server share one copy of those rules, and a
+/// second copy in this window is how a handle this shell accepts becomes
+/// one the server refuses.
+fn claim_handle<F>(app: &Rc<App>, handle: &str, bio: &str, done: F)
+where
+    F: FnOnce(&Rc<App>, Option<String>) + 'static,
+{
+    app.call(
+        "set_public_profile",
+        serde_json::json!({ "handle": handle, "bio": bio_param(bio) }),
+        move |app, result| match result {
+            Ok(value) => {
+                // Rendered from the daemon's answer rather than from what
+                // this window sent: the handle it stored is the validated
+                // display form, which is trimmed, and the roster date is
+                // the server's.
+                set_public_profile(app, parse_public_profile(&value));
+                let persisted = value
+                    .get("handle_persisted")
+                    .and_then(|v| v.as_bool())
+                    // A build that did not report the flag is treated as
+                    // having persisted: the alternative is warning about a
+                    // local cache miss that may not have happened, on a
+                    // profile that is public either way.
+                    .unwrap_or(true);
+                app.toast(published_sentence(persisted));
+                done(app, None);
+            }
+            Err(label) => done(app, Some(label)),
+        },
+    );
+}
+
+/// Withdraw the handle from the roster.
+fn leave_roster(app: &Rc<App>) {
+    app.call(
+        "clear_public_profile",
+        serde_json::json!({}),
+        |app, result| match result {
+            Ok(value) => {
+                set_public_profile(app, parse_public_profile(&value));
+                let persisted = value
+                    .get("handle_persisted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                app.toast(left_roster_sentence(persisted));
+            }
+            // Its own sentence, not the claim one: after a failed
+            // withdrawal the handle is still published, and "nothing was
+            // published" would read as the opposite.
+            Err(label) => app.toast(&copy::roster_leave_failure_sentence(&label)),
+        },
+    );
 }
 
 fn render_public(app: &Rc<App>) {
@@ -881,12 +1210,30 @@ fn public_profile_panel(app: &Rc<App>, profile: &PublicProfile) -> gtk::Box {
     buttons.append(&leave);
     panel.append(&buttons);
 
-    // Neither button has anywhere to go: the contract carries no
-    // public-profile method, and adding one is a feature change rather
-    // than a design pass. Both say so instead of appearing to work.
-    for button in [&save, &leave] {
+    // Save re-publishes the whole profile, because that is what the `PUT`
+    // does: the handle and the bio as they stand in these two fields, both
+    // of them, every time. There is no partial update to offer.
+    {
         let app = Rc::clone(app);
-        button.connect_clicked(move |_| app.toast(copy::ROSTER_UNREACHABLE));
+        let handle_field = handle.clone();
+        let bio_buffer = bio.buffer();
+        save.connect_clicked(move |_| {
+            let text = bio_buffer.text(&bio_buffer.start_iter(), &bio_buffer.end_iter(), false);
+            claim_handle(
+                &app,
+                handle_field.text().as_str(),
+                text.as_str(),
+                |app, refusal| {
+                    if let Some(label) = refusal {
+                        app.toast(&copy::profile_failure_sentence(&label));
+                    }
+                },
+            );
+        });
+    }
+    {
+        let app = Rc::clone(app);
+        leave.connect_clicked(move |_| leave_roster(&app));
     }
     panel
 }
@@ -955,6 +1302,56 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     ));
     body.append(&columns);
 
+    // The handle itself, and the optional bio. They are inside the consent
+    // dialog rather than behind it because the thing being consented to is
+    // this exact string becoming public: a contributor cannot meaningfully
+    // acknowledge "my handle becomes public" and then be asked afterwards
+    // what the handle is.
+    let handle = gtk::Entry::builder().build();
+    handle.add_css_class("tc-brand-field");
+    handle.add_css_class("tc-brand-mono");
+    handle.update_property(&[gtk::accessible::Property::Label(
+        copy::GO_PUBLIC_HANDLE_LABEL,
+    )]);
+    let handle_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    handle_group.append(&brand_label(copy::GO_PUBLIC_HANDLE_LABEL));
+    handle_group.append(&handle);
+    body.append(&handle_group);
+
+    let bio = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .accepts_tab(false)
+        .build();
+    bio.add_css_class("tc-brand-bio");
+    bio.update_property(&[gtk::accessible::Property::Label(copy::GO_PUBLIC_BIO_LABEL)]);
+    let bio_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    bio_frame.add_css_class("tc-brand-field");
+    bio_frame.append(&bio);
+    let bio_group = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+    bio_group.append(&brand_label(copy::GO_PUBLIC_BIO_LABEL));
+    bio_group.append(&bio_frame);
+    let counter = brand_label(&bio_counter(""));
+    counter.set_xalign(1.0);
+    bio_group.append(&counter);
+    let counter_handle = counter.clone();
+    bio.buffer().connect_changed(move |buffer| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        counter_handle.set_label(&bio_counter(text.as_str()));
+    });
+    body.append(&bio_group);
+
+    // A refusal stays in the dialog, next to the field it is about. A toast
+    // would land behind a modal window, and the one thing a contributor
+    // needs after "that handle is reserved" is the box they typed it into.
+    let refusal = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .build();
+    refusal.add_css_class("tc-brand-body");
+    body.append(&refusal);
+
     // The acknowledgement. Unchecked, and the only thing that unlocks the
     // primary.
     let ack_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -995,8 +1392,19 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     footnote.add_css_class("tc-brand-footnote");
     body.append(&footnote);
 
-    let confirm_handle = confirm.clone();
-    ack.connect_toggled(move |ack| confirm_handle.set_sensitive(ack.is_active()));
+    // The acknowledgement gate, plus the one thing the call cannot be made
+    // without. Both are the same rule stated twice: the primary does
+    // nothing until there is something to consent to and a consent to it.
+    let unlock = {
+        let confirm = confirm.clone();
+        let ack = ack.clone();
+        let handle = handle.clone();
+        move || confirm.set_sensitive(ack.is_active() && !handle.text().trim().is_empty())
+    };
+    let on_ack = unlock.clone();
+    ack.connect_toggled(move |_| on_ack());
+    let on_typed = unlock.clone();
+    handle.connect_changed(move |_| on_typed());
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("tc-brand-surface");
@@ -1004,9 +1412,11 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     content.append(&body);
     dialog.set_content(Some(&content));
 
-    // Every way out of this dialog leaves the switch off, the confirm
-    // included: there is nowhere for a confirmed opt-in to go yet, so the
-    // switch must not be left claiming a listing that does not exist.
+    // Closing without a claim leaves the switch off. The switch says
+    // whether a handle is on the roster, and abandoning this dialog has
+    // put none there -- a switch left on would be this window claiming a
+    // listing that does not exist. A successful claim never reaches this:
+    // the panel replaces the row the switch lives in.
     dialog.connect_close_request(move |_| {
         toggle.set_active(false);
         gtk::glib::Propagation::Proceed
@@ -1015,9 +1425,35 @@ fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
     not_now.connect_clicked(move |_| window.close());
     let window = dialog.clone();
     let app = Rc::clone(app);
-    confirm.connect_clicked(move |_| {
-        app.toast(copy::ROSTER_UNREACHABLE);
-        window.close();
+    let bio_buffer = bio.buffer();
+    confirm.connect_clicked(move |confirm| {
+        let text = bio_buffer.text(&bio_buffer.start_iter(), &bio_buffer.end_iter(), false);
+        // Held shut for the round trip, so a second click cannot send a
+        // second claim while the first is still in flight.
+        confirm.set_sensitive(false);
+        refusal.set_visible(false);
+        let window = window.clone();
+        let confirm = confirm.clone();
+        let refusal = refusal.clone();
+        claim_handle(
+            &app,
+            handle.text().as_str(),
+            text.as_str(),
+            move |_app, label| match label {
+                // Claimed. The toast is already up and the panel has
+                // already replaced the toggle; this dialog has nothing
+                // left to say.
+                None => window.close(),
+                // Refused, so the dialog stays open on the handle that was
+                // refused: this is the only surface where it can be
+                // corrected without typing it again.
+                Some(label) => {
+                    refusal.set_label(&copy::profile_failure_sentence(&label));
+                    refusal.set_visible(true);
+                    confirm.set_sensitive(true);
+                }
+            },
+        );
     });
     dialog.present();
 }
@@ -1100,4 +1536,102 @@ fn brand_link(text: &str, url: &str) -> gtk::Button {
             gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
     });
     button
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_knob_round_trips_through_the_unit_it_is_shown_in() {
+        // The daemon's defaults, which are the values a contributor sees on
+        // a machine nobody has changed: 30 minutes quiet, a 10-second hold,
+        // 4 hours between interruptions.
+        for (seconds, scale, shown) in [(1800u64, 60u64, 30.0), (10, 1, 10.0), (14_400, 3600, 4.0)]
+        {
+            assert_eq!(knob_shown(seconds, scale), shown);
+            assert_eq!(knob_seconds(shown as i32, scale), seconds);
+        }
+    }
+
+    #[test]
+    fn no_shown_value_can_become_an_enormous_one_on_the_wire() {
+        // `set_settings` takes a `u64`. A negative value cast rather than
+        // clamped would wrap into a quiet period measured in centuries,
+        // and the daemon would accept it.
+        assert_eq!(knob_seconds(-1, 60), 0);
+        assert_eq!(knob_seconds(i32::MIN, 3600), 0);
+    }
+
+    #[test]
+    fn a_published_profile_is_read_back_off_the_daemons_own_verdict() {
+        let profile = parse_public_profile(&serde_json::json!({
+            "on_roster": true,
+            "handle": "manian",
+            "bio": "Ships billing systems by day.",
+            "public_since": "2026-05-12T09:00:00Z",
+            "public_url": serde_json::Value::Null,
+        }))
+        .expect("a claimed handle renders the panel");
+        assert_eq!(profile.handle, "manian");
+        assert_eq!(profile.bio, "Ships billing systems by day.");
+        assert!(profile.on_roster_since.is_some());
+        // Null by contract: the daemon does not know the origin the
+        // community site serves profiles from, so no link is offered.
+        assert!(profile.public_url.is_none());
+    }
+
+    #[test]
+    fn an_unclaimed_handle_draws_the_opt_in_and_not_an_empty_panel() {
+        assert!(
+            parse_public_profile(&serde_json::json!({
+                "on_roster": false,
+                "handle": serde_json::Value::Null,
+                "bio": serde_json::Value::Null,
+                "public_since": serde_json::Value::Null,
+                "public_url": serde_json::Value::Null,
+            }))
+            .is_none()
+        );
+        // `not-logged-in` arrives as an error rather than as a shape, and
+        // an answer this build cannot read must not become a half-drawn
+        // panel either.
+        assert!(parse_public_profile(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn a_cache_write_that_failed_is_never_reported_as_a_failed_claim() {
+        // The correctness point of the whole surface. `handle_persisted:
+        // false` means the server took the handle and this device did not
+        // manage to write its own copy of it -- the profile IS public. A
+        // shell that reported that as a failure would tell a contributor
+        // their handle is private when it is not.
+        let uncached = published_sentence(false);
+        assert!(uncached.starts_with("You're on the roster"));
+        assert_ne!(uncached, published_sentence(true));
+        // And the withdrawal mirror: the row is gone from the server
+        // whether or not the local clear stuck.
+        assert!(left_roster_sentence(false).starts_with("You've left the roster"));
+    }
+
+    #[test]
+    fn an_empty_bio_box_is_sent_as_no_bio_rather_than_as_an_empty_one() {
+        // The PUT replaces the whole profile and the daemon refuses an
+        // omitted `bio` outright, so the empty box has to mean something
+        // explicit. It means "no bio".
+        assert!(bio_param("").is_null());
+        assert!(bio_param("   \n ").is_null());
+        assert_eq!(
+            bio_param("  Ships billing systems.  "),
+            "Ships billing systems."
+        );
+    }
+
+    #[test]
+    fn a_value_between_two_steps_is_shown_as_the_step_below_it() {
+        // Never rounded up: showing 2 minutes for a 90-second setting would
+        // overstate how long the watcher actually waits.
+        assert_eq!(knob_shown(90, 60), 1.0);
+        assert_eq!(knob_shown(0, 60), 0.0);
+    }
 }

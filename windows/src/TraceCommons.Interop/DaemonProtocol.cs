@@ -39,7 +39,70 @@ public static class DaemonProtocol
         public const string Resume = "resume";
         public const string Approve = "approve";
         public const string Dismiss = "dismiss";
+
+        /// <summary>
+        /// Recalls an approval while the daemon's hold is still running. This
+        /// is what the undo bar is made of; without it "Sending…" would be a
+        /// label rather than a reprieve.
+        /// </summary>
+        public const string Cancel = "cancel";
         public const string Shutdown = "shutdown";
+
+        // Onboarding. Every one of these was already in the daemon's pinned
+        // METHODS array before this app could call any of them: the gap on
+        // Windows was never protocol, only that nothing here asked.
+        public const string Enroll = "enroll";
+        public const string ConsentOptions = "consent_options";
+        public const string SetConsentScopes = "set_consent_scopes";
+        public const string GetSettings = "get_settings";
+        public const string ListProjects = "list_projects";
+        public const string SetProjectMode = "set_project_mode";
+        public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
+
+        // History and withdrawal. Like the onboarding block above, every one
+        // of these was already in the daemon's pinned METHODS array before
+        // this app could call any of them -- the gap on Windows was never
+        // protocol, only that nothing here asked. Adding a name that is NOT
+        // in that array would break
+        // `hello_advertises_exactly_the_documented_method_set`.
+        public const string ListHistory = "list_history";
+        public const string HistoryRollup = "history_rollup";
+        public const string RefreshHistory = "refresh_history";
+        public const string QueueOutcomeCounts = "queue_outcome_counts";
+
+        /// <summary>
+        /// Withdraws one submission and reports the tier the server applied.
+        ///
+        /// Deliberately paired with no <c>withdraw_bulk</c> constant. Bulk
+        /// reports only counts, so a bulk outcome cannot name a per-trace
+        /// tier, and the contract's first withdrawal rule -- never a generic
+        /// "withdrawn" -- cannot be honoured for it at all. See
+        /// <see cref="WithdrawCopy.NoBulk"/>, which says that to the
+        /// contributor rather than leaving the affordance silently missing.
+        /// </summary>
+        public const string Withdraw = "withdraw";
+
+        // The public roster profile. Like the two blocks above, every one of
+        // these was already in the daemon's pinned METHODS array before this
+        // app could call any of them -- the gap on Windows was never protocol,
+        // only that nothing here asked. Adding a name that is NOT in that
+        // array would break
+        // `hello_advertises_exactly_the_documented_method_set`.
+        public const string GetPublicProfile = "get_public_profile";
+
+        /// <summary>
+        /// Claims or re-publishes a handle.
+        /// </summary>
+        /// <remarks>
+        /// The whole profile, every time: the server upserts with
+        /// <c>bio = excluded.bio</c>, so there is no partial update to
+        /// express and the daemon refuses an omitted <c>bio</c> rather than
+        /// guessing. <see cref="PublicProfileRequest.Serialize"/> is what
+        /// builds the parameters, and it always sends the key.
+        /// </remarks>
+        public const string SetPublicProfile = "set_public_profile";
+
+        public const string ClearPublicProfile = "clear_public_profile";
     }
 
     public static class Events
@@ -209,6 +272,54 @@ public sealed class QueueEntry
 }
 
 /// <summary>
+/// The <c>status</c> payload -- "the tray's whole world in one object", as
+/// <c>ipc.rs</c> puts it.
+/// </summary>
+/// <remarks>
+/// Only the fields the tray needs are modelled. Note what is deliberately not
+/// read here even though the daemon sends it: <c>tenant_id</c> and
+/// <c>consent_scopes</c> are identity and policy, and neither belongs on a
+/// surface that renders a tooltip.
+/// </remarks>
+public sealed class DaemonStatus
+{
+    [JsonPropertyName("paused")]
+    public bool Paused { get; set; }
+
+    /// <summary>Decisions owed: the daemon's own count of pending entries.</summary>
+    [JsonPropertyName("queue_depth")]
+    public int QueueDepth { get; set; }
+
+    [JsonPropertyName("health")]
+    public DaemonHealth? Health { get; set; }
+
+    /// <summary>
+    /// Whether there is nothing to report.
+    /// </summary>
+    /// <remarks>
+    /// Health is expressed as the label of the last error and when it
+    /// started, so "healthy" is the absence of a label rather than a flag.
+    /// Reading it as the absence means a label this client has never heard of
+    /// still counts as unhealthy, which is the safe direction: an unknown
+    /// problem should not render as fine.
+    /// </remarks>
+    public bool IsHealthy => string.IsNullOrEmpty(Health?.LastErrorLabel);
+}
+
+/// <summary>
+/// The health sub-object. A fixed label and a timestamp; never a path, a URL
+/// or a message from a server.
+/// </summary>
+public sealed class DaemonHealth
+{
+    [JsonPropertyName("last_error_label")]
+    public string? LastErrorLabel { get; set; }
+
+    [JsonPropertyName("since")]
+    public string? Since { get; set; }
+}
+
+/// <summary>
 /// The <c>hello</c> payload: the handshake that establishes the daemon speaks
 /// a schema this client understands.
 /// </summary>
@@ -276,11 +387,24 @@ public sealed class DaemonEvent
     /// How many events the ABI dropped, for a <c>lagged</c> frame. Any nonzero
     /// answer means the local view must be refetched rather than patched.
     /// </summary>
-    public int SkippedCount =>
+    public int SkippedCount => IntField("skipped");
+
+    /// <summary>
+    /// How many decisions are owed, for a <c>digest_due</c> frame.
+    /// </summary>
+    /// <remarks>
+    /// Zero on a frame that carries no count, which reads downstream as
+    /// "nothing to say" and suppresses the notification. That is the safe
+    /// direction: a malformed frame must not produce an interruption claiming
+    /// an unknown number of sessions.
+    /// </remarks>
+    public int PendingCount => IntField("pending");
+
+    private int IntField(string name) =>
         Data is { } data
         && data.ValueKind == JsonValueKind.Object
-        && data.TryGetProperty("skipped", out JsonElement skipped)
-        && skipped.TryGetInt32(out int value)
+        && data.TryGetProperty(name, out JsonElement field)
+        && field.TryGetInt32(out int value)
             ? value
             : 0;
 }

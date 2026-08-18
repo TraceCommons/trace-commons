@@ -254,6 +254,10 @@ fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
         cwd: None,
         started_at,
         size_bytes: metadata.len(),
+        // One file per trajectory, in a flat directory, with no parent/child
+        // convention to group on.
+        group_modified_at: None,
+        group_member_count: 0,
     })
 }
 
@@ -319,6 +323,8 @@ impl TraceSource for TrajectorySource {
             started_at,
             session_hash: hash,
             events: parsed.events,
+            subagent_count: 0,
+            subagents_dropped: 0,
         })
     }
 }

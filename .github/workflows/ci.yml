@@ -259,6 +259,18 @@ jobs:
     name: install.ps1 against the real release
     runs-on: windows-latest
     timeout-minutes: 15
+    # The installer resolves the newest contributor-v* tag through the GitHub
+    # API, and anonymous api.github.com is rate-limited per source IP. Actions
+    # runners share those IPs, so unauthenticated the lookup fails on most
+    # runs -- sometimes as a 403, sometimes as an empty release list -- and
+    # this job goes red for reasons that have nothing to do with the change
+    # under test. GITHUB_TOKEN is read by install.ps1 when present and is
+    # read-only here; a contributor running the script by hand still makes the
+    # same anonymous request.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       # This installer's whole claim is that it refuses to install what it
@@ -423,6 +435,70 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+
+      # The MSIX manifest is checked but NOT built here, and that is a
+      # deliberate limitation rather than an oversight.
+      #
+      # Packaging a WinUI 3 project produces an .msix that must be signed, and
+      # this job has no signing identity -- pull requests do not get one, by
+      # design. An unsigned package cannot be installed or meaningfully
+      # verified, so building one here would cost several minutes to prove
+      # almost nothing, and would put an unproven packaging path in front of
+      # every pull request. The MSIX build lives behind an opt-in
+      # workflow_dispatch input on release-apps.yml instead.
+      #
+      # What IS worth asserting on every pull request is that the shipping
+      # build did not quietly become the packaged one. The zip is the artifact
+      # contributors get; MSIX is additive. If TcPackaged ever defaults to true
+      # that is a change to what ships, and it should not arrive unannounced.
+      - name: Check the MSIX manifest and that the default build is still unpackaged
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # XPath with local-name() throughout: the manifest is namespaced
+          # across four namespaces, and PowerShell's dotted XML adapter returns
+          # an XmlElement rather than a string for any element carrying
+          # attributes -- which would compare unequal in a way that reads like
+          # a content mismatch and is not one.
+          $manifest = "windows/packaging/Package.appxmanifest"
+          [xml] $xml = Get-Content -Path $manifest -Raw
+
+          $expectedPublisher = 'CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US'
+          $identity = $xml.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+          if (-not $identity) { throw "$manifest has no Identity element." }
+          $publisher = $identity.GetAttribute("Publisher")
+          if ($publisher -ne $expectedPublisher) {
+            throw "$manifest Publisher is '$publisher', expected '$expectedPublisher'. It must equal the signing certificate's subject exactly or the package installs nowhere -- see windows/packaging/README.md."
+          }
+
+          # Every logo the manifest names has to exist, or packaging fails on a
+          # release runner rather than here.
+          $visual = $xml.SelectSingleNode("//*[local-name()='VisualElements']")
+          $storeLogo = $xml.SelectSingleNode("//*[local-name()='Properties']/*[local-name()='Logo']")
+          if (-not $visual -or -not $storeLogo) { throw "$manifest is missing VisualElements or the store Logo." }
+          $logos = @(
+            $storeLogo.InnerText,
+            $visual.GetAttribute("Square150x150Logo"),
+            $visual.GetAttribute("Square44x44Logo")
+          )
+          foreach ($logo in $logos) {
+            if ([string]::IsNullOrWhiteSpace($logo)) { throw "$manifest names an empty logo path." }
+            $path = Join-Path "windows/packaging" ($logo -replace '\\', '/')
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "$manifest references '$logo' but $path does not exist."
+            }
+          }
+
+          $csproj = "windows/src/TraceCommons.App/TraceCommons.App.csproj"
+          [xml] $proj = Get-Content -Path $csproj -Raw
+          $node = $proj.SelectSingleNode("/Project/PropertyGroup/TcPackaged")
+          if (-not $node -or $node.InnerText.Trim() -ne "false") {
+            throw "$csproj no longer defaults TcPackaged to false. The shipping Windows artifact is the unpackaged zip; MSIX is additive and must stay opt-in."
+          }
+
+          Write-Host "manifest publisher, logo assets and unpackaged default all check out"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v5
         with:

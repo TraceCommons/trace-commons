@@ -106,6 +106,8 @@ Behavior:
                               KEK material. Exits 0 on success.
   --limit <N>                 Stop after N rows.
   --page-size <N>             Postgres page size (default: 500).
+  -V, --version               Print the version, the commit this binary was
+                              built from, and the build time.
 
 See docs/operator/vector-replay.md for the runbook.
 ";
@@ -158,6 +160,16 @@ fn parse_args(argv: &[String]) -> Result<ReplayArgs> {
         match arg {
             "-h" | "--help" => {
                 print!("{HELP_TEXT}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!(
+                    "{}",
+                    trace_commons_build_info::identity(
+                        env!("CARGO_BIN_NAME"),
+                        env!("CARGO_PKG_VERSION")
+                    )
+                );
                 std::process::exit(0);
             }
             "--tenant-id" => {

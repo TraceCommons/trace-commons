@@ -520,6 +520,14 @@ impl TraceUploadClaimIssuerConfig {
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
             invite_registry_authoritative: self.invite_registry_authoritative,
+            near_legion_claim: crate::near_legion_claim::NearLegionClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
+            celestine_sloth_claim: crate::celestine_sloth_claim::CelestineSlothClaimState::from_env(
+                self.invite_admin_backend.clone(),
+                self.invite_admin_registry.clone(),
+            ),
         }))
     }
 }
@@ -666,6 +674,17 @@ struct TraceUploadClaimIssuerState {
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
     invite_registry_authoritative: bool,
+    /// Self-serve NEAR Legion claim surface. `None` — routes unmounted —
+    /// unless the feature is enabled AND NEAR sign-in and the invite backend
+    /// are both configured. Built once here so the in-flight challenge store
+    /// is shared across requests rather than rebuilt per call.
+    near_legion_claim: Option<crate::near_legion_claim::NearLegionClaimState>,
+    /// Self-serve Celestine Sloth Society claim surface. `None` — routes
+    /// unmounted — unless the feature is enabled AND the collection, the LCD
+    /// endpoint, the tenant template and the invite backend are all configured.
+    /// Built once here so the in-flight challenge store is shared across
+    /// requests rather than rebuilt per call.
+    celestine_sloth_claim: Option<crate::celestine_sloth_claim::CelestineSlothClaimState>,
 }
 
 impl TraceUploadClaimIssuerState {
@@ -1009,21 +1028,7 @@ pub fn trace_upload_claim_issuer_router(
     let request_timeout = StdDuration::from_secs(config.request_timeout_seconds.max(1));
     let max_request_bytes = config.max_request_bytes.max(1);
     let state = config.build_state()?;
-    Ok(Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/.well-known/trace-commons-ed25519-keyset.json",
-            get(keyset_handler),
-        )
-        .route("/onboard", get(invite_landing_handler))
-        .route("/v1/trace-upload-claim", post(issue_claim_handler))
-        .route("/v1/onboard", post(onboard_handler))
-        .route("/v1/enroll", post(enroll_handler))
-        .layer(DefaultBodyLimit::max(max_request_bytes))
-        .layer(axum::middleware::from_fn(move |req, next| {
-            request_timeout_middleware(req, next, request_timeout)
-        }))
-        .with_state(state))
+    Ok(router_from_state(state, request_timeout, max_request_bytes))
 }
 
 async fn request_timeout_middleware(
@@ -1095,7 +1100,12 @@ fn router_from_state(
     request_timeout: StdDuration,
     max_request_bytes: usize,
 ) -> Router {
-    Router::new()
+    // Built before `with_state` because the claim sub-router carries its own
+    // state; merging it in keeps the self-serve surface unmounted (404) on any
+    // deployment that has not configured it.
+    let near_legion = state.near_legion_claim.clone();
+    let celestine_sloths = state.celestine_sloth_claim.clone();
+    let router = Router::new()
         .route("/health", get(health_handler))
         .route(
             "/.well-known/trace-commons-ed25519-keyset.json",
@@ -1105,11 +1115,27 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .with_state(state);
+
+    let router = match near_legion {
+        Some(claim_state) => router.merge(crate::near_legion_claim::near_legion_claim_router(
+            claim_state,
+        )),
+        None => router,
+    };
+
+    let router = match celestine_sloths {
+        Some(claim_state) => router.merge(
+            crate::celestine_sloth_claim::celestine_sloth_claim_router(claim_state),
+        ),
+        None => router,
+    };
+
+    router
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(axum::middleware::from_fn(move |req, next| {
             request_timeout_middleware(req, next, request_timeout)
         }))
-        .with_state(state)
 }
 
 async fn serve_both_with_graceful_shutdown(
@@ -1478,17 +1504,27 @@ async fn health_handler(
             })
         })
         .unwrap_or(false);
-    if healthy {
-        (
-            StatusCode::OK,
-            Json(json!({ "status": "ok", "checks": checks })),
-        )
+    // Build identity is additive and sits beside `checks` rather than inside
+    // it: `checks` is scanned for the "ok"/"configured" labels that decide the
+    // status code above, and an identity string is not a check. It is reported
+    // on the degraded response too -- knowing which build is broken is exactly
+    // what a degraded issuer is being asked.
+    let status = if healthy { "ok" } else { "degraded" };
+    let code = if healthy {
+        StatusCode::OK
     } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "degraded", "checks": checks })),
-        )
-    }
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(json!({
+            "status": status,
+            "checks": checks,
+            "build_commit": trace_commons_build_info::COMMIT,
+            "build_time": trace_commons_build_info::BUILD_TIME,
+            "build_version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
 }
 
 async fn keyset_handler(
@@ -4146,6 +4182,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_endpoint_reports_build_identity_on_both_outcomes() {
+        // The point of the identity is that it survives a bad deploy, so it has
+        // to be on the degraded response as much as the healthy one.
+        for (config_state, expected_status) in [
+            (test_config().build_state().expect("state builds"), "ok"),
+            (
+                {
+                    let mut state =
+                        (*test_config().build_state().expect("state builds")).clone_for_test();
+                    state.workload_public_key_pem =
+                        "-----BEGIN PUBLIC KEY-----\nnot-base64\n-----END PUBLIC KEY-----\n"
+                            .to_string();
+                    Arc::new(state)
+                },
+                "degraded",
+            ),
+        ] {
+            let router = Router::new()
+                .route("/health", get(health_handler))
+                .with_state(config_state);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["status"], expected_status);
+            assert_eq!(json["build_commit"], trace_commons_build_info::COMMIT);
+            assert_eq!(json["build_time"], trace_commons_build_info::BUILD_TIME);
+            assert_eq!(json["build_version"], env!("CARGO_PKG_VERSION"));
+            // Additive only: the fields existing consumers read are untouched.
+            assert!(json["checks"].is_object());
+        }
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_completes_within_grace_window() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let router = trace_upload_claim_issuer_router(test_config()).expect("router builds");
@@ -4228,6 +4306,11 @@ mod tests {
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
+                // The self-serve claim surfaces have their own hermetic tests in
+                // `near_legion_claim` and `celestine_sloth_claim`; these issuer
+                // tests build state without either.
+                near_legion_claim: None,
+                celestine_sloth_claim: None,
             }
         }
     }

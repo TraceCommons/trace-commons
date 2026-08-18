@@ -1,0 +1,16 @@
+# Build identity for every binary in this repository.
+#
+# Deliberately dependency-free, including build-dependencies: this crate is
+# compiled before everything else in the workspace and runs a build script, so
+# anything it pulls in is paid for on every clean build of every binary.
+[package]
+name = "trace-commons-build-info"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Commit and build-time identity stamped into Trace Commons binaries"
+build = "build.rs"
+
+[dependencies]
