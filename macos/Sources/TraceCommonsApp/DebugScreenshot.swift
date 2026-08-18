@@ -85,6 +85,16 @@ enum DebugScreenshot {
                 to: directory + "/macos-shell-onboarding-connect-dead-invite.png",
                 size: CGSize(width: 660, height: 420)
             )
+            // Settings is where the local change log lives, and a log is a
+            // surface that can only be checked by looking at it: the rows
+            // are small secondary text in two columns, which is exactly the
+            // combination that fails contrast or collapses at width without
+            // anyone noticing from a green build.
+            render(
+                SettingsContent().environmentObject(model),
+                to: directory + "/macos-shell-settings.png",
+                size: CGSize(width: 860, height: 1200)
+            )
             render(
                 WithdrawalConfirmationCapture().environmentObject(model),
                 to: directory + "/macos-shell-withdrawal.png",

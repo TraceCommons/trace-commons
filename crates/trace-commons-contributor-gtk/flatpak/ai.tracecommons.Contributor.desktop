@@ -2,8 +2,9 @@
 Type=Application
 Name=Trace Commons
 Comment=Review and contribute Claude Code and Codex sessions
-Exec=trace-commons-shell
+Exec=trace-commons-shell %u
 Icon=ai.tracecommons.Contributor
 Terminal=false
 Categories=Utility;
+MimeType=x-scheme-handler/tracecommons;
 X-Flatpak=ai.tracecommons.Contributor

@@ -791,6 +791,45 @@ pub unsafe extern "C" fn tc_call(
     outcome.unwrap_or_else(|_| to_owned_cstring(&error_frame("unavailable", "panic")))
 }
 
+/// The instance an invite link names, as an owned UTF-8 string, or NULL if
+/// the argument is not a usable invite.
+///
+/// This exists so a shell can satisfy the shared design spec's "resolve and
+/// show the instance before committing" without being handed the invite's
+/// code. `ParsedInvite` carries that code, and a shell cannot leak what it
+/// was never given, so only the host crosses this boundary.
+///
+/// Not a daemon method, deliberately. Adding one would change the pinned
+/// `METHODS` array that `hello` advertises and that
+/// `hello_advertises_exactly_the_documented_method_set` holds to; this is a
+/// pure function of its argument and touches no daemon state, so it belongs
+/// on the binding rather than the protocol.
+///
+/// NULL covers every rejection, matching the single failure sentence the
+/// spec gives the whole invite path: the caller must not distinguish "not a
+/// URL" from "no code in it", because the interface does not.
+///
+/// # Safety
+/// `invite`, if non-null, must be a valid NUL-terminated C string. The
+/// returned pointer, if non-null, is owned by the caller and must be
+/// released with [`tc_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_invite_issuer_host(invite: *const c_char) -> *mut c_char {
+    let outcome = guard(|| {
+        if invite.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(raw) = (unsafe { borrow_str(invite) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::commands::invite_issuer_host(raw) {
+            Some(host) => Ok(to_owned_cstring(&host)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    });
+    outcome.unwrap_or(std::ptr::null_mut())
+}
+
 /// Register an event callback, invoked on a background thread with a JSON
 /// event frame each time the daemon publishes one (queue changes, status
 /// changes, digests due, and so on), until `tc_unsubscribe` is called with

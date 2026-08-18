@@ -62,6 +62,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var consentScopes: [ConsentScope] = []
     @Published private(set) var daemonSettings: DaemonSettingsView?
     @Published private(set) var outcomeCounts: [String: Int] = [:]
+    @Published private(set) var audit: [AuditEntry] = []
     @Published var undo: Undo?
     @Published var lastActionError: String?
 
@@ -219,6 +220,17 @@ final class AppModel: ObservableObject {
         refreshSettings()
         refreshConsentOptions()
         refreshOutcomeCounts()
+        refreshAudit()
+    }
+
+    /// The local change log. Refreshed alongside everything else at launch,
+    /// and again after each call that APPENDS to it -- arming a project,
+    /// changing consent scopes, acknowledging the NEAR AI notice -- because
+    /// the daemon publishes no event for an audit append, so a list fetched
+    /// once would show a contributor everything except the change they just
+    /// made.
+    func refreshAudit() {
+        perform("list_audit", work: { try $0.listAudit() }, onSuccess: { self.audit = $0 })
     }
 
     func refreshStatus() {
@@ -260,6 +272,9 @@ final class AppModel: ObservableObject {
             work: { try $0.setProjectMode(projectKey: project.projectLabel, mode: mode) }
         ) { _ in
             self.refreshProjects()
+            // Arming or disarming a project is one of the changes the daemon
+            // records; see `refreshAudit`.
+            self.refreshAudit()
         }
     }
 
@@ -306,6 +321,7 @@ final class AppModel: ObservableObject {
         ) { _ in
             self.refreshSettings()
             self.refreshStatus()
+            self.refreshAudit()
         }
     }
 
@@ -342,6 +358,7 @@ final class AppModel: ObservableObject {
         }.value
         if case .succeeded = outcome {
             refreshStatus()
+            refreshAudit()
         }
         return outcome
     }
