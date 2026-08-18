@@ -96,11 +96,18 @@ ensure_firewall() {
 
 # Egress for a VM with no external IP.
 #
-# --no-address is what keeps this box off the internet's RDP scanners, and it
-# is not optional: this project's `default-allow-rdp` rule permits tcp:3389
-# from 0.0.0.0/0 with NO target tags, so it applies to every instance in the
-# network. Firewall rules are additive-allow, so a narrower rule cannot cancel
-# it -- the only reliable defence is having no external address to reach.
+# --no-address is what keeps this box off the internet's RDP and SSH scanners,
+# and it is not optional: this project carries BOTH `default-allow-rdp`
+# (tcp:3389) and `default-allow-ssh` (tcp:22), each permitting 0.0.0.0/0 with
+# NO target tags, so both apply to every instance in the network. Firewall
+# rules are additive-allow, so the tagged IAP rules created above narrow
+# nothing -- the only reliable defence is having no external address to reach.
+#
+# This is not self-healing. `start` below cannot attach an access config, but
+# it will happily start an instance that already has one, and an access config
+# added once survives stop/start until someone deletes it. If you are about to
+# remove --no-address to restore egress, recreate the NAT instead: see
+# "Deleting the NAT takes the instance's internet with it" in docs/dev-vm.md.
 #
 # But a VM with no external IP also has no outbound internet, and the bootstrap
 # has to download several GB of installers. Cloud NAT provides egress without
