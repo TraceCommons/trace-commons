@@ -36,6 +36,16 @@ public static class WithdrawDialog
     /// the honest range of what the act might achieve rather than a single
     /// confident sentence this window cannot support.
     /// </remarks>
+    /// <summary>
+    /// Whether this dialog is already on screen.
+    /// </summary>
+    /// <remarks>
+    /// Static because the dialog is: one window, one XamlRoot, one slot.
+    /// See the comment at the ShowAsync call for why an unguarded second
+    /// open is fatal rather than merely wrong.
+    /// </remarks>
+    private static bool _open;
+
     public static async Task<bool> ConfirmAsync(XamlRoot xamlRoot, WithdrawStage stage)
     {
         ArgumentNullException.ThrowIfNull(xamlRoot);
@@ -82,7 +92,37 @@ public static class WithdrawDialog
             DefaultButton = ContentDialogButton.Close,
         };
 
-        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        // WinUI permits ONE ContentDialog per XamlRoot, and every caller of
+        // this method is an `async void` handler -- an `async Task` in the
+        // middle contains nothing when the frame above it cannot observe the
+        // task, so a throw here leaves the async void boundary unhandled and
+        // takes the process with it. The window's caption button and the tray
+        // menu both stay live behind app-modal content, so a second dialog is
+        // one click away rather than a race.
+        //
+        // Refusing is the safe direction: `false` is "not confirmed", so a
+        // withdrawal the contributor was never actually asked about cannot
+        // happen. The dialog already on screen is the explanation for why
+        // nothing opened, which is the platform's own modal convention rather
+        // than a missing message.
+        if (_open)
+        {
+            return false;
+        }
+
+        _open = true;
+        try
+        {
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        finally
+        {
+            _open = false;
+        }
     }
 
     /// <summary>

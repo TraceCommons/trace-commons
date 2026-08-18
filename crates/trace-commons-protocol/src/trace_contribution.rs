@@ -1131,6 +1131,16 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .and_then(|labels| labels.overall_score)
         .map(|score| score.clamp(0.0, 1.0));
 
+    // Residual privacy risk is charged ONCE, as the multiplicative `gate`.
+    // There used to be a `- 0.60 * privacy_risk` term here as well, which
+    // charged it twice: `privacy_gate` and `privacy_risk_score` are
+    // complementary functions of the same enum (they sum to 1.0 for every
+    // band — pinned by a test), so the subtraction re-applied the gate. The
+    // effect fell entirely on the medium band, where a 0.5 gate plus a flat
+    // -0.30 put every realistic score at or below zero: accepted work that
+    // could never earn anything. Low risk was unaffected either way, since
+    // `privacy_risk_score(Low)` is 0.0, and high risk is zeroed by the gate
+    // and again by the explicit `High` check below.
     let raw = gate
         * schema_validity
         * (0.25 * quality
@@ -1139,8 +1149,7 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
             + 0.15 * coverage_bonus
             + 0.10 * difficulty
             + 0.10 * user_correction_value)
-        - 0.40 * duplicate_penalty
-        - 0.60 * privacy_risk;
+        - 0.40 * duplicate_penalty;
     let online_score = raw.clamp(0.0, 1.0);
     let credit_points_estimate =
         if matches!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::High) {
@@ -7394,6 +7403,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn privacy_gate_and_risk_score_are_the_same_signal() {
         use super::*;
         // The reason the subtractive term was redundant: these are
@@ -7412,6 +7422,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn medium_risk_work_can_earn_credit() {
         use super::*;
         // Every medium-risk submission in the pilot corpus scored exactly
@@ -7426,6 +7437,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dropping_the_double_penalty_leaves_low_risk_untouched() {
         use super::*;
         // The change is confined to the medium band, and this is why rather
@@ -7446,6 +7458,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn risk_bands_stay_ordered_and_high_earns_nothing() {
         use super::*;
         let low = compute_value_scorecard(&scoring_envelope(ResidualPiiRisk::Low));
