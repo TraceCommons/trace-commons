@@ -115,9 +115,12 @@ Deliberately absent, and each is its own piece of work:
   certificate, and the shipping artifact is still the zip. Read
   `packaging/README.md` before touching any of it — particularly the part about
   the publisher string and about what packaging does to the state directory.
-- The rest of the queue frame the design specifies: the health banner and the
-  week band. Both need daemon state the app does not read yet, so neither is
-  drawn.
+- Stat-card glyphs. The design gives the week band and History's three cards a
+  small icon each — a check in a circle, a clock, a set of columns. Neither
+  screen draws them: this shell's stat card carries its tone in the border
+  instead, and one screen introducing glyphs the other does not have would
+  read as two designs rather than one. They belong in both cards or in
+  neither.
 - Persistent recent searches. The preview sheet remembers search terms for the
   life of the process and writes none of them to disk; the macOS shell persists
   its own. A recent search is the contributor's list of the things they are
@@ -207,6 +210,53 @@ reachable from a unit test. In an interactive session on Windows Server 2022:
 Still unconfirmed: that the entry actually launches the app across a real
 sign-in, and how any of this behaves under MSIX, where run-at-login is
 deliberately inert.
+
+## The health banner says only what the daemon said
+
+The banner is rendered from `status.health.last_error_label` and nothing else.
+
+That is a restraint rather than an economy. The daemon holds a precedence
+order between conditions — `daemon/health.rs::precedence` ranks `not-logged-in`
+above the NEAR AI notice, above the self-test failure, above the unreachable
+labels — and it resolves that order itself, sending exactly one label. A client
+that rebuilt the ranking would eventually disagree with the daemon, and so with
+this app's own tray icon, about what is wrong. So `TraceCommons.Interop.HealthCopy`
+is a flat one-label-to-one-banner table with no ordering in it at all, and the
+view model stores whichever label arrived. The Linux shell's `render_health`
+records the same rule; the macOS `HealthCopy` is the same table again.
+
+Two copy rules from the shared design bind every sentence, and
+`QueueFrameCopyTests` holds them to both: **never name the mechanism**
+("privacy filter", "claim", "ingest", "canary" and "PII" are internal words),
+and **always state the data consequence** ("nothing has been lost", "your queue
+is safe", "rather than going out unscanned"). A label this build has never
+heard of gets the sentence that is true of every blocking label; it is never
+echoed back as the explanation, because a label is an internal name and
+printing it would breach the first rule by the most direct route available.
+
+The banner sits above both panes rather than inside the queue. The design draws
+it on the queue because the queue is the only screen that frame draws; put
+above the panes it says the same thing on every screen and never says it twice.
+The Linux shell moved it for this reason and the note there says so.
+
+Only two labels get an action button, because only two have one. The rest clear
+on their own, and a button that cannot change the condition beside it teaches a
+contributor that the buttons in this app do nothing — which they would then
+believe about Undo.
+
+## The week band reads the rollup the queue asks for itself
+
+`history_rollup` backs both the History screen's stat cards and the queue's
+week band, and each screen asks for it in its own refresh. That is deliberate
+duplication of one cheap read: History's view is built lazily on first
+navigation, so taking the figures from it would leave the band blank until
+somebody clicked History. `App::refresh` in the Linux shell makes the same call
+for the same reason.
+
+Two of the three figures are weekly and the third is not. "In the commons" is
+`all_time.accepted`, because it is a standing total — a weekly slice of it
+would read as the commons shrinking every Monday, in exactly the place a
+contributor looks for evidence that their work went somewhere.
 
 ## The read gate
 
