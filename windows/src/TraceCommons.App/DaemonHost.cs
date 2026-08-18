@@ -37,6 +37,29 @@ public sealed class DaemonHost : IAsyncDisposable
     public event Action? StatusChanged;
 
     /// <summary>
+    /// Raised on the UI thread when the daemon says a digest is due, carrying
+    /// the pending count it decided on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The daemon owns the decision, because the batching policy is shared by
+    /// every application that attaches to it: <c>daemon/notify.rs</c> refuses
+    /// on an empty queue and otherwise fires once per
+    /// <c>digest_interval_secs</c>, persisting the stamp so the spacing
+    /// survives a restart. This event is delivery, not policy, and the shell
+    /// must not invent a timer of its own to supplement it.
+    /// </para>
+    /// <para>
+    /// The daemon's own <c>text</c> field is deliberately ignored by the
+    /// subscriber. It phrases the digest for a shell-less daemon; the shared
+    /// spec's wording for an application is what
+    /// <c>TraceCommons.Interop.DigestText</c> produces, and all three shells
+    /// use that.
+    /// </para>
+    /// </remarks>
+    public event Action<int>? DigestDue;
+
+    /// <summary>
     /// Raised on the UI thread when the ABI reported dropped events. The view
     /// model treats this as "your local picture is stale, refetch everything",
     /// which is the only correct response to an unknown number of missed
@@ -209,6 +232,10 @@ public sealed class DaemonHost : IAsyncDisposable
 
                 case DaemonProtocol.Events.StatusChanged:
                     StatusChanged?.Invoke();
+                    break;
+
+                case DaemonProtocol.Events.DigestDue:
+                    DigestDue?.Invoke(evt.PendingCount);
                     break;
 
                 case DaemonProtocol.Events.Lagged:

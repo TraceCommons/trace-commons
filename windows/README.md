@@ -89,7 +89,12 @@ Deliberately absent, and each is its own piece of work:
 
 - Withdrawal, credit and history views. The macOS app has roughly eighteen
   views; this has three.
-- System tray presence and run-at-login.
+- The rest of the tray menu's vocabulary. The icon, the tooltip, the digest
+  and run-at-login are here (see "The tray and the interruption budget"); what
+  the shared spec also puts in that menu — pause with its three durations, the
+  week summary, the per-project list of what is waiting, settings — is not,
+  because none of those surfaces exist anywhere in this app yet and a menu
+  item that opens nothing is worse than an absent one.
 - MSIX packaging and signing. The app builds unpackaged so that CI can verify
   it without a certificate.
 - The rest of the queue frame the design specifies: the health banner and the
@@ -100,6 +105,62 @@ Deliberately absent, and each is its own piece of work:
   its own. A recent search is the contributor's list of the things they are
   worried about leaking, so keeping it in memory is a deliberate narrowing
   rather than an omission.
+
+## The tray and the interruption budget
+
+The onboarding "Done" screen tells a contributor they "will get at most one
+notification every 4 hours, and none at all if there's nothing waiting". Until
+this slice that was a promise about a notification path that did not exist.
+Now it exists, and the promise is enforced in two places, neither of which can
+cause a notification:
+
+1. **The daemon.** `daemon/notify.rs::digest_due` refuses on an empty queue and
+   otherwise fires once per `digest_interval_secs`, persisting `last_digest_at`
+   so the spacing survives a restart. This is the shared policy every shell
+   obeys; delivery is the `digest_due` subscription event.
+2. **`TraceCommons.Interop.DigestCadence`.** A second, in-process gate for the
+   ways a shell can over-notify with a correctly-behaving daemon behind it: a
+   resubscribe that replays, a duplicate handler, a future caller posting a
+   digest from somewhere other than the event. Claim-and-stamp is one call, so
+   the only way to be told yes is to have consumed the window.
+
+**Nothing reachable from the tray or a notification approves or sends
+anything.** Clicking the icon or the digest raises the window; the menu opens
+the window, toggles run-at-login, and asks to quit. That is the same rule
+`gtk/src/tray.rs` and `gtk/src/notify.rs` hold, for the same reason: a misfire
+on a surface the contributor is not looking at ships real transcripts and is
+unrecoverable.
+
+The digest is a `Shell_NotifyIcon` balloon rather than a toast with buttons.
+The spec's `[ Review ] [ Not now ]` becomes click-the-balloon and ignore-it;
+`Not now` "does nothing but dismiss" anyway, and a richer toast needs an
+activation identity this unpackaged app does not have. Worth revisiting with
+MSIX.
+
+Quitting warns first, from the window's close button as well as from the tray.
+On Windows the app HOSTS the daemon in-process, so quitting stops the watcher,
+and the shared spec is explicit that saying the Linux sentence here would be
+"a lie about whether the machine is still watching".
+
+### Run at login
+
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, written by
+`RunAtLogin`, toggled from the tray menu, opt-in. HKCU and never HKLM: this
+app installs per user with no administrator rights, and every other Windows
+mechanism costs elevation or a package — a Scheduled Task, a service, or the
+MSIX `windows.startupTask` extension. Same hive and same reasoning as
+`UrlSchemeRegistration`. The entry appears in Task Manager's Startup tab,
+which is where a contributor audits what starts with their machine; Windows
+can disable it there, and this class does not fight that.
+
+### What only Windows can confirm
+
+The mark's rasterization, the tooltip and digest wording, the icon-state
+precedence, the cadence, and the Run-key value and quoting are all unit-tested
+off Windows in `tests/TraceCommons.Interop.Tests/TrayTests.cs`. What those
+tests cannot reach: that `Shell_NotifyIcon` accepts the struct, that the shell
+draws the bitmap, that `TrackPopupMenu` dismisses correctly, that the balloon
+appears, and that the registry entry actually starts the app at sign-in.
 
 ## The read gate
 
