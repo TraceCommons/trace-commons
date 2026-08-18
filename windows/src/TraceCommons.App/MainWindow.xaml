@@ -77,54 +77,129 @@
             <!--
                 Nav rail.
 
-                One destination, because the app has one. The spec's History
-                and Settings rows are deliberately absent rather than drawn
+                Two destinations now that there are two views. The spec's
+                Settings row is still deliberately absent rather than drawn
                 disabled: a rail is a promise about where the app can go, and
-                two rows that lead nowhere would be the window's first
-                untrue statement. They belong here when those views do.
+                a row that leads nowhere would be the window's first untrue
+                statement. It belongs here when that view does.
+
+                Each row is a Button with its chrome removed rather than a
+                Border with a tapped handler. The rail is the app's primary
+                navigation, and a Button is what carries keyboard focus, the
+                invoke pattern and a narrator announcement for free; a Border
+                that merely looks like one carries none of it.
             -->
             <Border Grid.Column="0"
                     Padding="8,10"
                     Background="{ThemeResource TcChromeBackgroundBrush}">
-                <Grid VerticalAlignment="Top">
-                    <Border Background="{ThemeResource TcSurfaceScrimBrush}"
-                            CornerRadius="{StaticResource TcControlCornerRadius}"
-                            Padding="10,7">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <!-- The monitor glyph from the spec's nav
-                                 inventory, on its own 16-unit grid. The spec
-                                 gives the geometry but not a stroke width for
-                                 nav glyphs; 1.5 matches the other 16-unit
-                                 icons it does specify. -->
-                            <Viewbox Width="13" Height="13" VerticalAlignment="Center">
-                                <Canvas Width="16" Height="16">
-                                    <Rectangle Canvas.Left="2" Canvas.Top="3.5"
-                                               Width="12" Height="9.5"
-                                               RadiusX="1.5" RadiusY="1.5"
-                                               Stroke="{ThemeResource TcGreenTextBrush}"
-                                               StrokeThickness="1.5" />
-                                    <Path Data="M2 9h3l1.5 2h3L11 9h3"
-                                          Stroke="{ThemeResource TcGreenTextBrush}"
-                                          StrokeThickness="1.5" />
-                                </Canvas>
-                            </Viewbox>
-                            <TextBlock Text="Waiting"
-                                       Style="{StaticResource TcNavLabelSelectedTextStyle}"
-                                       VerticalAlignment="Center" />
-                        </StackPanel>
-                    </Border>
+                <StackPanel VerticalAlignment="Top" Spacing="4">
 
-                    <!-- The selection bar: 3px, inset 8px top and bottom. -->
-                    <Rectangle Width="3"
-                               HorizontalAlignment="Left"
-                               Margin="0,8,0,8"
-                               RadiusX="2" RadiusY="2"
-                               Fill="{ThemeResource TcGreenFillBrush}" />
-                </Grid>
+                    <Button HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Click="OnShowQueue">
+                        <Grid>
+                            <Border Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                                    Background="{ThemeResource TcSurfaceScrimBrush}"
+                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
+                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
+                                <!-- The monitor glyph from the spec's nav
+                                     inventory, on its own 16-unit grid. The
+                                     spec gives the geometry but not a stroke
+                                     width for nav glyphs; 1.5 matches the
+                                     other 16-unit icons it does specify. -->
+                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
+                                    <Canvas Width="16" Height="16">
+                                        <Rectangle Canvas.Left="2" Canvas.Top="3.5"
+                                                   Width="12" Height="9.5"
+                                                   RadiusX="1.5" RadiusY="1.5"
+                                                   Stroke="{ThemeResource TcGreenTextBrush}"
+                                                   StrokeThickness="1.5" />
+                                        <Path Data="M2 9h3l1.5 2h3L11 9h3"
+                                              Stroke="{ThemeResource TcGreenTextBrush}"
+                                              StrokeThickness="1.5" />
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="Waiting"
+                                           Style="{StaticResource TcNavLabelTextStyle}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <!-- The selection bar: 3px, inset 8px top and bottom. -->
+                            <Rectangle Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Margin="0,8,0,8"
+                                       RadiusX="2" RadiusY="2"
+                                       Fill="{ThemeResource TcGreenFillBrush}" />
+                        </Grid>
+                    </Button>
+
+                    <Button HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Click="OnShowHistory">
+                        <Grid>
+                            <Border Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
+                                    Background="{ThemeResource TcSurfaceScrimBrush}"
+                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
+                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
+                                <!-- A clock face, on the same 16-unit grid as
+                                     the monitor above and at the same stroke
+                                     width. History is a record of what has
+                                     already happened. -->
+                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
+                                    <Canvas Width="16" Height="16">
+                                        <Ellipse Canvas.Left="2" Canvas.Top="2"
+                                                 Width="12" Height="12"
+                                                 Stroke="{ThemeResource TcGreenTextBrush}"
+                                                 StrokeThickness="1.5" />
+                                        <Path Data="M8 4.8V8l2.3 1.4"
+                                              Stroke="{ThemeResource TcGreenTextBrush}"
+                                              StrokeThickness="1.5" />
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="History"
+                                           Style="{StaticResource TcNavLabelTextStyle}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <Rectangle Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Margin="0,8,0,8"
+                                       RadiusX="2" RadiusY="2"
+                                       Fill="{ThemeResource TcGreenFillBrush}" />
+                        </Grid>
+                    </Button>
+                </StackPanel>
             </Border>
 
+            <!--
+                The History pane.
+
+                It is created once and kept rather than rebuilt on each nav
+                click, because it holds the per submission record of what a
+                withdrawal actually did. list_history reports a record's
+                status, never the tier a withdrawal resolved to, so rebuilding
+                the pane would throw that away: a contributor who withdrew a
+                trace, glanced at the queue and came back would find the
+                sentence naming the tier the server applied replaced by a bare
+                chip. That is the contract's first withdrawal rule broken by a
+                navigation.
+            -->
+            <ContentPresenter x:Name="HistoryPane"
+                              Grid.Column="1"
+                              Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
+
             <!-- Header, queue, recovery bar, decision notice, caveat, progress. -->
-            <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto,Auto,Auto,Auto">
+            <Grid Grid.Column="1"
+                  Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto">
 
                 <!--
                     Content header.

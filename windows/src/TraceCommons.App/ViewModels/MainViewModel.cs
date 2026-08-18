@@ -48,6 +48,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private ApprovalHold? _undoHold;
     private string _undoEntryId = string.Empty;
     private string _undoProjectLabel = string.Empty;
+    private bool _showingHistory;
 
     public MainViewModel(DaemonHost host)
     {
@@ -69,6 +70,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>The pending queue, newest state as the daemon reports it.</summary>
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
+
+    /// <summary>
+    /// Which of the rail's two destinations is showing.
+    /// </summary>
+    /// <remarks>
+    /// A pair of exclusive booleans rather than an enum plus converters: two
+    /// destinations do not justify a converter class, and both panes bind
+    /// their Visibility directly to one of these. The queue is what opens,
+    /// because the queue is what has something waiting on the contributor.
+    /// </remarks>
+    public bool ShowingQueue => !_showingHistory;
+
+    public bool ShowingHistory => _showingHistory;
+
+    public void ShowQueue() => SetPane(history: false);
+
+    public void ShowHistory() => SetPane(history: true);
+
+    private void SetPane(bool history)
+    {
+        if (_showingHistory == history)
+        {
+            return;
+        }
+
+        _showingHistory = history;
+        Raise(nameof(ShowingQueue));
+        Raise(nameof(ShowingHistory));
+    }
 
     /// <summary>
     /// A short, human-readable status line. Fixed labels only -- everything
