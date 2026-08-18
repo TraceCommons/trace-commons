@@ -200,6 +200,68 @@ final class DaemonClient {
         try call("withdraw", params: ["submission_id": submissionID], as: WithdrawalOutcome.self)
     }
 
+    // MARK: - Public profile
+
+    /// The daemon's answer to all three profile calls. They share one shape
+    /// on purpose, so a client parses one thing whichever call it made.
+    ///
+    /// `handlePersisted` is present on `set` and `clear` only, and it is
+    /// **not** whether the call worked -- see `AppModel.claimHandle`. It
+    /// reports whether the daemon managed to write its local copy of a
+    /// profile the server has already accepted.
+    ///
+    /// `publicURL` is null by contract today: the daemon knows the origin
+    /// it uploads to, not the origin the community site serves profiles
+    /// from, and will not invent a link that does not resolve.
+    struct PublicProfile: Decodable {
+        let onRoster: Bool
+        let handle: String?
+        let bio: String?
+        let publicSince: Date?
+        let publicURL: String?
+        let handlePersisted: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case onRoster = "on_roster"
+            case handle
+            case bio
+            case publicSince = "public_since"
+            case publicURL = "public_url"
+            case handlePersisted = "handle_persisted"
+        }
+    }
+
+    /// The locally cached profile. No network I/O: there is no
+    /// `GET /v1/community/profile` for a contributor's own row, so this is
+    /// what this device last published rather than what the roster holds
+    /// this second. Fails with `not-logged-in` on an unenrolled device.
+    func publicProfile() throws -> PublicProfile {
+        try call("get_public_profile", as: PublicProfile.self)
+    }
+
+    /// Claims or updates the public handle. Real network I/O.
+    ///
+    /// `bio` is sent explicitly as null when there is none: the `PUT`
+    /// replaces the whole profile, so "leave the bio alone" is not
+    /// something the server can be asked for, and the daemon refuses an
+    /// omitted `bio` rather than guessing which was meant.
+    ///
+    /// The handle is not validated here. The daemon and the server share
+    /// one copy of those rules; a second copy in this app is how a handle
+    /// this app accepts becomes one the server refuses.
+    func setPublicProfile(handle: String, bio: String?) throws -> PublicProfile {
+        try call(
+            "set_public_profile",
+            params: ["handle": handle, "bio": bio ?? NSNull()],
+            as: PublicProfile.self
+        )
+    }
+
+    /// Withdraws the public handle from the roster. Real network I/O.
+    func clearPublicProfile() throws -> PublicProfile {
+        try call("clear_public_profile", as: PublicProfile.self)
+    }
+
     // MARK: - Pause
 
     struct PauseResult: Decodable {
