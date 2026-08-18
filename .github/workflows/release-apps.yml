@@ -52,6 +52,8 @@ jobs:
       short: ${{ steps.v.outputs.short }}
       build: ${{ steps.v.outputs.build }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
       # CFBundleVersion must increase monotonically across releases.
       # GitHub's run_number is monotonic per workflow and increments with every
       # run, persisting across branches and tag pushes without external state.
@@ -80,6 +82,23 @@ jobs:
           fi
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
           echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))" >> "$GITHUB_OUTPUT"
+
+      # The Linux shell reports CARGO_PKG_VERSION while the workflow names
+      # its artifacts from the tag. Keep those two user-visible versions from
+      # drifting. Dispatches remain free to exercise an arbitrary future
+      # version without publishing it.
+      - name: Confirm the tag matches the Linux app package version
+        if: github.event_name == 'push'
+        env:
+          TAG_VERSION: ${{ steps.v.outputs.short }}
+        run: |
+          set -euo pipefail
+          MANIFEST=crates/trace-commons-contributor-gtk/Cargo.toml
+          PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "refusing to release: $MANIFEST is $PACKAGE_VERSION, tag is $TAG_VERSION" >&2
+            exit 1
+          fi
 
   macos:
     name: macOS signed DMG

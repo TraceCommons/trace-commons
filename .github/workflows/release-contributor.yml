@@ -32,7 +32,33 @@ permissions:
   attestations: write
 
 jobs:
+  release-config:
+    name: verify release configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Keep a missing cross-repository token from surfacing only after four
+      # signed binaries and a GitHub Release have already been published.
+      # Dispatches are build-only, so they do not need publishing credentials.
+      - name: Confirm tag-release credentials are configured
+        if: github.event_name == 'push'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          WINGET_PKGS_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          UPDATE_PUBLIC_KEY: ${{ vars.TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$HOMEBREW_TAP_TOKEN" ] || missing+=(HOMEBREW_TAP_TOKEN)
+          [ -n "$WINGET_PKGS_TOKEN" ] || missing+=(WINGET_PKGS_TOKEN)
+          [ -n "$UPDATE_PUBLIC_KEY" ] || missing+=(TRACE_COMMONS_UPDATE_PUBLIC_KEY_HEX)
+          if [ ${#missing[@]} -ne 0 ]; then
+            printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
   build:
+    needs: release-config
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +89,27 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The updater and `--version` both use CARGO_PKG_VERSION, not the tag.
+      # Refuse a tag that would publish correctly named assets containing a
+      # binary which identifies itself as another version. The FFI library is
+      # shipped with the desktop apps and follows the same core release line.
+      - name: Confirm the tag matches the contributor package versions
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#contributor-v}"
+          for manifest in \
+            crates/trace-commons-contributor/Cargo.toml \
+            crates/trace-commons-contributor-ffi/Cargo.toml
+          do
+            PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$manifest")"
+            if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+              echo "refusing to release: $manifest is $PACKAGE_VERSION, tag is $TAG_VERSION" >&2
+              exit 1
+            fi
+          done
 
       # Pinned, not the runner image's preinstalled Rust. These crates declare
       # rust-version = 1.92, and windows-latest is newly added here -- an
