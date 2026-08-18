@@ -1255,6 +1255,12 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    /// Which privacy-filter backend resolved at boot. Reported on
+    /// `config-status` because an absent filter is otherwise invisible:
+    /// redaction silently degrades to deterministic-only and every other
+    /// signal still looks healthy.
+    privacy_filter_backend: PrivacyFilterBackendTag,
+    require_privacy_filter: bool,
     community_leaderboard_enabled: bool,
     /// How often to recompute the community snapshot in-process. `None`
     /// leaves recompute admin-triggered only, which is the behaviour
@@ -3224,10 +3230,8 @@ impl AppState {
         // nothing else distinguishes a filter that ran from one that was never
         // configured.
         let privacy_filter_backend = resolve_privacy_filter_backend()?;
-        validate_privacy_filter_config(
-            env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER),
-            privacy_filter_backend,
-        )?;
+        let require_privacy_filter = env_truthy(TRACE_COMMONS_REQUIRE_PRIVACY_FILTER);
+        validate_privacy_filter_config(require_privacy_filter, privacy_filter_backend)?;
         tracing::info!(
             privacy_filter_backend = privacy_filter_backend.label(),
             "Trace Commons privacy filter backend resolved"
@@ -3674,6 +3678,8 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            privacy_filter_backend,
+            require_privacy_filter,
             community_leaderboard_enabled,
             community_snapshot_interval: parse_community_snapshot_interval_from_env()?,
             community_analytics_publication_basis:
@@ -10916,6 +10922,11 @@ struct TraceCommonsConfigStatusResponse {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    /// Label of the resolved privacy-filter backend: `near_ai`, `sidecar`, or
+    /// `none`. Always present — `none` is the answer an operator most needs
+    /// and an omitted field would read as healthy.
+    privacy_filter_backend: &'static str,
+    require_privacy_filter: bool,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
@@ -11218,6 +11229,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         object_primary_derived_exports: state.object_primary_derived_exports,
         require_db_reconciliation_clean: state.require_db_reconciliation_clean,
         require_export_guardrails: state.require_export_guardrails,
+        privacy_filter_backend: state.privacy_filter_backend.label(),
+        require_privacy_filter: state.require_privacy_filter,
         tenant_rollout_gate_counts: state.tenant_rollout_gates.status_counts(),
         max_export_items_per_request: state.max_export_items_per_request,
         analytics_min_cell_count: state.analytics_min_cell_count,
