@@ -37,6 +37,17 @@ public sealed partial class MainWindow : Window
 
     private bool _quitConfirmed;
 
+    /// <summary>
+    /// Whether the quit confirmation is already on screen.
+    /// </summary>
+    /// <remarks>
+    /// A second close request while the dialog is up would try to open a
+    /// second <c>ContentDialog</c>, which throws. The close button is a
+    /// system caption button and stays live behind a dialog, so this is a
+    /// click away rather than a theoretical race.
+    /// </remarks>
+    private bool _quitDialogOpen;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -110,6 +121,11 @@ public sealed partial class MainWindow : Window
         // and start another one from the answer.
         args.Cancel = true;
 
+        if (_quitDialogOpen)
+        {
+            return;
+        }
+
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -120,7 +136,53 @@ public sealed partial class MainWindow : Window
             DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
         };
 
-        Microsoft.UI.Xaml.Controls.ContentDialogResult result = await dialog.ShowAsync();
+        Microsoft.UI.Xaml.Controls.ContentDialogResult result;
+
+        _quitDialogOpen = true;
+        try
+        {
+            result = await dialog.ShowAsync();
+        }
+        catch (Exception)
+        {
+            // WinUI allows one ContentDialog per XamlRoot, and this window now
+            // has two other callers -- WithdrawDialog, from History, and
+            // GoPublicDialog, from Settings. If either is open, ShowAsync
+            // throws, and this handler is `async void`, so the throw would
+            // take the process down.
+            //
+            // Catching is the whole fix, and there is no second decision to
+            // make here: `args.Cancel = true` ran synchronously above, before
+            // the first await, so WinUI has already honoured the cancellation
+            // by the time this throw is possible. The close is refused
+            // whatever happens next; the only question was whether the
+            // process survived to be closed again.
+            //
+            // The window then refuses to close without saying so, and that
+            // is right rather than merely tolerable. This runs precisely
+            // BECAUSE a dialog is already up, so at the moment of failure the
+            // explanation is already on screen and is the thing the
+            // contributor has to deal with. Clicking the owner window while a
+            // modal is open doing nothing is the platform's own convention,
+            // not a missing message.
+            //
+            // Recorded because both obvious places to add one are wrong, and
+            // that is not obvious. MainViewModel.Notice renders inside the
+            // QUEUE pane, while the two dialogs that can land us here are
+            // reachable only from History and Settings -- so the pane
+            // carrying the message would never be the pane on screen. The
+            // health banner is above all three panes and would be seen, but
+            // it is single-writer over the daemon's own health label, and
+            // every sentence in it states what happened to the data; a
+            // transient UI collision is neither, and an unrecognised label
+            // there renders "Contributions are on hold.", which would be
+            // false in the direction that makes people quit.
+            return;
+        }
+        finally
+        {
+            _quitDialogOpen = false;
+        }
 
         if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
         {
