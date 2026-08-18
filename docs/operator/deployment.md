@@ -315,12 +315,36 @@ is not evidence of anything. And the backend resolving at boot proves the
 adapter was built, not that it successfully scrubs; for that, see the canary
 check below.
 
-Before admitting real traces, the privacy-filter canary must report healthy.
-The canary submits a synthetic PII smoke payload and verifies the filter
-removes it; it reuses the existing `run_privacy_filter_canary` path in the
-rollout-smoke suite. Check the result via `GET /v1/admin/config-status` —
-the `privacy_filter_canary_status.healthy` field must be `true` before you
-enable live contributor traffic.
+Before admitting real traces, confirm a filter backend actually resolved.
+`GET /v1/admin/config-status` reports it:
+
+```json
+{
+  "privacy_filter_backend": "near_ai",
+  "require_privacy_filter": true
+}
+```
+
+`none` means deterministic-only redaction, whatever the config file says —
+that is the state to catch before enabling live contributor traffic, and it
+is what this deployment ran in, undetected, from launch until 2026-08-18.
+
+This reports that the adapter **resolved**, which is not the same as proving
+it scrubs. A synthetic round-trip is what proves that, and
+`run_privacy_filter_canary` implements it — it gates every PII-backstop tick
+— but it is not yet exposed on an admin route. Until it is, verify the
+filter end to end by classifying a synthetic payload directly:
+
+```sh
+curl -s -X POST "${TRACE_NEAR_AI_PRIVACY_BASE_URL:-https://cloud-api.near.ai/v1}/privacy/classify" \
+  -H "Authorization: Bearer $TRACE_NEAR_AI_PRIVACY_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/privacy-filter","input":"My name is Dana Whitfield, my email is dana.whitfield@example.com."}'
+```
+
+Expect `private_person` and `private_email` spans. An empty `data` array or a
+4xx means the adapter will construct at boot and then fail on every real
+call.
 
 At least one of the three gate floors must be positive — the binary
 refuses to start if all are zero. Under the A2.5 pilot-launch defaults
