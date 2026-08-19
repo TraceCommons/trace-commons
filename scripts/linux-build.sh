@@ -12,6 +12,8 @@
 #   scripts/linux-build.sh cargo clippy       # anything else
 #   scripts/linux-build.sh --shell            # interactive shell
 #   scripts/linux-build.sh --run-headless     # start the app under Xvfb
+#   scripts/linux-build.sh --roots-shot       # photograph the roots window
+#   scripts/linux-build.sh --roots-answer     # click through it, check output
 #   scripts/linux-build.sh --probe            # talk to a throwaway daemon
 #
 # Nothing here touches the host toolchain, and the host workspace still
@@ -58,6 +60,18 @@ case "${1:---build}" in
     # and print what it got back. Proves the crate links the contributor core
     # and speaks the v1_1 contract, without needing a display.
     run "bash /work/$CRATE_DIR/scripts/probe.sh"
+    ;;
+  --roots-shot)
+    # Photographs the roots-declaration window: no daemon, no settings file,
+    # discovery pointed at fixture stores. The one check that answers "what
+    # does this window look like", which no unit test can.
+    run "bash /work/$CRATE_DIR/scripts/roots-shot.sh"
+    ;;
+  --roots-answer)
+    # Drives the roots window with xdotool and asserts that the two answers
+    # reach daemon-settings.json as a Watch and an Off. The screenshot proves
+    # the window reads correctly; this proves the controls do what they say.
+    run "bash /work/$CRATE_DIR/scripts/roots-answer.sh"
     ;;
   --run-headless)
     # Starts the real application under Xvfb with a private session bus.

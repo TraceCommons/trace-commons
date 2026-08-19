@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xauth \
       x11-apps \
       imagemagick \
+      xdotool \
       dbus \
       dbus-x11 \
       jq \
