@@ -1,0 +1,17 @@
+# The product mark, "The Turn", as geometry.
+#
+# Deliberately dependency-free. This crate is the one description of the mark
+# that the export tool, the drift tests and every client transcription check
+# read from, so it has to build on every runner the packaging touches --
+# macos-26, windows-latest and ubuntu-latest alike. A dependency here would be
+# paid for on all three for the sake of two brackets and a rectangle.
+[package]
+name = "trace-commons-mark"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Trace Commons product mark as geometry, and its SVG export"
+
+[dependencies]

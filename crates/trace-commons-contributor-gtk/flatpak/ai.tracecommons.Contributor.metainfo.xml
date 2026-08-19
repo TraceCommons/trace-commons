@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for the Linux contributor shell.
+
+  Not generated from the mark crate: everything here is prose and licence
+  metadata rather than geometry. It is in this slice because without it no
+  software centre will display the application at all (GNOME Software and KDE
+  Discover both index this file, not the desktop entry), and Flathub refuses a
+  submission that lacks one. The icon the desktop entry has always named is
+  installed alongside it by the same manifest.
+
+  No <screenshots> element. AppStream requires screenshot URLs to be reachable
+  over the network, and the repository has no public image host; an element
+  pointing at URLs that 404 fails validation more loudly than its absence. The
+  images under docs/images/ are the obvious source when somewhere to host them
+  exists.
+-->
+<component type="desktop-application">
+  <id>ai.tracecommons.Contributor</id>
+
+  <name>Trace Commons</name>
+  <summary>Review and contribute your coding sessions</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <description>
+    <p>
+      Trace Commons contributes the sessions you have with coding agents to an
+      open corpus, with your explicit consent for each one. Nothing leaves your
+      machine until you have seen exactly what it contains.
+    </p>
+    <p>
+      The application watches the session folders you nominate, and nothing
+      else. It will not guess: until you say which folders to watch, it watches
+      none of them.
+    </p>
+    <p>
+      Every session is scanned for secrets and personal information and shown
+      to you in full before anything is sent. You decide per session, or arm a
+      project you trust to contribute without asking.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">ai.tracecommons.Contributor.desktop</launchable>
+
+  <url type="homepage">https://tracecommons.ai/</url>
+  <url type="bugtracker">https://github.com/TraceCommons/trace-commons-server/issues</url>
+
+  <developer id="ai.tracecommons">
+    <name>Trace Commons</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+
+  <provides>
+    <binary>trace-commons-shell</binary>
+  </provides>
+
+  <releases>
+    <release version="0.4.0" date="2026-08-19"/>
+  </releases>
+</component>

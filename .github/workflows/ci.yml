@@ -50,6 +50,23 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  mark-assets-drift:
+    name: mark assets match the generator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The committed files under assets/mark exist so a checkout is usable
+    # without running Rust first. This is what stops them being authoritative:
+    # hand-committed artwork nobody could regenerate is how three solid squares
+    # of #315FBA shipped as the Windows tiles.
+    #
+    # Only the vector sources are checked here. The platform rasters cannot be:
+    # .icns needs macOS and the MSIX tiles need Windows, so those regenerate and
+    # compare inside their own release jobs.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/mark/check-drift.sh
+
   cargo-clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
@@ -520,7 +537,27 @@ jobs:
             imagemagick \
             tesseract-ocr \
             tesseract-ocr-eng \
-            fonts-dejavu-core
+            fonts-dejavu-core \
+            desktop-file-utils \
+            appstream
+      # The desktop entry has always named an icon; until the icon slice
+      # nothing installed one, and a dangling Icon= is invisible until a
+      # software centre shows a blank tile. appstreamcli validate is the only
+      # thing that checks the metainfo at all, and Flathub runs it on
+      # submission, so it is better to fail here.
+      - name: Validate the desktop entry and AppStream metainfo
+        run: |
+          desktop-file-validate \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop
+          appstreamcli validate --no-net --pedantic \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml
+          # The entry names an icon; the manifest must install a file under
+          # that name. Checked as a pair because each half looks fine alone.
+          icon_name="$(sed -n 's/^Icon=//p' \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop)"
+          grep -q "apps/${icon_name}.svg" \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml \
+            || { echo "the flatpak manifest installs no icon named ${icon_name}" >&2; exit 1; }
       # trace-commons-contributor is a root-workspace crate; the shell links
       # it directly (see the crate's own Cargo.toml comment on why -- both
       # sides are Rust on Linux, no FFI boundary needed).

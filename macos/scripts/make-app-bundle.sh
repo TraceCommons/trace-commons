@@ -91,6 +91,19 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"
 
+# The app icon. Contents/Resources was created empty by every build before
+# this one -- an LSUIElement app never shows an icon, so nobody noticed there
+# was none to show. make-icons.sh verifies the result carries the mark rather
+# than trusting that iconutil wrote something.
+#
+# NOTE for the slice that removes LSUIElement: Info.plist still needs
+#   <key>CFBundleIconFile</key><string>AppIcon</string>
+# adding in scripts/info-plist.sh. That file is not this slice's to edit, and
+# without the key macOS falls back to the generic application icon even though
+# the .icns is sitting right here.
+./scripts/make-icons.sh "$REPO_ROOT/assets/mark/geometry.json" \
+  "$APP/Contents/Resources/AppIcon.icns"
+
 # cargo stamps the dylib with an absolute install name under target/. Repoint
 # it inside the bundle so the app does not depend on this checkout's path.
 install_name_tool -id "@rpath/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME" 2>/dev/null
