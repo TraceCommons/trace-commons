@@ -121,6 +121,101 @@ fn a_second_start_against_the_same_directory_fails_on_the_lock() {
     stop(a);
 }
 
+/// The reproduction that started sub-project G, pinned.
+///
+/// A hand-written `daemon-settings.json` -- the shape a person actually
+/// writes, missing `schema_version` and most required fields -- used to
+/// report the opaque `daemon-start-failed`, leaving a contributor and two
+/// agents with nothing to act on. It must name itself now.
+#[test]
+fn an_unparseable_settings_file_is_named_rather_than_flattened() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("daemon-settings.json"),
+        r#"{"claude_root":"/tmp/x","codex_root":"/tmp/y"}"#,
+    )
+    .unwrap();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(h.is_null(), "an unparseable settings file must not start");
+    assert_eq!(take_err(err), "settings-unreadable");
+
+    // And the failure must not leave behind the file every other reader
+    // treats as proof a daemon is running here.
+    assert!(
+        !dir.path().join("daemon.lock").exists(),
+        "a failed start left daemon.lock behind"
+    );
+}
+
+/// Lock contention names itself too, rather than sharing one label with
+/// every other way a start can fail.
+#[test]
+fn a_second_start_reports_lock_contention_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let b = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(b.is_null());
+    assert_eq!(take_err(err), "already-running");
+
+    stop(a);
+}
+
+/// No label crossing this boundary may carry a filesystem path.
+///
+/// A general guard rather than one case per label: the errors behind these
+/// embed the state-directory and lock-file paths for local stderr, so the
+/// failure mode is a future `format!` forwarding one, and that would not be
+/// caught by asserting the labels we happen to know about today. The
+/// contributor's home directory is checked explicitly because it carries the
+/// OS username, which is the specific disclosure that matters.
+#[test]
+fn no_start_failure_label_carries_a_path() {
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    // Each of these fails a start a different way.
+    let unparseable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unparseable.path().join("daemon-settings.json"),
+        r#"{"claude_root":"/tmp/x"}"#,
+    )
+    .unwrap();
+
+    let missing = unparseable.path().join("no-such-directory");
+
+    let contended = tempfile::tempdir().unwrap();
+    let held = start(contended.path());
+
+    let mut labels = Vec::new();
+    for dir in [unparseable.path(), missing.as_path(), contended.path()] {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
+        assert!(h.is_null(), "these directories must all fail to start");
+        labels.push(take_err(err));
+    }
+    stop(held);
+
+    for label in &labels {
+        assert!(
+            !label.contains('/') && !label.contains('\\'),
+            "a start-failure label carried a path separator: {label}"
+        );
+        assert!(
+            home.is_empty() || !label.contains(&home),
+            "a start-failure label carried the contributor's home directory: {label}"
+        );
+        assert!(
+            label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+            "a start-failure label must be a fixed kebab-case token: {label}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_method_returns_an_error_frame_rather_than_crashing() {
     let dir = tempfile::tempdir().unwrap();

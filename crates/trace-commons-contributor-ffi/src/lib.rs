@@ -97,11 +97,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
-use trace_commons_contributor::daemon::EmbeddedDaemon;
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
 use trace_commons_contributor::daemon::settings::{
     DaemonSettings, apply_settings_object, roots_declared,
 };
+use trace_commons_contributor::daemon::{EmbeddedDaemon, StartFailure};
 
 /// Catches a panic; on an ordinary `Err`, returns a fixed, content-free
 /// label rather than forwarding the underlying `anyhow::Error`'s `Display`
@@ -285,6 +285,35 @@ const ERR_DAEMON_START_FAILED: &str = "daemon-start-failed";
 /// unreachable.
 const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
 
+/// Fixed labels for the start failures the daemon can name, each mapped from
+/// a [`StartFailure`] variant rather than from the error's prose.
+///
+/// Every one exists because a contributor facing it has a different next
+/// action. `ERR_DAEMON_START_FAILED` remains for everything else, and remains
+/// opaque for the reason `finish_daemon_start` documents -- these are not a
+/// relaxation of that rule but the cases where a fixed, content-free fact can
+/// be stated without carrying any part of the underlying error across.
+const ERR_ALREADY_RUNNING: &str = "already-running";
+const ERR_STATE_DIR_NOT_WRITABLE: &str = "state-directory-not-writable";
+const ERR_SETTINGS_UNREADABLE: &str = "settings-unreadable";
+const ERR_IPC_BIND_FAILED: &str = "ipc-bind-failed";
+
+/// The fixed label for a start failure, or `ERR_DAEMON_START_FAILED` when the
+/// daemon did not name one.
+///
+/// Matches on the typed variant, never on the error text: the `anyhow` chain
+/// behind these embeds state-directory and lock-file paths, and reading it to
+/// decide a label is one careless `format!` away from forwarding them.
+fn start_failure_label(err: &anyhow::Error) -> &'static str {
+    match err.downcast_ref::<StartFailure>() {
+        Some(StartFailure::AlreadyRunning) => ERR_ALREADY_RUNNING,
+        Some(StartFailure::StateDirectoryNotWritable) => ERR_STATE_DIR_NOT_WRITABLE,
+        Some(StartFailure::SettingsUnreadable) => ERR_SETTINGS_UNREADABLE,
+        Some(StartFailure::IpcBindFailed) => ERR_IPC_BIND_FAILED,
+        None => ERR_DAEMON_START_FAILED,
+    }
+}
+
 /// Whether this store's persisted settings declare both session roots, as
 /// `daemon::settings::roots_declared` defines it -- the single definition of
 /// the rule, deliberately not restated here.
@@ -418,10 +447,11 @@ fn finish_daemon_start(result: anyhow::Result<tc_handle>, err: *mut *mut c_char)
             registry_insert(ptr as usize, AllocKind::Handle);
             ptr
         }
-        Err(_) => {
-            set_last_error(ERR_DAEMON_START_FAILED);
+        Err(e) => {
+            let label = start_failure_label(&e);
+            set_last_error(label);
             if !err.is_null() {
-                unsafe { *err = to_owned_cstring(ERR_DAEMON_START_FAILED) };
+                unsafe { *err = to_owned_cstring(label) };
             }
             std::ptr::null_mut()
         }
