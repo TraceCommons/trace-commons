@@ -2713,6 +2713,7 @@ dependencies = [
  "trace-commons-build-info",
  "trace-commons-contributor",
  "trace-commons-mark",
+ "trace-commons-protocol",
  "uuid",
  "zbus",
 ]
