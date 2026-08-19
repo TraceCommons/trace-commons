@@ -651,10 +651,17 @@ struct SettingsContent: View {
     // not built. Changing a mind about "ignore" -- set during onboarding or
     // never revisited since -- should not require a terminal, so that half
     // is wired to `AppModel.setProjectMode`, the same real `set_project_mode`
-    // call the onboarding screen uses. See `DaemonClient.setProjectMode` for
-    // why that call is expected to fail with `project-key-unrecognized` for
-    // every real project today; this view surfaces that the same way
-    // onboarding does rather than pretending the toggle always lands.
+    // call the onboarding screen uses.
+    //
+    // That call now names the project by the opaque id `list_projects` mints.
+    // It used to send `project_label` as a `project_key` and be refused with
+    // `project-key-unrecognized` for every real project, which this comment
+    // used to describe as expected; it is not expected any more.
+    //
+    // When the arming flow IS built, it must consult `ProjectRow.canBeArmed`
+    // rather than listing every `ProjectMode`. The daemon refuses
+    // `auto_upload` for the unresolvable bucket, so a control offering it
+    // there would be a choice that cannot be delivered.
     private var projects: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Projects")
@@ -665,18 +672,37 @@ struct SettingsContent: View {
                 Text("No projects seen yet.").font(TC.Font_.body).foregroundStyle(.secondary)
             } else {
                 ForEach(model.projects) { project in
-                    HStack {
-                        Text(project.projectLabel)
-                        Spacer()
-                        Text(modeSentence(project.mode)).foregroundStyle(.secondary)
-                        if project.mode == .ask || project.mode == .ignore {
-                            Button(project.mode == .ignore ? "Ask again" : "Ignore") {
-                                model.setProjectMode(
-                                    project,
-                                    mode: project.mode == .ignore ? .ask : .ignore
-                                )
+                    VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                        HStack {
+                            // `displayLabel`, not `projectLabel`: the bucket's
+                            // own label is the slug `unknown-project`. The row
+                            // is recognised by the daemon's
+                            // `is_unresolved_bucket` flag, never by that
+                            // string, which the IPC contract now forbids
+                            // matching on because it is display text.
+                            Text(project.displayLabel)
+                            Spacer()
+                            Text(modeSentence(project.mode)).foregroundStyle(.secondary)
+                            if project.mode == .ask || project.mode == .ignore {
+                                Button(project.mode == .ignore ? "Ask again" : "Ignore") {
+                                    model.setProjectMode(
+                                        project,
+                                        mode: project.mode == .ignore ? .ask : .ignore
+                                    )
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.bordered)
+                        }
+                        // Why this row is different, said on the row rather
+                        // than in a footnote -- and it also corrects the
+                        // section's closing sentence for this one project,
+                        // which otherwise reads as a promise that arming
+                        // becomes possible later. For this row it never does.
+                        if project.isUnresolvedBucket {
+                            Text(ProjectCopy.unresolvedBucketNote)
+                                .font(TC.Font_.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .font(TC.Font_.body)

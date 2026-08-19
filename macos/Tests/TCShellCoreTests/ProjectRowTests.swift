@@ -106,6 +106,50 @@ final class ProjectRowTests: XCTestCase {
         XCTAssertTrue(decoded[1].isUnresolvedBucket)
     }
 
+    /// The bucket can never be armed, and that is the daemon's rule rather
+    /// than a preference: `auto_upload` is refused for its key in two
+    /// independent places. Any future mode control must consult this instead
+    /// of listing every `ProjectMode`.
+    func testTheBucketCanNeverBeArmedAndOrdinaryProjectsCan() {
+        let bucket = ProjectRow(
+            projectId: "p_b", projectLabel: "unknown-project", mode: .ask,
+            isUnresolvedBucket: true
+        )
+        let ordinary = ProjectRow(projectId: "p_a", projectLabel: "frob", mode: .ask)
+        XCTAssertFalse(bucket.canBeArmed)
+        XCTAssertTrue(ordinary.canBeArmed)
+    }
+
+    /// Both surfaces that list projects show the same name for this row, and
+    /// neither shows the slug. Two screens naming one thing two ways is the
+    /// drift these constants exist to prevent.
+    func testTheBucketDisplaysSharedWordsAndNeverItsSlug() {
+        let bucket = ProjectRow(
+            projectId: "p_b", projectLabel: "unknown-project", mode: .ask,
+            isUnresolvedBucket: true
+        )
+        XCTAssertEqual(bucket.displayLabel, ProjectCopy.unresolvedBucketLabel)
+        XCTAssertEqual(bucket.displayLabel, "Sessions with no project")
+        XCTAssertNotEqual(bucket.displayLabel, bucket.projectLabel)
+    }
+
+    /// An ordinary project keeps its own name, including one that happens to
+    /// be called `unknown-project`.
+    func testAnOrdinaryProjectKeepsItsLabel() {
+        let row = ProjectRow(projectId: "p_a", projectLabel: "unknown-project", mode: .ask)
+        XCTAssertEqual(row.displayLabel, "unknown-project")
+    }
+
+    /// The note states what the daemon does. Pinned against the spec's words
+    /// so a reword in one shell does not pass unnoticed.
+    func testTheNoteSaysWhatTheDaemonDoes() {
+        XCTAssertEqual(
+            ProjectCopy.unresolvedBucketNote,
+            "Trace Commons can't tell which folder these ran in, so they can never "
+                + "be contributed automatically. You'll always be asked."
+        )
+    }
+
     /// A daemon predating the flag leaves rows plain rather than explained.
     /// Defaulting the other way would tell a contributor their own repository
     /// can never be contributed automatically, which is a lie about their

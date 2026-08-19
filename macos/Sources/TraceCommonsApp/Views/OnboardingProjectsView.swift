@@ -110,8 +110,8 @@ struct OnboardingProjectsContent: View {
             VStack(alignment: .leading, spacing: TC.Space.xxs) {
                 // The bucket's own label is `unknown-project`, a slug that
                 // means nothing to a contributor. The daemon marks the row;
-                // the shell names it.
-                Text(isBucket ? "Sessions with no project" : project.projectLabel)
+                // the shell names it, with the words Settings uses too.
+                Text(project.displayLabel)
                     .font(TC.Font_.body.weight(.semibold))
                 // `Ask me first` and `Ignored` are the words Settings already
                 // uses for these modes. Two screens setting one field must
@@ -122,13 +122,10 @@ struct OnboardingProjectsContent: View {
                     symbol: isIgnored ? "minus.circle" : "hand.raised"
                 )
                 if isBucket {
-                    Text("""
-                    Trace Commons can't tell which folder these ran in, so they can never be \
-                    contributed automatically. You'll always be asked.
-                    """)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Text(ProjectCopy.unresolvedBucketNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: TC.Space.m)
