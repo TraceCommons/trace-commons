@@ -58,9 +58,19 @@ fn info_plist_script_injects_the_version_it_is_given() {
         !plist.contains("<key>LSUIElement</key>"),
         "LSUIElement is back; the app would lose its Dock icon:\n{plist}"
     );
-    // The .icns can sit in Contents/Resources and still not be used: without
-    // this key macOS falls back to the generic application icon, which looks
-    // exactly like a build that forgot the artwork.
+    // The artwork can sit in Contents/Resources and still not be used:
+    // without these keys macOS falls back to the generic application icon,
+    // which looks exactly like a build that forgot the artwork.
+    //
+    // Both are asserted because losing either is a silent downgrade rather
+    // than a failure. CFBundleIconName resolves AppIcon out of Assets.car --
+    // the macOS 26 icon with the Liquid Glass treatment -- and dropping it
+    // quietly demotes the app to the flat legacy icns, which still renders
+    // and so would pass any check that only asked whether an icon appeared.
+    assert!(
+        plist.contains("<key>CFBundleIconName</key><string>AppIcon</string>"),
+        "CFBundleIconName lost; the Dock would fall back to the legacy icns:\n{plist}"
+    );
     assert!(
         plist.contains("<key>CFBundleIconFile</key><string>AppIcon</string>"),
         "CFBundleIconFile lost; the Dock would show the generic icon:\n{plist}"

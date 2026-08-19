@@ -328,11 +328,9 @@ maintenance, licence and transitive-count detail rather than folded in.
 Stated plainly, in the manner `docs/superpowers/specs/2026-08-16-signed-app-distribution-design.md`
 and the flatpak manifest already use.
 
-- No `.icon` document has been produced or compiled. `actool` 26.6 exists
-  locally with the documented `--app-icon` flag, but compiling an Icon
-  Composer document outside an Xcode project build, into a SwiftPM-produced
-  bundle, has not been demonstrated. The `iconutil` fallback exists for this
-  reason.
+- ~~No `.icon` document has been produced or compiled.~~ **RESOLVED, and the
+  premise was wrong.** See "The `.icon` route works from a build script"
+  below.
 - The full set of MSIX scale and targetsize qualifiers the manifest should
   declare has not been enumerated against Microsoft's current requirements.
 - `MarkRaster` renders the template variant only. The framed two-colour path
@@ -361,3 +359,61 @@ the pipeline does not.
 - Store submission of any kind — Microsoft Store, Flathub, Mac App Store.
   Each imposes its own icon requirements and each is an owner decision.
 - Marketing or community-site artwork. `community/` keeps its own.
+
+## Addendum: the `.icon` route works from a build script
+
+Recorded 2026-08-19, after implementation. The open question above assumed an
+Icon Composer document could not be produced outside Xcode. It can, and the
+belief was never tested — it sat in `macos/scripts/make-icons.sh` as a
+statement of fact, which is why it went unchallenged.
+
+What was established, each by doing it rather than by reading about it:
+
+- A `.icon` is a **directory**. Icon Composer's `Info.plist` exports the UTI
+  `com.apple.iconcomposer.icon` with `UTTypeConformsTo` = `com.apple.package`.
+- It holds `icon.json` plus an `Assets` directory of **SVGs**.
+  `IconComposerFoundation` carries the strings `Assets should be a directory`
+  and a diagnostic rejecting SVG assets that contain text elements, which is
+  only meaningful if SVG is the asset format. The mark's SVGs are pure paths.
+- `actool` compiles such a directory with no Xcode project involved, emitting
+  `Assets.car`, a fallback `AppIcon.icns`, and a partial `Info.plist`
+  declaring **both** `CFBundleIconFile` and `CFBundleIconName`.
+- The compiled result renders with the genuine macOS 26 Liquid Glass
+  treatment — system tile, shape, shadow and specular highlight.
+
+Two properties of `actool` that the implementation had to be built around,
+both verified deliberately:
+
+1. **It validates nothing.** An `icon.json` naming an asset file that does not
+   exist compiles without a warning, as does a key whose value is the wrong
+   JSON type. A typo therefore yields a different icon, not a failed build.
+   This is why `make-icon-document.sh` ends by decoding what came out.
+2. **Its output is not reproducible.** Two compilations of byte-identical
+   input produce different `Assets.car` bytes; rendition names embed fresh
+   UUIDs each run. So this artifact cannot join the byte-level drift check
+   that covers the SVG and PNG artwork. It is checked semantically instead.
+
+### The light/dark question is only half answered
+
+The `.icon` route removes the structural cause of the collapse: the layer is
+now the frameless glyph, so the ground belongs to the system rather than being
+baked into the artwork, and the compiled `Assets.car` declares
+`NSAppearanceNameDarkAqua` and `ISAppearanceTintable` appearances.
+
+What is **not** established is that the mark's own dark drawing
+(`mark-glyph-dark.svg`) is used. Specifically:
+
+- `IconComposerFoundation` carries the key name `image-name-specializations`,
+  but supplying it produced no observable difference in the compiled output,
+  and — per property 1 above — a wrong shape would be silently ignored rather
+  than reported. So the correct schema for appearance-specific artwork is
+  **unknown**, and nothing here relies on it. `mark-glyph-dark.svg` is
+  generated and committed but not currently consumed by the icon.
+- `NSWorkspace.icon(forFile:)` returns byte-identical images under `.aqua` and
+  `.darkAqua`, so that API cannot demonstrate the difference either way. The
+  Dock composites appearance at draw time.
+
+The honest position: the system derives a dark appearance, we have not shown
+it uses *our* dark palette, and confirming it needs either the correct
+specialization schema or an eyes-on comparison of the Dock under a real system
+appearance switch. Recorded rather than claimed.

@@ -179,6 +179,37 @@ pub fn svg(scheme: Scheme, size: u32) -> String {
     )
 }
 
+/// The frameless, two-colour glyph variant as an SVG document.
+///
+/// Both brackets in their own colours, on nothing. This is the variant an
+/// Icon Composer `.icon` wants: the system draws the tile, its shape, its
+/// shadow and its specular highlight, and composites the appearance -- so a
+/// layer that brought its own opaque ground would sit inside the system's
+/// tile as a light square that never changes, in dark and tinted appearances
+/// alike. That is exactly the light/dark collapse the `.icon` route exists to
+/// remove, so the ground is left to the system and only the mark is supplied.
+///
+/// Distinct from [`template_svg`], which is also frameless but collapses both
+/// brackets to a single ink for a status area. Here they keep their colours.
+pub fn glyph_svg(scheme: Scheme, size: u32) -> String {
+    format!(
+        concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
+            r#"viewBox="0 0 {view} {view}" role="img" aria-label="Trace Commons">"#,
+            r#"<path d="{green_path}" fill="none" stroke="{green}" stroke-width="{stroke}"/>"#,
+            r#"<path d="{blue_path}" fill="none" stroke="{blue}" stroke-width="{stroke}"/>"#,
+            r#"</svg>"#,
+        ),
+        size = size,
+        view = VIEW,
+        green_path = PATH_GREEN,
+        blue_path = PATH_BLUE,
+        stroke = STROKE_FRAMED,
+        green = scheme.green(),
+        blue = scheme.blue(),
+    )
+}
+
 /// The frameless, single-ink template variant as an SVG document.
 ///
 /// `ink` is a CSS colour written straight into the document -- pass
@@ -408,6 +439,13 @@ pub fn all_exports() -> Vec<Export> {
             },
             contents: template_svg(scheme.ink(), 1024),
         });
+        out.push(Export {
+            relative_path: match scheme {
+                Scheme::Light => "mark-glyph-light.svg",
+                Scheme::Dark => "mark-glyph-dark.svg",
+            },
+            contents: glyph_svg(scheme, 1024),
+        });
     }
     out.push(Export {
         relative_path: "geometry.json",
@@ -489,6 +527,50 @@ mod tests {
             assert_eq!(VIEW - green.0, blue.0, "x of {green:?} vs {blue:?}");
             assert_eq!(VIEW - green.1, blue.1, "y of {green:?} vs {blue:?}");
         }
+    }
+
+    /// The glyph variant exists so an Icon Composer `.icon` can supply the
+    /// mark and let the system supply the ground. If it carried the frame
+    /// rect, the icon would be a light tile in every appearance -- which is
+    /// the light/dark collapse the `.icon` route is meant to remove.
+    #[test]
+    fn the_glyph_variant_has_no_ground_of_its_own() {
+        for scheme in Scheme::ALL {
+            let doc = glyph_svg(scheme, 1024);
+            assert!(
+                !doc.contains("<rect"),
+                "{} glyph carries a frame rect: {doc}",
+                scheme.name()
+            );
+            assert!(
+                !doc.contains(scheme.surface()),
+                "{} glyph paints a surface",
+                scheme.name()
+            );
+            assert!(
+                doc.contains(scheme.green()),
+                "{} glyph lost the green bracket",
+                scheme.name()
+            );
+            assert!(
+                doc.contains(scheme.blue()),
+                "{} glyph lost the blue bracket",
+                scheme.name()
+            );
+            assert!(doc.contains(PATH_GREEN));
+            assert!(doc.contains(PATH_BLUE));
+        }
+    }
+
+    /// Both brackets keep their own colour. The template variant collapses
+    /// them to one ink on purpose; the glyph variant must not, or the icon
+    /// stops being the two-colour mark.
+    #[test]
+    fn the_glyph_variant_keeps_two_colours() {
+        let doc = glyph_svg(Scheme::Light, 1024);
+        assert_ne!(Scheme::Light.green(), Scheme::Light.blue());
+        assert!(doc.contains(Scheme::Light.green()));
+        assert!(doc.contains(Scheme::Light.blue()));
     }
 
     /// The palette literals here are copies of tokens that live in each
@@ -633,13 +715,13 @@ mod tests {
         assert!(!doc.contains("#178F70"), "template is single-ink: {doc}");
     }
 
-    /// Four documents, distinct paths, and none of them empty. The list drives
+    /// Seven documents, distinct paths, and none of them empty. The list drives
     /// both the export tool and the drift check, so a duplicate path here would
     /// silently drop a packaging surface.
     #[test]
-    fn exports_are_five_distinct_non_empty_documents() {
+    fn exports_are_seven_distinct_non_empty_documents() {
         let exports = all_exports();
-        assert_eq!(exports.len(), 5);
+        assert_eq!(exports.len(), 7);
         let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
         paths.sort_unstable();
         assert_eq!(
@@ -647,6 +729,8 @@ mod tests {
             [
                 "geometry.json",
                 "mark-dark.svg",
+                "mark-glyph-dark.svg",
+                "mark-glyph-light.svg",
                 "mark-light.svg",
                 "mark-template-dark.svg",
                 "mark-template-light.svg",

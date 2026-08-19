@@ -75,6 +75,16 @@ cat <<PLIST
          So the app is a regular one: Dock icon, App menu, Cmd-Tab. The
          MenuBarExtra stays, because it is still the right place for
          at-a-glance status; it is simply no longer the only door. -->
+    <!-- Both keys, which is the pair actool's own partial Info.plist emits
+         for a compiled .icon. CFBundleIconName resolves AppIcon out of
+         Assets.car, which is what macOS 26 draws and what carries the Liquid
+         Glass treatment; CFBundleIconFile names the AppIcon.icns beside it,
+         which is the fallback for anything that wants a file icon. Dropping
+         either one is a silent downgrade rather than a build failure: with
+         no IconName the system falls back to the flat legacy icns, and with
+         no IconFile a caller asking for the file icon gets the generic
+         document. -->
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <!-- Invite mail carries a tracecommons:// link to contributors on all
          three platforms. onOpenURL has been wired in the Connect screen
