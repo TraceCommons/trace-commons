@@ -109,6 +109,9 @@ struct MenuBarContent: View {
         case .refused:
             Text("Not watching anything")
             Text("Open the window for what to do about it")
+        case .needsRoots:
+            Text("Not watching anything yet")
+            Text("Open the window to choose which folders to watch")
         case .running:
             if model.decisionsOwed == 0 {
                 Text("Nothing waiting")

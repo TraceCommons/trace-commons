@@ -46,6 +46,11 @@ struct MainWindowView: View {
             // resolves.
             CenteredNotice(title: "The watcher isn't running.", detail: reason)
                 .onAppear { model.refreshAll() }
+        case .needsRoots:
+            // The one refusal with somewhere to go. Rendering it as a notice
+            // is what made a fresh install a dead end: every screen that
+            // could clear it was behind the daemon it was blocking.
+            OnboardingRootsView(configDirectory: model.configDirectory)
         case .running:
             // First-run detection: `status.logged_in` from the daemon's own
             // `status`, never a local file probe -- see `AppModel.start()`
