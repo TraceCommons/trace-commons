@@ -208,13 +208,21 @@ public sealed class SessionRootsTests
     [Fact]
     public void EvidenceDistinguishesMissingEmptyAndPopulatedStores()
     {
+        const string Path = @"C:\Users\z\.codex\sessions";
+
         string missing = SessionRootsCopy.Evidence(
-            new SourceCandidate { Source = SourceDiscovery.Codex, Exists = false });
-        string empty = SessionRootsCopy.Evidence(
-            new SourceCandidate { Source = SourceDiscovery.Codex, Exists = true, SessionCount = 0 });
+            new SourceCandidate { Source = SourceDiscovery.Codex, Path = Path, Exists = false });
+        string empty = SessionRootsCopy.Evidence(new SourceCandidate
+        {
+            Source = SourceDiscovery.Codex,
+            Path = Path,
+            Exists = true,
+            SessionCount = 0,
+        });
         string populated = SessionRootsCopy.Evidence(new SourceCandidate
         {
             Source = SourceDiscovery.Codex,
+            Path = Path,
             Exists = true,
             SessionCount = 3066,
             MostRecent = DateTimeOffset.UtcNow.AddMinutes(-120),
@@ -258,12 +266,39 @@ public sealed class SessionRootsTests
         Assert.False(string.IsNullOrWhiteSpace(SessionRootsCopy.ManualHint));
     }
 
+    /// <summary>
+    /// A store that exists is never described as having no location.
+    ///
+    /// Regression: the no-location branch originally tested the path alone and
+    /// ran first, so a discovered store with thousands of sessions was
+    /// reported as "no location for this agent" -- which would have turned the
+    /// one line that makes this screen a consent prompt back into an empty
+    /// box. Exists can only be true if a directory was stat'd, so it outranks
+    /// an empty path rather than the other way round.
+    /// </summary>
+    [Fact]
+    public void AStoreThatExistsIsNeverReportedAsHavingNoLocation()
+    {
+        string sentence = SessionRootsCopy.Evidence(new SourceCandidate
+        {
+            Source = SourceDiscovery.Codex,
+            Path = string.Empty,
+            Exists = true,
+            SessionCount = 3066,
+            MostRecent = DateTimeOffset.UtcNow,
+        });
+
+        Assert.DoesNotContain("no location", sentence, StringComparison.Ordinal);
+        Assert.Contains("3066", sentence, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void OneSessionIsNotPluralised()
     {
         string sentence = SessionRootsCopy.Evidence(new SourceCandidate
         {
             Source = SourceDiscovery.ClaudeCode,
+            Path = @"C:\Users\z\.claude\projects",
             Exists = true,
             SessionCount = 1,
             MostRecent = DateTimeOffset.UtcNow,

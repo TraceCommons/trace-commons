@@ -76,11 +76,18 @@ public static class SessionRootsCopy
     {
         ArgumentNullException.ThrowIfNull(candidate);
 
-        if (string.IsNullOrEmpty(candidate.Path))
+        if (!candidate.Exists && string.IsNullOrEmpty(candidate.Path))
         {
             // Discovery returned nothing for this source. Distinct from "the
             // conventional folder is not there": we do not even have a guess
             // to show, so the sentence has to ask rather than report.
+            //
+            // BOTH conditions, not just the empty path. Exists is only true
+            // when a directory was actually stat'd, which cannot have happened
+            // without a location -- so an emptiness check that outranked it
+            // would answer "no location for this agent" about a store holding
+            // thousands of sessions, turning the one line that makes this a
+            // consent prompt into a dead end.
             return "Trace Commons has no location for this agent. Type the folder its sessions are in.";
         }
 
