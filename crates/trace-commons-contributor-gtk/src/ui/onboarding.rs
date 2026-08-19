@@ -36,6 +36,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use trace_commons_contributor::daemon::policy;
 
 use crate::copy;
 use crate::model::Project;
@@ -888,6 +889,12 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     rule.add_css_class("tc-rule");
                     list.append(&rule);
                 }
+                // The bucket for sessions whose working directory the daemon
+                // could not name. Recognised by id rather than by label:
+                // `project_id_for` is a digest of the key and is what the row
+                // IS, where `project_label` is what it currently displays.
+                let unresolvable =
+                    project.project_id == policy::project_id_for(policy::UNKNOWN_PROJECT_KEY);
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
                 // Name over state, in a column, so the row reads as one thing
                 // with a property rather than two peers.
@@ -899,7 +906,14 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 // `settings::render_projects` states where it draws the same
                 // list.
                 let label = gtk::Label::builder()
-                    .label(&project.project_label)
+                    // The wire carries the slug `unknown-project` for the
+                    // bucket, which is an identifier and not a name. Every
+                    // other row's label is already a display name.
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_LABEL
+                    } else {
+                        project.project_label.as_str()
+                    })
                     .xalign(0.0)
                     .hexpand(true)
                     .wrap(true)
@@ -912,8 +926,18 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 // What will happen to this project, stated rather than left to
                 // be inferred from the absence of a control. Ask-first is the
                 // outcome for every row a contributor never touches.
+                //
+                // The unresolvable bucket says why it can never be anything
+                // else, which is the note the shared spec asks for. It stands
+                // in place of the state line rather than adding a third: the
+                // note ends "you'll always be asked", which is what the state
+                // line would have said.
                 let state = gtk::Label::builder()
-                    .label(copy::ONBOARD_WATCH_ASK_FIRST)
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                    } else {
+                        copy::ONBOARD_WATCH_ASK_FIRST
+                    })
                     .xalign(0.0)
                     .wrap(true)
                     .build();
@@ -975,7 +999,14 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         // And put the state back with it, or
                                         // the row would claim to be ignored
                                         // while the daemon still offers it.
-                                        row_state.set_label(copy::ONBOARD_WATCH_ASK_FIRST);
+                                        // The unresolvable bucket goes back to
+                                        // its note, not to the state line it
+                                        // never had.
+                                        row_state.set_label(if unresolvable {
+                                            copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                                        } else {
+                                            copy::ONBOARD_WATCH_ASK_FIRST
+                                        });
                                         app.toast(copy::PROJECT_MODE_FAILED);
                                     }
                                 }

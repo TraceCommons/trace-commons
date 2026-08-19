@@ -1057,6 +1057,29 @@ pub const ONBOARD_WATCH_IGNORED: &str = "Ignored";
 pub const ONBOARD_WATCH_EMPTY: &str =
     "No projects yet. Sessions you run later will appear here, and in Settings.";
 
+/// The human name for `policy::UNKNOWN_PROJECT_KEY`. The wire carries the
+/// slug `unknown-project` as this row's `project_label`, because
+/// `project_label_for` deliberately returns the constant rather than risk
+/// deriving a name from a path. A slug is the right answer on the socket and
+/// the wrong one on a screen.
+pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
+
+/// The note the shared spec asks for: "sessions with no resolvable project
+/// get a permanent plain-English note that they can never be armed."
+///
+/// Stated as a consequence rather than a fault. The daemon buckets these
+/// because a cwd with no usable final segment has no label but itself, and
+/// `project_label` reaches `daemon-audit.jsonl`, OS notification text and
+/// `HistoryRecord` -- so naming them would have written a full local path
+/// into all three. Not being armable is the protective half of that, not a
+/// degradation, and the wording should not read as an error a contributor
+/// might try to fix.
+///
+/// It replaces the state line rather than adding a third: "you'll always be
+/// asked" already says what `Ask me first` says.
+pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = "Trace Commons can't tell which folder these ran in, so they can never be contributed \
+     automatically. You'll always be asked.";
+
 /// The per-project control on screen 5. `Ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
 /// live thought at this moment and never returns, whereas arming automation
