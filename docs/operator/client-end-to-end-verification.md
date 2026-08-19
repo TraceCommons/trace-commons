@@ -79,6 +79,41 @@ A completed record is the release gate for the next `app-v*` tag.
 5. **A copy of the pass-record template**, at
    `docs/operator/verification-records/app-v<version>.md`.
 
+### Know what you are pointing the uploader at
+
+Read this before declaring a root in step 3.
+
+A Claude Code session tree is not only session transcripts.
+`~/.claude/projects/<encoded-cwd>/` holds the transcripts **and** a `memory/`
+subdirectory of private auto-memory notes kept as `.md` files, and `~/.claude`
+itself holds `history.jsonl` — the contributor's global prompt history across
+every project they have ever worked on.
+
+Exactly one thing keeps that material out of collection: the `.jsonl`
+extension filter at
+`crates/trace-commons-contributor/src/source/claude_code.rs:242`.
+
+```rust
+.filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+```
+
+Nothing names `memory/` or `history.jsonl` in order to exclude them. They are
+excluded incidentally, by a filter written for a different purpose. A change
+to that line — or a source that reaches the tree by another path — turns a
+trace uploader into a prompt-history uploader.
+
+So a campaign that declares a real `~/.claude` is, by construction, aiming the
+uploader at a tree containing private non-transcript material protected by one
+line of code. Two consequences for this procedure:
+
+- **Prefer a root that is not the operator's real `~/.claude`.** Declare the
+  scratch tree holding the synthetic fixtures. The point of the campaign is
+  the client's behaviour, not the operator's history.
+- **If a real tree must be declared** — because the pass is specifically
+  testing discovery against a realistic store — the tester is accepting that
+  exposure knowingly, and the closing check below is what confirms nothing
+  escaped.
+
 ---
 
 ## Why the launcher matters
@@ -169,6 +204,50 @@ publish a repo with no signed summary (lines 46-49), so a successful install
 exercises the signature chain rather than merely fetching bytes. An install
 that needed `--no-gpg-verify` is a **failure**, not a workaround.
 
+### The Windows pass is not one platform among three
+
+On macOS and Linux, this campaign is the last check before a contributor.
+**On Windows it is the only one there has ever been.**
+
+`TraceCommons.App` targets `net8.0-windows10.0.19041.0`
+(`windows/src/TraceCommons.App/TraceCommons.App.csproj:5`), and its build runs
+`XamlCompiler.exe` — a Windows-only net472 binary — *before* the C# compile
+step. It cannot be built on macOS or Linux at all, `EnableWindowsTargeting`
+notwithstanding. So every WinUI file reaches a compiler for the first time in
+CI's msbuild step, and nothing anywhere executes it: there is no UI test
+project in the tree (`find windows -type d -name "*App.Tests*"` returns
+nothing).
+
+The Interop layer is a different story and should not be confused with this
+one. `windows/tests/TraceCommons.Interop.Tests` holds 196 declared test
+methods across 10 files, exercised against the real cdylib locally and in CI.
+The boundary is well covered. **The screen is not covered at all.**
+
+Concretely, the roots screen, the main window, their view models, and the
+`DaemonHost` changes have been compiled but never run. A precedence error
+caught by a test during sub-project A's implementation would, unfixed, have
+described a store holding thousands of sessions as having no location — a
+defect invisible to every check that stops at compilation.
+
+Therefore the Windows leg of step 3 is walked state by state rather than as
+one instruction. Record each line separately:
+
+- [ ] The roots screen opens with **nothing pre-selected**. Neither agent is
+      chosen for the operator.
+- [ ] **Continue is disabled** until both agents have been answered. Confirm
+      by answering one and observing that Continue stays disabled.
+- [ ] Choosing **"I don't use this agent"** persists `{"mode":"off"}` for that
+      agent, and the choice survives closing and reopening the screen.
+- [ ] The **evidence line shows real counts** taken from the store — a
+      discovered session count and a location — not a placeholder, not zero
+      against a store that has sessions, and not a location that is absent
+      while the count is non-zero.
+- [ ] Continue proceeds, and the daemon starts against exactly the roots
+      declared.
+
+The same five states exist on macOS and Linux and are worth checking there
+too, but on Windows they are the entire quality signal for that screen.
+
 ### Step 14, per install method
 
 The channel differs by install method, and a check that merely asks "is there
@@ -215,21 +294,59 @@ content, no path, no code and no identity:
 For the preview, consent and connect steps the evidence is a written
 assertion of what was observed, not an image.
 
-**The screenshot check.** Before any image is committed, tick this box for it:
+### How to capture, and how not to
 
-- [ ] Opened at full size and inspected against the permitted list above:
-      no invite code, no filesystem path, no trace content, no contributor
-      identity, no token, no URL bearing a credential.
+This is a measured failure mode, not a hypothetical. On 2026-08-19, three
+separate agents verifying GUI work on this project captured the operator's own
+screen instead of their target: a Safari window, the full desktop, and a
+browser account-chooser page showing his email address. All three deleted the
+files and reported it. The cause was identical every time — a capture at
+coordinates recorded earlier, or a full-screen capture used as a fallback when
+the window could not be found. Both are unsafe the instant focus moves, and
+focus moves constantly.
 
-"Be careful with screenshots" is not a control; the checkbox is. Note that the
-existing captures under `docs/images/` are demo images, not verification
-evidence, and this rule does not retroactively govern them.
+That risk is **higher** for this campaign than it was for those agents. A
+verification pass runs on a machine with real session data, real mail, and a
+real browser on screen.
+
+Mandatory procedure for every image kept:
+
+1. **Locate the target window through the accessibility API at the moment of
+   capture.** Not from coordinates noted a minute ago, not from a previous
+   step, not from this runbook.
+2. **Capture that window's current frame**, as just returned.
+3. **Assert which process owns the window** before the image is kept, and
+   record that assertion in the record's visual-checks table.
+4. **Inspect the image at full size** against the permitted list above.
+
+**Never a full-screen capture. Never remembered coordinates.** There is no
+fallback that widens the capture: if the window cannot be located, verify that
+surface through files, logs, or the accessibility API instead, and record in
+the visual-checks table that the visual check was not performed. A missing
+visual check is an acceptable outcome. A capture of the operator's desktop is
+not, and it cannot be undone by deleting the file afterwards if it has already
+been committed.
+
+"Be careful with screenshots" is not a control; steps 1-4 and the table are.
+Note that the existing captures under `docs/images/` are demo images, not
+verification evidence, and this rule does not retroactively govern them.
 
 ---
 
 ## Cleanup
 
 Mandatory, and its results are recorded whether or not anything was found.
+
+0. **Confirm the submitted set is transcripts only.** Before withdrawing
+   anything, enumerate what the campaign actually submitted and confirm every
+   item is a session transcript — no `memory/` file, no `history.jsonl`
+   content, and a submitted count equal to the count of transcripts seeded.
+   Record the result as `submitted_set_transcripts_only`; the release gate
+   requires `pass`.
+
+   This is step zero rather than a footnote because it is the only check in
+   the campaign that would catch a regression in the one extension filter
+   described above, and withdrawal destroys the evidence needed to run it.
 
 1. **Withdraw every verification submission** through the client's own
    `withdraw`, backed by
@@ -276,6 +393,13 @@ pass.
 - **The Linux install completed without `--no-gpg-verify`.**
 - **Every seeded synthetic secret was found by step 9**, and the residual risk
   label matched the fixture's expectation.
+- **The submitted set was transcripts only**, confirmed before withdrawal, and
+  recorded as `submitted_set_transcripts_only`.
+- **Every kept screenshot located its window at capture time** and asserted
+  the owning process. No full-screen capture was taken. Surfaces whose window
+  could not be located are recorded as not visually checked.
+- **The Windows roots screen was walked state by state**, with all five lines
+  recorded, since nothing else exercises that UI.
 - **Withdrawal count recorded**, and `/v1/account/traces` shows nothing left
   for the verification identity.
 - **Quarantine count recorded and reconciled**, zero or otherwise.
@@ -325,6 +449,12 @@ harness that enrolls, declares roots, generates a session, previews, approves
 and withdraws belongs in CI on Linux and Windows. The client path — whether
 the installed bundle launches, whether the roots screen appears, whether the
 menu-bar mark is visible — is manual on all three platforms.
+
+Windows deserves a specific note here, because its CI presence is misleading.
+Four `windows-latest` jobs exist and the WinUI app does compile in one of
+them, which reads like coverage. It is not: compilation is the only thing that
+happens to that UI anywhere, and the 196 Interop tests that do run cover the
+layer beneath it. See "The Windows pass is not one platform among three".
 
 macOS is the hardest case and should not be papered over.
 `.github/workflows/ci.yml` has nine `ubuntu-latest` jobs and four

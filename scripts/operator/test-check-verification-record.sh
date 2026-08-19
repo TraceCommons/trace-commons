@@ -53,6 +53,7 @@ invite_hash: $GOOD_INVITE_HASH
 platform_macos: pass
 platform_linux: pass
 platform_windows: pass
+submitted_set_transcripts_only: pass
 submissions_withdrawn: 6
 quarantined_found: 2
 quarantined_resolved: 2
@@ -155,6 +156,10 @@ expect_failure MalformedPlatformResult_platform_linux 1.0.8 \
   's/^platform_linux:.*/platform_linux: probably/'
 expect_failure MalformedCount_submissions_withdrawn 1.0.9 \
   's/^submissions_withdrawn:.*/submissions_withdrawn: several/'
+expect_failure SubmittedSetNotTranscriptsOnly 1.0.10 \
+  's/^submitted_set_transcripts_only:.*/submitted_set_transcripts_only: fail/'
+expect_failure MalformedTranscriptsOnly 1.0.11 \
+  's/^submitted_set_transcripts_only:.*/submitted_set_transcripts_only: mostly/'
 expect_failure QuarantineUnreconciled 1.1.0 \
   's/^quarantined_resolved:.*/quarantined_resolved: 1/'
 expect_failure UpdateChannelNotCurrent_update_channel_macos_brew 1.1.1 \

@@ -96,6 +96,7 @@ REQUIRED_KEYS="version date operator
 artifact_sha256_macos artifact_sha256_linux artifact_sha256_windows
 invite_hash
 platform_macos platform_linux platform_windows
+submitted_set_transcripts_only
 submissions_withdrawn quarantined_found quarantined_resolved
 update_channel_macos_brew update_channel_macos_dmg
 update_channel_linux_flatpak update_channel_windows_appinstaller
@@ -134,6 +135,25 @@ for key in platform_macos platform_linux platform_windows; do
     *) fail "MalformedPlatformResult_$key" ;;
   esac
 done
+
+# The watched tree contains private material that is NOT transcripts. Under
+# `~/.claude` sit `history.jsonl` -- the contributor's global prompt history
+# across every project -- and a `memory/` directory of private auto-memory
+# notes per project. Exactly one line keeps those out of collection: the
+# `.jsonl` extension filter at
+# crates/trace-commons-contributor/src/source/claude_code.rs:242. Nothing
+# names those paths to exclude them; they are excluded incidentally.
+#
+# So a campaign asserts, as a first-class result, that what it actually
+# submitted was session transcripts and nothing else. A regression in that one
+# filter is the difference between uploading a trace and uploading somebody's
+# prompt history.
+TRANSCRIPTS_ONLY="$(value_of submitted_set_transcripts_only)"
+case "$TRANSCRIPTS_ONLY" in
+  pass) ;;
+  fail) fail "SubmittedSetNotTranscriptsOnly" ;;
+  *) fail "MalformedTranscriptsOnly" ;;
+esac
 
 # Cleanup counts. Verification traces are real traces on a real server; a
 # campaign that leaves them behind has not finished.

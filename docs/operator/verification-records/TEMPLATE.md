@@ -26,6 +26,7 @@ invite_hash: FILLME
 platform_macos: FILLME
 platform_linux: FILLME
 platform_windows: FILLME
+submitted_set_transcripts_only: FILLME
 submissions_withdrawn: FILLME
 quarantined_found: FILLME
 quarantined_resolved: FILLME
@@ -46,6 +47,7 @@ Accepted values:
 | `artifact_sha256_*` | 64 hex characters. The hash of the artifact actually installed, not of a build you have locally |
 | `invite_hash` | 64 hex characters. The verification invite's hash, never the code itself |
 | `platform_*` | `pass`, `fail`, or `not-run`. The gate requires `pass` on all three |
+| `submitted_set_transcripts_only` | `pass` or `fail`. Every submission was a session transcript, and no memory file or prompt history was collected. The gate requires `pass` |
 | `submissions_withdrawn` | Integer. How many submissions step 13 withdrew |
 | `quarantined_found` | Integer. Recorded even when zero |
 | `quarantined_resolved` | Integer. Must equal `quarantined_found` |
@@ -94,6 +96,26 @@ campaign's job is to find them and file them.
 
 | Defect | Platform | Step | Filed as |
 |---|---|---|---|
+
+## Visual checks
+
+One row per screenshot kept. "Not performed" is an acceptable outcome and does
+not fail the campaign; a full-screen capture is never acceptable. See the
+runbook's screenshot rules.
+
+| Surface | Window located at capture time | Owning process asserted | Result |
+|---|---|---|---|
+| Roots screen, empty state | | | |
+| Refusal notice | | | |
+| macOS Dock icon and menu-bar mark | | | |
+| Done screen | | | |
+
+## Collected-set confirmation
+
+- [ ] Every submission in the campaign was a session transcript.
+- [ ] No `memory/` file was collected.
+- [ ] No `history.jsonl` content was collected.
+- [ ] The count of submitted items equals the count of transcripts seeded.
 
 ## Cleanup confirmation
 
