@@ -159,10 +159,28 @@ fn present_with<F>(
     continue_button.add_css_class("suggested-action");
     continue_button.set_sensitive(false);
 
+    // A rule between the two source blocks. Without one the boundary is
+    // carried by whitespace and a bold title alone, and the three controls of
+    // the first block sit closer to the second block's title than that title
+    // sits to its own controls -- so the eye groups them wrongly. Each block
+    // asks for a separator ahead of itself except the first, which is the same
+    // rule the history cells use for their divider.
     let choices: Rc<Vec<Choice>> = Rc::new(
         candidates
             .iter()
-            .map(|candidate| build_choice(&outer, candidate, &window))
+            .enumerate()
+            .map(|(index, candidate)| {
+                if index > 0 {
+                    let rule = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .margin_top(space::S)
+                        .margin_bottom(space::S)
+                        .build();
+                    rule.add_css_class("tc-rule");
+                    outer.append(&rule);
+                }
+                build_choice(&outer, candidate, &window)
+            })
             .collect(),
     );
 
