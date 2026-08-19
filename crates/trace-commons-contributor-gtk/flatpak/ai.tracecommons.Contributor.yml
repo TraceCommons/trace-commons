@@ -131,6 +131,14 @@ modules:
       - cargo --offline build --release --target-dir target --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
       - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
       - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
+      # The icon the desktop entry has always named and nothing has ever
+      # installed. Scalable SVG rather than a raster ladder: the file is
+      # generated from crates/trace-commons-mark, and hicolor/scalable means
+      # Linux needs no rasterizer on this path at all.
+      - install -Dm644 assets/mark/mark-light.svg /app/share/icons/hicolor/scalable/apps/ai.tracecommons.Contributor.svg
+      # AppStream metainfo. GNOME Software and KDE Discover index this file,
+      # not the desktop entry, and will not show the application without it.
+      - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml /app/share/metainfo/ai.tracecommons.Contributor.metainfo.xml
     sources:
       - type: dir
         path: ../../..
