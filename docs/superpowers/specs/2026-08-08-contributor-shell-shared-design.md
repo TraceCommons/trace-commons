@@ -166,6 +166,31 @@ this moment and never returns, whereas arming automation before seeing a
 single preview is asking for trust not yet earned. Sessions with no resolvable
 project get a permanent plain-English note that they can never be armed.
 
+The screen's words, added 2026-08-19. This section previously specified only
+behaviour and gave the screen no copy, so it shipped as a bare title over an
+unlabelled list -- on the one screen deciding which of a contributor's
+repositories are eligible to leave the machine. All three shells transcribe
+these; do not reword them in one client alone.
+
+> **What to watch**
+>
+> Every project starts at ask-first: you see each session before anything is
+> sent. Ignore a project to leave it out entirely.
+>
+> `PROJECTS` (section eyebrow)
+>
+> Per row: the project name, with its mode beneath as **Ask me first** or
+> **Ignored**. `Ask me first` is the vocabulary Settings already uses for this
+> mode -- two screens setting one field must not name it two ways, and
+> `Ignored` echoes the button that produced it rather than introducing a third
+> name.
+>
+> Empty: **No projects yet. Sessions you run later will appear here, and in
+> Settings.**
+
+The subtitle states the default before the exception on purpose: the default
+is what happens to a contributor who reads nothing and clicks Continue.
+
 ### 6. Done
 
 > **You're set up. Nothing has been sent.**
