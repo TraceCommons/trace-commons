@@ -214,6 +214,25 @@ public sealed partial class MainWindow : Window
         Activated -= OnFirstActivated;
         await ViewModel.InitializeAsync();
 
+        // Everything below this point talks to a daemon. A start refused for
+        // undeclared session sources has none, so the roots screen goes first
+        // and the rest resumes once it has been answered. Onboarding in
+        // particular is entirely daemon IPC, so running it here would ask the
+        // contributor to enrol through a socket that is not there.
+        if (ViewModel.NeedsSessionRoots)
+        {
+            await ShowSessionRootsAsync();
+            return;
+        }
+
+        await ContinueStartupAsync();
+    }
+
+    /// <summary>
+    /// The startup work that requires a running daemon.
+    /// </summary>
+    private async Task ContinueStartupAsync()
+    {
         // After the queue is on screen, not before. The update check is a
         // network round trip through the deployment service and nothing
         // about it should stand between a contributor and the sessions they
@@ -222,6 +241,41 @@ public sealed partial class MainWindow : Window
 
         await RefreshTrayAsync();
         await ShowOnboardingIfNeededAsync();
+    }
+
+    /// <summary>
+    /// Asks which session folders to watch, then resumes startup.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A window rather than a page: until this is answered there is no daemon,
+    /// so the queue behind it has nothing to show and no menu it offers would
+    /// work.
+    /// </para>
+    /// <para>
+    /// Discovery runs on a background thread. It counts session files
+    /// recursively under both stores, which on a working developer's machine
+    /// is thousands of them, and that is a visible hang if it happens on the
+    /// UI thread. Same reasoning as the daemon start above.
+    /// </para>
+    /// </remarks>
+    private async Task ShowSessionRootsAsync()
+    {
+        IReadOnlyList<SourceCandidate> candidates = await Task
+            .Run(SourceDiscovery.ProbeThisMachine)
+            .ConfigureAwait(true);
+
+        var roots = new SessionRootsWindow(_host, candidates);
+        roots.Declared += OnSessionRootsDeclared;
+        roots.Activate();
+    }
+
+    private async void OnSessionRootsDeclared()
+    {
+        // The daemon is up now, so the queue window needs the first snapshot
+        // it could not load, and then the startup it did not finish.
+        await ViewModel.RefreshAsync();
+        await ContinueStartupAsync();
     }
 
     /// <summary>

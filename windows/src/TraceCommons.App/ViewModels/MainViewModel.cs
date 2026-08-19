@@ -52,6 +52,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _isPaused;
     private bool _isUpdateBannerVisible;
     private bool _isUpdateApplyEnabled;
+    private bool _needsSessionRoots;
 
     private string _notice = string.Empty;
     private ApprovalHold? _undoHold;
@@ -550,12 +551,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// A start failure is shown rather than thrown: the overwhelmingly likely
     /// cause is another instance already holding the state directory's lock,
     /// which is a thing to tell the contributor plainly, not a crash.
+    ///
+    /// One failure is not a fault at all. A daemon refused because the session
+    /// sources are undeclared is waiting for an answer nobody has been asked
+    /// for yet, so it sets <see cref="NeedsSessionRoots"/> and the caller
+    /// shows the roots screen. Reporting that as "another instance may already
+    /// be running" would be telling the contributor something false about
+    /// their own machine, and leaving them with nothing to do about it.
     /// </summary>
     public async Task InitializeAsync()
     {
         try
         {
             await _host.StartAsync().ConfigureAwait(true);
+            NeedsSessionRoots = false;
+        }
+        catch (TcException exception) when (exception.IsRootsNotDeclared)
+        {
+            NeedsSessionRoots = true;
+            StatusText = "Trace Commons is not watching anything yet.";
+            return;
         }
         catch (TcException)
         {
@@ -567,6 +582,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Whether the last start was refused because the contributor has not yet
+    /// said which session folders to watch.
+    /// </summary>
+    public bool NeedsSessionRoots
+    {
+        get => _needsSessionRoots;
+        private set
+        {
+            if (_needsSessionRoots != value)
+            {
+                _needsSessionRoots = value;
+                Raise(nameof(NeedsSessionRoots));
+            }
+        }
     }
 
     /// <summary>
