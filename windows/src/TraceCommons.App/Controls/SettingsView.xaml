@@ -1,15 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    The Settings screen, and its first panel: the public profile from section
+    The complete device Settings screen, plus the public profile from section
     5.6 of the design spec.
 
-    Three methods back it (get_public_profile, set_public_profile,
-    clear_public_profile). Every one of them was already in the daemon's
-    pinned METHODS array; this screen adds no method.
-
-    Until this existed, claiming a public handle was the one thing a
-    contributor could do on Linux and macOS and not on Windows, and this app
-    had no Settings destination to put it on at all.
+    Every value comes from the daemon or the operating system. Timing edits
+    send one set_settings key at a time, project changes use opaque project
+    ids, and the local audit log contains fixed labels only.
 
     Two surfaces, not two states of one. Off the roster this is a single
     control that grants nothing and opens a consent dialog; on it, it is a
@@ -19,11 +15,6 @@
 
     The footnote sits OUTSIDE the panel, in the window's own type: it is this
     window talking about the public surface, not part of it.
-
-    Anything else the design spec puts under Settings (the watcher knobs, the
-    connection section, the project list) is absent rather than drawn
-    disabled, and windows/README.md still lists it. A control that leads
-    nowhere would be this screen's first untrue statement.
 
     XML comments cannot contain a double hyphen, so the prose here uses commas
     and parentheses where the C# files use dashes.
@@ -45,13 +36,184 @@
                     BorderBrush="{ThemeResource TcHairlineDividerBrush}"
                     BorderThickness="0,0,0,1">
             <TextBlock Text="Settings" Style="{StaticResource TcTitleScreenTextStyle}" />
-            <TextBlock Text="What this device shares, and under whose name."
+            <TextBlock Text="What this machine watches, and what your traces are allowed to do."
                        Style="{StaticResource TcCaptionTextStyle}"
                        TextWrapping="Wrap" />
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+
+                <TextBlock Text="CONNECTION"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind Settings.ConnectionText, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}" />
+                        <TextBlock Text="{x:Bind Settings.ConnectionDetail, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasConnectionDetail, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <ItemsControl ItemsSource="{x:Bind Settings.ConnectionRows}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:ConnectionStatusViewModel">
+                                    <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" Margin="0,2">
+                                        <FontIcon Grid.Column="0" Glyph="&#xE73E;" FontSize="11" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind Text}"
+                                                   Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Grid.Column="2" Text="{x:Bind State}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Text="STARTUP"
+                           Style="{StaticResource TcEyebrowTextStyle}"
+                           Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
+                <ToggleSwitch Header="Start Trace Commons when you sign in"
+                              IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
+                              IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                              Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
+                              Toggled="OnStartAtLoginToggled" />
+
+                <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock Text="Applies to traces you send from now on."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                <TextBlock Text="ALWAYS INCLUDED"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.AlwaysIncluded}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                                      IsEnabled="False"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.OptionalScopes}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                      IsEnabled="{x:Bind IsEnabled}"
+                                      Click="OnConsentChanged"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="Nothing here is pre-selected on your behalf."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                <TextBlock Text="HOW IT BEHAVES"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <StackPanel Spacing="10">
+                        <NumberBox x:Name="QuiescenceMinutes"
+                                   Header="Quiet time before a session counts as finished (minutes)"
+                                   Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
+                                   Minimum="1"
+                                   Maximum="240"
+                                   SmallChange="1"
+                                   SpinButtonPlacementMode="Inline"
+                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                   ValueChanged="OnBehaviorChanged" />
+                        <NumberBox x:Name="ApprovalHoldSeconds"
+                                   Header="How long you can take something back (seconds after approval)"
+                                   Value="{x:Bind Settings.ApprovalHoldSeconds, Mode=OneWay}"
+                                   Minimum="0"
+                                   Maximum="300"
+                                   SmallChange="1"
+                                   SpinButtonPlacementMode="Inline"
+                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                   ValueChanged="OnBehaviorChanged" />
+                        <TextBlock Text="No undo window. Approving sends on the next pass."
+                                   Visibility="{x:Bind Settings.HasNoUndoWindow, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <NumberBox x:Name="DigestHours"
+                                   Header="How often you can be interrupted (hours between notifications, at most)"
+                                   Value="{x:Bind Settings.DigestHours, Mode=OneWay}"
+                                   Minimum="1"
+                                   Maximum="24"
+                                   SmallChange="1"
+                                   SpinButtonPlacementMode="Inline"
+                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                   ValueChanged="OnBehaviorChanged" />
+                        <TextBlock Text="{x:Bind Settings.QueueExpiryText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.NotificationOwnerText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="These govern the background watcher, not this window, and take effect as soon as they are changed. The same values are readable and settable from the command line."
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Text="PROJECTS"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock Text="No projects seen yet."
+                           Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.Projects}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ProjectSettingViewModel">
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
+                                <TextBlock Grid.Column="0" Text="{x:Bind ProjectLabel}"
+                                           Style="{StaticResource TcBodyDenseTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           VerticalAlignment="Center" />
+                                <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
+                                        IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
+                                        Click="OnProjectMode"
+                                        Style="{StaticResource TcSecondaryButtonStyle}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="Arming a project so it contributes without asking is a deliberate confirmation flow, and it is not built yet."
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="{x:Bind Settings.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind Settings.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcBodyDenseTextStyle}"
+                           TextWrapping="Wrap" />
 
                 <TextBlock Text="{x:Bind ViewModel.HeadingText}"
                            Style="{StaticResource TcTitleSectionTextStyle}" />
@@ -166,6 +328,25 @@
                            Style="{StaticResource TcCaptionTextStyle}"
                            Foreground="{ThemeResource TcInkTertiaryBrush}"
                            TextWrapping="Wrap" />
+
+                <TextBlock Text="WHAT HAS BEEN CHANGED ON THIS MACHINE"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock Text="Nothing has been changed."
+                           Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AuditSettingViewModel">
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">
+                                <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
+                                           Style="{StaticResource TcMonoChipTextStyle}" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </StackPanel>
         </ScrollViewer>
     </Grid>

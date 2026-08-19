@@ -44,10 +44,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly DaemonHost _host;
     private readonly AppUpdater? _updater;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly SemaphoreSlim _watchingChangeGate = new(1, 1);
     private readonly DispatcherQueueTimer _undoTick;
     private string _statusText = "Starting…";
     private string _updateStatusText = string.Empty;
     private bool _isBusy;
+    private bool _isPaused;
     private bool _isUpdateBannerVisible;
     private bool _isUpdateApplyEnabled;
 
@@ -243,6 +245,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>The inverse of <see cref="IsBusy"/>, for enabling controls.</summary>
     public bool IsNotBusy => !_isBusy;
 
+    /// <summary>Whether the daemon has stopped discovering and sending.</summary>
+    public bool IsPaused => _isPaused;
+
+    /// <summary>The inverse used by the Waiting header's mutually exclusive controls.</summary>
+    public bool IsWatching => !_isPaused;
+
     /// <summary>True when there is nothing pending, for an empty-state view.</summary>
     public bool IsEmpty => Pending.Count == 0;
 
@@ -405,6 +413,63 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// Pauses through the daemon, which persists timed deadlines across app
+    /// restarts. Nothing already waiting is discarded.
+    /// </summary>
+    public async Task PauseAsync(PauseDuration duration)
+    {
+        if (!await _watchingChangeGate.WaitAsync(0).ConfigureAwait(true))
+        {
+            return;
+        }
+
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(
+                    DaemonProtocol.Methods.Pause,
+                    PauseRequest.Serialize(duration, DateTimeOffset.UtcNow))
+                .ConfigureAwait(true);
+
+            Notice = response.IsError
+                ? "Watching couldn't be paused just now. Nothing already waiting was changed."
+                : string.Empty;
+
+            await RefreshAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _watchingChangeGate.Release();
+        }
+    }
+
+    /// <summary>Resumes discovery and the normal upload sweep.</summary>
+    public async Task ResumeAsync()
+    {
+        if (!await _watchingChangeGate.WaitAsync(0).ConfigureAwait(true))
+        {
+            return;
+        }
+
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.Resume)
+                .ConfigureAwait(true);
+
+            Notice = response.IsError
+                ? "Watching couldn't be resumed just now."
+                : string.Empty;
+
+            await RefreshAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _watchingChangeGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Recalls an approval, backed by the daemon's <c>cancel</c>.
     /// </summary>
     /// <remarks>
@@ -541,9 +606,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // condition is over, and clearing on silence would retract a
             // "nothing is being sent" the contributor is entitled to keep
             // seeing until something says otherwise.
-            if (!status.IsError)
+            if (!status.IsError && status.ResultAs<DaemonStatus>() is { } parsedStatus)
             {
-                SetHealth(status.ResultAs<DaemonStatus>()?.Health?.LastErrorLabel);
+                SetPaused(parsedStatus.Paused);
+                SetHealth(parsedStatus.Health?.LastErrorLabel);
             }
 
             DaemonResponse rollup = await _host
@@ -678,6 +744,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(HealthDetail));
         Raise(nameof(HasHealthAction));
         Raise(nameof(HealthActionLabel));
+    }
+
+    private void SetPaused(bool paused)
+    {
+        if (_isPaused == paused)
+        {
+            return;
+        }
+
+        _isPaused = paused;
+        Raise(nameof(IsPaused));
+        Raise(nameof(IsWatching));
     }
 
     private static string DescribeQueue(int count) => count switch

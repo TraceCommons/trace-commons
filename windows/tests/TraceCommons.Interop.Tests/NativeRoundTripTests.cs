@@ -26,6 +26,8 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public sealed class NativeRoundTripTests : IDisposable
 {
+    private const string PlantedSecret = "sk-fake-windows-preview-secret-1234";
+
     private readonly string _configDir;
     private readonly string _settingsJson;
 
@@ -73,6 +75,87 @@ public sealed class NativeRoundTripTests : IDisposable
     }
 
     private TcDaemon StartDaemon() => new(_configDir, _settingsJson);
+
+    /// <summary>
+    /// Seeds the exact local state the Windows app sees after enrollment and
+    /// discovery: one enrolled contributor, one real Claude session, and one
+    /// pending queue entry pointing at it.
+    /// </summary>
+    /// <remarks>
+    /// The queue is written before the daemon starts instead of waiting for
+    /// two watcher polls. A first sighting is deliberately unstable and the
+    /// production poll interval is a minute, neither of which belongs in a
+    /// test whose subject is preview-then-approve rather than discovery.
+    /// Every path remains inside this test's private temp directory.
+    /// </remarks>
+    private string SeedEnrolledQueuedSession()
+    {
+        string claudeRoot = Path.Combine(_configDir, "claude");
+        string projectDir = Path.Combine(claudeRoot, "-Users-testuser-code-windows-preview");
+        Directory.CreateDirectory(projectDir);
+
+        string sessionPath = Path.Combine(projectDir, "preview-session.jsonl");
+        string session = JsonSerializer.Serialize(new
+        {
+            type = "user",
+            message = new
+            {
+                role = "user",
+                content = $"deploy with key {PlantedSecret}",
+            },
+            cwd = "/Users/testuser/code/windows-preview",
+            timestamp = "2026-08-18T10:00:00Z",
+            version = "2.0.1",
+            sessionId = "preview-session",
+            uuid = "a1",
+        });
+        File.WriteAllText(sessionPath, session + Environment.NewLine);
+
+        string contributor = JsonSerializer.Serialize(new
+        {
+            schema_version = "trace_commons.contributor_config.v1",
+            issuer_url = "http://issuer.invalid",
+            ingest_url = "http://ingest.invalid",
+            audience = "trace-commons-upload",
+            tenant_id = "tenant-windows-test",
+            instance_id = "instance-windows-test",
+            user_subject = "windows-test-user",
+            device_key_id = "sha256:windows-test",
+            consent_scopes = new[] { "debugging_evaluation" },
+            pii_filter = (string?)null,
+            allowed_hosts = (string?)null,
+        });
+        File.WriteAllText(Path.Combine(_configDir, "contributor.json"), contributor);
+
+        string entryId = Guid.NewGuid().ToString();
+        string queueEntry = JsonSerializer.Serialize(new
+        {
+            entry_id = entryId,
+            session_hash = "sha256:windows-preview-round-trip",
+            source = "claude-code",
+            project_key = "/Users/testuser/code/windows-preview",
+            project_label = "windows-preview",
+            path = sessionPath,
+            size_bytes = new FileInfo(sessionPath).Length,
+            discovered_at = "2026-08-18T10:01:00Z",
+            state = "pending",
+            reason_label = (string?)null,
+            attempts = 0,
+            retry_after = (string?)null,
+            submission_id = (string?)null,
+            approved_scopes = (string[]?)null,
+            approved_inputs = (string?)null,
+            previewed_envelope_digest = (string?)null,
+            approved_at = (string?)null,
+            subagent_count = 0,
+            subagents_dropped = 0,
+        });
+        File.WriteAllText(
+            Path.Combine(_configDir, "daemon-queue.jsonl"),
+            queueEntry + Environment.NewLine);
+
+        return entryId;
+    }
 
     public void Dispose()
     {
@@ -124,8 +207,14 @@ public sealed class NativeRoundTripTests : IDisposable
                      DaemonProtocol.Methods.ListPending,
                      DaemonProtocol.Methods.Pause,
                      DaemonProtocol.Methods.Resume,
+                     DaemonProtocol.Methods.GetSettings,
+                     DaemonProtocol.Methods.SetSettings,
+                     DaemonProtocol.Methods.ListProjects,
+                     DaemonProtocol.Methods.SetProjectMode,
+                     DaemonProtocol.Methods.ListAudit,
                      DaemonProtocol.Methods.Approve,
                      DaemonProtocol.Methods.Dismiss,
+                     DaemonProtocol.Methods.Cancel,
                      DaemonProtocol.Methods.Shutdown,
 
                      // The roster profile. Named here rather than trusted,
@@ -170,6 +259,69 @@ public sealed class NativeRoundTripTests : IDisposable
         // assertion that matters is that the envelope and payload deserialize
         // into the shapes the UI binds to.
         Assert.NotNull(pending!.Pending);
+    }
+
+    [Fact]
+    public void PauseDeadlineAndResumeRoundTripThroughTheNativeBinding()
+    {
+        using TcDaemon daemon = StartDaemon();
+        string pause = PauseRequest.Serialize(
+            PauseDuration.OneHour,
+            DateTimeOffset.UtcNow);
+
+        DaemonResponse paused = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Pause, pause));
+        Assert.False(paused.IsError);
+        Assert.True(Status(daemon).Paused);
+
+        DaemonResponse resumed = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Resume));
+        Assert.False(resumed.IsError);
+        Assert.False(Status(daemon).Paused);
+    }
+
+    [Fact]
+    public void ProjectSettingsUseTheDaemonsOpaqueIdAndLabel()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        ProjectSettingsPayload? payload = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListProjects))
+            .ResultAs<ProjectSettingsPayload>();
+
+        ProjectSetting project = Assert.Single(payload!.Projects);
+        Assert.False(string.IsNullOrWhiteSpace(project.ProjectId));
+        Assert.Equal("windows-preview", project.ProjectLabel);
+        Assert.DoesNotContain('/', project.ProjectId);
+        Assert.DoesNotContain('\\', project.ProjectId);
+    }
+
+    [Fact]
+    public void BehaviorSettingAndAuditRoundTripThroughTheNativeBinding()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        DaemonResponse changed = DaemonResponse.Parse(
+            daemon.Call(
+                DaemonProtocol.Methods.SetSettings,
+                BehaviorSettingsRequest.Serialize(BehaviorSetting.QuiescenceMinutes, 12)));
+        Assert.False(changed.IsError);
+        Assert.Equal(
+            720UL,
+            changed.ResultAs<DaemonSettingsSnapshot>()!.QuiescenceSeconds);
+
+        DaemonResponse consent = DaemonResponse.Parse(
+            daemon.Call(
+                DaemonProtocol.Methods.SetConsentScopes,
+                "{\"scopes\":[\"debugging_evaluation\"]}"));
+        Assert.False(consent.IsError);
+
+        AuditSettingsPayload? audit = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListAudit, "{\"limit\":20}"))
+            .ResultAs<AuditSettingsPayload>();
+        Assert.Contains(audit!.Entries, entry => entry.Action == "consent-scopes-changed");
     }
 
     [Fact]
@@ -372,5 +524,66 @@ public sealed class NativeRoundTripTests : IDisposable
         TcException error =
             Assert.Throws<TcException>(() => daemon.OpenPreview("no-such-entry"));
         Assert.Contains("tc_preview_open", error.Message, StringComparison.Ordinal);
+    }
+
+    private static DaemonStatus Status(TcDaemon daemon)
+    {
+        DaemonStatus? status = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.Status))
+            .ResultAs<DaemonStatus>();
+        return Assert.IsType<DaemonStatus>(status);
+    }
+
+    [Fact]
+    public void EnrolledPreviewCanBeApprovedAndUndoneThroughTheNativeBinding()
+    {
+        // This is the Windows app's complete consequential path below WinUI:
+        // the same queue shape it binds, the same in-process preview it shows,
+        // and the same approve/cancel calls its buttons issue. It does not
+        // contact an ingest server; the daemon's real approval hold keeps the
+        // fixture local until it is recalled.
+        string entryId = SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        PendingList? before = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListPending))
+            .ResultAs<PendingList>();
+        Assert.NotNull(before);
+        Assert.Contains(before!.Pending, entry => entry.EntryId == entryId);
+
+        using (TcPreview preview = daemon.OpenPreview(entryId))
+        {
+            PreviewSummary? summary = PreviewSummary.Parse(preview.SummaryJson);
+            Assert.NotNull(summary);
+            Assert.True(summary!.Enrolled);
+            Assert.True(summary.WouldSendBytes > 0);
+            Assert.DoesNotContain(PlantedSecret, preview.Body, StringComparison.Ordinal);
+        }
+
+        string entryParams = JsonSerializer.Serialize(new { entry_id = entryId });
+        DaemonResponse approved = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Approve, entryParams));
+        Assert.False(approved.IsError);
+
+        ApprovalHold? hold = ApprovalHold.Parse(approved);
+        Assert.NotNull(hold);
+        Assert.True(hold!.HoldSecs >= 5);
+        Assert.True(hold.Deadline > DateTimeOffset.UtcNow);
+
+        PendingList? whileApproved = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListPending))
+            .ResultAs<PendingList>();
+        Assert.NotNull(whileApproved);
+        Assert.DoesNotContain(whileApproved!.Pending, entry => entry.EntryId == entryId);
+
+        DaemonResponse cancelled = DaemonResponse.Parse(
+            daemon.Call(DaemonProtocol.Methods.Cancel, entryParams));
+        Assert.False(cancelled.IsError);
+
+        PendingList? afterUndo = DaemonResponse
+            .Parse(daemon.Call(DaemonProtocol.Methods.ListPending))
+            .ResultAs<PendingList>();
+        Assert.NotNull(afterUndo);
+        Assert.Contains(afterUndo!.Pending, entry => entry.EntryId == entryId);
     }
 }

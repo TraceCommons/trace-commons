@@ -146,6 +146,124 @@ public sealed class TrayModel
 }
 
 /// <summary>
+/// The context menu's read-only facts, reduced from daemon responses before
+/// they reach Win32. Project labels are daemon-derived; paths and content have
+/// no field in this model.
+/// </summary>
+public sealed class TrayMenuModel
+{
+    private TrayMenuModel(
+        bool isPaused,
+        int decisionsOwed,
+        IReadOnlyList<TrayProjectLine> waiting,
+        IReadOnlyList<string> armedProjects,
+        string weekText)
+    {
+        IsPaused = isPaused;
+        DecisionsOwed = decisionsOwed;
+        Waiting = waiting;
+        ArmedProjects = armedProjects;
+        WeekText = weekText;
+    }
+
+    public bool IsPaused { get; }
+
+    public int DecisionsOwed { get; }
+
+    public IReadOnlyList<TrayProjectLine> Waiting { get; }
+
+    public IReadOnlyList<string> ArmedProjects { get; }
+
+    public string WeekText { get; }
+
+    public static TrayMenuModel Compute(
+        DaemonStatus status,
+        IEnumerable<QueueEntry> pending,
+        HistoryRollup rollup,
+        IEnumerable<ProjectSetting> projects)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        ArgumentNullException.ThrowIfNull(pending);
+        ArgumentNullException.ThrowIfNull(rollup);
+        ArgumentNullException.ThrowIfNull(projects);
+
+        List<TrayProjectLine> waiting = pending
+            .GroupBy(
+                entry => !string.IsNullOrWhiteSpace(entry.ProjectLabel) ? entry.ProjectLabel!
+                    : !string.IsNullOrWhiteSpace(entry.ProjectId) ? entry.ProjectId!
+                    : "Unknown project",
+                StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => new TrayProjectLine(
+                group.Key,
+                group.Count(),
+                group.Sum(entry => Math.Max(0, entry.SizeBytes))))
+            .ToList();
+
+        List<string> armed = projects
+            .Where(project => project.Mode == "auto_upload")
+            .Select(project => string.IsNullOrWhiteSpace(project.ProjectLabel)
+                ? "Unknown project"
+                : project.ProjectLabel)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(label => label, StringComparer.Ordinal)
+            .ToList();
+
+        string week = string.Format(
+            CultureInfo.CurrentCulture,
+            "This week: {0} contributed, {1} held for privacy review",
+            rollup.Week.Submitted,
+            rollup.Week.Quarantined);
+
+        return new TrayMenuModel(
+            status.Paused,
+            Math.Max(0, status.QueueDepth),
+            waiting,
+            armed,
+            week);
+    }
+}
+
+public sealed class TrayProjectLine
+{
+    public TrayProjectLine(string label, int count, long bytes)
+    {
+        Label = label;
+        Count = Math.Max(0, count);
+        Bytes = Math.Max(0, bytes);
+    }
+
+    public string Label { get; }
+
+    public int Count { get; }
+
+    public long Bytes { get; }
+
+    public string Text => string.Format(
+        CultureInfo.CurrentCulture,
+        "{0} — {1} · {2}",
+        Label,
+        Count,
+        FormatBytes(Bytes));
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = { "B", "KB", "MB", "GB" };
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return unit == 0
+            ? string.Format(CultureInfo.CurrentCulture, "{0:0} {1}", value, units[unit])
+            : string.Format(CultureInfo.CurrentCulture, "{0:0.#} {1}", value, units[unit]);
+    }
+}
+
+/// <summary>
 /// The digest notification's text, transcribed from the shared design spec
 /// rather than paraphrased.
 /// </summary>

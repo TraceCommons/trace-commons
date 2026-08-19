@@ -17,11 +17,10 @@
     <!--
       Unpackaged (WindowsPackageType=None) BY DEFAULT, MSIX only on request.
 
-      The shipping artifact is the self-contained unpackaged publish tree,
-      zipped: it needs no prerequisites on a contributor's machine, it installs
-      per user without administrator rights, and it builds in CI with no
-      certificate at all — which is what lets the `windows contributor app` job
-      verify the XAML and the Windows App SDK wiring on every pull request.
+      The default compile path is the self-contained unpackaged publish tree:
+      it needs no prerequisites, installs per user without administrator
+      rights, and builds in CI with no certificate. Releases separately opt in
+      to the MSIX flavour below.
 
       TcPackaged=true switches this project to MSIX. It is opt-in rather than
       the default because the packaged flavour is NOT a superset: it needs

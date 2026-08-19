@@ -8,7 +8,7 @@ namespace TraceCommons.App;
 
 /// <summary>
 /// The notification-area presence: the mark in the tray, a tooltip that says
-/// what is owed, a small menu, and the 4-hour digest balloon.
+/// what is owed, the shared steady-state menu, and the 4-hour digest balloon.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -20,8 +20,8 @@ namespace TraceCommons.App;
 /// <para>
 /// <b>What this may do, and what it may never do.</b> Nothing reachable from
 /// the tray or from a notification approves or sends anything. The menu opens
-/// the window, toggles run-at-login, and asks to quit; the balloon, when
-/// clicked, opens the window. That is the same rule the Linux tray
+/// the window or Settings, pauses/resumes watching, and asks to quit; the
+/// balloon, when clicked, opens the window. That is the same rule the Linux tray
 /// (<c>gtk/src/tray.rs</c>) and the Linux notifier (<c>gtk/src/notify.rs</c>)
 /// hold: a surface reachable when the contributor is not looking at the
 /// window gets the smallest possible vocabulary, because a misfire there
@@ -49,6 +49,14 @@ public sealed class TrayIcon : IDisposable
     /// <summary>Raised when the contributor asks for the window.</summary>
     public event Action? OpenRequested;
 
+    public event Action? ReviewRequested;
+
+    public event Action? SettingsRequested;
+
+    public event Action<PauseDuration>? PauseRequested;
+
+    public event Action? ResumeRequested;
+
     /// <summary>
     /// Raised when the contributor chooses Quit from the menu.
     /// </summary>
@@ -63,9 +71,14 @@ public sealed class TrayIcon : IDisposable
     private const uint CallbackMessage = WM_APP + 1;
     private const uint IconId = 1;
 
-    private const int MenuIdOpen = 1;
-    private const int MenuIdRunAtLogin = 2;
-    private const int MenuIdQuit = 3;
+    private const int MenuIdReview = 1;
+    private const int MenuIdOpen = 2;
+    private const int MenuIdSettings = 3;
+    private const int MenuIdQuit = 5;
+    private const int MenuIdPauseHour = 10;
+    private const int MenuIdPauseTomorrow = 11;
+    private const int MenuIdPauseUntilResumed = 12;
+    private const int MenuIdResume = 13;
 
     private readonly WndProc _wndProc;
     private readonly string _className;
@@ -74,6 +87,11 @@ public sealed class TrayIcon : IDisposable
     private ushort _classAtom;
     private bool _added;
     private TrayModel _model = TrayModel.Compute(0, isPaused: false, isHealthy: true);
+    private TrayMenuModel _menu = TrayMenuModel.Compute(
+        new DaemonStatus(),
+        Array.Empty<QueueEntry>(),
+        new HistoryRollup(),
+        Array.Empty<ProjectSetting>());
     private bool _disposed;
 
     /// <summary>
@@ -129,14 +147,16 @@ public sealed class TrayIcon : IDisposable
     /// Updates the icon, its tooltip and its menu header from daemon state.
     /// </summary>
     /// <remarks>
-    /// Takes counts and flags, not entries. Everything this surface shows is
-    /// a fixed label plus a number by construction, so there is no path or
-    /// identity available here to leak even by accident.
+    /// The menu model has already reduced entries to daemon-derived project
+    /// labels, counts and sizes. It has no path or trace-content field.
     /// </remarks>
-    public void Update(int decisionsOwed, bool isPaused, bool isHealthy)
+    public void Update(TrayMenuModel menu, bool isHealthy)
     {
-        TrayModel model = TrayModel.Compute(decisionsOwed, isPaused, isHealthy);
+        ArgumentNullException.ThrowIfNull(menu);
+
+        TrayModel model = TrayModel.Compute(menu.DecisionsOwed, menu.IsPaused, isHealthy);
         _model = model;
+        _menu = menu;
 
         if (!_added)
         {
@@ -341,12 +361,9 @@ public sealed class TrayIcon : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Deliberately short. The shared spec's tray menu also lists what is
-    /// waiting per project, the week summary, pause and settings; this app
-    /// has no settings surface, no week band and no pause control anywhere
-    /// yet, and a menu item that opens nothing is worse than an absent one.
-    /// The header line carries the state so the icon is never the only place
-    /// it is said. The rest arrives with the surfaces it belongs to.
+    /// The header line carries the icon state so it is never communicated by
+    /// colour alone. Waiting and armed rows are deliberately inert: the only
+    /// forward path is Review, which opens the queue and its preview gate.
     /// </para>
     /// <para>
     /// Nothing here approves, dismisses or sends.
@@ -363,22 +380,69 @@ public sealed class TrayIcon : IDisposable
         try
         {
             AppendMenu(menu, MF_STRING | MF_DISABLED | MF_GRAYED, IntPtr.Zero, _model.MenuHeader);
-            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
-            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Trace Commons");
-            // Omitted entirely under MSIX, where run-at-login belongs to the
-            // manifest and this toggle would write something the package
-            // model does not honour. Drawn disabled would be worse: a
-            // checkbox that cannot be ticked reads as a bug in the app rather
-            // than as a property of the build.
-            if (RunAtLogin.IsSupported)
+
+            foreach (TrayProjectLine waiting in _menu.Waiting)
+            {
+                AppendMenu(
+                    menu,
+                    MF_STRING | MF_DISABLED | MF_GRAYED,
+                    IntPtr.Zero,
+                    "   " + waiting.Text);
+            }
+
+            if (_menu.DecisionsOwed > 0)
+            {
+                AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting sessions…");
+            }
+
+            if (_menu.ArmedProjects.Count > 0)
             {
                 AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
                 AppendMenu(
                     menu,
-                    MF_STRING | (RunAtLogin.IsEnabled ? MF_CHECKED : MF_UNCHECKED),
-                    MenuIdRunAtLogin,
-                    "Start Trace Commons when I sign in");
+                    MF_STRING | MF_DISABLED | MF_GRAYED,
+                    IntPtr.Zero,
+                    $"Armed: {_menu.ArmedProjects.Count} project(s) — contributed without asking");
+                foreach (string project in _menu.ArmedProjects)
+                {
+                    AppendMenu(
+                        menu,
+                        MF_STRING | MF_DISABLED | MF_GRAYED,
+                        IntPtr.Zero,
+                        "   " + project);
+                }
             }
+
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+            AppendMenu(
+                menu,
+                MF_STRING | MF_DISABLED | MF_GRAYED,
+                IntPtr.Zero,
+                _menu.WeekText);
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+
+            if (_menu.IsPaused)
+            {
+                AppendMenu(menu, MF_STRING, MenuIdResume, "Resume watching");
+            }
+            else
+            {
+                IntPtr pauseMenu = CreatePopupMenu();
+                if (pauseMenu != IntPtr.Zero)
+                {
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseHour, "For 1 hour");
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseTomorrow, "Until tomorrow morning");
+                    AppendMenu(
+                        pauseMenu,
+                        MF_STRING,
+                        MenuIdPauseUntilResumed,
+                        "Until I turn it back on");
+                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, "Pause");
+                }
+            }
+
+            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Trace Commons");
+            AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit Trace Commons…");
@@ -399,15 +463,32 @@ public sealed class TrayIcon : IDisposable
 
             switch (command)
             {
+                case MenuIdReview:
+                    ReviewRequested?.Invoke();
+                    break;
+
                 case MenuIdOpen:
                     OpenRequested?.Invoke();
                     break;
 
-                case MenuIdRunAtLogin:
-                    // Read back rather than toggled blind: RunAtLogin.Set
-                    // returns what the registry says afterwards, so the next
-                    // time this menu is built the checkmark is the truth.
-                    RunAtLogin.Set(!RunAtLogin.IsEnabled);
+                case MenuIdSettings:
+                    SettingsRequested?.Invoke();
+                    break;
+
+                case MenuIdPauseHour:
+                    PauseRequested?.Invoke(PauseDuration.OneHour);
+                    break;
+
+                case MenuIdPauseTomorrow:
+                    PauseRequested?.Invoke(PauseDuration.TomorrowMorning);
+                    break;
+
+                case MenuIdPauseUntilResumed:
+                    PauseRequested?.Invoke(PauseDuration.UntilResumed);
+                    break;
+
+                case MenuIdResume:
+                    ResumeRequested?.Invoke();
                     break;
 
                 case MenuIdQuit:
@@ -600,8 +681,7 @@ public sealed class TrayIcon : IDisposable
 
     private const uint MF_STRING = 0x00000000;
     private const uint MF_SEPARATOR = 0x00000800;
-    private const uint MF_CHECKED = 0x00000008;
-    private const uint MF_UNCHECKED = 0x00000000;
+    private const uint MF_POPUP = 0x00000010;
     private const uint MF_DISABLED = 0x00000002;
     private const uint MF_GRAYED = 0x00000001;
 

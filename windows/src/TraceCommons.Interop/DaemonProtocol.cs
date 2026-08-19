@@ -64,8 +64,10 @@ public static class DaemonProtocol
         public const string ConsentOptions = "consent_options";
         public const string SetConsentScopes = "set_consent_scopes";
         public const string GetSettings = "get_settings";
+        public const string SetSettings = "set_settings";
         public const string ListProjects = "list_projects";
         public const string SetProjectMode = "set_project_mode";
+        public const string ListAudit = "list_audit";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
 
         // History and withdrawal. Like the onboarding block above, every one
@@ -292,12 +294,19 @@ public sealed class QueueEntry
 /// </remarks>
 public sealed class DaemonStatus
 {
+    [JsonPropertyName("logged_in")]
+    public bool LoggedIn { get; set; }
+
     [JsonPropertyName("paused")]
     public bool Paused { get; set; }
 
     /// <summary>Decisions owed: the daemon's own count of pending entries.</summary>
     [JsonPropertyName("queue_depth")]
     public int QueueDepth { get; set; }
+
+    /// <summary>The scopes currently granted by this contributor.</summary>
+    [JsonPropertyName("consent_scopes")]
+    public List<string> ConsentScopes { get; set; } = new();
 
     [JsonPropertyName("health")]
     public DaemonHealth? Health { get; set; }

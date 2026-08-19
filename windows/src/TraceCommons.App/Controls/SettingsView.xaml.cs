@@ -1,7 +1,9 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
+using TraceCommons.Interop;
 
 namespace TraceCommons.App.Controls;
 
@@ -9,11 +11,10 @@ namespace TraceCommons.App.Controls;
 /// The Settings screen's markup and wiring.
 ///
 /// Thin by design, like <see cref="HistoryView"/> and <see cref="PreviewSheet"/>:
-/// every decision lives in <see cref="PublicProfileViewModel"/>, and the part
-/// that is contract rather than product -- what may honestly be said about a
-/// claim or a withdrawal -- lives one layer further down in
-/// <c>TraceCommons.Interop.PublicProfileCopy</c>, so it is tested off Windows.
-/// This file wires clicks and shows one dialog.
+/// device behavior lives in <see cref="ContributorSettingsViewModel"/> and
+/// profile behavior in <see cref="PublicProfileViewModel"/>. Contract shapes
+/// and serializers live one layer further down in TraceCommons.Interop so
+/// they can be tested off Windows. This file wires controls and one dialog.
 ///
 /// Nothing here is logged. A handle and a bio are public by construction, but
 /// they are contributor identity and never reach a log line.
@@ -25,10 +26,13 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
 
         ViewModel = new PublicProfileViewModel(host);
+        Settings = new ContributorSettingsViewModel(host);
         Loaded += OnFirstLoaded;
     }
 
     public PublicProfileViewModel ViewModel { get; }
+
+    public ContributorSettingsViewModel Settings { get; }
 
     /// <summary>
     /// Reads the profile once the view is on screen rather than in the
@@ -39,7 +43,45 @@ public sealed partial class SettingsView : UserControl
     private async void OnFirstLoaded(object sender, RoutedEventArgs e)
     {
         Loaded -= OnFirstLoaded;
-        await ViewModel.LoadAsync();
+        await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync());
+    }
+
+    private async void OnStartAtLoginToggled(object sender, RoutedEventArgs e)
+    {
+        if (sender is ToggleSwitch toggle && Settings.IsLoaded)
+        {
+            await Settings.SetStartAtLoginAsync(toggle.IsOn);
+        }
+    }
+
+    private async void OnConsentChanged(object sender, RoutedEventArgs e)
+    {
+        await Settings.SaveConsentAsync();
+    }
+
+    private async void OnProjectMode(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: ProjectSettingViewModel project })
+        {
+            await Settings.ToggleProjectAsync(project);
+        }
+    }
+
+    private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))
+        {
+            return;
+        }
+
+        BehaviorSetting setting = sender.Name switch
+        {
+            "QuiescenceMinutes" => BehaviorSetting.QuiescenceMinutes,
+            "ApprovalHoldSeconds" => BehaviorSetting.ApprovalHoldSeconds,
+            "DigestHours" => BehaviorSetting.DigestHours,
+            _ => throw new InvalidOperationException("unknown behavior setting"),
+        };
+        await Settings.SaveBehaviorAsync(setting, args.NewValue);
     }
 
     /// <summary>

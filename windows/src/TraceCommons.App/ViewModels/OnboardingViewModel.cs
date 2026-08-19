@@ -259,8 +259,8 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         // The list and the descriptions are the daemon's, never a table in
         // this file, so an operator who changes them changes what this screen
         // says without a new client.
-        ConsentOptionsResult? parsed = options.ResultAs<ConsentOptionsResult>();
-        foreach (ConsentScope scope in parsed?.Scopes ?? new List<ConsentScope>())
+        ConsentOptionsPayload? parsed = options.ResultAs<ConsentOptionsPayload>();
+        foreach (ConsentOption scope in parsed?.Scopes ?? new List<ConsentOption>())
         {
             var row = new ConsentScopeViewModel(scope);
             if (scope.AlwaysOn)
@@ -352,12 +352,12 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             .ConfigureAwait(true);
 
         Projects.Clear();
-        ProjectList? parsed = response.ResultAs<ProjectList>();
-        foreach (Project project in parsed?.Projects ?? new List<Project>())
+        ProjectSettingsPayload? parsed = response.ResultAs<ProjectSettingsPayload>();
+        foreach (ProjectSetting project in parsed?.Projects ?? new List<ProjectSetting>())
         {
-            if (!string.IsNullOrEmpty(project.LocalPath))
+            if (!string.IsNullOrEmpty(project.ProjectId))
             {
-                Projects.Add(new ProjectViewModel(project.LocalPath));
+                Projects.Add(new ProjectViewModel(project));
             }
         }
     }
@@ -375,13 +375,16 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(project);
 
-        project.IsIgnored = true;
         string payload = JsonSerializer.Serialize(
-            new ProjectModeRequest { LocalPath = project.LocalPath, Mode = "ignore" });
+            new ProjectModeRequest { ProjectId = project.ProjectId, Mode = "ignore" });
 
-        await _host
+        DaemonResponse response = await _host
             .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
             .ConfigureAwait(true);
+        if (!response.IsError)
+        {
+            project.SetMode("ignore");
+        }
     }
 
     /// <summary>
@@ -450,8 +453,8 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     private sealed class ProjectModeRequest
     {
-        [JsonPropertyName("local_path")]
-        public string LocalPath { get; set; } = string.Empty;
+        [JsonPropertyName("project_id")]
+        public string ProjectId { get; set; } = string.Empty;
 
         [JsonPropertyName("mode")]
         public string Mode { get; set; } = string.Empty;
@@ -468,46 +471,12 @@ public enum OnboardingStep
     Done,
 }
 
-/// <summary>One scope as <c>consent_options</c> describes it.</summary>
-public sealed class ConsentScope
-{
-    [JsonPropertyName("name")]
-    public string Name { get; set; } = string.Empty;
-
-    [JsonPropertyName("description")]
-    public string Description { get; set; } = string.Empty;
-
-    [JsonPropertyName("always_on")]
-    public bool AlwaysOn { get; set; }
-
-    [JsonPropertyName("grants_data_use")]
-    public bool GrantsDataUse { get; set; }
-}
-
-public sealed class ConsentOptionsResult
-{
-    [JsonPropertyName("scopes")]
-    public List<ConsentScope> Scopes { get; set; } = new();
-}
-
-public sealed class Project
-{
-    [JsonPropertyName("local_path")]
-    public string LocalPath { get; set; } = string.Empty;
-}
-
-public sealed class ProjectList
-{
-    [JsonPropertyName("projects")]
-    public List<Project> Projects { get; set; } = new();
-}
-
 /// <summary>A scope row: the daemon's description, and a local short title.</summary>
 public sealed class ConsentScopeViewModel : INotifyPropertyChanged
 {
     private bool _isSelected;
 
-    public ConsentScopeViewModel(ConsentScope scope)
+    public ConsentScopeViewModel(ConsentOption scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
 
@@ -572,14 +541,21 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
 {
     private bool _isIgnored;
 
-    public ProjectViewModel(string localPath)
+    public ProjectViewModel(ProjectSetting project)
     {
-        LocalPath = localPath ?? throw new ArgumentNullException(nameof(localPath));
+        ArgumentNullException.ThrowIfNull(project);
+        ProjectId = project.ProjectId;
+        ProjectLabel = string.IsNullOrWhiteSpace(project.ProjectLabel)
+            ? "Unknown project"
+            : project.ProjectLabel;
+        _isIgnored = project.Mode == "ignore";
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public string LocalPath { get; }
+    public string ProjectId { get; }
+
+    public string ProjectLabel { get; }
 
     public bool IsIgnored
     {
@@ -598,4 +574,6 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     }
 
     public bool IsNotIgnored => !_isIgnored;
+
+    public void SetMode(string mode) => IsIgnored = mode == "ignore";
 }

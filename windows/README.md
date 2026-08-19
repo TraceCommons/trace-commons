@@ -141,26 +141,6 @@ Deliberately absent, and each is its own piece of work:
   "withdrawn". A bulk button could not honour it at any wording. The held
   group says so where a contributor would look for the button, and points at
   the per-row control that *can* tell them what it did.
-- The rest of Settings. The rail's third row exists now and carries the public
-  profile panel (see "Claiming a public handle"); the watcher knobs, the
-  connection section and the per-project list the spec also puts on that screen
-  are absent from the screen rather than drawn disabled, for the same reason
-  the row itself was absent until now.
-- The rest of the tray menu's vocabulary. The icon, the tooltip, the digest
-  and run-at-login are here (see "The tray and the interruption budget"); what
-  the shared spec also puts in that menu — pause with its three durations, the
-  week summary, the per-project list of what is waiting, settings — is not,
-  because those surfaces do not exist in this app yet and a menu item that
-  opens nothing is worse than an absent one.
-- MSIX packaging and signing, *as a shipping artifact*. The manifest, the
-  packaging script and the signing path now exist under `packaging/` and
-  `scripts/make-msix.ps1`, but none of it has ever been built: it is opt-in
-  (`TcPackaged=true`), reachable only from a `workflow_dispatch` on
-  `release-apps.yml`, and it needs a real icon before anyone should install it.
-  The app still builds unpackaged by default so that CI can verify it without a
-  certificate, and the shipping artifact is still the zip. Read
-  `packaging/README.md` before touching any of it — particularly the part about
-  the publisher string and about what packaging does to the state directory.
 - Stat-card glyphs. The design gives the week band and History's three cards a
   small icon each — a check in a circle, a clock, a set of columns. Neither
   screen draws them: this shell's stat card carries its tone in the border
@@ -192,17 +172,19 @@ cause a notification:
    the only way to be told yes is to have consumed the window.
 
 **Nothing reachable from the tray or a notification approves or sends
-anything.** Clicking the icon or the digest raises the window; the menu opens
-the window, toggles run-at-login, and asks to quit. That is the same rule
+anything.** Clicking the icon or the digest raises the window; the menu can
+open Review, pause or resume watching, open Settings, or ask to quit. Its
+read-only rows summarize waiting projects, armed projects and the current
+week. That is the same rule
 `gtk/src/tray.rs` and `gtk/src/notify.rs` hold, for the same reason: a misfire
 on a surface the contributor is not looking at ships real transcripts and is
 unrecoverable.
 
 The digest is a `Shell_NotifyIcon` balloon rather than a toast with buttons.
 The spec's `[ Review ] [ Not now ]` becomes click-the-balloon and ignore-it;
-`Not now` "does nothing but dismiss" anyway, and a richer toast needs an
-activation identity this unpackaged app does not have. Worth revisiting with
-MSIX.
+`Not now` "does nothing but dismiss" anyway. A richer toast would add a
+separate activation route, while the balloon keeps every action inside the
+already-running process.
 
 Quitting warns first, from the window's close button as well as from the tray.
 On Windows the app HOSTS the daemon in-process, so quitting stops the watcher,
@@ -211,23 +193,19 @@ and the shared spec is explicit that saying the Linux sentence here would be
 
 ### Run at login
 
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, written by
-`RunAtLogin`, toggled from the tray menu, opt-in. HKCU and never HKLM: this
-app installs per user with no administrator rights, and every other Windows
-mechanism costs elevation or a package — a Scheduled Task, a service, or the
-MSIX `windows.startupTask` extension. Same hive and same reasoning as
-`UrlSchemeRegistration`. The entry appears in Task Manager's Startup tab,
-which is where a contributor audits what starts with their machine; Windows
-can disable it there, and this class does not fight that.
+The Settings toggle is opt-in and `StartupRegistration` chooses exactly one
+mechanism. The portable build writes
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` through `RunAtLogin`;
+HKCU and never HKLM, because the app installs per user and needs no
+administrator rights. The MSIX declares `TraceCommonsStartup` through the
+`windows.startupTask` manifest extension and uses
+`Windows.ApplicationModel.StartupTask` to read or change it. It never writes
+the Run key from inside `WindowsApps`.
 
-Inert under MSIX. The packaged flavour (`TcPackaged=true`) disables registry
-virtualization, so the write would be real and would record a path inside
-`WindowsApps` — the same reason `UrlSchemeRegistration` skips its own
-registration when packaged. A packaged build declares startup with a
-`windows.startupTask` manifest extension instead; that extension is not in
-`packaging/Package.appxmanifest` yet, so a packaged build has no run-at-login
-and `RunAtLogin.IsSupported` reports false, which drops the item from the tray
-menu rather than drawing a toggle that cannot work.
+Both registrations appear in Windows' Startup Apps surface. If a contributor
+disables the packaged task there, the API reports `DisabledByUser`; Settings
+shows where to turn it back on and does not pretend that the app can override
+the user's decision.
 
 ### What the tests cover, and what the VM confirmed
 
@@ -243,9 +221,10 @@ reachable from a unit test. In an interactive session on Windows Server 2022:
 - The mark reads correctly at 16px on a dark taskbar — single light ink, the
   user's bracket top left, the agent's answer bottom right, and the attention
   dot in the top-right quadrant both brackets leave empty.
-- `TrackPopupMenuEx` drew the menu (disabled header, `Open Trace Commons`, the
-  run-at-login toggle, `Quit Trace Commons…`) and returned cleanly when
-  dismissed with Escape.
+- `TrackPopupMenuEx` drew the original short menu (disabled header,
+  `Open Trace Commons`, the run-at-login toggle, `Quit Trace Commons…`) and
+  returned cleanly when dismissed with Escape. The expanded menu still needs
+  the same interactive VM pass.
 - The digest arrived with the shared spec's wording, under the mark as its app
   icon.
 - Writing the Run key made Windows raise its own "now configured to run when
@@ -253,9 +232,9 @@ reachable from a unit test. In an interactive session on Windows Server 2022:
   startup registration rather than an inert key. The value read back quoted,
   removal worked, and disabling twice was not an error.
 
-Still unconfirmed: that the entry actually launches the app across a real
-sign-in, and how any of this behaves under MSIX, where run-at-login is
-deliberately inert.
+Still unconfirmed: that either startup registration launches the app across a
+real sign-in, and the interactive behaviour of the packaged startup consent
+prompt.
 
 ## The health banner says only what the daemon said
 
@@ -369,8 +348,10 @@ switches panes.
 
 ## Claiming a public handle
 
-The rail's Settings row carries one panel: the public profile from section 5.6
-of the shared design spec. It is backed by `get_public_profile`,
+The rail's Settings row carries the device connection summary, startup,
+daemon-provided consent scopes, the three watcher timing controls, per-project
+ask/ignore controls, the local change log, and the public profile from section
+5.6 of the shared design spec. The profile is backed by `get_public_profile`,
 `set_public_profile` and `clear_public_profile`, all three of which were
 already in the daemon's pinned `METHODS` array — the gap on Windows was never
 protocol, only that nothing here asked.
