@@ -74,6 +74,53 @@ receive the link that opens them.
 
 ## Part 1 — the invisible mark
 
+> **SUPERSEDED 2026-08-19 by the bisect this section asked for. There is no
+> rendering defect. Do not implement the fix described below.**
+>
+> The bisect was run against a bundle built from this branch by
+> `macos/scripts/make-app-bundle.sh`, launched by explicit path, with the
+> status item located by pid. Results:
+>
+> | Rung | Label | Drawn? |
+> |------|-------|--------|
+> | 1 | `Image(systemName: "tray.full")` | no |
+> | 3 | `Rectangle().fill(.black)` | no |
+> | 5 | current `MenuBarLabel` (control) | no |
+>
+> Rung 3 settles it on its own: an opaque black fill is not something any
+> template-image path can discard. Rungs 2 and 4 were not needed once rung 3
+> came back blank, because every remaining hypothesis in this section is about
+> how the mark's geometry or ink survives rasterization, and rung 3 contains
+> neither geometry nor `.primary`.
+>
+> The decisive control is not in this repository at all. A separate, minimal
+> SwiftUI app — one `MenuBarExtra` whose label is a solid black 15pt square,
+> its own bundle id, nothing else — is **equally invisible on this machine**,
+> and `System Events` reports a frame for it exactly as it does for ours
+> (`804, 4, 18, 24`). No code in `macos/Sources` can be responsible for that.
+>
+> What is actually happening is that this machine's menu bar has no room.
+> `NSScreen.auxiliaryTopLeftArea` ends at x=663 and `auxiliaryTopRightArea`
+> begins at x=848, so the notch spans 663..848. Observed status-item frames
+> land at 785, 804, 887 and 896 — inside the notch, or in the dead band
+> between the notch and the leftmost glyph that is actually drawn, at ~925.
+> Items there are reported by the accessibility API and never rasterized.
+>
+> So the item is present, positioned, sized, and accessible, and macOS does
+> not draw it because there is nowhere to draw it. On a machine with a shorter
+> menu bar it would appear. The mark's own appearance in a menu bar remains
+> **unverified** — not wrong, unverified — because no slot has ever been
+> visible here to verify it in.
+>
+> `macos/scripts/menu-bar-check.sh` was added to make this measurable: it
+> reports the item's frame, measures the notch from the screen rather than
+> assuming a width, and refuses with a specific message when the two overlap.
+>
+> Everything from here to "### What C needs from B" is the reasoning that led
+> to the bisect. It is kept because the bisect design is what produced the
+> correction, and because the parity observation below is still true and still
+> worth acting on some day — but its diagnosis is wrong.
+
 ### What is established
 
 Re-verified against the running 0.3.0 bundle, not taken from the earlier
@@ -593,12 +640,14 @@ been pulled into scope as Part 3, at Zaki's direction.
 
 Part 1, independent of B:
 
-1. Run the five-rung bisect and record the result.
-2. Fix the label per the outcome; if the hypothesis holds, rasterize
-   `BrandMark`'s template geometry via `ImageRenderer` into a template
-   `NSImage`.
-3. Confirm the badge, unhealthy, and paused states all still draw, since the
-   current evidence only covers the idle state.
+1. ~~Run the five-rung bisect and record the result.~~ Done; see the
+   superseded note at the top of Part 1. No rendering defect exists.
+2. ~~Fix the label per the outcome.~~ Dropped. Nothing to fix.
+3. Verify the mark's appearance in a menu bar that has room — a machine with
+   fewer status items, or this one with some freed. All four label states
+   (idle, badge, unhealthy, paused) are still unverified on a real surface,
+   because no visible slot has been available to verify them in. This is the
+   only Part 1 work that remains, and it needs a machine, not a change.
 
 Part 3, also independent of B, and sharing Part 2's delegate:
 
@@ -627,10 +676,15 @@ Part 2, after B:
 
 ## Verification
 
-- The bisect result is written down, and the fix cites it.
-- On a real unlocked macOS 26 desktop, the status item's accessibility frame
-  is captured and is not uniform, in light and dark appearance, with the
-  system accent both default and changed.
+- The bisect result is written down. It falsified the hypothesis; there is no
+  fix to cite it.
+- `macos/scripts/menu-bar-check.sh` reports the item as NOT overlapping the
+  notch before any judgement is made about what it draws. A capture taken
+  while the item overlaps the notch proves nothing, and reading one as
+  evidence of a rendering defect is the specific mistake this slice made.
+- On a real unlocked macOS 26 desktop **with room in the menu bar**, the
+  status item's accessibility frame is captured and is not uniform, in light
+  and dark appearance, with the system accent both default and changed.
 - All four label states draw: idle, badge, unhealthy, paused.
 - The app appears in the Dock and in Cmd-Tab, with artwork rather than the
   generic placeholder.
