@@ -325,7 +325,9 @@ mod roots_tests {
             claude_source: claude
                 .map(make)
                 .map(|path| SourceDeclaration::Watch { path }),
-            codex_source: codex.map(make).map(|path| SourceDeclaration::Watch { path }),
+            codex_source: codex
+                .map(make)
+                .map(|path| SourceDeclaration::Watch { path }),
             ..Default::default()
         }
         .save(&store)
