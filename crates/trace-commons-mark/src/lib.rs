@@ -204,11 +204,18 @@ pub fn template_svg(ink: &str, size: u32) -> String {
 /// The geometry and palette as JSON, for renderers that cannot read SVG.
 ///
 /// macOS builds its `.icns` with CoreGraphics rather than by rasterizing the
-/// SVG, because the rasterizers available on a stock macOS runner get it
-/// wrong: `sips` zeroes the blue channel in the bottom-right corner at 16 and
-/// 32 pixels, which is both invisible in a build log and exactly the size the
-/// Finder and the menu bar use. A renderer that draws the geometry itself has
-/// no such failure mode.
+/// SVG, because `sips`' SVG support is not a documented interface and the build
+/// should not depend on it. It is NOT because `sips` renders the mark wrongly.
+///
+/// An earlier version of this comment said `sips` zeroed the blue channel at 16
+/// and 32 pixels. That was a misreading: the corruption came from
+/// `iconutil --convert iconset`, which mis-decodes its own `ic04`/`ic05`
+/// chunks -- those are raw ARGB RLE rather than PNG. Read through
+/// `CGImageSource`, which is what macOS itself uses, every representation is
+/// clean, and so is direct `sips` output. The trap is worth knowing about
+/// because it presents as corruption of exactly the two sizes the Finder and
+/// the menu bar use, which is precisely what somebody verifying an `.icns`
+/// would expect a real bug to look like.
 ///
 /// This is emitted rather than hand-written on the Swift side so the numbers
 /// still come from here. Written by hand rather than with serde: this crate is
