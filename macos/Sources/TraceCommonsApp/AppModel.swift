@@ -194,6 +194,14 @@ final class AppModel: ObservableObject {
             // publish `status_changed` for a queue change, so a status
             // fetched at launch would stay at 0 forever.
             refreshStatus()
+            // A queue change is when a project can first become visible:
+            // `list_projects` reports discovered projects from the queue, and
+            // a session for a project nobody has ruled on is exactly what a
+            // queue change delivers. Projects were fetched only by
+            // `refreshAll()` at launch and after `setProjectMode`, so a
+            // project discovered while the app was open stayed invisible in
+            // both Settings and onboarding screen 5 until a relaunch.
+            refreshProjects()
         case .statusChanged:
             refreshStatus()
         case .digestDue(let count, _):

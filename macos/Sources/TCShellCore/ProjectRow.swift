@@ -100,4 +100,51 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         // own repository.
         isUnresolvedBucket = try c.decodeIfPresent(Bool.self, forKey: .isUnresolvedBucket) ?? false
     }
+
+    /// Whether this project could ever be armed to contribute without asking.
+    ///
+    /// False for the unresolvable bucket, and not as a UI preference: the
+    /// daemon refuses `auto_upload` for that key in two independent places
+    /// (`daemon/policy.rs`, in `set_mode` and in `resolve`). Any surface that
+    /// offers a mode control must consult this rather than listing every
+    /// `ProjectMode` case, because offering a mode the daemon will refuse
+    /// invites a contributor to believe they have armed something that cannot
+    /// be armed.
+    ///
+    /// macOS offers no such control today -- Settings toggles only ask and
+    /// ignore, and the deliberate confirmation flow for arming is unbuilt --
+    /// so nothing reads this yet. It exists so the constraint is stated where
+    /// that flow will have to look, instead of being rediscovered from the
+    /// Rust when someone builds it.
+    public var canBeArmed: Bool { !isUnresolvedBucket }
+
+    /// The name to show for this row.
+    ///
+    /// The bucket's own `projectLabel` is the slug `unknown-project`, which
+    /// is a key rather than words. Every shell replaces it, with the same
+    /// replacement, because it is one fact stated on several surfaces.
+    public var displayLabel: String {
+        isUnresolvedBucket ? ProjectCopy.unresolvedBucketLabel : projectLabel
+    }
+}
+
+/// Words shared by every macOS surface that lists projects.
+///
+/// Onboarding screen 5 and Settings show the same row and must say the same
+/// thing about it; the shared design spec states these once for all three
+/// shells, under "The unresolvable bucket in Settings". Kept here rather than
+/// beside either view so that neither becomes the owner and the other the
+/// copy -- a near-duplicate is how two surfaces start disagreeing.
+public enum ProjectCopy {
+    public static let unresolvedBucketLabel = "Sessions with no project"
+
+    /// A statement of what the daemon does, not an apology. Nothing in it is
+    /// a contributor's to fix: the bucket exists so that a directory the
+    /// daemon cannot name never has its path written into the audit log,
+    /// notification text or history, and not being armable is the protective
+    /// half of that.
+    public static let unresolvedBucketNote = """
+        Trace Commons can't tell which folder these ran in, so they can never \
+        be contributed automatically. You'll always be asked.
+        """
 }
