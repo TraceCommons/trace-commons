@@ -54,33 +54,23 @@ public static class WatchCopy
         "No projects yet. Sessions you run later will appear here, and in Settings.";
 
     /// <summary>
-    /// The human name for the unresolvable bucket.
-    ///
-    /// The wire carries the slug <c>unknown-project</c> as this row's
-    /// <c>project_label</c>, because the daemon's <c>project_label_for</c>
-    /// deliberately returns the constant rather than degrade to something that
-    /// might carry a path. A slug is not a project name, so it is not shown --
-    /// and it is not what identifies the row either. That is the daemon's
-    /// <c>is_unresolved_bucket</c> flag.
+    /// The bucket's name, from <see cref="UnresolvedBucketCopy"/>. Settings
+    /// shows the same row, so the words live in one place; see that type for
+    /// why the wire's slug is not shown.
     /// </summary>
-    public const string UnknownLabel = "Sessions with no project";
+    public const string UnknownLabel = UnresolvedBucketCopy.Label;
 
     /// <summary>
-    /// Why that bucket can never be armed.
+    /// Why the bucket can never be armed, from
+    /// <see cref="UnresolvedBucketCopy"/>.
     ///
-    /// Phrased as a CONSEQUENCE, not a fault. The bucket exists because a cwd
-    /// with no usable final segment has no label but itself, and
-    /// <c>project_label</c> reaches <c>daemon-audit.jsonl</c>, notification
-    /// text and <c>HistoryRecord</c> -- so naming it would write a full local
-    /// path into all three. Not being armable is the protective half of that,
-    /// and nothing in it is a contributor's to fix.
-    ///
-    /// It REPLACES the state line rather than adding a third: "you'll always be
-    /// asked" already says what <see cref="AskMeFirst"/> says.
+    /// On this screen it REPLACES the state line rather than adding a third:
+    /// "you'll always be asked" already says what <see cref="AskMeFirst"/>
+    /// says. Settings keeps its state column and puts the note beneath the
+    /// name, because there the state column is the row's own vocabulary and an
+    /// empty cell in a list reads as a fault.
     /// </summary>
-    public const string UnknownNote =
-        "Trace Commons can't tell which folder these ran in, so they can never be "
-        + "contributed automatically. You'll always be asked.";
+    public const string UnknownNote = UnresolvedBucketCopy.Note;
 
     /// <summary>
     /// What to show as a row's name: the human label for the unresolvable
