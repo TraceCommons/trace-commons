@@ -27,6 +27,7 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
+| Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
@@ -83,6 +84,13 @@ Every runbook in this directory, with a one-line description.
   restore procedures, and honest RPO/RTO targets.
 - [`./calibration.md`](./calibration.md) — empirical procedure for tuning
   perplexity, tail-fraction, and novelty floors (dry-run → cutover).
+- [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) —
+  per-platform pass over the installed contributor app: install the real
+  artifact, launch it from the platform's own launcher, enroll, watch,
+  preview, consent, submit, read back, withdraw, and confirm the update
+  channel that install method actually uses. Produces a committed pass record
+  under [`./verification-records/`](./verification-records/) which gates the
+  next `app-v*` tag.
 - [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
   the authoritative top-of-funnel doc.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`

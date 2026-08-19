@@ -100,6 +100,27 @@ jobs:
             exit 1
           fi
 
+      # A green CI and a notarized DMG were both true on 2026-08-18 while the
+      # macOS app could not start at all: it resolved its state directory from
+      # an environment variable a Finder launch cannot set, so it refused
+      # before constructing a daemon. Nothing in this pipeline noticed,
+      # because nothing in this pipeline runs the thing it ships.
+      #
+      # This gate does not fix that. It requires that somebody did -- that a
+      # human installed the real artifact on all three platforms and drove it
+      # through to an accepted, then withdrawn, submission. The procedure is
+      # docs/operator/client-end-to-end-verification.md and it produces a
+      # committed pass record per version.
+      #
+      # Deliberately a script and not a paragraph: docs/release-runbook.md
+      # still describes a world where no release has been published, three
+      # releases after the first one shipped. Prose gates rot silently.
+      - name: Confirm a client end-to-end verification pass record exists
+        if: github.event_name == 'push'
+        env:
+          TAG_VERSION: ${{ steps.v.outputs.short }}
+        run: ./scripts/operator/check-verification-record.sh "$TAG_VERSION"
+
   macos:
     name: macOS signed DMG
     needs: version
