@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The roots screen: which session folders this machine may watch.
+
+    Reached from a refusal, not from a menu. The daemon will not start until
+    both sources are declared, so until this is answered the app can do nothing
+    at all. Before this window existed, a Windows contributor whose settings
+    did not declare both roots got a start failure and no way out of it.
+
+    One rule governs the whole layout: nothing is pre-selected. Each row shows
+    the folder discovery found and what is in it, and then waits. The two
+    buttons per row are the only things that answer, and Continue stays
+    disabled until both rows have been answered. A pre-ticked box plus a
+    habitual Continue is the shape of consent people click through, which
+    would recover the silent scanning this screen exists to end.
+
+    The path is pre-filled and the ANSWER is not. Those are different things:
+    the contributor has to be able to see what they would be agreeing to.
+
+    XML comments cannot contain a double hyphen, so the prose here uses
+    commas and parentheses where the C# files use dashes.
+-->
+<Window
+    x:Class="TraceCommons.App.SessionRootsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Trace Commons">
+
+    <Grid Background="{ThemeResource TcWindowBackgroundBrush}" Padding="28"
+          RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16">
+
+        <TextBlock Grid.Row="0" Style="{StaticResource TcTitleScreenTextStyle}"
+                   Text="{x:Bind ViewModel.Title}" TextWrapping="Wrap" />
+
+        <TextBlock Grid.Row="1" Style="{StaticResource TcBodyTextStyle}"
+                   Text="{x:Bind ViewModel.Body}" TextWrapping="Wrap" />
+
+        <ScrollViewer Grid.Row="2">
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Rows}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:SourceRowViewModel">
+                        <StackPanel Spacing="8" Margin="0,0,0,20">
+                            <TextBlock Style="{StaticResource TcTitleCardTextStyle}"
+                                       Text="{x:Bind AgentName}" />
+
+                            <!--
+                                Editable, so a contributor whose store is
+                                somewhere discovery did not look can still
+                                name it. Editing clears an existing answer:
+                                see SourceRowViewModel.Path for why.
+                            -->
+                            <TextBox Text="{x:Bind Path, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                            <TextBlock Style="{StaticResource TcBodyDenseTextStyle}"
+                                       Text="{x:Bind Evidence}" TextWrapping="Wrap" />
+
+                            <!--
+                                Always shown, not only when discovery came up
+                                empty. Typing a folder has to read as a normal
+                                way to answer this screen rather than as a
+                                repair for something broken, because a
+                                relocated profile or a store on a second drive
+                                is an ordinary situation and not a fault.
+                            -->
+                            <TextBlock Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                       Text="{x:Bind ManualHint}" TextWrapping="Wrap" />
+
+                            <TextBlock Style="{StaticResource TcCaptionTextStyle}"
+                                       Text="{x:Bind RelocatedNote}" TextWrapping="Wrap"
+                                       Visibility="{x:Bind IsRelocated}" />
+
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <!--
+                                    Two buttons rather than a checkbox pair,
+                                    because there is no default here and a
+                                    control with an off state looks like one.
+                                -->
+                                <Button Content="Watch this folder" Click="OnWatch" />
+                                <Button Content="{x:Bind DoNotUseLabel}" Click="OnDoNotUse" />
+                                <TextBlock Style="{StaticResource TcCaptionTextStyle}"
+                                           VerticalAlignment="Center"
+                                           Foreground="{ThemeResource TcGreenTextBrush}"
+                                           Text="Watching this folder."
+                                           Visibility="{x:Bind IsWatchSelected, Mode=OneWay}" />
+                                <TextBlock Style="{StaticResource TcCaptionTextStyle}"
+                                           VerticalAlignment="Center"
+                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                           Text="Not watched."
+                                           Visibility="{x:Bind IsOffSelected, Mode=OneWay}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12"
+                    HorizontalAlignment="Right">
+            <!--
+                The hint is shown as well as the disabled button. A greyed out
+                control does not say which of the two rows is still waiting,
+                and an unanswered source is not "no".
+            -->
+            <TextBlock Style="{StaticResource TcBodyDenseTextStyle}" VerticalAlignment="Center"
+                       Text="{x:Bind ViewModel.Hint, Mode=OneWay}" TextWrapping="Wrap" />
+            <TextBlock Style="{StaticResource TcBodyDenseTextStyle}" VerticalAlignment="Center"
+                       Foreground="{ThemeResource TcCoralTextBrush}"
+                       Text="{x:Bind ViewModel.Error, Mode=OneWay}" TextWrapping="Wrap"
+                       Visibility="{x:Bind ViewModel.HasError, Mode=OneWay}" />
+            <Button Style="{StaticResource TcPrimaryButtonStyle}" Content="Continue"
+                    IsEnabled="{x:Bind ViewModel.CanContinue, Mode=OneWay}"
+                    Click="OnContinue" />
+        </StackPanel>
+    </Grid>
+</Window>
