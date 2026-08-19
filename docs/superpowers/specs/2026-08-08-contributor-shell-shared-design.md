@@ -255,14 +255,18 @@ is what happens to a contributor who reads nothing and clicks Continue.
 
 ## The unresolvable bucket in Settings
 
-Settings lists every project with a mode control. The unresolvable bucket
-appears in that list like any other row, and every shell got it wrong the same
-way: it rendered as the raw slug `unknown-project` with no explanation, and its
-mode control offered **Contributed without asking**.
+Settings lists every project with its mode. The unresolvable bucket appears in
+that list like any other row, and every shell rendered it as the raw slug
+`unknown-project` with no explanation.
 
-The second half is the serious one. The daemon refuses `auto_upload` for this
-bucket in two independent places, so a contributor could select that mode and
-have it silently declined -- a control offering a choice it cannot deliver.
+The shells differ in how far the defect went, and the difference matters.
+**GTK** offers a real three-position mode dropdown, so a contributor could
+select **Contributed without asking** on a row the daemon refuses to arm at
+`policy.rs:98` and `policy.rs:125` -- a control offering a choice it cannot
+deliver, which is the serious form of this. **macOS and Windows** offer only a
+two-way Ignore / Ask-again button and never present `auto_upload` as a choice
+at all, so on those two only the label was wrong. Do not "fix" a picker that
+does not exist; do check, per shell, which case you are in.
 
 Required on all three shells, using the same words screen 5 uses, because it is
 the same fact stated on a second surface:
@@ -274,10 +278,13 @@ the same fact stated on a second surface:
 
 - Recognise the row by the `is_unresolved_bucket` flag on the `list_projects`
   payload. Never by `project_label`, which is display text and is not stable.
-- Do NOT offer `auto_upload` for this row. Offering a mode the daemon will
-  refuse is worse than omitting it: it invites a contributor to believe they
-  have armed something that cannot be armed. `Ignore` and ask-first remain,
-  because the bucket can be silenced even though it cannot be armed.
+- Wherever a shell CAN express `auto_upload`, it must not offer it for this
+  row. Offering a mode the daemon will refuse is worse than omitting it: it
+  invites a contributor to believe they have armed something that cannot be
+  armed. `Ignore` and ask-first remain, because the bucket can be silenced even
+  though it cannot be armed. A shell with no arming control has nothing to
+  remove, but should still encode the rule where a future picker would find it,
+  rather than leaving the next author to rediscover the refusal.
 - The note is a statement of what the daemon does, not an apology. Nothing in
   it is a contributor's to fix.
 
