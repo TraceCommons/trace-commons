@@ -326,13 +326,20 @@ pub fn all_exports() -> Vec<Export> {
             },
             contents: template_svg(scheme.ink(), 1024),
         });
-        out.push(Export {
-            relative_path: match scheme {
-                Scheme::Light => "mark-glyph-light.svg",
-                Scheme::Dark => "mark-glyph-dark.svg",
-            },
-            contents: glyph_svg(scheme, 1024),
-        });
+        // Only the light glyph is exported. `glyph_svg` renders either
+        // scheme and is tested for both, but the macOS `.icon` cannot
+        // currently be told to use a per-appearance drawing: `actool` derives
+        // the dark appearance itself from one artwork, and every documented
+        // way of overriding that is ignored without a diagnostic. Committing
+        // a dark glyph nothing consumes would read as though the icon carried
+        // our dark palette. See the addendum in
+        // docs/superpowers/specs/2026-08-19-icon-pipeline-design.md.
+        if scheme == Scheme::Light {
+            out.push(Export {
+                relative_path: "mark-glyph-light.svg",
+                contents: glyph_svg(scheme, 1024),
+            });
+        }
     }
     out.push(Export {
         relative_path: "geometry.json",
@@ -512,13 +519,17 @@ mod tests {
         assert!(!doc.contains("#178F70"), "template is single-ink: {doc}");
     }
 
-    /// Seven documents, distinct paths, and none of them empty. The list drives
+    /// Six documents, distinct paths, and none of them empty. The list drives
     /// both the export tool and the drift check, so a duplicate path here would
     /// silently drop a packaging surface.
+    ///
+    /// There is deliberately no `mark-glyph-dark.svg`: nothing can consume it
+    /// yet, and an exported file no surface reads would suggest the macOS icon
+    /// carries our dark palette when it does not.
     #[test]
-    fn exports_are_seven_distinct_non_empty_documents() {
+    fn exports_are_six_distinct_non_empty_documents() {
         let exports = all_exports();
-        assert_eq!(exports.len(), 7);
+        assert_eq!(exports.len(), 6);
         let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
         paths.sort_unstable();
         assert_eq!(
@@ -526,7 +537,6 @@ mod tests {
             [
                 "geometry.json",
                 "mark-dark.svg",
-                "mark-glyph-dark.svg",
                 "mark-glyph-light.svg",
                 "mark-light.svg",
                 "mark-template-dark.svg",
