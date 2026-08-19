@@ -66,12 +66,31 @@ Six screens, one decision each.
 > keys, and tokens. That scrubbing is good and it is not perfect — which is
 > why you get to look first.
 >
+> *What gets removed?*  (quiet link, directly under the scrubbing paragraph)
+>
 > **You decide what gets contributed. Nothing is sent unless you say so.**
 >
-> [ Get started ]   [ What gets removed? ]
+> [ Get started ]
 
 "Good and not perfect" is load-bearing. A developer knows automatic redaction
 is imperfect; conceding it first is what makes the rest credible.
+
+`What gets removed?` moved out of the footer 2026-08-19, having been
+photographed in both positions. Beside `Get started` it sat some 220px from
+the sentence that raises the question, on the far side of the promise, putting
+a second element against the one beat that should be uncontested. Under the
+paragraph it is answerable where it is asked, and the footer keeps a single
+clear action. It opens a DIALOG, not a seventh screen: this is reference
+material read once, and an expander would push the promise and the button down
+a page that does not scroll.
+
+Its contents are GENERATED from the scrubber's own detector table
+(`secret_leak_pattern_names()`), never hand-written -- a hand-maintained list
+of what is removed is exactly the kind of claim that silently stops being
+true. Names only, never the patterns: publishing the regexes would tell
+someone trying to slip a secret past the scrubber what to avoid. The list is
+shown with the residual-risk concession beneath it, because a list of what is
+caught is not a guarantee.
 
 Order revised 2026-08-19, after the GTK client became the first shell anyone
 had seen rendered. The promise was inline in paragraph 2 and the screen ended
@@ -197,6 +216,21 @@ these; do not reword them in one client alone.
 >
 > Empty: **No projects yet. Sessions you run later will appear here, and in
 > Settings.**
+>
+> The unresolvable bucket, rendered as its own row: **Sessions with no
+> project** / *Trace Commons can't tell which folder these ran in, so they can
+> never be contributed automatically. You'll always be asked.*
+
+That row is recognised by the id of `UNKNOWN_PROJECT_KEY`, not by its label.
+The daemon already refuses `auto_upload` for it in two independent places, so
+the note describes enforcement that exists rather than asking a client to
+enforce anything. Phrase it as a consequence, not a fault: the bucket exists
+because a cwd with no usable final segment has no label but itself, and
+`project_label` reaches `daemon-audit.jsonl`, notification text and
+`HistoryRecord` -- so naming it would write a full local path into all three.
+Not being armable is the protective half of that, and nothing in it is a
+contributor's to fix. `Ignore` stays offered: the bucket can be silenced even
+though it cannot be armed.
 
 The subtitle states the default before the exception on purpose: the default
 is what happens to a contributor who reads nothing and clicks Continue.
