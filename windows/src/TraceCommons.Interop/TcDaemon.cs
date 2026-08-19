@@ -85,15 +85,18 @@ public sealed class TcDaemon : IDisposable
     /// <summary>
     /// Starts the daemon against <paramref name="configDir"/>.
     ///
-    /// The C ABI has no call to set claude_root / codex_root after start, so
-    /// the caller is expected to have already written
-    /// <c>configDir/daemon-settings.json</c> pointing those roots somewhere
-    /// deliberate. <c>DaemonHost</c> does exactly that; this constructor never
-    /// touches a real transcript tree on its own.
+    /// Never touches a real transcript tree on its own: the daemon refuses to
+    /// start at all unless <c>daemon-settings.json</c> declares both session
+    /// sources, and the refusal arrives as
+    /// <see cref="TcException.RootsNotDeclaredLabel"/> for the host to route
+    /// to a roots screen. Pass <paramref name="settingsJson"/> to declare them
+    /// in the same call, which is what turns "the contributor just answered"
+    /// into a running daemon.
     /// </summary>
     /// <exception cref="TcException">
-    /// The daemon could not start -- most commonly because another daemon
-    /// already holds daemon.lock for this directory.
+    /// The daemon could not start -- because the session roots are undeclared
+    /// (<see cref="TcException.IsRootsNotDeclared"/>), or most commonly
+    /// because another daemon already holds daemon.lock for this directory.
     /// </exception>
     /// <param name="configDir">The daemon's state directory.</param>
     /// <param name="settingsJson">
@@ -117,7 +120,7 @@ public sealed class TcDaemon : IDisposable
             // The error string is owned even though the call failed; taking it
             // frees it.
             string message = NativeMethods.TakeOwnedString(errPtr) ?? "unknown error";
-            throw new TcException($"tc_daemon_start failed: {message}");
+            throw new TcException($"tc_daemon_start failed: {message}", message);
         }
 
         // Defensive: a non-null handle with a non-null err would be an ABI
@@ -545,8 +548,44 @@ public sealed class TcDaemon : IDisposable
 /// <summary>An error raised by the trace-commons C ABI boundary.</summary>
 public sealed class TcException : Exception
 {
+    /// <summary>
+    /// The ABI's label for a start refused because the session sources are
+    /// undeclared. Fixed and content-free, and distinct from the opaque
+    /// <c>daemon-start-failed</c> every other start failure reports -- which
+    /// is the whole reason a host can tell "you need to answer the roots
+    /// question" apart from "something else went wrong".
+    ///
+    /// Defined by <c>ERR_ROOTS_NOT_DECLARED</c> in
+    /// <c>crates/trace-commons-contributor-ffi/src/lib.rs</c>.
+    /// </summary>
+    public const string RootsNotDeclaredLabel = "roots-not-declared";
+
     public TcException(string message)
-        : base(message)
+        : this(message, null)
     {
     }
+
+    /// <summary>
+    /// As above, carrying the raw ABI label alongside the human sentence.
+    ///
+    /// The label is kept as its own property rather than parsed back out of
+    /// <see cref="Exception.Message"/>: the message is a UI-facing string that
+    /// may be reworded, and routing a contributor to the right screen must not
+    /// depend on nobody ever editing it.
+    /// </summary>
+    public TcException(string message, string? label)
+        : base(message)
+    {
+        Label = label;
+    }
+
+    /// <summary>The fixed ABI label, when the failure carried one.</summary>
+    public string? Label { get; }
+
+    /// <summary>
+    /// Whether this start failed because the contributor has not yet said
+    /// which session folders to watch. Recoverable: show the roots screen.
+    /// </summary>
+    public bool IsRootsNotDeclared =>
+        string.Equals(Label, RootsNotDeclaredLabel, StringComparison.Ordinal);
 }
