@@ -36,19 +36,24 @@
 # Verify by loading the .icns through CGImageSource, which is what macOS itself
 # uses to draw it. All ten representations decode clean that way.
 #
-# # Why .icns and not an Icon Composer .icon
+# # SUPERSEDED: this script is no longer wired into the build
 #
-# The design spec recommends a .icon document: it carries light, dark and
-# tinted appearances natively and gets the macOS 26 Liquid Glass treatment,
-# where a classic .icns renders as a flat legacy icon beside system icons.
-# That is still the right destination. It is not what this script does, because
-# an .icon is authored in Icon Composer's GUI and there is no documented way to
-# produce one from a build script; this package builds with `swift build`, not
-# xcodebuild, so there is no Xcode project to carry the document either.
+# make-app-bundle.sh calls make-icon-document.sh instead, which builds an
+# Icon Composer .icon and compiles it with actool.
 #
-# .icns is the spec's own stated fallback, it is not deprecated, and it is
-# verifiable end to end from a script. When someone drives Icon Composer once
-# and commits the document, this script is what gets replaced.
+# The claim that used to stand here -- that an .icon "is authored in Icon
+# Composer's GUI and there is no documented way to produce one from a build
+# script" -- was wrong, and it was wrong in the direction that costs the most:
+# it read as settled, so nobody checked. A .icon is a directory (its UTI
+# conforms to com.apple.package), it holds icon.json plus an Assets directory
+# of SVGs, and actool compiles one with no xcodeproj involved. All three were
+# verified before this comment was rewritten.
+#
+# This script is kept, unwired, for one reason: it produces the full
+# ten-representation icns ladder, where actool's fallback icns carries four.
+# If the .icon route ever has to be backed out, this is what to go back to.
+# Nothing else references it -- if it is still unwired when someone next reads
+# this, deleting it is reasonable.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
