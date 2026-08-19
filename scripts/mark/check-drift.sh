@@ -10,26 +10,37 @@
 # `git diff --exit-code` alone is not enough: it says nothing about a file the
 # generator writes that was never committed, which is exactly what a newly
 # added packaging surface looks like. The untracked check below covers that.
+#
+# # The Windows tiles are covered here too
+#
+# They were not, at first. They were rendered with CoreGraphics on a Mac and
+# committed, which meant this check -- which runs on ubuntu-latest -- could not
+# regenerate them and therefore could not compare them to anything. That is the
+# same hole the flat blue squares lived in. They are now rendered by
+# crates/trace-commons-mark with no dependencies and no platform toolchain, so
+# they regenerate identically here and drift is caught like any other asset.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 ASSETS="assets/mark"
+TILES="windows/packaging/Assets"
 
-cargo run --quiet -p trace-commons-mark --bin mark-export -- "$ASSETS"
+cargo run --quiet -p trace-commons-mark --bin mark-export -- "$ASSETS" --repo-root .
 
-if ! git diff --exit-code -- "$ASSETS"; then
-  echo "FATAL: $ASSETS does not match the generator." >&2
-  echo "The SVGs are generated from crates/trace-commons-mark, not edited." >&2
+if ! git diff --exit-code -- "$ASSETS" "$TILES"; then
+  echo "FATAL: generated assets do not match the generator." >&2
+  echo "These files are generated from crates/trace-commons-mark, not edited." >&2
   echo "Run scripts/mark/check-drift.sh locally and commit the result." >&2
   exit 1
 fi
 
-UNTRACKED="$(git ls-files --others --exclude-standard -- "$ASSETS")"
+UNTRACKED="$(git ls-files --others --exclude-standard -- "$ASSETS" "$TILES")"
 if [ -n "$UNTRACKED" ]; then
   echo "FATAL: the generator wrote files that are not committed:" >&2
   echo "$UNTRACKED" >&2
-  echo "A packaging surface was added to all_exports() without being" >&2
-  echo "committed, so every consumer of it would build against nothing." >&2
+  echo "A packaging surface was added to all_exports() or windows_tiles()" >&2
+  echo "without being committed, so every consumer of it would build" >&2
+  echo "against nothing." >&2
   exit 1
 fi
 
@@ -39,10 +50,10 @@ while IFS= read -r tracked; do
     echo "FATAL: $tracked is committed but the generator did not write it." >&2
     MISSING=1
   fi
-done < <(git ls-files -- "$ASSETS")
+done < <(git ls-files -- "$ASSETS" "$TILES")
 if [ "$MISSING" != 0 ]; then
   echo "A committed asset no longer corresponds to any packaging surface." >&2
   exit 1
 fi
 
-echo "assets/mark matches the generator"
+echo "assets/mark and $TILES match the generator"

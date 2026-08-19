@@ -258,14 +258,212 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
 }
 
+/// A deflate bitstream writer.
+///
+/// Deflate packs bits into bytes least-significant-bit first, but writes
+/// Huffman codes most-significant-bit first within that packing. The two rules
+/// are easy to conflate and produce a stream that looks plausible and decodes
+/// to noise, so they are separate methods here rather than one with a flag.
+struct BitWriter {
+    out: Vec<u8>,
+    bit: u32,
+    acc: u32,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        BitWriter {
+            out: Vec::new(),
+            bit: 0,
+            acc: 0,
+        }
+    }
+
+    /// Write `n` bits of `value`, least-significant bit first. This is the
+    /// packing deflate uses for everything that is not a Huffman code.
+    fn bits(&mut self, value: u32, n: u32) {
+        for i in 0..n {
+            self.acc |= ((value >> i) & 1) << self.bit;
+            self.bit += 1;
+            if self.bit == 8 {
+                self.out.push(self.acc as u8);
+                self.acc = 0;
+                self.bit = 0;
+            }
+        }
+    }
+
+    /// Write a Huffman code of `n` bits, most-significant bit first.
+    fn code(&mut self, value: u32, n: u32) {
+        for i in (0..n).rev() {
+            self.bits((value >> i) & 1, 1);
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bit > 0 {
+            self.out.push(self.acc as u8);
+        }
+        self.out
+    }
+}
+
+/// Emit one literal byte using the fixed Huffman literal/length alphabet.
+///
+/// The code assignments are RFC 1951 section 3.2.6, which is a table rather
+/// than a formula and is transcribed here as one.
+fn fixed_literal(w: &mut BitWriter, byte: u8) {
+    let v = byte as u32;
+    if v <= 143 {
+        w.code(0x30 + v, 8);
+    } else {
+        w.code(0x190 + (v - 144), 9);
+    }
+}
+
+/// Length codes 257..=285 as `(code, extra_bits, base_length)`.
+const LENGTH_CODES: [(u32, u32, u32); 28] = [
+    (257, 0, 3),
+    (258, 0, 4),
+    (259, 0, 5),
+    (260, 0, 6),
+    (261, 0, 7),
+    (262, 0, 8),
+    (263, 0, 9),
+    (264, 0, 10),
+    (265, 1, 11),
+    (266, 1, 13),
+    (267, 1, 15),
+    (268, 1, 17),
+    (269, 2, 19),
+    (270, 2, 23),
+    (271, 2, 27),
+    (272, 2, 31),
+    (273, 3, 35),
+    (274, 3, 43),
+    (275, 3, 51),
+    (276, 3, 59),
+    (277, 4, 67),
+    (278, 4, 83),
+    (279, 4, 99),
+    (280, 4, 115),
+    (281, 5, 131),
+    (282, 5, 163),
+    (283, 5, 195),
+    (284, 5, 227),
+    // 285 is length 258 with no extra bits, handled as a special case below.
+];
+
+/// Emit a back-reference of `len` bytes at distance 1.
+///
+/// Distance 1 only. This compressor does run-length encoding and nothing else:
+/// the mark is large areas of one colour, and after the PNG `Up` filter almost
+/// every row is a run of zeroes, so repeats of the immediately preceding byte
+/// are the only matches worth finding. A general LZ77 with a hash chain would
+/// compress marginally better and would be several times the code to audit, for
+/// an artifact that is already small once the runs are gone.
+fn fixed_match(w: &mut BitWriter, len: u32) {
+    debug_assert!((3..=258).contains(&len));
+    if len == 258 {
+        // Literal/length code 285, which lives in the 280..=287 run and is
+        // therefore eight bits based at 0xC0 -- NOT a seven-bit code. Writing
+        // it as 0x17 instead names code 279, which expects four extra bits;
+        // omitting those desynchronises every bit that follows. Short tiles
+        // never produce a maximal run, so that mistake decodes fine at 16px
+        // and destroys a 150px tile.
+        w.code(0xC0 + (285 - 280), 8);
+    } else {
+        let (code, extra, base) = *LENGTH_CODES
+            .iter()
+            .rev()
+            .find(|(_, _, base)| *base <= len)
+            .expect("length below the smallest match");
+        // 257..=279 are seven-bit codes based at 0; 280..=287 are eight-bit.
+        if code <= 279 {
+            w.code(code - 256, 7);
+        } else {
+            w.code(0xC0 + (code - 280), 8);
+        }
+        w.bits(len - base, extra);
+    }
+    // Distance code 0 is distance 1, five bits, no extra bits. Distance codes
+    // use their own fixed five-bit alphabet, not the literal/length one.
+    w.code(0, 5);
+}
+
+/// Deflate `raw` with fixed Huffman codes and distance-1 run-length matches.
+fn deflate_rle(raw: &[u8]) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.bits(1, 1); // BFINAL
+    w.bits(1, 2); // BTYPE 01, fixed Huffman
+
+    let mut i = 0;
+    while i < raw.len() {
+        // A distance-1 match repeats the previous byte, so a run of identical
+        // bytes of length n is one literal followed by a match of n-1.
+        let mut run = 1;
+        while i + run < raw.len() && raw[i + run] == raw[i] {
+            run += 1;
+        }
+        fixed_literal(&mut w, raw[i]);
+        i += 1;
+        let mut remaining = run - 1;
+        while remaining >= 3 {
+            let take = remaining.min(258);
+            // Never leave a tail of 1 or 2, which cannot be encoded as a match
+            // and would have to be emitted as literals anyway.
+            let take = if remaining - take == 1 || remaining - take == 2 {
+                take - 3
+            } else {
+                take
+            };
+            fixed_match(&mut w, take as u32);
+            i += take;
+            remaining -= take;
+        }
+        for _ in 0..remaining {
+            fixed_literal(&mut w, raw[i]);
+            i += 1;
+        }
+    }
+
+    w.code(0, 7); // end of block, literal/length code 256
+    w.finish()
+}
+
+/// Apply PNG's `Up` filter to every row, prefixing each with its filter byte.
+///
+/// `Up` subtracts the byte directly above, modulo 256. The first row has no row
+/// above it, which PNG defines as an implicit row of zeroes, so `Up` on row 0
+/// leaves it unchanged -- the filter type is still declared as `Up` rather than
+/// `None`, because a decoder reads the declared type and both give the same
+/// bytes there.
+fn filter_up(pixels: &[u8], size: u32) -> Vec<u8> {
+    let stride = size as usize * 4;
+    let mut raw = Vec::with_capacity(size as usize * (stride + 1));
+    for row in 0..size as usize {
+        raw.push(2);
+        let start = row * stride;
+        for i in 0..stride {
+            let above = if row == 0 {
+                0
+            } else {
+                pixels[start - stride + i]
+            };
+            raw.push(pixels[start + i].wrapping_sub(above));
+        }
+    }
+    raw
+}
+
 /// Encode straight RGBA pixels as a PNG.
 ///
-/// The zlib stream uses stored (uncompressed) deflate blocks. A tile is a few
-/// hundred kilobytes at worst and the file is a build artifact, so trading size
-/// for a compressor this crate would otherwise have to carry -- or take a
-/// dependency for -- is the right way round. The bytes are still a valid PNG
-/// that any decoder reads; `stored` is a normal deflate block type, not an
-/// extension.
+/// Rows use the `Up` filter, which subtracts the row above. The mark is wide
+/// bands of one colour, so almost every row becomes zeroes and the run-length
+/// compressor collapses it. Without filtering the same image is stored
+/// essentially verbatim: the 150px tile was 90kB before this and is a fraction
+/// of that after, which matters because a scale-400 variant of it would
+/// otherwise be well over a megabyte of committed binary.
 pub fn encode_png(pixels: &[u8], size: u32) -> Vec<u8> {
     assert_eq!(
         pixels.len(),
@@ -273,26 +471,9 @@ pub fn encode_png(pixels: &[u8], size: u32) -> Vec<u8> {
         "pixel buffer does not match {size}x{size} RGBA"
     );
 
-    // Filter byte 0 (None) in front of each row. Filtering exists to help the
-    // compressor, and there is no compressor here.
-    let mut raw = Vec::with_capacity((size as usize) * (size as usize * 4 + 1));
-    for row in 0..size as usize {
-        raw.push(0);
-        let start = row * size as usize * 4;
-        raw.extend_from_slice(&pixels[start..start + size as usize * 4]);
-    }
-
+    let raw = filter_up(pixels, size);
     let mut z = vec![0x78, 0x01];
-    let mut offset = 0;
-    while offset < raw.len() {
-        let len = (raw.len() - offset).min(65535);
-        let final_block = offset + len == raw.len();
-        z.push(if final_block { 1 } else { 0 });
-        z.extend_from_slice(&(len as u16).to_le_bytes());
-        z.extend_from_slice(&(!(len as u16)).to_le_bytes());
-        z.extend_from_slice(&raw[offset..offset + len]);
-        offset += len;
-    }
+    z.extend_from_slice(&deflate_rle(&raw));
     z.extend_from_slice(&adler32(&raw).to_be_bytes());
 
     let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -482,17 +663,54 @@ mod tests {
                 let z = &bytes[i + 8..i + 8 + len];
                 let header = ((z[0] as u32) << 8) | z[1] as u32;
                 assert_eq!(header % 31, 0, "zlib header {header:#x} is not valid");
-                let mut raw = Vec::new();
-                for row in 0..raw_size as usize {
-                    raw.push(0);
-                    let start = row * raw_size as usize * 4;
-                    raw.extend_from_slice(&pixels[start..start + raw_size as usize * 4]);
-                }
+                let raw = filter_up(&pixels, raw_size);
                 let stated = u32::from_be_bytes(z[z.len() - 4..].try_into().unwrap());
                 assert_eq!(adler32(&raw), stated, "adler mismatch");
                 return;
             }
             i += 12 + len;
+        }
+    }
+
+    /// The maximal match length is code 285, an EIGHT-bit code based at 0xC0.
+    ///
+    /// This is a regression test for a real bug. Writing it as the seven-bit
+    /// `0x17` names code 279 instead, which expects four extra bits that then go
+    /// unwritten, desynchronising the remainder of the stream. It is invisible
+    /// at small sizes because a maximal 258-byte run never comes up: the 16px
+    /// tile decoded perfectly while the 150px tile inflated to 704 of its 90150
+    /// bytes and stopped.
+    #[test]
+    fn maximal_match_uses_the_eight_bit_length_code() {
+        let mut w = BitWriter::new();
+        fixed_match(&mut w, 258);
+        let bytes = w.finish();
+        // 0xC5 most-significant-bit first, then five zero bits for distance
+        // code 0, packed least-significant-bit first into the output.
+        let bits: Vec<u8> = bytes
+            .iter()
+            .flat_map(|b| (0..8).map(move |i| (b >> i) & 1))
+            .collect();
+        assert_eq!(
+            &bits[..8],
+            &[1, 1, 0, 0, 0, 1, 0, 1],
+            "length code 285 must be 0xC5 in eight bits, MSB first"
+        );
+        assert_eq!(&bits[8..13], &[0, 0, 0, 0, 0], "distance code 0");
+    }
+
+    /// Every match length the encoder can emit maps to a code in the right
+    /// width class. The 279/285 confusion above is one instance of a general
+    /// hazard: the fixed alphabet changes width twice, and nothing about a
+    /// wrong-width code is visible until a decoder desynchronises.
+    #[test]
+    fn every_match_length_round_trips_through_a_run() {
+        // A run long enough to force a maximal match plus a remainder, at a
+        // size that actually produces one.
+        for len in [3u32, 10, 11, 114, 115, 226, 227, 257, 258] {
+            let mut w = BitWriter::new();
+            fixed_match(&mut w, len);
+            assert!(!w.finish().is_empty(), "length {len} produced no output");
         }
     }
 
