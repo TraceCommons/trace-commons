@@ -118,7 +118,8 @@ use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
-    disambiguated_label, known_keys, project_id_for, project_key_for_id, project_key_is_admissible,
+    UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
+    project_key_is_admissible,
 };
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
@@ -606,6 +607,20 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // project is the notify-only default. Nothing new crosses the
         // socket: the label and the id are the same two daemon-derived
         // fields the queue entry for that project already carries.
+        //
+        // `is_unresolved_bucket` marks the row holding sessions whose
+        // working directory had no usable final segment. Clients show it
+        // with a permanent note that these can never be armed -- which is
+        // enforcement they are REPORTING, not performing: `Policy` refuses
+        // `auto_upload` for this key independently of any client.
+        //
+        // The daemon says so explicitly because it is the only side that
+        // knows it for free. A client deriving it would have to re-implement
+        // `project_id_for`'s hash to compare ids, and a client matching on
+        // `project_label` would break the day that string is reworded --
+        // which every shell does to it, because the raw label is a slug no
+        // contributor should read. Clients MUST NOT recognise this row by
+        // label.
         "list_projects" => {
             let policy = shared.policy.lock().expect("policy lock");
             let queue = shared.queue.lock().expect("queue lock");
@@ -626,6 +641,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
                         "configured": true,
+                        "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                     })
                 })
                 .chain(discovered.iter().map(|key| {
@@ -635,6 +651,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         "mode": policy.resolve(key),
                         "added_at": serde_json::Value::Null,
                         "configured": false,
+                        "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                     })
                 }))
                 .collect();
@@ -2624,6 +2641,77 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["configured"], serde_json::json!(true));
         assert_eq!(rows[0]["mode"], serde_json::json!("ignore"));
+    }
+
+    #[test]
+    fn list_projects_marks_only_the_unresolvable_bucket() {
+        // The flag exists so a shell never has to re-derive `project_id_for`
+        // to know which row this is, and never matches on `project_label` --
+        // which every client rewords, because the raw label is a slug.
+        let s = shared();
+        let ordinary = tmp_project("employer-repo");
+        seed_entry(&s, &ordinary);
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+
+        let rows = projects_of(&s);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+
+        let bucket: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| r["is_unresolved_bucket"] == serde_json::json!(true))
+            .collect();
+        assert_eq!(bucket.len(), 1, "exactly one row is the bucket: {rows:?}");
+
+        // And it is the right one. Checked through the id the daemon minted
+        // for the key, not through the label, so this test cannot pass by
+        // agreeing with a display string.
+        assert_eq!(
+            bucket[0]["project_id"],
+            serde_json::json!(project_id_for(UNKNOWN_PROJECT_KEY))
+        );
+
+        let ordinary_row = rows
+            .iter()
+            .find(|r| r["project_id"] == serde_json::json!(project_id_for(&ordinary)))
+            .expect("the ordinary project is listed");
+        assert_eq!(
+            ordinary_row["is_unresolved_bucket"],
+            serde_json::json!(false),
+            "an ordinary project must never be explained as unresolvable"
+        );
+    }
+
+    #[test]
+    fn the_unresolvable_flag_survives_being_ruled_on() {
+        // A contributor can silence the bucket even though it can never be
+        // armed. Ignoring it moves it from discovered to configured, and the
+        // marker has to hold across that -- otherwise the row loses its
+        // explanation exactly when someone has interacted with it.
+        let s = shared();
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+
+        let rows = projects_of(&s);
+        let id = rows[0]["project_id"].as_str().unwrap().to_string();
+        assert_eq!(rows[0]["is_unresolved_bucket"], serde_json::json!(true));
+        assert_eq!(rows[0]["configured"], serde_json::json!(false));
+
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "ignore"}),
+            ),
+        );
+
+        let rows = projects_of(&s);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["configured"], serde_json::json!(true));
+        assert_eq!(rows[0]["mode"], serde_json::json!("ignore"));
+        assert_eq!(
+            rows[0]["is_unresolved_bucket"],
+            serde_json::json!(true),
+            "the marker is a property of the key, not of whether it is configured"
+        );
     }
 
     #[test]

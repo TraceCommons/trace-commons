@@ -12,7 +12,7 @@ use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_scrub_detector_names,
-    tc_string_free, tc_subscribe, tc_unknown_project_id, tc_unsubscribe,
+    tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -1513,26 +1513,4 @@ fn the_detector_export_never_carries_a_pattern() {
             );
         }
     }
-}
-
-#[test]
-fn the_unknown_project_id_matches_what_the_daemon_mints() {
-    // A shell recognises the unresolvable row by this id. Derived here from
-    // the same function the daemon uses, so the two cannot drift; a digest
-    // hardcoded in a client is the failure this export exists to prevent.
-    let out = tc_unknown_project_id();
-    assert!(!out.is_null());
-    let id = unsafe { CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { tc_string_free(out) };
-
-    let expected = trace_commons_contributor::daemon::policy::project_id_for(
-        trace_commons_contributor::daemon::policy::UNKNOWN_PROJECT_KEY,
-    );
-    assert_eq!(id, expected);
-    assert!(
-        !id.contains('/') && !id.contains("unknown-project"),
-        "the id is a digest and must not leak the key or a path: {id}"
-    );
 }

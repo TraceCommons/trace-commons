@@ -296,25 +296,13 @@ struct ConsentScope: Decodable, Identifiable, Equatable {
     }
 }
 
-enum ProjectMode: String, Decodable {
-    case ask
-    case autoUpload = "auto_upload"
-    case ignore
-}
-
-struct ProjectRow: Decodable, Identifiable, Equatable {
-    let projectLabel: String
-    let mode: ProjectMode
-    let addedAt: Date
-
-    var id: String { projectLabel }
-
-    enum CodingKeys: String, CodingKey {
-        case projectLabel = "project_label"
-        case mode
-        case addedAt = "added_at"
-    }
-}
+// `ProjectMode` and `ProjectRow` live in TCShellCore, re-exported here by the
+// file-level `import TCShellCore`. They moved because both had wire bugs no
+// test could reach from an executable target: `ask` was spelled `"ask"` while
+// the daemon sends `"notify_only"`, and `addedAt` was non-optional while a
+// project the contributor has not decided about carries null. Either one
+// fails the whole array, so `list_projects` never decoded and the projects
+// screen rendered its empty state on every machine.
 
 /// `get_settings`: the credential and both session roots are reported as
 /// configured-or-not booleans, never as values. This type has nowhere to put

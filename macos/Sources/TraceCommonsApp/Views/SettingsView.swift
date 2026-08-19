@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCShellCore
 import TCUpdates
 
 /// What this machine is doing, and what permissions traces carry.

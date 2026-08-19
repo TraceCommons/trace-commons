@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import TCBridge
+import TCShellCore
 
 /// Everything the UI reads, and the only thing that talks to the daemon.
 ///
@@ -294,15 +295,14 @@ final class AppModel: ObservableObject {
     /// `lastActionError`, same as every other action here, and the caller
     /// must leave its own state alone until this succeeds.
     ///
-    /// `project.projectLabel` is the only identifier `ProjectRow` carries.
-    /// It is not guaranteed to be a `project_key` the daemon will accept --
-    /// see the comment on `DaemonClient.setProjectMode` -- so callers
-    /// should expect `project-key-unrecognized` today and must surface it
-    /// rather than assume success.
+    /// Named by `project.projectId`, the opaque id `list_projects` mints for
+    /// every row. This used to send `projectLabel` as a `project_key`, which
+    /// is a final path segment rather than a key and was refused with
+    /// `project-key-unrecognized`.
     func setProjectMode(_ project: ProjectRow, mode: ProjectMode) {
         perform(
             "set_project_mode",
-            work: { try $0.setProjectMode(projectKey: project.projectLabel, mode: mode) }
+            work: { try $0.setProjectMode(projectID: project.projectId, mode: mode) }
         ) { _ in
             self.refreshProjects()
             // Arming or disarming a project is one of the changes the daemon

@@ -365,7 +365,7 @@ history record, audit entry, notification text, or IPC response.
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured}` | configured **and** discovered projects; see "`list_projects`" below |
+| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
@@ -698,7 +698,8 @@ render, not from anything the daemon left out.
       "project_label": "my-proj",
       "mode": "notify_only",
       "added_at": null,
-      "configured": false
+      "configured": false,
+      "is_unresolved_bucket": false
     }
   ]
 }
@@ -711,6 +712,25 @@ Every project the daemon knows about, in two kinds:
 - **discovered** (`configured: false`, `added_at: null`) — the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
+
+#### `is_unresolved_bucket`
+
+True for exactly one row: the bucket holding sessions whose working directory
+had no usable final segment. Sessions in it can never be armed for automatic
+upload — `Policy` refuses `auto_upload` for that key independently of any
+client — so a shell showing the row with a permanent note is **reporting**
+enforcement, not performing it. `Ignore` still applies: the bucket can be
+silenced even though it cannot be armed.
+
+The flag is sent rather than left for clients to derive, because the daemon is
+the only side that knows it for free. Deriving it means re-implementing the
+`project_id_for` hash to compare ids, which is a copy of the rule per client
+with nothing keeping the copies in step.
+
+**Clients MUST NOT recognise this row by `project_label`.** The raw label is a
+slug no contributor should read, so every shell replaces it with its own
+wording; a client keyed on the displayed string loses the row's explanation
+the moment that wording improves, and does it silently.
 
 Discovered rows are reported because the onboarding "which of these should
 never be uploaded" screen has to list precisely the projects nobody has

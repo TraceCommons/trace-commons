@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 
 /// Onboarding screen 5, "What to watch" -- lists the projects the daemon has
 /// discovered, every one starting at ask-first. Copy and rules are from the

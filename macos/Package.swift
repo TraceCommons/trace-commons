@@ -87,6 +87,23 @@ let package = Package(
                 ])
             ]
         ),
+        // The one test target that links the dylib. Everything testable
+        // without it lives in TCShellCore and is tested there -- but "every
+        // detector the scrubber actually has is labelled" cannot be asserted
+        // against a fixture, only against the real table, and a list of what
+        // is removed that quietly falls back to a de-slugged name is exactly
+        // the drift this screen exists to avoid.
+        .testTarget(
+            name: "TCBridgeTests",
+            dependencies: ["TCBridge", "TCShellCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L", ffiLibDir,
+                    "-ltrace_commons_contributor_ffi",
+                ])
+            ]
+        ),
         .executableTarget(
             name: "tc-ffi-demo",
             dependencies: ["TCBridge"],
