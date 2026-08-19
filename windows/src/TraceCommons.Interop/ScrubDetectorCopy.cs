@@ -45,28 +45,6 @@ public static class ScrubDetectorCopy
     public const string Close = "Close";
 
     /// <summary>
-    /// Every detector slug the scrubber's table carried when this screen was
-    /// built, as read from <c>trace_contribution.rs</c>.
-    ///
-    /// This is NOT what the dialog renders -- that comes from the live export.
-    /// It exists so <c>EveryKnownDetectorHasAHumanLabel</c> can run on a machine
-    /// that cannot reach the cdylib's newest exports, and it is deliberately a
-    /// weaker guard than GTK's, which iterates the live table. When the export
-    /// is available here, this set should be replaced by a call to it.
-    /// </summary>
-    internal static readonly string[] KnownDetectorsAtTimeOfWriting =
-    {
-        "openai_api_key",
-        "github_token",
-        "aws_access_key",
-        "provider_token",
-        "jwt",
-        "npm_token",
-        "google_api_key",
-        "pem_header_orphan",
-    };
-
-    /// <summary>
     /// A named detector, in words. <paramref name="slug"/> is a name from the
     /// protocol's table.
     /// </summary>

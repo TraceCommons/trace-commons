@@ -1,6 +1,4 @@
 using System;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace TraceCommons.Interop;
 
@@ -61,7 +59,9 @@ public static class WatchCopy
     /// The wire carries the slug <c>unknown-project</c> as this row's
     /// <c>project_label</c>, because the daemon's <c>project_label_for</c>
     /// deliberately returns the constant rather than degrade to something that
-    /// might carry a path. A slug is not a project name, so it is not shown.
+    /// might carry a path. A slug is not a project name, so it is not shown --
+    /// and it is not what identifies the row either. That is the daemon's
+    /// <c>is_unresolved_bucket</c> flag.
     /// </summary>
     public const string UnknownLabel = "Sessions with no project";
 
@@ -83,50 +83,20 @@ public static class WatchCopy
         + "contributed automatically. You'll always be asked.";
 
     /// <summary>
-    /// The daemon's key for the unresolvable bucket, from
-    /// <c>policy.rs</c>'s <c>UNKNOWN_PROJECT_KEY</c>.
-    /// </summary>
-    internal const string UnknownProjectKey = "unknown-project";
-
-    private const string ProjectIdPrefix = "proj_";
-
-    /// <summary>Hex characters of SHA-256 carried in an opaque project id.</summary>
-    private const int ProjectIdHexChars = 16;
-
-    /// <summary>
-    /// The opaque id the daemon mints for the unresolvable bucket.
-    ///
-    /// Derived rather than hardcoded, mirroring <c>policy.rs</c>'s
-    /// <c>project_id_for</c>: SHA-256 of the key, first 16 hex characters,
-    /// <c>proj_</c> prefix. Recognition goes through the ID and never the
-    /// label, because the id is what the row IS while the label is only what it
-    /// displays -- and a shell that matched on the label would break the moment
-    /// the label became a translated string.
-    ///
-    /// DUPLICATION, STATED PLAINLY: this re-implements a derivation that lives
-    /// in Rust. The GTK shell has no such copy because it links the crate and
-    /// calls <c>project_id_for</c> directly; a shell reaching the daemon over
-    /// the C ABI cannot. <c>AnUnresolvableBucketIsRecognisedByItsDaemonMintedId</c>
-    /// pins the value the daemon actually produces, but a C# test cannot notice
-    /// if the Rust side changes its algorithm. The durable fix is for
-    /// <c>list_projects</c> to mark the row explicitly; until it does, this is
-    /// the only way a C ABI client can tell.
-    /// </summary>
-    public static string UnknownProjectId { get; } = DeriveProjectId(UnknownProjectKey);
-
-    /// <summary>
-    /// True when <paramref name="projectId"/> is the unresolvable bucket.
-    /// </summary>
-    public static bool IsUnresolvable(string? projectId) =>
-        string.Equals(projectId, UnknownProjectId, StringComparison.Ordinal);
-
-    /// <summary>
     /// What to show as a row's name: the human label for the unresolvable
     /// bucket, the daemon's label otherwise.
     /// </summary>
-    public static string LabelFor(string? projectId, string? projectLabel)
+    /// <param name="isUnresolvedBucket">
+    /// The daemon's own <c>is_unresolved_bucket</c> flag. This shell does not
+    /// work the answer out for itself: the daemon decides, because the daemon
+    /// is what refuses to arm the row. Recognising it any other way -- by the
+    /// label, or by re-deriving the opaque id's hash -- is forbidden by
+    /// <c>docs/contributor-daemon-ipc-v1_1.md</c> and was a second way to know
+    /// one thing.
+    /// </param>
+    public static string LabelFor(bool isUnresolvedBucket, string? projectLabel)
     {
-        if (IsUnresolvable(projectId))
+        if (isUnresolvedBucket)
         {
             return UnknownLabel;
         }
@@ -138,27 +108,13 @@ public static class WatchCopy
     /// The line beneath a row's name: the note for the unresolvable bucket,
     /// otherwise the mode. The note replaces the state rather than joining it.
     /// </summary>
-    public static string SubLineFor(string? projectId, string? mode)
+    public static string SubLineFor(bool isUnresolvedBucket, string? mode)
     {
-        if (IsUnresolvable(projectId))
+        if (isUnresolvedBucket)
         {
             return UnknownNote;
         }
 
         return string.Equals(mode, "ignore", StringComparison.Ordinal) ? Ignored : AskMeFirst;
-    }
-
-    private static string DeriveProjectId(string projectKey)
-    {
-        byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(projectKey));
-        var hex = new StringBuilder(ProjectIdPrefix, ProjectIdPrefix.Length + ProjectIdHexChars);
-        for (int nibble = 0; nibble < ProjectIdHexChars; nibble++)
-        {
-            byte b = digest[nibble / 2];
-            int value = (nibble % 2 == 0) ? (b >> 4) : (b & 0x0f);
-            hex.Append(value.ToString("x", System.Globalization.CultureInfo.InvariantCulture));
-        }
-
-        return hex.ToString();
     }
 }

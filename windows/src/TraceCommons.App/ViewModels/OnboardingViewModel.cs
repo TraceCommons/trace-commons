@@ -574,10 +574,11 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
 
         // Both the name and the line beneath it come from WatchCopy, which is
         // in the interop assembly precisely so they are exercised by tests on a
-        // machine that cannot build WinUI. Nothing about which row this is gets
-        // decided here.
-        ProjectLabel = WatchCopy.LabelFor(project.ProjectId, project.ProjectLabel);
-        IsUnresolvable = WatchCopy.IsUnresolvable(project.ProjectId);
+        // machine that cannot build WinUI. Which row this IS comes from the
+        // daemon's own flag, never from the label and never from re-deriving
+        // the opaque id.
+        IsUnresolvable = project.IsUnresolvedBucket;
+        ProjectLabel = WatchCopy.LabelFor(IsUnresolvable, project.ProjectLabel);
         _isIgnored = project.Mode == "ignore";
     }
 
@@ -600,7 +601,7 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     /// note REPLACES the mode rather than joining it, because "you'll always be
     /// asked" already says what "Ask me first" says.
     /// </summary>
-    public string SubLine => WatchCopy.SubLineFor(ProjectId, _isIgnored ? "ignore" : "ask");
+    public string SubLine => WatchCopy.SubLineFor(IsUnresolvable, _isIgnored ? "ignore" : "ask");
 
     public bool IsIgnored
     {
