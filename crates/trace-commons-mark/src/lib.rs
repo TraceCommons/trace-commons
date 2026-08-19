@@ -303,23 +303,76 @@ pub struct BinaryExport {
 /// The sizes come from the filenames, which are what `Package.appxmanifest`
 /// names and what MSIX resolves against; see the manifest's `Logo` and
 /// `uap:VisualElements` elements.
+/// The three assets `Package.appxmanifest` names, and the scale-qualified
+/// variants alongside them.
+///
+/// # The scale ladder
+///
+/// The manifest names exactly three files. MSIX resolves a request for
+/// `Assets\Square44x44Logo.png` through the resource system, which prefers a
+/// `.scale-N` variant matching the display and falls back to the unqualified
+/// file otherwise -- so the unqualified files stay, and the variants are added
+/// beside them. `TraceCommons.App.csproj` globs `Assets/*.png`, so a new
+/// filename here needs no project change.
+///
+/// The percentages are the set named in
+/// `docs/superpowers/specs/2026-08-19-icon-pipeline-design.md`. `scale-100` is
+/// deliberately absent: it would be a byte-for-byte duplicate of the
+/// unqualified file, which already serves that scale.
+///
+/// Pixel sizes are the base size scaled by the percentage and rounded half up.
+/// That is arithmetic rather than a table, which matters because a table would
+/// be a second description of the ladder.
+///
+/// # What is NOT here
+///
+/// The `targetsize-*` variants the taskbar and Start use are not generated. The
+/// spec gestures at them without enumerating them, and its own open questions
+/// record that the qualifier set was never checked against Microsoft's
+/// requirements. Enumerating it from memory is how a plausible, unexercised
+/// asset set gets committed, which is the failure this whole slice exists to
+/// undo. Adding them is a line in `LADDER` once somebody who can run the
+/// Windows packaging confirms the list.
 pub fn windows_tiles() -> Vec<BinaryExport> {
     const TILES: [(&str, u32); 3] = [
-        ("windows/packaging/Assets/StoreLogo.png", 50),
-        ("windows/packaging/Assets/Square150x150Logo.png", 150),
-        ("windows/packaging/Assets/Square44x44Logo.png", 44),
+        ("windows/packaging/Assets/StoreLogo", 50),
+        ("windows/packaging/Assets/Square150x150Logo", 150),
+        ("windows/packaging/Assets/Square44x44Logo", 44),
     ];
-    TILES
-        .into_iter()
-        .map(|(repo_path, size)| BinaryExport {
-            repo_path,
-            // Light only. A Start tile is composited on a background the app
-            // does not choose, and the manifest sets `BackgroundColor` to
-            // transparent, so the tile carries its own light surface rather
-            // than following a system appearance it cannot observe.
-            bytes: raster::png(Scheme::Light, size),
-        })
-        .collect()
+    /// Scale percentages, excluding 100.
+    const LADDER: [u32; 4] = [125, 150, 200, 400];
+
+    let mut out = Vec::new();
+    for (stem, base) in TILES {
+        // Light only. A Start tile is composited on a background the app does
+        // not choose, and the manifest sets `BackgroundColor` to transparent,
+        // so the tile carries its own light surface rather than following a
+        // system appearance it cannot observe.
+        out.push(BinaryExport {
+            repo_path: leak_path(format!("{stem}.png")),
+            bytes: raster::png(Scheme::Light, base),
+        });
+        for percent in LADDER {
+            // Round half up, which is not `div_ceil`: they agree on the .5
+            // cases these three bases produce and disagree on everything else,
+            // so using ceil here would make the comment above false the moment
+            // a fourth tile size appears.
+            let size = (base * percent + 50) / 100;
+            out.push(BinaryExport {
+                repo_path: leak_path(format!("{stem}.scale-{percent}.png")),
+                bytes: raster::png(Scheme::Light, size),
+            });
+        }
+    }
+    out
+}
+
+/// `BinaryExport::repo_path` is `&'static str` because every other path in this
+/// crate is a literal, and the scale ladder is the one place a path is
+/// computed. The set is fixed and tiny and is built once per process, so
+/// leaking it is cheaper than making every caller own a `String`.
+fn leak_path(path: String) -> &'static str {
+    Box::leak(path.into_boxed_str())
 }
 
 /// Every SVG the packaging surfaces consume, in a stable order.
@@ -453,25 +506,51 @@ mod tests {
     /// resampled, which looks like a slightly soft icon rather than a failure.
     #[test]
     fn windows_tiles_are_the_sizes_their_names_promise() {
+        // The three the manifest names, each with four scale variants.
+        let expected: &[(&str, u32)] = &[
+            ("StoreLogo.png", 50),
+            ("StoreLogo.scale-125.png", 63),
+            ("StoreLogo.scale-150.png", 75),
+            ("StoreLogo.scale-200.png", 100),
+            ("StoreLogo.scale-400.png", 200),
+            ("Square150x150Logo.png", 150),
+            ("Square150x150Logo.scale-125.png", 188),
+            ("Square150x150Logo.scale-150.png", 225),
+            ("Square150x150Logo.scale-200.png", 300),
+            ("Square150x150Logo.scale-400.png", 600),
+            ("Square44x44Logo.png", 44),
+            ("Square44x44Logo.scale-125.png", 55),
+            ("Square44x44Logo.scale-150.png", 66),
+            ("Square44x44Logo.scale-200.png", 88),
+            ("Square44x44Logo.scale-400.png", 176),
+        ];
+
         let tiles = windows_tiles();
-        assert_eq!(tiles.len(), 3);
-        for tile in &tiles {
-            let name = tile
-                .repo_path
-                .rsplit('/')
-                .next()
-                .expect("tile path has a filename");
-            let want: u32 = match name {
-                "StoreLogo.png" => 50,
-                "Square150x150Logo.png" => 150,
-                "Square44x44Logo.png" => 44,
-                other => panic!("unexpected tile {other}"),
-            };
+        assert_eq!(tiles.len(), expected.len());
+        for (tile, (name, want)) in tiles.iter().zip(expected) {
+            assert!(
+                tile.repo_path.ends_with(name),
+                "expected {name}, got {}",
+                tile.repo_path
+            );
             // IHDR width and height are bytes 16..24 of a PNG.
             let w = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
             let h = u32::from_be_bytes(tile.bytes[20..24].try_into().unwrap());
-            assert_eq!((w, h), (want, want), "{}", tile.repo_path);
+            assert_eq!((w, h), (*want, *want), "{}", tile.repo_path);
         }
+    }
+
+    /// Every generated path is distinct. A duplicate would mean one asset
+    /// silently overwriting another during export, and the drift check would
+    /// then compare the survivor against itself and pass.
+    #[test]
+    fn windows_tile_paths_are_distinct() {
+        let tiles = windows_tiles();
+        let mut paths: Vec<&str> = tiles.iter().map(|t| t.repo_path).collect();
+        paths.sort_unstable();
+        let before = paths.len();
+        paths.dedup();
+        assert_eq!(before, paths.len(), "duplicate tile path");
     }
 
     /// The teeth, at the level the packaging actually consumes. Not "the file
