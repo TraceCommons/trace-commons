@@ -641,6 +641,53 @@ button.danger {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.install-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.install-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin: 18px 0 6px;
+  text-transform: uppercase;
+}
+
+.install-code {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 0;
+  overflow-x: auto;
+  padding: 12px 14px;
+}
+
+.install-code code {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.install-note {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+
+.install-note code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-size: 13px;
+  padding: 1px 5px;
+  word-break: break-word;
+}
+
 .empty {
   color: var(--muted);
   padding: 28px;
@@ -665,7 +712,8 @@ button.danger {
   .kpi-grid,
   .flow-list,
   .rhythm-grid,
-  .about-grid {
+  .about-grid,
+  .install-grid {
     grid-template-columns: 1fr;
   }
 

@@ -9,6 +9,7 @@ const state = {
 const routes = new Set([
   "/",
   "/leaderboard",
+  "/install",
   "/analytics",
   "/brief",
   "/profile",
@@ -105,6 +106,11 @@ function renderRoute(pathname) {
   if (!app) return;
   const normalizedPath = normalizePathname(pathname);
   setActiveNav(normalizedPath);
+  if (normalizedPath === "/install") {
+    app.innerHTML = renderInstall();
+    app.focus();
+    return;
+  }
   if (!state.snapshot) {
     app.innerHTML = renderSnapshotError();
     return;
@@ -568,6 +574,74 @@ function renderAbout(path) {
       <div class="panel"><h2>No raw traces</h2><p class="lede">The community site renders aggregate counts, credit totals, and handles. It does not render message text, tool payloads, or per-trace details.</p></div>
       <div class="panel"><h2>Pseudonymous handles</h2><p class="lede">A handle is self-declared public material. The server keeps the underlying contributor principal as the pseudonymous join key.</p></div>
       <div class="panel"><h2>Withdrawal</h2><p class="lede">Withdrawing stamps the profile as no longer public. The next snapshot removes the profile and contributor page from the site.</p></div>
+    </section>
+  `;
+}
+
+function renderInstall() {
+  return `
+    <section class="section-band">
+      <p class="eyebrow">Install</p>
+      <h1>Run the contributor on macOS, Windows, or Linux.</h1>
+      <p class="lede">The desktop app and the command-line contributor are separate downloads on every platform. Nothing leaves your machine until you approve an upload.</p>
+    </section>
+
+    <section class="install-grid">
+      <div class="panel">
+        <h2>Windows</h2>
+        <p class="lede">The app is Authenticode-signed through Azure Trusted Signing and RFC3161 timestamped.</p>
+        <p class="install-label">Desktop app, keeps itself up to date</p>
+        <pre class="install-code"><code>https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller</code></pre>
+        <p class="install-note">Open that address in Windows. It installs the signed MSIX and Windows updates it from the same address afterwards.</p>
+        <p class="install-label">Desktop app, portable</p>
+        <p class="install-note">Unzip <code>trace-commons-app-windows-x86_64-*.zip</code> from the release and run <code>TraceCommons.exe</code>. It is self-contained, so there is no runtime to install first.</p>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+.\\install.ps1</code></pre>
+        <p class="install-note">Downloading it first so you can read it is the documented form. Only an x64 build is published; Windows on Arm runs it under emulation.</p>
+      </div>
+
+      <div class="panel">
+        <h2>macOS</h2>
+        <p class="lede">Signed with Iqlusion Inc's Developer ID and notarized by Apple. The app is a universal build for Apple silicon and Intel, and needs macOS Sonoma or newer.</p>
+        <p class="install-label">Desktop app</p>
+        <pre class="install-code"><code>brew tap TraceCommons/tap
+brew install --cask trace-commons</code></pre>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>brew install TraceCommons/tap/trace-commons-contributor</code></pre>
+        <p class="install-note">Without Homebrew, download the DMG or the CLI zip from the release and use the shell installer below.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Linux</h2>
+        <p class="lede">Distributed as a GPG-signed flatpak.</p>
+        <p class="install-label">Desktop app</p>
+        <pre class="install-code"><code>flatpak install --from https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref</code></pre>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+sh install.sh</code></pre>
+      </div>
+    </section>
+
+    <section class="section-band">
+      <p class="eyebrow">New on Windows</p>
+      <h1>Pause, Settings, and the tray reached parity.</h1>
+      <p class="lede">The Windows app now carries the same controls the macOS and Linux shells do.</p>
+    </section>
+
+    <section class="about-grid">
+      <div class="panel"><h2>Pause and resume</h2><p class="lede">Pause capture from the window or the tray for any of the three shared durations, and resume before it lapses.</p></div>
+      <div class="panel"><h2>Settings</h2><p class="lede">Connection, startup, consent, behavior, per-project, public-profile, and audit surfaces are all present.</p></div>
+      <div class="panel"><h2>Tray</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
+      <div class="panel"><h2>Preview and undo</h2><p class="lede">Approve a trace from the native envelope preview, and undo the approval on the same round trip.</p></div>
+      <div class="panel"><h2>Run at login</h2><p class="lede">The MSIX build registers through the Windows startup-task API. The portable build uses the per-user Run key instead.</p></div>
+      <div class="panel"><h2>Projects</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered.</p></div>
+    </section>
+
+    <section class="section-band">
+      <p class="eyebrow">Verification</p>
+      <h1>The installers refuse what they cannot verify.</h1>
+      <p class="lede">Both installers check the published SHA-256, and check a signature against the platform's own roots: Authenticode naming Iqlusion Inc on Windows, a Developer ID naming our team on macOS. Neither has a force or skip-verify flag. This tool reads your coding transcripts, so an installer that can be talked out of its checks is worse than no installer. On failure you get the reason, a non-zero exit, and nothing on your PATH.</p>
     </section>
   `;
 }
