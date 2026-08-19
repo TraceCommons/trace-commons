@@ -45,6 +45,8 @@
 //! client's own token, the client's token is right and
 //! [`tests::palette_matches_client_tokens`] is what should have caught it.
 
+pub mod raster;
+
 /// The mark's coordinate space. Every number in this module is in these units
 /// and is scaled to the requested pixel size at render time.
 pub const VIEW: u32 = 64;
@@ -269,6 +271,57 @@ pub struct Export {
     pub contents: String,
 }
 
+/// One generated binary file: a path relative to the repository root, and its
+/// bytes.
+///
+/// Unlike [`Export`], the path is relative to the repository rather than to an
+/// export directory, because these files have to land where a packaging
+/// manifest already names them. `Package.appxmanifest` references
+/// `Assets\StoreLogo.png`, and MSIX resolves that against the package layout --
+/// so the tile cannot live under `assets/mark` with the SVGs and be copied
+/// later without something doing the copying, which is one more step nothing
+/// would verify.
+pub struct BinaryExport {
+    pub repo_path: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Every raster asset a packaging manifest names, in a stable order.
+///
+/// # Why these are generated in Rust rather than by a platform toolchain
+///
+/// These three files were solid `#315FBA` squares for months. They were the
+/// right dimensions with the right names in the right brand colour, so the only
+/// checks that looked at them passed. The first fix generated them with
+/// CoreGraphics, which put the mark on them but left them regenerable only on a
+/// Mac -- and the drift check runs on `ubuntu-latest`, so they stayed outside
+/// it. An asset nothing can regenerate is an asset nothing can verify.
+///
+/// [`raster`] renders them with no dependencies and no platform toolchain, so
+/// the drift check can regenerate them on any runner and compare bytes.
+///
+/// The sizes come from the filenames, which are what `Package.appxmanifest`
+/// names and what MSIX resolves against; see the manifest's `Logo` and
+/// `uap:VisualElements` elements.
+pub fn windows_tiles() -> Vec<BinaryExport> {
+    const TILES: [(&str, u32); 3] = [
+        ("windows/packaging/Assets/StoreLogo.png", 50),
+        ("windows/packaging/Assets/Square150x150Logo.png", 150),
+        ("windows/packaging/Assets/Square44x44Logo.png", 44),
+    ];
+    TILES
+        .into_iter()
+        .map(|(repo_path, size)| BinaryExport {
+            repo_path,
+            // Light only. A Start tile is composited on a background the app
+            // does not choose, and the manifest sets `BackgroundColor` to
+            // transparent, so the tile carries its own light surface rather
+            // than following a system appearance it cannot observe.
+            bytes: raster::png(Scheme::Light, size),
+        })
+        .collect()
+}
+
 /// Every SVG the packaging surfaces consume, in a stable order.
 ///
 /// The export tool writes exactly this list and the drift check re-runs it, so
@@ -393,6 +446,70 @@ mod tests {
         assert_eq!(Scheme::Dark.blue(), "#7FA0EC");
         assert_eq!(Scheme::Light.ink(), "#20241F");
         assert_eq!(Scheme::Dark.ink(), "#E8EAE3");
+    }
+
+    /// The tiles are named by the manifest, at the sizes their filenames
+    /// promise. A tile generated at the wrong size still installs; it is just
+    /// resampled, which looks like a slightly soft icon rather than a failure.
+    #[test]
+    fn windows_tiles_are_the_sizes_their_names_promise() {
+        let tiles = windows_tiles();
+        assert_eq!(tiles.len(), 3);
+        for tile in &tiles {
+            let name = tile
+                .repo_path
+                .rsplit('/')
+                .next()
+                .expect("tile path has a filename");
+            let want: u32 = match name {
+                "StoreLogo.png" => 50,
+                "Square150x150Logo.png" => 150,
+                "Square44x44Logo.png" => 44,
+                other => panic!("unexpected tile {other}"),
+            };
+            // IHDR width and height are bytes 16..24 of a PNG.
+            let w = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
+            let h = u32::from_be_bytes(tile.bytes[20..24].try_into().unwrap());
+            assert_eq!((w, h), (want, want), "{}", tile.repo_path);
+        }
+    }
+
+    /// The teeth, at the level the packaging actually consumes. Not "the file
+    /// exists", not "it is the right size", not "it has more than one colour" --
+    /// the two bracket inks have to be present in the decoded pixels, because a
+    /// flat square satisfies all three of the others and that is precisely what
+    /// shipped.
+    #[test]
+    fn windows_tiles_carry_both_brackets() {
+        for tile in windows_tiles() {
+            let size = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
+            let pixels = raster::render_framed(Scheme::Light, size);
+            let ink = |hex: &str| {
+                let b = hex.as_bytes();
+                let n = |c: u8| match c {
+                    b'0'..=b'9' => c - b'0',
+                    b'A'..=b'F' => c - b'A' + 10,
+                    _ => 0,
+                };
+                [
+                    n(b[1]) * 16 + n(b[2]),
+                    n(b[3]) * 16 + n(b[4]),
+                    n(b[5]) * 16 + n(b[6]),
+                    255,
+                ]
+            };
+            for (name, hex) in [
+                ("green", Scheme::Light.green()),
+                ("blue", Scheme::Light.blue()),
+            ] {
+                let want = ink(hex);
+                assert!(
+                    pixels.chunks(4).any(|p| p == want),
+                    "{} has no {name} bracket",
+                    tile.repo_path
+                );
+            }
+        }
     }
 
     /// The emitted document has to carry the geometry, not merely be
