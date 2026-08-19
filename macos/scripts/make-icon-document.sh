@@ -57,10 +57,33 @@ ASSET_DIR="${1:-$REPO_ROOT/assets/mark}"
 RESOURCES="${2:?usage: make-icon-document.sh <asset-dir> <bundle-resources-dir>}"
 
 LIGHT="$ASSET_DIR/mark-glyph-light.svg"
+DARK="$ASSET_DIR/mark-glyph-dark.svg"
 
-if [ ! -s "$LIGHT" ]; then
-  echo "FATAL: $LIGHT does not exist." >&2
-  echo "Generate it: cargo run -p trace-commons-mark --bin mark-export" >&2
+for svg in "$LIGHT" "$DARK"; do
+  if [ ! -s "$svg" ]; then
+    echo "FATAL: $svg does not exist." >&2
+    echo "Generate it: cargo run -p trace-commons-mark --bin mark-export" >&2
+    exit 1
+  fi
+  # Both brackets, by their path data. A document that compiles to a blank
+  # or half-drawn icon is the failure this whole slice exists to catch, and
+  # it is invisible downstream: actool will happily compile an empty SVG.
+  for bracket in 'M11 28V11h17' 'M53 36v17H36'; do
+    if ! grep -q "$bracket" "$svg"; then
+      echo "FATAL: $svg does not carry the bracket $bracket." >&2
+      exit 1
+    fi
+  done
+done
+
+# The dark drawing has to actually be a different drawing. If the two files
+# ever come out identical -- a generator regression, a bad copy -- the icon
+# would still build, still declare a dark specialization, and still show the
+# light inks in dark mode, which is precisely the silent rot this check is
+# here to stop.
+if cmp -s "$LIGHT" "$DARK"; then
+  echo "FATAL: the dark glyph is byte-identical to the light one." >&2
+  echo "Dark mode would show the light palette while appearing to be set." >&2
   exit 1
 fi
 
@@ -69,14 +92,19 @@ trap 'rm -rf "$WORK"' EXIT
 DOC="$WORK/AppIcon.icon"
 mkdir -p "$DOC/Assets" "$WORK/out"
 
-# Only what icon.json references. actool ignores an unreferenced file in the
-# Assets directory, so shipping one would just be a claim that the icon uses
-# artwork it does not.
 cp "$LIGHT" "$DOC/Assets/mark-glyph-light.svg"
+cp "$DARK" "$DOC/Assets/mark-glyph-dark.svg"
 
 # The surface token from the shared palette, as the extended-sRGB components
 # actool wants. Kept in step with Scheme::Light.surface() by
 # icon_document_fill_matches_the_light_surface in the mark crate.
+# The specialization array is base-first: the entry with NO "appearance" key
+# is what every appearance starts from, and entries carrying an "appearance"
+# override it. That ordering is the whole trick. An array holding only the
+# dark entry -- an override with nothing to override -- is structurally
+# invalid, and since actool validates nothing it is discarded in silence,
+# which reads exactly like the feature not existing. The shape is taken from
+# an icon.json written by Icon Composer 1.6, not inferred.
 cat > "$DOC/icon.json" <<'JSON'
 {
   "fill" : {
@@ -86,7 +114,15 @@ cat > "$DOC/icon.json" <<'JSON'
     {
       "layers" : [
         {
-          "image-name" : "mark-glyph-light.svg"
+          "image-name-specializations" : [
+            {
+              "value" : "mark-glyph-light.svg"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "mark-glyph-dark.svg"
+            }
+          ]
         }
       ]
     }
@@ -144,6 +180,13 @@ for appearance in NSAppearanceNameAqua NSAppearanceNameDarkAqua ISAppearanceTint
     exit 1
   fi
 done
-echo "  Assets.car carries Aqua, DarkAqua and Tintable compositions"
+
+# And that the dark composition resolves to the DARK artwork. The check above
+# would pass with all three appearances sharing one layer, which is exactly
+# what this build did before the specialization was understood: three
+# compositions, one vector, light inks in dark mode. Nothing downstream would
+# have said so -- the icon renders, it just renders wrong.
+xcrun assetutil --info "$RESOURCES/Assets.car" > "$WORK/catalogue.json"
+python3 "$PACKAGE_DIR/scripts/verify-icon-appearances.py" "$WORK/catalogue.json"
 
 echo "built $RESOURCES/AppIcon.icns and $RESOURCES/Assets.car"

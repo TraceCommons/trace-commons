@@ -394,58 +394,68 @@ both verified deliberately:
    that covers the SVG and PNG artwork. It is checked semantically instead.
 
 
-### The dark drawing cannot currently be used, and here is exactly why
 
-The first pass recorded this as "unknown". It is not unknown any more. The
-compiled catalogue was inspected directly with `assetutil --info`, which
-answers questions no rendering API could.
+### The dark drawing is carried, and the shape that carries it
 
-What the compiled `Assets.car` contains:
+Dark mode draws the mark's own palette. The layer names both glyphs through
+an `image-name-specializations` array:
 
-- **Three appearance compositions, and they are real.** `IconGroup` and
-  `IconImageStack` renditions exist for `NSAppearanceNameAqua`,
-  `NSAppearanceNameDarkAqua` and `ISAppearanceTintable`.
-- **The dark composition genuinely differs.** The dark stack references
-  `Gradient-2`, built from two dark greys (`0.192` and `0.078`, gray gamma
-  2.2); the light and tintable stacks reference `Gradient-1`, the white that
-  `icon.json` specifies. `actool` derived that dark ground on its own — it was
-  never asked to.
-- **All three reference the same artwork.** Every one of the three `IconGroup`
-  renditions carries a single layer named `AppIcon_Assets/mark-glyph-light`,
-  with an identical `NameIdentifier` and an identical `SHA1Digest`. There is
-  exactly one `Vector` asset in the catalogue.
+```json
+"layers" : [
+  {
+    "image-name-specializations" : [
+      { "value" : "mark-glyph-light.svg" },
+      { "appearance" : "dark", "value" : "mark-glyph-dark.svg" }
+    ]
+  }
+]
+```
 
-So dark mode already gets a dark tile. What it does not get is the mark's dark
-palette — the light inks are composited onto the dark ground.
+**The base entry is the whole trick.** The first element carries no
+`appearance` key: it is what every appearance starts from, and entries with an
+`appearance` override it. An array holding only the dark entry -- an override
+with nothing to override -- is structurally invalid and, because `actool`
+validates nothing, is discarded in silence. That silence is indistinguishable
+from the feature not existing, which is what two earlier passes concluded.
+The same construct works at the top level for `fill-specializations`.
 
-Two specialization syntaxes were tested against a signal that cannot be
-misread: a `dark` fill of pure red, checked by reading the emitted colour
-components back out of the catalogue.
+This shape was taken from an `icon.json` written by Icon Composer 1.6, not
+inferred. Two earlier attempts failed on structure, not vocabulary: the key
+name `image-name-specializations` and the slot name `dark` were both right
+from the start.
 
-| Shape | Result |
+Evidence it works, read back from the compiled catalogue with
+`assetutil --info`:
+
+| Appearance | Layer | Digest |
+| --- | --- | --- |
+| `NSAppearanceNameDarkAqua` | `AppIcon_Assets/mark-glyph-dark` | `CFEFF50C…` |
+| `NSAppearanceNameAqua` | `AppIcon_Assets/mark-glyph-light` | `A79E9F76…` |
+| `ISAppearanceTintable` | `AppIcon_Assets/mark-glyph-light` | `A79E9F76…` |
+
+Two distinct `Vector` assets, where before there was one shared by all three.
+
+### Why the dark rendition is checked separately
+
+`verify-icon.swift` inspects the fallback `.icns`, which carries only the light
+drawing; the dark artwork exists solely inside `Assets.car`. And asserting
+merely that a dark *composition* exists is not enough — this build previously
+emitted three appearance compositions all referencing one vector, so it drew
+the light inks in dark mode while every structural check passed. The icon
+rendered. It rendered wrong, and nothing said so.
+
+So `macos/scripts/verify-icon-appearances.py` asserts both halves: the dark
+appearance draws the dark glyph, and its artwork digest differs from the
+light one. It is a separate file rather than inline so it can be run against
+any catalogue, which is how its teeth were proven.
+
+Three failure modes, each demonstrated to fail the build:
+
+| Broken input | Caught by |
 | --- | --- |
-| `"fill-specializations": [ { "appearance": "dark", "value": {...} } ]` | ignored; colours unchanged |
-| `"fill-specializations": { "dark": {...} }` | ignored; colours unchanged |
+| Blank dark glyph | bracket path check in `make-icon-document.sh` |
+| Dark glyph byte-identical to light | `cmp` check in `make-icon-document.sh` |
+| Specialization dropped from `icon.json` | `verify-icon-appearances.py`, exit 1 |
 
-Neither produced a diagnostic, because `actool` does not validate this
-document at all. That is what makes the search unbounded: a wrong guess and an
-unsupported feature are indistinguishable from the outside, so no number of
-further guesses would settle it.
-
-**What would settle it**, and it is a small, one-off human action rather than
-more automation: author one icon in Icon Composer's GUI, set a dark override
-on any property, save, and read the `icon.json` it writes. The schema is then
-known exactly and this pipeline can adopt it, since the document is generated
-and a key is a one-line change. Until then, nothing here guesses.
-
-Consequently `mark-glyph-dark.svg` is **not exported**. `glyph_svg` renders
-either scheme and is tested for both, so the capability is present and pinned,
-but committing an asset no surface consumes would read as though the icon
-carried our dark palette. The build script likewise copies only the artwork
-`icon.json` references.
-
-What is checked instead: `make-icon-document.sh` asserts, via `assetutil`,
-that the catalogue carries all three appearance compositions. That is the
-property actually relied upon in dark mode, it is generated by the toolchain
-rather than by us, and the fallback `.icns` says nothing about it — so it
-could regress silently otherwise.
+The third is the one that matters most: it is precisely the state this build
+shipped in before the shape was understood.
