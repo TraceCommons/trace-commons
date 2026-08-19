@@ -6,6 +6,12 @@
 //! authorization carve-out, and behaviour on malformed input -- are the ones
 //! that must not drift.
 
+#![cfg(unix)]
+// The daemon's IPC transport is a unix socket here and a named pipe on
+// Windows, so this file's fixtures are unix-only. Without this gate the
+// whole test target fails to COMPILE on Windows -- which is why the
+// contributor crate's suite had never run there at all, not merely skipped.
+
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
