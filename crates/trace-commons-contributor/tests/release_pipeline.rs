@@ -14,9 +14,21 @@ fn repo_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
+/// Reads a repository file with line endings normalized to LF.
+///
+/// Git on Windows defaults `core.autocrlf` to true, so a Windows checkout
+/// delivers these workflow and script files with CRLF endings -- 1367 pairs
+/// in `release-apps.yml` alone. Every assertion below is textual by design
+/// (see the module comment), so an unnormalized read makes each one
+/// platform-dependent: `contains` of any multi-line fragment stops matching,
+/// and byte offsets computed from line lengths drift. Normalizing once here
+/// keeps the tests asserting about content rather than about the checkout
+/// that produced it.
 fn read(relative: &str) -> String {
     let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    raw.replace("\r\n", "\n")
 }
 
 #[test]
@@ -1341,14 +1353,22 @@ fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("expected to find job {name}"));
     let body_start = start + marker.len();
     let rest = &workflow[body_start..];
+    // `split_inclusive` keeps the terminator in each item, so `line.len()` is
+    // the true byte width whether the file ends its lines with LF or CRLF.
+    // `str::lines()` strips a trailing `\r` but the cursor here only added one
+    // byte back, so under CRLF every line under-counted by one, the drift
+    // accumulated down the file, and the job body was returned truncated --
+    // which surfaced as an assertion claiming a step near the end of the job
+    // did not exist. See `workflow_parsing_survives_a_crlf_checkout`.
     let end = rest
-        .lines()
+        .split_inclusive('\n')
         .scan(0usize, |pos, line| {
             let this_pos = *pos;
-            *pos += line.len() + 1;
+            *pos += line.len();
             Some((this_pos, line))
         })
         .find(|(_, line)| {
+            let line = line.trim_end_matches(['\r', '\n']);
             !line.is_empty()
                 && line.starts_with("  ")
                 && !line.starts_with("    ")
@@ -1601,6 +1621,33 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
         assert!(
             job.contains(expected),
             "the Windows release job must consistently use the canonical MSIX identity: {expected}"
+        );
+    }
+}
+
+/// A Windows checkout has CRLF line endings -- `core.autocrlf` defaults to
+/// true there, and the box this was found on reported 1367 CRLF pairs in
+/// `release-apps.yml` alone. That must not change what these tests read.
+///
+/// The bug this pins was silent and total. `extract_job` walked lines with
+/// `str::lines()`, which strips a trailing `\r`, while advancing its byte
+/// cursor by `line.len() + 1`. Under CRLF every line under-counted by one
+/// byte, the drift accumulated down the file, and the job body was sliced
+/// short -- so an assertion about a step near the END of a job failed
+/// claiming the step was absent, which is indistinguishable from the step
+/// genuinely having been deleted. It cost a Windows debugging session to
+/// tell those two apart.
+#[test]
+fn workflow_parsing_survives_a_crlf_checkout() {
+    let lf = read(".github/workflows/release-apps.yml");
+    let crlf = lf.replace('\n', "\r\n");
+
+    for job in ["windows-app", "macos", "version"] {
+        let from_lf = extract_job(&lf, job);
+        let from_crlf = extract_job(&crlf, job).replace("\r\n", "\n");
+        assert_eq!(
+            from_lf, from_crlf,
+            "extract_job({job}) disagreed between an LF and a CRLF checkout"
         );
     }
 }
