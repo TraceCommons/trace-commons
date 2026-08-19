@@ -5513,6 +5513,13 @@ fn invalidate_envelope_schema(envelope: &mut TraceContributionEnvelope) {
 async fn submit_rejects_out_of_range_training_dynamics() {
     use trace_commons_protocol::trace_contribution::TrainingDynamicsSignals;
 
+    // Shares SUBMIT_RATE_LIMIT_TOKEN_A with the accounting tests, and the
+    // rate limiter it drives is a process-global. Without this lock the
+    // counter this test bumps is visible to
+    // submit_authentication_precedes_rate_limit_accounting, which asserts it
+    // is zero -- a flake of roughly one run in four under parallel load.
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
     let temp = tempfile::tempdir().expect("temp dir");
     let state = submit_rate_limit_test_state(temp.path().to_path_buf());
 
@@ -5538,6 +5545,13 @@ async fn submit_rejects_out_of_range_training_dynamics() {
 async fn submit_accepts_reduced_training_dynamics() {
     use trace_commons_protocol::trace_contribution::reduce_token_confidences;
 
+    // Shares SUBMIT_RATE_LIMIT_TOKEN_A with the accounting tests, and the
+    // rate limiter it drives is a process-global. Without this lock the
+    // counter this test bumps is visible to
+    // submit_authentication_precedes_rate_limit_accounting, which asserts it
+    // is zero -- a flake of roughly one run in four under parallel load.
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
     let temp = tempfile::tempdir().expect("temp dir");
     let state = submit_rate_limit_test_state(temp.path().to_path_buf());
 
