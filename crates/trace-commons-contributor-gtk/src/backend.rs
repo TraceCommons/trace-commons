@@ -46,16 +46,76 @@ pub struct Hosting {
     _embedded: daemon::EmbeddedDaemon,
 }
 
+/// The label this shell reports when the contributor has not said which
+/// session folders to watch.
+///
+/// The same string the C ABI uses, deliberately: macOS and Windows read it
+/// off `tc_daemon_start`, this shell produces it directly, and one label
+/// across the product means the three onboarding flows can route on the same
+/// fact rather than each inventing a spelling.
+pub const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
+
+/// Record the two session roots the contributor named, so the next
+/// `Backend::open` can start.
+///
+/// Goes through `apply_settings_object` rather than assigning the fields,
+/// for the reason `tc_daemon_start_with_settings` shares `set_settings`'
+/// validator: one definition of a valid settings object. This shell links
+/// the core directly, so this is that same definition rather than a second
+/// implementation of it -- the objection that keeps Swift and C# from
+/// writing `daemon-settings.json` themselves does not apply to a caller
+/// that is already Rust.
+///
+/// Refuses an incomplete declaration here rather than writing one and
+/// letting the next start refuse: a half-written settings file is a worse
+/// thing to leave behind than an unanswered question.
+pub fn declare_roots(
+    dir: &std::path::Path,
+    claude_root: &std::path::Path,
+    codex_root: &std::path::Path,
+) -> Result<()> {
+    let store = ConfigStore::open(dir.to_path_buf())?;
+    let mut settings = daemon::settings::DaemonSettings::load(&store)?;
+    let object = serde_json::json!({
+        "claude_root": claude_root.to_string_lossy(),
+        "codex_root": codex_root.to_string_lossy(),
+    });
+    daemon::settings::apply_settings_object(&mut settings, &object)
+        .map_err(|label| anyhow!(label))?;
+    if !daemon::settings::roots_declared(&settings) {
+        bail!(ERR_ROOTS_NOT_DECLARED);
+    }
+    settings.save(&store)?;
+    Ok(())
+}
+
 impl Backend {
     /// Attach to a running daemon, or start one in-process.
     ///
     /// The running-daemon check comes first, and a lost race on the lock
     /// falls back to attaching rather than failing: between the check and
     /// the `try_lock`, the user unit may have come up.
+    ///
+    /// Starting one in-process fails closed on undeclared session roots, on
+    /// the rule `daemon::settings::roots_declared` owns. Until this landed
+    /// the Linux shell had no such check at all: it started, and an unset
+    /// `claude_root` meant the daemon watched the contributor's real
+    /// `~/.claude`.
+    ///
+    /// The ATTACH path is deliberately not gated. A daemon that is already
+    /// running was started by `trace-commons-contributor daemon` -- somebody
+    /// typing a command on purpose -- and the CLI keeps its own defaults by
+    /// design. This is an application-shell posture, and refusing to attach
+    /// to a daemon this shell did not start would be a different decision
+    /// than the one made here.
     pub fn open(dir: std::path::PathBuf) -> Result<Self> {
         let store = ConfigStore::open(dir.clone())?;
         if daemon::client::is_running(&store) {
             return Ok(Backend::Attached { store });
+        }
+        let settings = daemon::settings::DaemonSettings::load(&store)?;
+        if !daemon::settings::roots_declared(&settings) {
+            bail!(ERR_ROOTS_NOT_DECLARED);
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -215,5 +275,145 @@ impl EventStream for SocketEvents {
                 return Some(name.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod roots_tests {
+    use super::*;
+    use trace_commons_contributor::daemon::settings::DaemonSettings;
+
+    /// A scratch directory that removes itself.
+    ///
+    /// Hand-rolled rather than pulling in `tempfile`: this crate is its own
+    /// workspace with its own lockfile, so a dev-dependency here is a real
+    /// new package edge, and the repo's dependency policy asks for an inline
+    /// utility when one fits in a few lines.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("tc-gtk-{tag}-{unique}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn declare(dir: &std::path::Path, claude: Option<&str>, codex: Option<&str>) {
+        let store = ConfigStore::open(dir.to_path_buf()).unwrap();
+        let make = |name: &str| {
+            let p = dir.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        };
+        use trace_commons_contributor::daemon::settings::SourceDeclaration;
+        DaemonSettings {
+            claude_source: claude
+                .map(make)
+                .map(|path| SourceDeclaration::Watch { path }),
+            codex_source: codex
+                .map(make)
+                .map(|path| SourceDeclaration::Watch { path }),
+            ..Default::default()
+        }
+        .save(&store)
+        .unwrap();
+    }
+
+    #[test]
+    fn open_refuses_to_host_a_daemon_when_no_roots_are_declared() {
+        let dir = Scratch::new("no-roots");
+        let message = match Backend::open(dir.path().to_path_buf()) {
+            Ok(_) => panic!("undeclared roots must refuse to start"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(
+            message, ERR_ROOTS_NOT_DECLARED,
+            "the label has to be exactly the one the other two shells route on"
+        );
+    }
+
+    #[test]
+    fn open_refuses_when_only_one_root_is_declared() {
+        // The fail-open an `||` would have allowed: an unset codex_root is
+        // the real ~/.codex, not "no codex source".
+        let dir = Scratch::new("half-roots");
+        declare(dir.path(), Some("claude"), None);
+
+        let message = match Backend::open(dir.path().to_path_buf()) {
+            Ok(_) => panic!("half a declaration must refuse"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn declare_roots_turns_a_refusal_into_a_start() {
+        // The whole exit from the refusal, end to end: refused, the
+        // contributor names two folders, and the next open hosts.
+        let dir = Scratch::new("declare");
+        assert!(Backend::open(dir.path().to_path_buf()).is_err());
+
+        let claude = dir.path().join("claude");
+        let codex = dir.path().join("codex");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        declare_roots(dir.path(), &claude, &codex).unwrap();
+
+        let backend = match Backend::open(dir.path().to_path_buf()) {
+            Ok(b) => b,
+            Err(e) => panic!("after declaring roots the shell must start: {e}"),
+        };
+        assert!(backend.hosts_the_loop());
+    }
+
+    #[test]
+    fn declare_roots_survives_a_folder_name_that_would_break_string_building() {
+        // These come from a file chooser. A quote or a backslash in a folder
+        // name must round-trip, which is why the settings object is built as
+        // JSON rather than formatted.
+        let dir = Scratch::new("awkward");
+        let claude = dir.path().join(r#"He said "hi"\back"#);
+        let codex = dir.path().join("codex");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+
+        declare_roots(dir.path(), &claude, &codex).unwrap();
+
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let settings = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            settings.claude_source.as_ref().and_then(|d| d.path()),
+            Some(claude.as_path())
+        );
+    }
+
+    #[test]
+    fn open_hosts_a_daemon_once_both_roots_are_declared() {
+        let dir = Scratch::new("both-roots");
+        declare(dir.path(), Some("claude"), Some("codex"));
+
+        let backend = match Backend::open(dir.path().to_path_buf()) {
+            Ok(b) => b,
+            Err(e) => panic!("declared roots must start: {e}"),
+        };
+        assert!(
+            backend.hosts_the_loop(),
+            "nothing else held the lock, so this shell should be hosting"
+        );
     }
 }

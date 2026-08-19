@@ -72,15 +72,34 @@ public final class TCDaemon {
         case startFailed(String)
         case previewFailed(String)
         case daemonGone
+        /// The contributor has not said which session folders to watch, so
+        /// the daemon refused to start and has scanned nothing.
+        ///
+        /// Its own case rather than a `startFailed` carrying a label,
+        /// because the two lead somewhere different: this one routes to the
+        /// screen that collects the folders, and every other start failure
+        /// to a notice with nothing to do. Flattening them is what left the
+        /// old shell with a refusal it could never clear.
+        case rootsNotDeclared
 
         public var description: String {
             switch self {
             case .startFailed(let msg): return "tc_daemon_start failed: \(msg)"
             case .previewFailed(let msg): return "tc_preview_open failed: \(msg)"
             case .daemonGone: return "daemon handle already freed"
+            case .rootsNotDeclared:
+                return """
+                    This app hasn't been told which session folders to watch, and it \
+                    won't guess. Nothing is being watched.
+                    """
             }
         }
     }
+
+    /// The fixed label the C ABI reports for a roots refusal. Matched, not
+    /// parsed: `trace_commons.h` documents it as a fixed, content-free
+    /// string precisely so a host can branch on it.
+    private static let rootsNotDeclaredLabel = "roots-not-declared"
 
     /// How many calls are inside the C ABI with the handle right now.
     /// Diagnostics only -- true the instant it is read and possibly not the
@@ -117,17 +136,33 @@ public final class TCDaemon {
         return try body(h)
     }
 
-    /// Starts the daemon against `configDir`. Never touches the real
-    /// ~/.claude or ~/.codex trees: this repo's C ABI has no call to set
-    /// claude_root/codex_root before start, so the caller is expected to
-    /// have already pre-seeded `configDir/daemon-settings.json` pointing
-    /// those roots somewhere deliberate before calling this initializer.
-    /// `TraceCommonsApp/DaemonHost.swift` does exactly that.
-    public init(configDir: String) throws {
+    /// Starts the daemon against `configDir`.
+    ///
+    /// Never touches the real ~/.claude or ~/.codex trees, and no longer
+    /// relies on the caller to have arranged that: the C ABI itself refuses
+    /// to start unless both session roots are declared, reporting
+    /// `roots-not-declared`, which surfaces here as
+    /// `TCError.rootsNotDeclared`.
+    ///
+    /// `settingsJSON` is applied and durably persisted BEFORE the watcher's
+    /// first tick, and the roots check runs after it -- so passing a settings
+    /// object naming both folders is how a caller turns a refusal into a
+    /// running daemon in one call. That is the roots screen's entire
+    /// mechanism. Passing nil (the default) uses whatever is already
+    /// persisted, exactly like the old initializer.
+    ///
+    /// Do not build `settingsJSON` by string concatenation: a folder a
+    /// contributor picked can contain quotes and backslashes. Encode it.
+    public init(configDir: String, settingsJSON: String? = nil) throws {
         var errPtr: UnsafeMutablePointer<CChar>?
         let h: OpaquePointer? = configDir.withCString { cDir in
             withUnsafeMutablePointer(to: &errPtr) { errOut in
-                tc_daemon_start(cDir, errOut)
+                if let settingsJSON {
+                    return settingsJSON.withCString { cSettings in
+                        tc_daemon_start_with_settings(cDir, cSettings, errOut)
+                    }
+                }
+                return tc_daemon_start(cDir, errOut)
             }
         }
         if h == nil {
@@ -137,6 +172,9 @@ public final class TCDaemon {
                 tc_string_free(e)
             } else {
                 message = "unknown error"
+            }
+            if message == Self.rootsNotDeclaredLabel {
+                throw TCError.rootsNotDeclared
             }
             throw TCError.startFailed(message)
         }

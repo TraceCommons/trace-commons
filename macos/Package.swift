@@ -56,10 +56,26 @@ let package = Package(
             dependencies: ["TCUpdates"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // State-directory resolution and the shell's refusal rules. Carved
+        // out for the same reason TCUpdates was: the app target links the
+        // FFI dylib, so nothing in it can be a unit test. The bug this
+        // target exists to prevent -- resolving the state directory from an
+        // environment variable a Finder launch never has -- shipped in a
+        // notarized build precisely because there was nowhere to test it.
+        .target(
+            name: "TCShellCore",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TCShellCoreTests",
+            dependencies: ["TCShellCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "TraceCommonsApp",
             dependencies: [
                 "TCBridge",
+                "TCShellCore",
                 "TCUpdates",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],

@@ -15,6 +15,15 @@ final class AppModel: ObservableObject {
         case running
         /// Refused to start, with a sentence a person can act on.
         case refused(String)
+        /// Refused because nobody has said which session folders to watch.
+        ///
+        /// Separate from `.refused` because it is the one refusal with a way
+        /// out: the roots screen collects two folders and starts the daemon
+        /// with them. Before this case existed the refusal rendered as a
+        /// static notice and every screen that could clear it lived behind
+        /// the daemon it was blocking, so a fresh install could never
+        /// finish onboarding.
+        case needsRoots
     }
 
     /// The recovery hold that follows an approval.
@@ -109,6 +118,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// The resolved state directory, once `start()` has named one.
+    ///
+    /// Held so the roots screen starts the daemon against the same directory
+    /// that refused, rather than re-resolving and possibly disagreeing with
+    /// it.
+    private(set) var configDirectory: String = ""
+
     func start() {
         guard case .starting = startup else { return }
         let resolved: DaemonHost.Resolution
@@ -118,14 +134,30 @@ final class AppModel: ObservableObject {
             startup = .refused("\(error)")
             return
         }
+        configDirectory = resolved.path
+        startDaemon(at: resolved.path, settingsJSON: nil)
+    }
+
+    /// Start (or restart) the in-process daemon against an already-resolved
+    /// state directory.
+    ///
+    /// `settingsJSON` is the roots screen's mechanism: the C ABI persists it
+    /// and only then evaluates whether both session roots are declared, so
+    /// one call both records the contributor's answer and starts the watcher.
+    func startDaemon(at path: String, settingsJSON: String?) {
         do {
-            let daemon = try TCDaemon(configDir: resolved.path)
+            let daemon = try TCDaemon(configDir: path, settingsJSON: settingsJSON)
             let client = DaemonClient(daemon: daemon)
             self.daemon = daemon
             self.client = client
             startup = .running
             subscribe()
             refreshAll()
+        } catch TCDaemon.TCError.rootsNotDeclared {
+            // Not a dead end any more: the roots screen renders on this
+            // state and calls back into `startDaemon` with the two folders
+            // the contributor picked.
+            startup = .needsRoots
         } catch {
             startup = .refused("\(error)")
         }

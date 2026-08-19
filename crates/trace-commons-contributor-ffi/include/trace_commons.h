@@ -116,6 +116,19 @@ typedef struct tc_preview tc_preview;
  * one worker, an in-flight tc_subscribe callback and tc_daemon_stop's join
  * on the supervisor are mutually exclusive demands on the only worker, and
  * tc_daemon_stop is documented as callable from inside a callback.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS. If the persisted settings do
+ * not declare BOTH claude_root and codex_root, this returns NULL with the
+ * fixed label "roots-not-declared" and nothing is scanned. An unset root
+ * does not mean "no source for that agent" -- it means the conventional
+ * per-user location, i.e. the contributor's real ~/.claude or ~/.codex --
+ * so half a declaration is a fail-open and is refused exactly like none.
+ *
+ * That label is deliberately distinct from the opaque
+ * "daemon-start-failed": a host must be able to route a roots refusal to
+ * whatever screen collects the folders, and every other start failure to a
+ * generic notice. tc_daemon_start takes no settings, so the only way out of
+ * this refusal through this ABI is tc_daemon_start_with_settings below.
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
@@ -153,8 +166,42 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  * The returned handle, on success, is exactly a tc_daemon_start handle --
  * every rule above about tc_daemon_start's return value, and everything
  * below about tc_daemon_stop / tc_handle_free, applies to it unchanged.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS, on the same rule and with the
+ * same "roots-not-declared" label as tc_daemon_start -- but evaluated AFTER
+ * settings_json has been applied and persisted. That ordering is the point:
+ * a settings_json declaring both roots clears a refusal the persisted file
+ * alone would have earned, which is what makes this the one call a host can
+ * use to turn "the contributor just named two folders" into a running
+ * daemon. Declaring only one root here is refused exactly as it is above.
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
+
+/* Describe the session stores on this machine, so a roots screen can ask the
+ * contributor about something specific rather than showing an empty field.
+ *
+ * Takes no handle: it runs BEFORE any daemon exists, which is the point --
+ * the screen that uses it is the one clearing the refusal that stops a
+ * daemon from starting.
+ *
+ * Returns an owned JSON array; free it with tc_string_free. Each element:
+ *   source            "claude-code" | "codex"
+ *   path              where this store would be watched
+ *   exists            whether that directory is there right now
+ *   session_count     how many session files, counted recursively
+ *   most_recent       RFC 3339 timestamp, or null
+ *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *
+ * This is the ONE place in this ABI that deliberately returns a filesystem
+ * path. Everywhere else a path is withheld because the caller is being told
+ * about a trace; here the caller is the contributor's own machine asking
+ * which of their own folders to watch, and a consent prompt that will not
+ * name what it is asking about is not a consent prompt.
+ *
+ * Reads directory entries and metadata only; never opens a session file.
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_discover_sources(void);
 
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call

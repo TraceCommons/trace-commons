@@ -97,8 +97,16 @@ impl Harness {
         let shared = Arc::new(DaemonShared::load(store).unwrap());
         {
             let mut s = shared.settings.lock().unwrap();
-            s.claude_root = Some(claude_root.clone());
-            s.codex_root = Some(dir.path().join("codex"));
+            s.claude_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: claude_root.clone(),
+                },
+            );
+            s.codex_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex"),
+                },
+            );
         }
         Self {
             _dir: dir,
