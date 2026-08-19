@@ -8,6 +8,11 @@
 //! `docs/release-runbook.md` for those gates.
 
 use std::path::PathBuf;
+// Only the bash-invoking tests below use this, and they are all `cfg(unix)`
+// -- the scripts they run are bash describing a macOS bundle. Left ungated,
+// the import is unused on Windows, and these tests build under
+// `-D warnings`, so that is a build failure rather than a lint.
+#[cfg(unix)]
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
@@ -31,6 +36,18 @@ fn read(relative: &str) -> String {
     raw.replace("\r\n", "\n")
 }
 
+/// Executes `macos/scripts/info-plist.sh`, so it is unix-only: the script is
+/// bash describing a macOS bundle, and Windows has no `bash` on PATH to run
+/// it with. Without this gate the test does not skip on Windows, it panics
+/// with `NotFound "program not found"` -- a failure about the runner rather
+/// than about the plist.
+///
+/// The gate is per-test rather than on the whole target: most of this file
+/// pins Windows release behaviour (`windows_msix_*`,
+/// `ci_packages_and_validates_the_windows_app_feed_identity`,
+/// `windows_signing_is_timestamped`), and those are exactly the assertions
+/// most worth running ON Windows.
+#[cfg(unix)]
 #[test]
 fn info_plist_script_injects_the_version_it_is_given() {
     let script = repo_root().join("macos/scripts/info-plist.sh");
@@ -1124,6 +1141,12 @@ fn flatpak_manifest_pinned_toolchain_meets_the_crates_rust_version_floor() {
 }
 
 /// Runs info-plist.sh with a given TC_SPARKLE_PUBLIC_ED_KEY (None = unset).
+///
+/// Unix-only for the same reason as its two callers below: it shells out to
+/// bash. It carries its own `cfg` rather than relying on theirs, because an
+/// ungated helper whose only callers are gated is dead code on Windows, and
+/// this crate builds its tests under `-D warnings`.
+#[cfg(unix)]
 fn info_plist_with_key(key: Option<&str>) -> String {
     let script = repo_root().join("macos/scripts/info-plist.sh");
     let mut command = Command::new("bash");
@@ -1145,6 +1168,8 @@ fn info_plist_with_key(key: Option<&str>) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Unix-only: runs `macos/scripts/info-plist.sh` through bash.
+#[cfg(unix)]
 #[test]
 fn info_plist_carries_the_approved_sparkle_configuration() {
     let plist = info_plist_with_key(Some("dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ=="));
@@ -1180,6 +1205,8 @@ fn info_plist_carries_the_approved_sparkle_configuration() {
     );
 }
 
+/// Unix-only: runs `macos/scripts/info-plist.sh` through bash.
+#[cfg(unix)]
 #[test]
 fn info_plist_ships_no_feed_at_all_without_a_public_key() {
     // Fail closed. A bundle with a feed but no key would ask Sparkle to
