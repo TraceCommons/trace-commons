@@ -479,6 +479,7 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
 
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_1));
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_2));
+    body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
     // The promise gets the notice box, not a heavier weight of the same
     // prose. `roots.rs` reached this conclusion first for the sentence that
     // makes its own screen mean anything: "leave it as prose and it reads as
@@ -488,12 +489,19 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     // paragraph. The two screens a contributor sees first should state their
     // load-bearing promise the same way.
     //
+    // It comes LAST, after the scrubbing paragraph rather than before it, so
+    // the promise is the final beat before `Get started` instead of landing
+    // mid-prose. It also makes the page an argument in order: here is what
+    // this machine does mechanically, here is the limit of it, therefore you
+    // are the one who decides. NOTE this is a different order from the shared
+    // spec's screen 1, which runs the promise inline in paragraph 2 and ends
+    // on scrubbing.
+    //
     // `tc-brand-emphasis` keeps its other call site in `render_scopes`, so
     // the rule stays live.
     let decides = body_label(copy::ONBOARD_WELCOME_DECIDES);
     decides.add_css_class("tc-brand-notice");
     body.append(&decides);
-    body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
 
     let next = gtk::Button::with_label(copy::ONBOARD_GET_STARTED);
     next.add_css_class("suggested-action");
@@ -912,10 +920,23 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 state.add_css_class("tc-meta");
                 column.append(&state);
                 let ignore = gtk::Button::with_label(copy::ONBOARD_IGNORE);
-                // Flat, and centred against the two-line column. A raised
-                // button here outranked the project it acts on; the same
-                // reasoning left `roots.rs`'s folder chooser flat.
-                ignore.add_css_class("flat");
+                // An outlined chip, centred against the two-line column.
+                //
+                // The raised grey button this replaced outranked the project
+                // it acts on. `flat` corrected that and overshot: with no
+                // border, no fill and no surface, it photographed as plain
+                // bold text and did not read as clickable at all. The cost of
+                // that is asymmetric -- a contributor who does not notice they
+                // can exclude a repository leaves a client repo at ask-first
+                // rather than ignored, which is a privacy outcome and not an
+                // aesthetic one.
+                //
+                // `tc-chip` is the button treatment `preview.rs` already uses
+                // for its recent searches: a hairline pill at 12px/600, so it
+                // stays subordinate to the 14px/700 project name above it,
+                // and its `:hover` turns the border green, which is the
+                // affordance a static frame cannot show.
+                ignore.add_css_class("tc-chip");
                 ignore.set_valign(gtk::Align::Center);
                 ignore.connect_clicked({
                     let app = app.clone();
