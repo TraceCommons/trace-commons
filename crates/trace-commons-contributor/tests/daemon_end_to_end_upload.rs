@@ -5,6 +5,11 @@
 //! opted-in project reaches the server without anyone touching it, and that a
 //! session in a project they have *not* opted in does not.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::{Arc, Mutex};
 
 use axum::{Json, Router, routing::post};

@@ -7,6 +7,11 @@
 //! receipts file that no longer exists, and leaving the next person to enroll
 //! on this machine holding the previous contributor's auto-upload opt-ins.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::Arc;
 use std::time::Duration;
 

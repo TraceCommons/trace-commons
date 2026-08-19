@@ -20,6 +20,11 @@
 //! those bytes. The tests here drive that against a classifier that really
 //! does move between calls.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
