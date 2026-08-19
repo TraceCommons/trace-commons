@@ -60,17 +60,27 @@ Six screens, one decision each.
 > shared pool that isn't.
 >
 > This app watches for finished Claude Code and Codex sessions on this machine
-> and shows them to you. **You decide what gets contributed. Nothing is sent
-> unless you say so.**
+> and shows them to you.
 >
 > Before anything leaves this machine it is scrubbed locally for secrets,
 > keys, and tokens. That scrubbing is good and it is not perfect — which is
 > why you get to look first.
 >
+> **You decide what gets contributed. Nothing is sent unless you say so.**
+>
 > [ Get started ]   [ What gets removed? ]
 
 "Good and not perfect" is load-bearing. A developer knows automatic redaction
 is imperfect; conceding it first is what makes the rest credible.
+
+Order revised 2026-08-19, after the GTK client became the first shell anyone
+had seen rendered. The promise was inline in paragraph 2 and the screen ended
+on scrubbing; photographed, it read as the fourth sentence of a stack nobody
+finishes. It is now a separate terminal block, given the same standing
+treatment the roots screen gives its caveat, and the page reads as an argument
+in sequence: here is what this machine does mechanically, here is the limit of
+it, therefore you are the one who decides. All three shells end this screen on
+the promise -- do not restore the inline form in one client alone.
 
 ### 2. Connect
 
