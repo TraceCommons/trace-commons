@@ -977,6 +977,39 @@ pub const ONBOARD_WELCOME_SCRUB: &str = "Before anything leaves this machine it 
      That scrubbing is good and it is not perfect — which is why you get to look first.";
 pub const ONBOARD_GET_STARTED: &str = "Get started";
 
+/// The second button the shared spec gives screen 1 and the shell never had.
+pub const ONBOARD_WHAT_REMOVED: &str = "What gets removed?";
+pub const ONBOARD_WHAT_REMOVED_HEADING: &str = "What gets removed";
+/// The list is generated from `trace_commons_protocol::secret_leak_pattern_names`,
+/// so this sentence introduces it without claiming to enumerate it.
+pub const ONBOARD_WHAT_REMOVED_INTRO: &str =
+    "Before a trace leaves this machine, these are found and replaced:";
+
+/// A named detector, in words. `slug` is a name from the protocol's table.
+///
+/// The LIST is generated; only the prettification is a lookup, and an
+/// unrecognised slug still renders -- de-slugged rather than dropped -- so a
+/// detector added upstream can never silently vanish from a screen that tells
+/// a contributor what is scrubbed. `every_detector_has_a_human_label` fails
+/// the build if one arrives without a label, so the fallback is a safety net
+/// and not the plan.
+pub fn scrub_detector_label(slug: &str) -> String {
+    match slug {
+        "openai_api_key" => "OpenAI API keys".to_string(),
+        "github_token" => "GitHub tokens".to_string(),
+        "aws_access_key" => "AWS access keys".to_string(),
+        // The regex behind this one covers Stripe, GitLab and Slack prefixes.
+        // Naming them beats "provider tokens", which tells a contributor
+        // nothing about whether their own provider is covered.
+        "provider_token" => "Stripe, GitLab and Slack tokens".to_string(),
+        "jwt" => "JSON Web Tokens".to_string(),
+        "npm_token" => "npm tokens".to_string(),
+        "google_api_key" => "Google API keys".to_string(),
+        "pem_header_orphan" => "Private keys in PEM blocks".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
 pub const ONBOARD_CONNECT_TITLE: &str = "Connect";
 pub const ONBOARD_CONNECT_PROMPT: &str =
     "Paste the invite link someone sent you, or click it from your email.";
@@ -1633,5 +1666,32 @@ mod tests {
         let unknown = profile_failure_sentence("https://ingest.example/v1/community/profile");
         assert!(!unknown.contains("https://"));
         assert_eq!(unknown, profile_failure_sentence("something-else"));
+    }
+
+    #[test]
+    fn every_detector_has_a_human_label() {
+        // The list on screen is generated from this table, so a detector
+        // added upstream appears whether or not anyone taught this shell to
+        // say its name. This fails the day that happens, so the name it
+        // appears under is a decision rather than a de-slugged accident.
+        for slug in trace_commons_protocol::trace_contribution::secret_leak_pattern_names() {
+            let label = scrub_detector_label(slug);
+            assert_ne!(
+                label,
+                slug.replace('_', " "),
+                "detector {slug} has no human label in scrub_detector_label"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detector_nobody_named_still_renders() {
+        // The safety net, asserted rather than assumed: an unrecognised slug
+        // must not render as an empty row on a screen whose whole job is
+        // saying what is scrubbed.
+        assert_eq!(
+            scrub_detector_label("some_new_vendor_key"),
+            "some new vendor key"
+        );
     }
 }
