@@ -45,6 +45,12 @@ fn main() -> anyhow::Result<()> {
     let start_page = std::env::args()
         .position(|a| a == "--start-page")
         .and_then(|i| std::env::args().nth(i + 1));
+    // The main window's stack and onboarding's steps are different things:
+    // `--start-page` moves the former, and onboarding is a modal with its own
+    // pages that had no way to be opened past its first screen.
+    let onboarding_page = std::env::args()
+        .position(|a| a == "--onboarding-page")
+        .and_then(|i| std::env::args().nth(i + 1));
     // A state directory can be named explicitly, mostly so a container run
     // does not touch a real one.
     let dir = match std::env::args().position(|a| a == "--state-dir") {
@@ -92,6 +98,7 @@ fn main() -> anyhow::Result<()> {
         search_term,
         preview_tab,
         start_page,
+        onboarding_page,
     });
 
     application.connect_activate(move |application| {
@@ -112,6 +119,7 @@ struct Drivers {
     search_term: Option<String>,
     preview_tab: Option<String>,
     start_page: Option<String>,
+    onboarding_page: Option<String>,
 }
 
 /// Start the shell, or ask which folders it may watch and then start it.
@@ -178,6 +186,17 @@ fn start_or_ask(
     // Contribute in the preview sheet.
     if let Some(page) = drivers.start_page.clone() {
         app.stack.set_visible_child_name(&page);
+    }
+    if let Some(page) = drivers.onboarding_page.clone() {
+        let app = app.clone();
+        // After the status handler has had its chance to present onboarding
+        // itself, so this replaces that window rather than racing it.
+        gtk::glib::timeout_add_seconds_local(2, move || {
+            if !ui::onboarding::present_at_page(&app, &page) {
+                eprintln!("trace-commons-shell: unknown --onboarding-page {page}");
+            }
+            gtk::glib::ControlFlow::Break
+        });
     }
     if drivers.open_preview {
         let app = app.clone();

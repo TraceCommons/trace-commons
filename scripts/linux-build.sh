@@ -67,6 +67,13 @@ case "${1:---build}" in
     # does this window look like", which no unit test can.
     run "bash /work/$CRATE_DIR/scripts/roots-shot.sh"
     ;;
+  --onboarding-shots)
+    # Photographs every onboarding page that styles itself. Onboarding was
+    # merged carrying four class names no stylesheet defined; a camera is the
+    # only thing that shows a widget rendering in GTK's defaults, because
+    # `add_css_class` accepts any string without complaint.
+    run "bash /work/$CRATE_DIR/scripts/onboarding-shots.sh"
+    ;;
   --roots-answer)
     # Drives the roots window with xdotool and asserts that the two answers
     # reach daemon-settings.json as a Watch and an Off. The screenshot proves
