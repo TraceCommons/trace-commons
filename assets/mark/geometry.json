@@ -1,0 +1,25 @@
+{
+  "view": 64,
+  "frame": [1, 1, 62, 62],
+  "strokeFrame": 2,
+  "strokeFramed": 7,
+  "strokeTemplate": 8,
+  "green": [[11, 28], [11, 11], [28, 11]],
+  "blue": [[53, 36], [53, 53], [36, 53]],
+  "schemes": {
+    "light": {
+      "surface": "#FFFFFF",
+      "line": "#D9DFDC",
+      "green": "#178F70",
+      "blue": "#315FBA",
+      "ink": "#20241F"
+    },
+    "dark": {
+      "surface": "#21241E",
+      "line": "#3B4038",
+      "green": "#3FBE9A",
+      "blue": "#7FA0EC",
+      "ink": "#E8EAE3"
+    }
+  }
+}

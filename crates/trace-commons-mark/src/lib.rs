@@ -199,6 +199,69 @@ pub fn template_svg(ink: &str, size: u32) -> String {
     )
 }
 
+/// The geometry and palette as JSON, for renderers that cannot read SVG.
+///
+/// macOS builds its `.icns` with CoreGraphics rather than by rasterizing the
+/// SVG, because the rasterizers available on a stock macOS runner get it
+/// wrong: `sips` zeroes the blue channel in the bottom-right corner at 16 and
+/// 32 pixels, which is both invisible in a build log and exactly the size the
+/// Finder and the menu bar use. A renderer that draws the geometry itself has
+/// no such failure mode.
+///
+/// This is emitted rather than hand-written on the Swift side so the numbers
+/// still come from here. Written by hand rather than with serde: this crate is
+/// dependency-free on purpose, and the document is nine fields.
+pub fn geometry_json() -> String {
+    let vertices = |v: &[(u32, u32); 3]| {
+        v.iter()
+            .map(|(x, y)| format!("[{x}, {y}]"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let scheme_object = |s: Scheme| {
+        format!(
+            concat!(
+                "{{\n      \"surface\": \"{surface}\",\n",
+                "      \"line\": \"{line}\",\n",
+                "      \"green\": \"{green}\",\n",
+                "      \"blue\": \"{blue}\",\n",
+                "      \"ink\": \"{ink}\"\n    }}",
+            ),
+            surface = s.surface(),
+            line = s.line(),
+            green = s.green(),
+            blue = s.blue(),
+            ink = s.ink(),
+        )
+    };
+    format!(
+        concat!(
+            "{{\n",
+            "  \"view\": {view},\n",
+            "  \"frame\": [{fx}, {fy}, {fw}, {fh}],\n",
+            "  \"strokeFrame\": {sframe},\n",
+            "  \"strokeFramed\": {sframed},\n",
+            "  \"strokeTemplate\": {stemplate},\n",
+            "  \"green\": [{green}],\n",
+            "  \"blue\": [{blue}],\n",
+            "  \"schemes\": {{\n    \"light\": {light},\n    \"dark\": {dark}\n  }}\n",
+            "}}",
+        ),
+        view = VIEW,
+        fx = FRAME_RECT.0,
+        fy = FRAME_RECT.1,
+        fw = FRAME_RECT.2,
+        fh = FRAME_RECT.3,
+        sframe = STROKE_FRAME,
+        sframed = STROKE_FRAMED,
+        stemplate = STROKE_TEMPLATE,
+        green = vertices(&VERTICES_GREEN),
+        blue = vertices(&VERTICES_BLUE),
+        light = scheme_object(Scheme::Light),
+        dark = scheme_object(Scheme::Dark),
+    )
+}
+
 /// One generated file: the repository-relative path under the export root, and
 /// its contents.
 pub struct Export {
@@ -233,6 +296,10 @@ pub fn all_exports() -> Vec<Export> {
             contents: template_svg(scheme.ink(), 1024),
         });
     }
+    out.push(Export {
+        relative_path: "geometry.json",
+        contents: geometry_json(),
+    });
     out
 }
 
@@ -367,14 +434,15 @@ mod tests {
     /// both the export tool and the drift check, so a duplicate path here would
     /// silently drop a packaging surface.
     #[test]
-    fn exports_are_four_distinct_non_empty_documents() {
+    fn exports_are_five_distinct_non_empty_documents() {
         let exports = all_exports();
-        assert_eq!(exports.len(), 4);
+        assert_eq!(exports.len(), 5);
         let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
         paths.sort_unstable();
         assert_eq!(
             paths,
             [
+                "geometry.json",
                 "mark-dark.svg",
                 "mark-light.svg",
                 "mark-template-dark.svg",
@@ -382,6 +450,10 @@ mod tests {
             ]
         );
         for export in &exports {
+            assert!(!export.contents.is_empty(), "{}", export.relative_path);
+            if !export.relative_path.ends_with(".svg") {
+                continue;
+            }
             assert!(
                 export.contents.starts_with("<svg") && export.contents.ends_with("</svg>"),
                 "{} is not a complete document",
@@ -398,6 +470,31 @@ mod tests {
                 export.relative_path
             );
         }
+    }
+
+    /// The JSON the macOS renderer consumes has to carry every number that
+    /// renderer needs, and carry them as numbers rather than strings. A typo
+    /// here surfaces as a blank icon at build time, which is the failure this
+    /// slice exists to stop shipping.
+    #[test]
+    fn geometry_json_carries_the_numbers_the_renderer_needs() {
+        let doc = geometry_json();
+        assert!(doc.contains(r#""view": 64"#), "{doc}");
+        assert!(doc.contains(r#""frame": [1, 1, 62, 62]"#), "{doc}");
+        assert!(doc.contains(r#""strokeFrame": 2"#), "{doc}");
+        assert!(doc.contains(r#""strokeFramed": 7"#), "{doc}");
+        assert!(doc.contains(r#""strokeTemplate": 8"#), "{doc}");
+        assert!(
+            doc.contains(r#""green": [[11, 28], [11, 11], [28, 11]]"#),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(r#""blue": [[53, 36], [53, 53], [36, 53]]"#),
+            "{doc}"
+        );
+        assert!(doc.contains("#FFFFFF"), "{doc}");
+        assert!(doc.contains("#178F70"), "{doc}");
+        assert!(doc.contains("#7FA0EC"), "{doc}");
     }
 
     /// Light and dark have to actually differ, in both treatments. Emitting the
