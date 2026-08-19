@@ -489,7 +489,7 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         // done. Clearing it keeps the invite out of the
                         // window for the rest of the session.
                         onboarding.invite.set_text("");
-                        load_consent_options(&app, &onboarding);
+                        load_consent_options(app, &onboarding);
                         onboarding.go(Step::Consent);
                     }
                     Err(_) => {

@@ -1041,6 +1041,61 @@ pub const ONBOARD_DONE_BODY: &str = "Trace Commons lives in your system tray. Wh
      at all if there's nothing waiting.";
 pub const ONBOARD_DONE_BUTTON: &str = "Finish";
 
+// The roots screen. It runs BEFORE the daemon starts, so it is not one of
+// the six onboarding screens above -- those are all daemon-backed, which is
+// exactly why the roots refusal used to be a dead end.
+
+pub const ROOTS_TITLE: &str = "Which folders may this app watch?";
+pub const ROOTS_BODY: &str = "Trace Commons reads coding-session transcripts. It will not guess where they are, and it \
+     will not watch anything until you say so.";
+/// Says the consequence, per the copy rules. Without this sentence "skip it"
+/// reads as safe, and it is the opposite of safe: an unanswered source is
+/// the one that falls back to the real location.
+pub const ROOTS_BOTH: &str = "Answer for both. Leaving one blank is not the same as skipping it -- an unanswered folder \
+     falls back to the standard location, which is probably your real work.";
+pub const ROOTS_CLAUDE: &str = "Claude Code sessions";
+pub const ROOTS_CODEX: &str = "Codex sessions";
+pub const ROOTS_WATCH: &str = "Watch this folder";
+pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
+pub const ROOTS_CONTINUE: &str = "Continue";
+pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
+/// Shown against a path that is not on this machine. Not an error: naming a
+/// folder that does not exist yet is allowed, and saying so is more use than
+/// refusing it.
+pub const ROOTS_ABSENT: &str = "Not on this machine";
+pub const ROOTS_EMPTY: &str = "No sessions yet";
+/// Said when an environment variable moved the store, so a path that is not
+/// the usual one does not read as a mistake.
+pub const ROOTS_RELOCATED: &str = "Set by an environment variable";
+
+/// The evidence line under a discovered folder.
+///
+/// A count and a recency, because that is what makes this a consent prompt
+/// rather than a text field: "946 sessions, most recent 2 hours ago" tells a
+/// contributor what they are agreeing to.
+pub fn roots_evidence(session_count: u64, recent: Option<&str>) -> String {
+    let sessions = if session_count == 1 {
+        "1 session".to_string()
+    } else {
+        format!("{session_count} sessions")
+    };
+    match recent {
+        Some(when) => format!("{sessions}, most recent {when}"),
+        None => sessions,
+    }
+}
+
+/// A coarse "how long ago", in the vocabulary the rest of the app uses.
+pub fn roots_ago(seconds: i64) -> String {
+    match seconds {
+        s if s < 90 => "just now".to_string(),
+        s if s < 5400 => format!("{} minutes ago", (s + 30) / 60),
+        s if s < 172_800 => format!("{} hours ago", (s + 1800) / 3600),
+        s => format!("{} days ago", (s + 43200) / 86400),
+    }
+}
+
 /// The short bold label for a consent scope.
 ///
 /// `consent_options` carries the wire name and the description but no
@@ -1064,6 +1119,39 @@ pub fn scope_title(wire_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_evidence_line_counts_one_session_without_a_plural() {
+        assert_eq!(roots_evidence(1, None), "1 session");
+        assert_eq!(roots_evidence(0, None), "0 sessions");
+        assert_eq!(roots_evidence(946, None), "946 sessions");
+    }
+
+    #[test]
+    fn the_evidence_line_carries_the_recency_when_there_is_one() {
+        assert_eq!(
+            roots_evidence(946, Some("2 hours ago")),
+            "946 sessions, most recent 2 hours ago"
+        );
+    }
+
+    #[test]
+    fn ago_reads_in_the_largest_unit_that_fits() {
+        assert_eq!(roots_ago(5), "just now");
+        assert_eq!(roots_ago(600), "10 minutes ago");
+        assert_eq!(roots_ago(7200), "2 hours ago");
+        assert_eq!(roots_ago(86_400 * 3), "3 days ago");
+    }
+
+    #[test]
+    fn the_roots_copy_says_what_leaving_one_blank_actually_does() {
+        // The rule is "always state the data consequence". A screen that
+        // said only "answer both" would leave the contributor thinking a
+        // blank means "skip that one", which is the fail-open this whole
+        // slice removes.
+        assert!(ROOTS_BOTH.contains("falls back"));
+        assert!(ROOTS_BODY.contains("will not watch anything until you say"));
+    }
 
     #[test]
     fn no_health_sentence_names_an_internal_mechanism() {

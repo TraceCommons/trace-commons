@@ -484,6 +484,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: actions/cache@v5
         with:
           path: |
@@ -532,6 +534,19 @@ jobs:
       # pure and needs no display -- but without this step nothing runs it.
       - name: Test the shell
         run: cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      # Being its own workspace also puts this crate outside the root
+      # `cargo fmt --all` and the root clippy job, so for as long as it has
+      # existed nothing has checked either one here and it drifted. Same
+      # allow-list as the root job, deliberately not widened.
+      - name: Check the shell's formatting
+        run: cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml -- --check
+      - name: Clippy the shell
+        run: |
+          cargo clippy --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
 

@@ -27,6 +27,7 @@ use anyhow::{Result, anyhow, bail};
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon;
 use trace_commons_contributor::daemon::ipc::DaemonShared;
+use trace_commons_contributor::daemon::settings::SourceDeclaration;
 
 /// How the shell reaches the daemon.
 pub enum Backend {
@@ -69,16 +70,19 @@ pub const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
 /// Refuses an incomplete declaration here rather than writing one and
 /// letting the next start refuse: a half-written settings file is a worse
 /// thing to leave behind than an unanswered question.
-pub fn declare_roots(
+pub fn declare_sources(
     dir: &std::path::Path,
-    claude_root: &std::path::Path,
-    codex_root: &std::path::Path,
+    claude: &SourceDeclaration,
+    codex: &SourceDeclaration,
 ) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
     let mut settings = daemon::settings::DaemonSettings::load(&store)?;
+    // The `_source` spellings, not the `_root` ones: a path can say where to
+    // watch but cannot say "off", and off is the answer this exists to make
+    // expressible.
     let object = serde_json::json!({
-        "claude_root": claude_root.to_string_lossy(),
-        "codex_root": codex_root.to_string_lossy(),
+        "claude_source": serde_json::to_value(claude)?,
+        "codex_source": serde_json::to_value(codex)?,
     });
     daemon::settings::apply_settings_object(&mut settings, &object)
         .map_err(|label| anyhow!(label))?;
@@ -87,6 +91,27 @@ pub fn declare_roots(
     }
     settings.save(&store)?;
     Ok(())
+}
+
+/// Declare both sources as folders to watch.
+///
+/// Kept as the two-paths spelling for callers that have two paths; the
+/// window goes through [`declare_sources`], because a folder chooser cannot
+/// express "I don't use this agent".
+pub fn declare_roots(
+    dir: &std::path::Path,
+    claude_root: &std::path::Path,
+    codex_root: &std::path::Path,
+) -> Result<()> {
+    declare_sources(
+        dir,
+        &SourceDeclaration::Watch {
+            path: claude_root.to_path_buf(),
+        },
+        &SourceDeclaration::Watch {
+            path: codex_root.to_path_buf(),
+        },
+    )
 }
 
 impl Backend {
@@ -400,6 +425,89 @@ mod roots_tests {
             settings.claude_source.as_ref().and_then(|d| d.path()),
             Some(claude.as_path())
         );
+    }
+
+    #[test]
+    fn declaring_an_agent_off_is_a_real_answer_that_lets_the_daemon_start() {
+        // "I don't use Codex" has to be an answer, not a silence. Before
+        // `SourceDeclaration` the only way to express it was to leave the
+        // root unset, and an unset root means the real ~/.codex -- so the
+        // answer a privacy-conscious contributor is most likely to give was
+        // the one that scanned their work.
+        let dir = Scratch::new("codex-off");
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        declare_sources(
+            dir.path(),
+            &SourceDeclaration::Watch {
+                path: claude.clone(),
+            },
+            &SourceDeclaration::Off,
+        )
+        .unwrap();
+
+        let backend = match Backend::open(dir.path().to_path_buf()) {
+            Ok(b) => b,
+            Err(e) => panic!("an off declaration is complete and must start: {e}"),
+        };
+        assert!(backend.hosts_the_loop());
+    }
+
+    #[test]
+    fn an_agent_declared_off_never_reaches_the_conventional_location() {
+        // Asserting on the declaration itself, not on a count: the failure
+        // that matters is not "a source went missing" but "a source is
+        // rooted at the contributor's home directory".
+        let dir = Scratch::new("off-not-home");
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        declare_sources(
+            dir.path(),
+            &SourceDeclaration::Watch { path: claude },
+            &SourceDeclaration::Off,
+        )
+        .unwrap();
+
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let settings = DaemonSettings::load(&store).unwrap();
+        assert_eq!(settings.codex_source, Some(SourceDeclaration::Off));
+        assert_eq!(
+            settings.codex_source.as_ref().and_then(|d| d.path()),
+            None,
+            "off must resolve to no directory at all, not to a fallback"
+        );
+    }
+
+    #[test]
+    fn both_agents_off_is_a_complete_declaration() {
+        // Somebody who uses neither agent still has to be able to leave the
+        // screen. Refusing here would be the dead end this whole slice
+        // exists to remove.
+        let dir = Scratch::new("both-off");
+        declare_sources(dir.path(), &SourceDeclaration::Off, &SourceDeclaration::Off).unwrap();
+
+        let backend = match Backend::open(dir.path().to_path_buf()) {
+            Ok(b) => b,
+            Err(e) => panic!("two off declarations are still a declaration: {e}"),
+        };
+        assert!(backend.hosts_the_loop());
+    }
+
+    #[test]
+    fn an_off_declaration_survives_a_reload_rather_than_reverting_to_unasked() {
+        // The regression that would matter most quietly: if `off` failed to
+        // round-trip through the settings file it would load back as None,
+        // which is "never asked" -- and never-asked is the state that falls
+        // back to the real location.
+        let dir = Scratch::new("off-round-trip");
+        declare_sources(dir.path(), &SourceDeclaration::Off, &SourceDeclaration::Off).unwrap();
+
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let reloaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(reloaded.claude_source, Some(SourceDeclaration::Off));
+        assert_eq!(reloaded.codex_source, Some(SourceDeclaration::Off));
     }
 
     #[test]
