@@ -5,6 +5,19 @@
 //! blue, and the session implied in the space between them. No gradients,
 //! no fills other than the frame, no asset file.
 //!
+//! ## Where the numbers live
+//!
+//! Not here, any more. The geometry, the palette and the SVG emitters moved
+//! to `trace-commons-mark`, which this module re-exports; what stays is the
+//! cairo drawing and the GTK widgets around it. The move was forced by
+//! packaging: the root workspace excludes this crate and it links GTK 4, so
+//! an export tool that has to run on a macOS or Windows runner could not
+//! reach the emitters while they lived here.
+//!
+//! The drawing code below reads `FRAME_RECT`, the stroke widths and the
+//! bracket vertices from that crate rather than restating them, so cairo and
+//! SVG cannot disagree about what the mark is.
+//!
 //! The geometry is `design-import/DESIGN-SPEC.md` §1.2, transcribed unit
 //! for unit on its 64-unit coordinate space:
 //!
@@ -44,118 +57,35 @@ use std::cell::RefCell;
 use adw::prelude::*;
 use gtk::cairo;
 
+pub use trace_commons_mark::{Scheme, svg, template_svg};
+
 /// The mark's coordinate space. Every number in this module is in these
 /// units and is scaled to the requested pixel size at draw time.
-const VIEW: f64 = 64.0;
+const VIEW: f64 = trace_commons_mark::VIEW as f64;
 
 /// Stroke width of a bracket inside the frame, in view units.
-const STROKE_FRAMED: f64 = 7.0;
+const STROKE_FRAMED: f64 = trace_commons_mark::STROKE_FRAMED as f64;
 
 /// Stroke width of a bracket without the frame. Thicker, because the frame
 /// is no longer there to give the two brackets something to sit against.
-const STROKE_TEMPLATE: f64 = 8.0;
+const STROKE_TEMPLATE: f64 = trace_commons_mark::STROKE_TEMPLATE as f64;
 
-/// Which palette the mark is drawn in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Scheme {
-    Light,
-    Dark,
-}
+/// Stroke width of the frame itself, in view units.
+const STROKE_FRAME: f64 = trace_commons_mark::STROKE_FRAME as f64;
 
-impl Scheme {
-    /// The scheme the desktop is currently asking for.
-    pub fn current() -> Self {
-        if adw::StyleManager::default().is_dark() {
-            Scheme::Dark
-        } else {
-            Scheme::Light
-        }
-    }
-
-    /// Frame fill. `tc_surface`.
-    fn surface(self) -> &'static str {
-        match self {
-            Scheme::Light => "#FFFFFF",
-            Scheme::Dark => "#21241E",
-        }
-    }
-
-    /// Frame stroke. `tc_line`.
-    fn line(self) -> &'static str {
-        match self {
-            Scheme::Light => "#D9DFDC",
-            Scheme::Dark => "#3B4038",
-        }
-    }
-
-    /// The user's bracket. `tc_green`.
-    fn green(self) -> &'static str {
-        match self {
-            Scheme::Light => "#178F70",
-            Scheme::Dark => "#3FBE9A",
-        }
-    }
-
-    /// The agent's bracket. `tc_blue`.
-    fn blue(self) -> &'static str {
-        match self {
-            Scheme::Light => "#315FBA",
-            Scheme::Dark => "#7FA0EC",
-        }
-    }
-
-    /// The single ink of the template variant. `tc_ink`.
-    ///
-    /// A status area recolours a template icon itself where it can, so this
-    /// is what it falls back to when it cannot.
-    pub fn ink(self) -> &'static str {
-        match self {
-            Scheme::Light => "#20241F",
-            Scheme::Dark => "#E8EAE3",
-        }
-    }
-}
-
-/// The mark as an SVG document, for surfaces that can only take a
-/// serialised icon.
+/// The scheme the desktop is currently asking for.
 ///
-/// `size` is the rendered edge in pixels; the geometry stays on its
-/// 64-unit `viewBox`, so the document is resolution-independent whatever
-/// is passed here.
-pub fn svg(scheme: Scheme, size: u32) -> String {
-    format!(
-        concat!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
-            r#"viewBox="0 0 64 64" role="img" aria-label="Trace Commons">"#,
-            r#"<rect x="1" y="1" width="62" height="62" fill="{surface}" stroke="{line}" stroke-width="2"/>"#,
-            r#"<path d="M11 28V11h17" fill="none" stroke="{green}" stroke-width="7"/>"#,
-            r#"<path d="M53 36v17H36" fill="none" stroke="{blue}" stroke-width="7"/>"#,
-            r#"</svg>"#,
-        ),
-        size = size,
-        surface = scheme.surface(),
-        line = scheme.line(),
-        green = scheme.green(),
-        blue = scheme.blue(),
-    )
-}
-
-/// The frameless, single-ink template variant as an SVG document.
-///
-/// `ink` is a CSS colour written straight into the document -- pass
-/// [`Scheme::ink`] unless a status area has told you what it wants.
-pub fn template_svg(ink: &str, size: u32) -> String {
-    format!(
-        concat!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
-            r#"viewBox="0 0 64 64" role="img" aria-label="Trace Commons">"#,
-            r#"<path d="M11 28V11h17" fill="none" stroke="{ink}" stroke-width="8"/>"#,
-            r#"<path d="M53 36v17H36" fill="none" stroke="{ink}" stroke-width="8"/>"#,
-            r#"</svg>"#,
-        ),
-        size = size,
-        ink = ink,
-    )
+/// This is the one part of the mark that cannot live in
+/// `trace-commons-mark`: the answer comes from libadwaita, and that crate is
+/// deliberately GUI-free so the export tool can run on a macOS or Windows
+/// runner. Everything else -- geometry, palette, SVG -- is re-exported above
+/// rather than restated here.
+pub fn current_scheme() -> Scheme {
+    if adw::StyleManager::default().is_dark() {
+        Scheme::Dark
+    } else {
+        Scheme::Light
+    }
 }
 
 /// The framed mark as a widget, in the palette the desktop is currently
@@ -166,7 +96,7 @@ pub fn template_svg(ink: &str, size: u32) -> String {
 pub fn framed(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_framed(cr, Scheme::current(), width as f64, height as f64);
+        draw_framed(cr, current_scheme(), width as f64, height as f64);
     });
     follow_scheme(&area);
     area
@@ -180,7 +110,7 @@ pub fn framed(size: i32) -> gtk::DrawingArea {
 pub fn template(size: i32) -> gtk::DrawingArea {
     let area = base(size);
     area.set_draw_func(move |_, cr, width, height| {
-        let scheme = Scheme::current();
+        let scheme = current_scheme();
         draw_template(cr, scheme.ink(), width as f64, height as f64);
     });
     follow_scheme(&area);
@@ -237,11 +167,12 @@ fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
 
     // The frame: inset one unit, two-unit stroke, so its outer edge is the
     // 64x64 boundary exactly.
-    cr.rectangle(1.0, 1.0, 62.0, 62.0);
+    let (fx, fy, fw, fh) = trace_commons_mark::FRAME_RECT;
+    cr.rectangle(f64::from(fx), f64::from(fy), f64::from(fw), f64::from(fh));
     set_source(cr, scheme.surface());
     let _ = cr.fill_preserve();
     set_source(cr, scheme.line());
-    cr.set_line_width(2.0);
+    cr.set_line_width(STROKE_FRAME);
     let _ = cr.stroke();
 
     cr.set_line_width(STROKE_FRAMED);
@@ -277,16 +208,29 @@ fn draw_template(cr: &cairo::Context, ink: &str, width: f64, height: f64) {
 
 /// `M11 28V11h17` -- up the left edge, then right along the top.
 fn bracket_top_left(cr: &cairo::Context) {
-    cr.move_to(11.0, 28.0);
-    cr.line_to(11.0, 11.0);
-    cr.line_to(28.0, 11.0);
+    polyline(cr, &trace_commons_mark::VERTICES_GREEN);
 }
 
 /// `M53 36v17H36` -- down the right edge, then left along the bottom.
 fn bracket_bottom_right(cr: &cairo::Context) {
-    cr.move_to(53.0, 36.0);
-    cr.line_to(53.0, 53.0);
-    cr.line_to(36.0, 53.0);
+    polyline(cr, &trace_commons_mark::VERTICES_BLUE);
+}
+
+/// Trace a bracket from the canonical vertices.
+///
+/// The numbers are not repeated here: they come from `trace-commons-mark`,
+/// which is also what the SVG emitter and the packaging artwork are built
+/// from. A bracket typed out again in cairo coordinates is how the mark ends
+/// up meaning two slightly different things depending on which surface drew
+/// it.
+fn polyline(cr: &cairo::Context, vertices: &[(u32, u32)]) {
+    let mut points = vertices.iter();
+    if let Some(&(x, y)) = points.next() {
+        cr.move_to(f64::from(x), f64::from(y));
+    }
+    for &(x, y) in points {
+        cr.line_to(f64::from(x), f64::from(y));
+    }
 }
 
 /// Set a `#rrggbb` literal as the source colour.

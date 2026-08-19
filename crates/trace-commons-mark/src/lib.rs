@@ -69,6 +69,18 @@ pub const PATH_GREEN: &str = "M11 28V11h17";
 /// The agent's answer, bottom-right. `M53 36 v17 H36`.
 pub const PATH_BLUE: &str = "M53 36v17H36";
 
+/// The green bracket as vertices, for renderers that draw lines rather than
+/// parse a path string -- cairo on Linux, `CGPath` on macOS, Win2D on Windows.
+///
+/// The SVG path constants above say the same thing in SVG's own notation.
+/// [`tests::path_strings_agree_with_vertices`] is what keeps the two spellings
+/// from drifting; without it this would be the fifth description of the mark
+/// rather than a second view of the first.
+pub const VERTICES_GREEN: [(u32, u32); 3] = [(11, 28), (11, 11), (28, 11)];
+
+/// The blue bracket as vertices. See [`VERTICES_GREEN`].
+pub const VERTICES_BLUE: [(u32, u32); 3] = [(53, 36), (53, 53), (36, 53)];
+
 /// Which palette the mark is drawn in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scheme {
@@ -254,6 +266,49 @@ mod tests {
         assert_eq!(y - half, 0);
         assert_eq!(x + w + half, VIEW);
         assert_eq!(y + h + half, VIEW);
+    }
+
+    /// The SVG path strings and the vertex lists are two spellings of the same
+    /// two brackets. A renderer that draws lines uses one and a renderer that
+    /// parses SVG uses the other, so nothing else in the codebase would notice
+    /// them disagreeing.
+    #[test]
+    fn path_strings_agree_with_vertices() {
+        // "M11 28V11h17" -- absolute move, absolute vertical, relative
+        // horizontal. Rebuilt here from the vertices in exactly that notation.
+        let green = format!(
+            "M{} {}V{}h{}",
+            VERTICES_GREEN[0].0,
+            VERTICES_GREEN[0].1,
+            VERTICES_GREEN[1].1,
+            VERTICES_GREEN[2].0 - VERTICES_GREEN[1].0,
+        );
+        assert_eq!(green, PATH_GREEN);
+
+        // "M53 36v17H36" -- absolute move, relative vertical, absolute
+        // horizontal. The two brackets are spelled differently in the source
+        // this was transcribed from, and that asymmetry is preserved.
+        let blue = format!(
+            "M{} {}v{}H{}",
+            VERTICES_BLUE[0].0,
+            VERTICES_BLUE[0].1,
+            VERTICES_BLUE[1].1 - VERTICES_BLUE[0].1,
+            VERTICES_BLUE[2].0,
+        );
+        assert_eq!(blue, PATH_BLUE);
+    }
+
+    /// The two brackets are rotationally symmetric about the centre of the view
+    /// box: the blue bracket is the green one turned 180 degrees. That is the
+    /// whole idea of the mark -- the user's corner and the agent's answer
+    /// facing each other -- so it is worth asserting rather than trusting six
+    /// hand-typed coordinate pairs.
+    #[test]
+    fn brackets_are_rotationally_symmetric() {
+        for (green, blue) in VERTICES_GREEN.iter().zip(VERTICES_BLUE.iter()) {
+            assert_eq!(VIEW - green.0, blue.0, "x of {green:?} vs {blue:?}");
+            assert_eq!(VIEW - green.1, blue.1, "y of {green:?} vs {blue:?}");
+        }
     }
 
     /// The palette literals here are copies of tokens that live in each
