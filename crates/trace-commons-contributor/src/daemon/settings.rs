@@ -215,8 +215,15 @@ impl DaemonSettings {
         let Some(body) = store.read_daemon_file(DAEMON_SETTINGS_FILE)? else {
             return Ok(Self::default());
         };
-        let mut settings: Self =
-            serde_json::from_slice(&body).context("parsing daemon settings")?;
+        // The serde context stays for local stderr and journals, where the
+        // parser's own "missing field `schema_version` at line 1 column 65"
+        // is the whole diagnosis. `StartFailure` rides alongside it so a
+        // caller across the C ABI -- which must not receive that text, since
+        // the file it names is in the contributor's home directory -- can
+        // still tell this apart from every other start failure.
+        let mut settings: Self = serde_json::from_slice(&body)
+            .context("parsing daemon settings")
+            .context(crate::daemon::StartFailure::SettingsUnreadable)?;
         settings.absorb_legacy_roots();
         Ok(settings)
     }
