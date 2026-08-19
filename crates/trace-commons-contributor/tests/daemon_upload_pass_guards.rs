@@ -133,8 +133,16 @@ impl Harness {
         };
         {
             let mut s = shared.settings.lock().unwrap();
-            s.claude_root = Some(claude_root.clone());
-            s.codex_root = Some(dir.path().join("codex"));
+            s.claude_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: claude_root.clone(),
+                },
+            );
+            s.codex_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex"),
+                },
+            );
             if let Some(base_url) = filter_base {
                 s.near_ai = Some(NearAiSettings {
                     api_key: "test-key".into(),
@@ -434,8 +442,16 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     let shared = Arc::new(DaemonShared::load(store).unwrap());
     {
         let mut s = shared.settings.lock().unwrap();
-        s.claude_root = Some(claude_root.clone());
-        s.codex_root = Some(dir.path().join("codex"));
+        s.claude_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root.clone(),
+            },
+        );
+        s.codex_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: dir.path().join("codex"),
+            },
+        );
     }
     shared
         .policy

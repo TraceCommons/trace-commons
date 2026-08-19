@@ -26,7 +26,7 @@ fn cstr_str(s: &str) -> CString {
 /// Point the daemon's session roots at empty tempdirs before starting it,
 /// the way `trace-commons-contributor`'s own watcher tests already do
 /// (`WatcherFixture`). Without this, `tc_daemon_start` -- via the settings
-/// default of `claude_root: None` / `codex_root: None`, meaning "the
+/// default of `claude_source: None` / `codex_source: None`, meaning "the
 /// conventional per-user location" -- scans the machine owner's *real*
 /// `~/.claude`/`~/.codex` session roots: a real privacy problem for a test
 /// (it reads the developer's actual coding transcripts), and also what made
@@ -40,8 +40,16 @@ fn write_tempdir_session_roots(dir: &Path) {
     std::fs::create_dir_all(&codex_root).unwrap();
     let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
     let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
-        claude_root: Some(claude_root),
-        codex_root: Some(codex_root),
+        claude_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root,
+            },
+        ),
+        codex_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: codex_root,
+            },
+        ),
         ..Default::default()
     };
     settings.save(&store).unwrap();
@@ -177,7 +185,7 @@ fn tc_daemon_start_null_config_dir_is_an_error() {
 fn tc_daemon_start_null_err_out_param_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     // Same tempdir session roots every other test gets: without this the
-    // settings default of `claude_root: None` / `codex_root: None` means
+    // settings default of `claude_source: None` / `codex_source: None` means
     // "the conventional per-user location", so the supervisor's first tick
     // would scan and hash the *developer's real* ~/.claude and ~/.codex
     // transcripts on every run of this suite. `start()` is not reused here
@@ -1221,8 +1229,12 @@ fn tc_daemon_start_refuses_when_only_one_root_is_declared() {
     let store =
         trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
     trace_commons_contributor::daemon::settings::DaemonSettings {
-        claude_root: Some(claude_root),
-        codex_root: None,
+        claude_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root,
+            },
+        ),
+        codex_source: None,
         ..Default::default()
     }
     .save(&store)

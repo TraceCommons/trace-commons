@@ -4,11 +4,14 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use crate::daemon::settings::SourceDeclaration;
+
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 pub mod claude_code;
 pub mod codex;
+pub mod discovery;
 pub mod trajectory;
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
@@ -130,26 +133,55 @@ pub fn preview_submission_id_for(session_hash: &str) -> uuid::Uuid {
     uuid::Uuid::from_bytes(bytes)
 }
 
-/// Construct the set of available `TraceSource` adapters, defaulting roots to
-/// `~/.claude/projects` and `~/.codex/sessions` when not overridden. The
-/// trajectory source is included only when an explicit path is supplied,
+/// Construct the set of available `TraceSource` adapters from what the
+/// contributor declared.
+///
+/// Three states per source, and the difference between two of them is the
+/// whole point:
+///
+/// - `Some(Watch { path })` -- watch that directory.
+/// - `Some(Off)` -- the contributor said they do not use this agent. **No
+///   source is constructed and there is no fallback.** This is the state
+///   that previously did not exist, and its absence is what made "I don't
+///   use Codex" indistinguishable from "nobody has asked yet" and therefore
+///   equal to watching the real `~/.codex`.
+/// - `None` -- never asked. Only here does the conventional per-user
+///   location still apply, and only the CLI can reach it: every application
+///   shell refuses to start until both sources are declared
+///   (`daemon::settings::roots_declared`). `trace-commons-contributor daemon`
+///   is somebody typing a command on purpose and keeps its defaults.
+///
+/// The trajectory source is included only when an explicit path is supplied,
 /// because trajectory files have no conventional local store.
 pub fn all_sources(
-    claude_root: Option<PathBuf>,
-    codex_root: Option<PathBuf>,
+    claude: Option<SourceDeclaration>,
+    codex: Option<SourceDeclaration>,
     trajectory_path: Option<PathBuf>,
 ) -> Vec<Box<dyn TraceSource>> {
-    let claude_root = claude_root.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".claude/projects")
-    });
-    let codex_root =
-        codex_root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex/sessions"));
-    let mut sources: Vec<Box<dyn TraceSource>> = vec![
-        Box::new(claude_code::ClaudeCodeSource::new(claude_root)),
-        Box::new(codex::CodexSource::new(codex_root)),
-    ];
+    let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
+
+    match claude {
+        Some(SourceDeclaration::Off) => {}
+        Some(SourceDeclaration::Watch { path }) => {
+            sources.push(Box::new(claude_code::ClaudeCodeSource::new(path)))
+        }
+        None => sources.push(Box::new(claude_code::ClaudeCodeSource::new(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".claude/projects"),
+        ))),
+    }
+
+    match codex {
+        Some(SourceDeclaration::Off) => {}
+        Some(SourceDeclaration::Watch { path }) => {
+            sources.push(Box::new(codex::CodexSource::new(path)))
+        }
+        None => sources.push(Box::new(codex::CodexSource::new(
+            dirs::home_dir().unwrap_or_default().join(".codex/sessions"),
+        ))),
+    }
+
     if let Some(path) = trajectory_path {
         sources.push(Box::new(trajectory::TrajectorySource::new(path)));
     }
@@ -159,6 +191,84 @@ pub fn all_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fail-open this slice closes, stated as a test.
+    ///
+    /// "I don't use Codex" used to be spelled `codex_root: None`, which
+    /// `all_sources` turned into `~/.codex/sessions`. On a real machine that
+    /// is thousands of session files the contributor never agreed to.
+    #[test]
+    fn a_source_declared_off_is_not_constructed_at_all() {
+        let sources = all_sources(
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/declared/claude"),
+            }),
+            Some(SourceDeclaration::Off),
+            None,
+        );
+        let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            vec![SOURCE_CLAUDE_CODE],
+            "a source declared off must produce no adapter, and therefore \
+             nothing that can discover or read a file"
+        );
+    }
+
+    #[test]
+    fn both_declared_off_watches_nothing() {
+        let sources = all_sources(
+            Some(SourceDeclaration::Off),
+            Some(SourceDeclaration::Off),
+            None,
+        );
+        assert!(
+            sources.is_empty(),
+            "declaring every source off is a legitimate answer and must \
+             watch nothing, not fall back to everything"
+        );
+    }
+
+    #[test]
+    fn off_never_reaches_the_conventional_location() {
+        // Pinned separately from the count above: the failure mode that
+        // matters is not "an extra adapter appeared", it is "an adapter
+        // appeared pointing at the contributor's real home directory".
+        let home = dirs::home_dir().unwrap_or_default();
+        for sources in [
+            all_sources(
+                Some(SourceDeclaration::Off),
+                Some(SourceDeclaration::Off),
+                None,
+            ),
+            all_sources(
+                Some(SourceDeclaration::Off),
+                Some(SourceDeclaration::Watch {
+                    path: PathBuf::from("/declared/codex"),
+                }),
+                None,
+            ),
+        ] {
+            for source in &sources {
+                assert_ne!(
+                    source.name(),
+                    SOURCE_CLAUDE_CODE,
+                    "claude was declared off; no claude adapter may exist, \
+                     least of all one rooted at {}",
+                    home.join(".claude/projects").display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_asked_still_defaults_so_the_cli_is_unaffected() {
+        // The application shells cannot reach this: roots_declared() gates
+        // them. The CLI can, and deliberately keeps its defaults.
+        let sources = all_sources(None, None, None);
+        let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec![SOURCE_CLAUDE_CODE, SOURCE_CODEX]);
+    }
 
     #[test]
     fn session_hash_is_prefixed_and_deterministic() {

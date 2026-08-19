@@ -87,7 +87,11 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
     }
 
     let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_root = Some(sessions_root);
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root,
+        },
+    );
     settings.save(&store).unwrap();
 
     let entry_id = entry_id_for("cli-preview-test-hash");

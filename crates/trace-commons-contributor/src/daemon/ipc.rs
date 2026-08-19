@@ -1337,15 +1337,15 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let (near_ai, claude_root, codex_root) = {
+    let (near_ai, claude_source, codex_source) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.near_ai.clone(),
-            s.claude_root.clone(),
-            s.codex_root.clone(),
+            s.claude_source.clone(),
+            s.codex_source.clone(),
         )
     };
-    let sources = crate::source::all_sources(claude_root, codex_root, None);
+    let sources = crate::source::all_sources(claude_source, codex_source, None);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
     let (summary, body, envelope) =
@@ -1784,17 +1784,38 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // serialized-wholesale settings blob was not, and leaked one
         // whenever either root was overridden from the conventional
         // location. Report presence only.
-        let claude_root_configured = s.claude_root.is_some();
-        let codex_root_configured = s.codex_root.is_some();
+        //
+        // `*_root_configured` stays true only for a source pointed at a
+        // folder. A source declared OFF is answered but has no folder, so
+        // reporting it as configured would tell a settings screen to print
+        // "sessions folder set" about an agent the contributor said they do
+        // not use. The mode carries that distinction, and carries no path.
+        let mode_of = |d: &Option<crate::daemon::settings::SourceDeclaration>| match d {
+            Some(crate::daemon::settings::SourceDeclaration::Watch { .. }) => "watch",
+            Some(crate::daemon::settings::SourceDeclaration::Off) => "off",
+            None => "unset",
+        };
+        let claude_mode = mode_of(&s.claude_source);
+        let codex_mode = mode_of(&s.codex_source);
         obj.remove("claude_root");
         obj.remove("codex_root");
+        obj.remove("claude_source");
+        obj.remove("codex_source");
         obj.insert(
             "claude_root_configured".to_string(),
-            serde_json::Value::Bool(claude_root_configured),
+            serde_json::Value::Bool(claude_mode == "watch"),
         );
         obj.insert(
             "codex_root_configured".to_string(),
-            serde_json::Value::Bool(codex_root_configured),
+            serde_json::Value::Bool(codex_mode == "watch"),
+        );
+        obj.insert(
+            "claude_source_mode".to_string(),
+            serde_json::Value::String(claude_mode.to_string()),
+        );
+        obj.insert(
+            "codex_source_mode".to_string(),
+            serde_json::Value::String(codex_mode.to_string()),
         );
     }
     v
@@ -2947,8 +2968,12 @@ mod tests {
         let s = shared();
         {
             let mut settings = s.settings.lock().unwrap();
-            settings.claude_root = Some(std::path::PathBuf::from("/Users/z/.claude/projects"));
-            settings.codex_root = Some(std::path::PathBuf::from("/Users/z/.codex/sessions"));
+            settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from("/Users/z/.claude/projects"),
+            });
+            settings.codex_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from("/Users/z/.codex/sessions"),
+            });
         }
         let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
         let result = r.result.unwrap();

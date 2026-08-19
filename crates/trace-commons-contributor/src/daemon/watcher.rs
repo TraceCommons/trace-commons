@@ -75,16 +75,16 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
     let mut report = TickReport::default();
     let mut changed = false;
 
-    let (max_queue_entries, claude_root, codex_root) = {
+    let (max_queue_entries, claude_source, codex_source) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.max_queue_entries,
-            s.claude_root.clone(),
-            s.codex_root.clone(),
+            s.claude_source.clone(),
+            s.codex_source.clone(),
         )
     };
 
-    for source in all_sources(claude_root, codex_root, None) {
+    for source in all_sources(claude_source, codex_source, None) {
         let refs = match source.discover() {
             Ok(refs) => refs,
             Err(_) => continue,
@@ -414,8 +414,11 @@ mod tests {
             let shared = DaemonShared::load(store).unwrap();
             {
                 let mut s = shared.settings.lock().unwrap();
-                s.claude_root = Some(claude_root.clone());
-                s.codex_root = Some(codex_root);
+                s.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                    path: claude_root.clone(),
+                });
+                s.codex_source =
+                    Some(crate::daemon::settings::SourceDeclaration::Watch { path: codex_root });
             }
             Self {
                 _dir: dir,

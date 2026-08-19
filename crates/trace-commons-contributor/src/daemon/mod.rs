@@ -376,12 +376,12 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    let (near_ai, claude_root, codex_root) = {
+    let (near_ai, claude_source, codex_source) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.near_ai.clone(),
-            s.claude_root.clone(),
-            s.codex_root.clone(),
+            s.claude_source.clone(),
+            s.codex_source.clone(),
         )
     };
     // These options are envelope-determining and are NOT covered by
@@ -415,7 +415,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
 
-    let sources = crate::source::all_sources(claude_root, codex_root, None);
+    let sources = crate::source::all_sources(claude_source, codex_source, None);
     let mut changed = false;
     // A fail-closed precondition (`SubmitPreconditionFailure`) aborts the
     // pass. It is held here rather than propagated with `?` so the pass's

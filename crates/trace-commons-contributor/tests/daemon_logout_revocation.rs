@@ -152,8 +152,16 @@ async fn logout_makes_a_real_running_daemon_exit() {
         // test's business.
         let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
             poll_interval_secs: 3600,
-            claude_root: Some(dir.path().join("empty-claude")),
-            codex_root: Some(dir.path().join("empty-codex")),
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("empty-claude"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("empty-codex"),
+                },
+            ),
             ..Default::default()
         };
         settings.save(&store).unwrap();

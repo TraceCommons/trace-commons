@@ -423,7 +423,11 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
     store.save_config(&cfg).unwrap();
 
     let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_root = Some(sessions_root.clone());
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
     settings.save(&store).unwrap();
 
     let entry_id = entry_id_for("preview-test-hash");
@@ -762,7 +766,11 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
     store.save_config(&cfg).unwrap();
 
     let mut settings = DaemonSettings::load(&store).unwrap();
-    settings.claude_root = Some(sessions_root.clone());
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
     settings.save(&store).unwrap();
 
     let entry_id = entry_id_for("turn-index-test-hash");
