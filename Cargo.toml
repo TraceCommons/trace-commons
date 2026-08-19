@@ -5,6 +5,7 @@ members = [
     "crates/trace-commons-contributor-ffi",
     "crates/trace-commons-gate-api",
     "crates/trace-commons-gate-enclave",
+    "crates/trace-commons-mark",
     "crates/trace-commons-operator-client",
     "crates/trace-commons-protocol",
     "crates/trace-commons-server",

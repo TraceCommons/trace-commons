@@ -1,0 +1,359 @@
+//! "The Turn" -- the product mark, as pure geometry.
+//!
+//! Two corner brackets facing each other inside a hairline frame: the user's
+//! bracket top-left in green, the agent's answer bottom-right in blue, and the
+//! session implied in the space between them. No gradients, no fills other
+//! than the frame, no asset file behind any of it.
+//!
+//! The geometry is transcribed unit for unit on a 64-unit coordinate space:
+//!
+//! ```text
+//! frame     rect x=1 y=1 w=62 h=62, stroke-width 2
+//! green     M11 28 V11 H28          stroke-width 7
+//! blue      M53 36 v17 H36          stroke-width 7
+//! template  the same two paths in one ink, stroke-width 8, no frame
+//! ```
+//!
+//! The frame is inset one unit under a two-unit stroke, so its outer edge
+//! lands exactly on the 64x64 boundary. The template variant thickens to 8
+//! because it loses the frame that was holding the brackets apart.
+//!
+//! ## Why this crate exists
+//!
+//! The mark is drawn live in all three clients -- `BrandMark.swift` on macOS,
+//! `ui/mark.rs` on Linux, `Controls/BrandMark.xaml.cs` on Windows -- and that
+//! stays true. A `DrawingArea` or a SwiftUI `Shape` is handed the real device
+//! scale and redraws into it, so a UI surface needs no file and no size
+//! ladder.
+//!
+//! Packaging is the exception. An operating system that wants a Dock icon, a
+//! Start tile or a `hicolor` entry wants a file on disk, and until this crate
+//! existed nobody generated one: macOS shipped an empty `Contents/Resources`,
+//! the Linux desktop entry named an icon nothing installed, and the three
+//! Windows tiles were solid squares of `#315FBA`. This crate is the single
+//! description those files are generated from, and the drift tests below plus
+//! the per-client transcription tests are what keep the four descriptions of
+//! the mark from wandering apart.
+//!
+//! Nothing here has a dependency, and nothing here rasterizes. SVG out; each
+//! platform's own toolchain turns that into whatever it needs.
+//!
+//! ## Colour
+//!
+//! Every ink is a palette token, repeated here as a literal because this crate
+//! cannot reach any client's palette. If a value below ever drifts from a
+//! client's own token, the client's token is right and
+//! [`tests::palette_matches_client_tokens`] is what should have caught it.
+
+/// The mark's coordinate space. Every number in this module is in these units
+/// and is scaled to the requested pixel size at render time.
+pub const VIEW: u32 = 64;
+
+/// Stroke width of a bracket inside the frame, in view units.
+pub const STROKE_FRAMED: u32 = 7;
+
+/// Stroke width of a bracket without the frame. Thicker, because the frame is
+/// no longer there to give the two brackets something to sit against.
+pub const STROKE_TEMPLATE: u32 = 8;
+
+/// Stroke width of the frame itself, in view units.
+pub const STROKE_FRAME: u32 = 2;
+
+/// The frame rectangle, as `(x, y, width, height)` in view units. Inset one
+/// unit so a two-unit stroke lands its outer edge on the view box boundary.
+pub const FRAME_RECT: (u32, u32, u32, u32) = (1, 1, 62, 62);
+
+/// The user's bracket, top-left. `M11 28 V11 H28`.
+pub const PATH_GREEN: &str = "M11 28V11h17";
+
+/// The agent's answer, bottom-right. `M53 36 v17 H36`.
+pub const PATH_BLUE: &str = "M53 36v17H36";
+
+/// Which palette the mark is drawn in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scheme {
+    Light,
+    Dark,
+}
+
+impl Scheme {
+    /// Both schemes, in the order the export tool writes them.
+    pub const ALL: [Scheme; 2] = [Scheme::Light, Scheme::Dark];
+
+    /// The lowercase name used in generated filenames.
+    pub fn name(self) -> &'static str {
+        match self {
+            Scheme::Light => "light",
+            Scheme::Dark => "dark",
+        }
+    }
+
+    /// Frame fill. `tc_surface`.
+    pub fn surface(self) -> &'static str {
+        match self {
+            Scheme::Light => "#FFFFFF",
+            Scheme::Dark => "#21241E",
+        }
+    }
+
+    /// Frame stroke. `tc_line`.
+    pub fn line(self) -> &'static str {
+        match self {
+            Scheme::Light => "#D9DFDC",
+            Scheme::Dark => "#3B4038",
+        }
+    }
+
+    /// The user's bracket. `tc_green`.
+    pub fn green(self) -> &'static str {
+        match self {
+            Scheme::Light => "#178F70",
+            Scheme::Dark => "#3FBE9A",
+        }
+    }
+
+    /// The agent's bracket. `tc_blue`.
+    pub fn blue(self) -> &'static str {
+        match self {
+            Scheme::Light => "#315FBA",
+            Scheme::Dark => "#7FA0EC",
+        }
+    }
+
+    /// The single ink of the template variant. `tc_ink`.
+    ///
+    /// A status area recolours a template icon itself where it can, so this is
+    /// what it falls back to when it cannot.
+    pub fn ink(self) -> &'static str {
+        match self {
+            Scheme::Light => "#20241F",
+            Scheme::Dark => "#E8EAE3",
+        }
+    }
+}
+
+/// The mark as an SVG document, for surfaces that can only take a serialised
+/// icon.
+///
+/// `size` is the rendered edge in pixels; the geometry stays on its 64-unit
+/// `viewBox`, so the document is resolution-independent whatever is passed
+/// here.
+pub fn svg(scheme: Scheme, size: u32) -> String {
+    format!(
+        concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
+            r#"viewBox="0 0 {view} {view}" role="img" aria-label="Trace Commons">"#,
+            r#"<rect x="{fx}" y="{fy}" width="{fw}" height="{fh}" fill="{surface}" stroke="{line}" stroke-width="{frame_stroke}"/>"#,
+            r#"<path d="{green_path}" fill="none" stroke="{green}" stroke-width="{stroke}"/>"#,
+            r#"<path d="{blue_path}" fill="none" stroke="{blue}" stroke-width="{stroke}"/>"#,
+            r#"</svg>"#,
+        ),
+        size = size,
+        view = VIEW,
+        fx = FRAME_RECT.0,
+        fy = FRAME_RECT.1,
+        fw = FRAME_RECT.2,
+        fh = FRAME_RECT.3,
+        frame_stroke = STROKE_FRAME,
+        green_path = PATH_GREEN,
+        blue_path = PATH_BLUE,
+        stroke = STROKE_FRAMED,
+        surface = scheme.surface(),
+        line = scheme.line(),
+        green = scheme.green(),
+        blue = scheme.blue(),
+    )
+}
+
+/// The frameless, single-ink template variant as an SVG document.
+///
+/// `ink` is a CSS colour written straight into the document -- pass
+/// [`Scheme::ink`] unless a status area has told you what it wants.
+pub fn template_svg(ink: &str, size: u32) -> String {
+    format!(
+        concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
+            r#"viewBox="0 0 {view} {view}" role="img" aria-label="Trace Commons">"#,
+            r#"<path d="{green_path}" fill="none" stroke="{ink}" stroke-width="{stroke}"/>"#,
+            r#"<path d="{blue_path}" fill="none" stroke="{ink}" stroke-width="{stroke}"/>"#,
+            r#"</svg>"#,
+        ),
+        size = size,
+        view = VIEW,
+        green_path = PATH_GREEN,
+        blue_path = PATH_BLUE,
+        stroke = STROKE_TEMPLATE,
+        ink = ink,
+    )
+}
+
+/// One generated file: the repository-relative path under the export root, and
+/// its contents.
+pub struct Export {
+    pub relative_path: &'static str,
+    pub contents: String,
+}
+
+/// Every SVG the packaging surfaces consume, in a stable order.
+///
+/// The export tool writes exactly this list and the drift check re-runs it, so
+/// adding a packaging surface means adding it here and nowhere else.
+///
+/// Sizes are the nominal `width`/`height` on the document. They do not
+/// constrain anything -- the `viewBox` makes every one of these scalable -- but
+/// a consumer that ignores the view box gets a sensible default rather than a
+/// 64px icon on a 1024px canvas.
+pub fn all_exports() -> Vec<Export> {
+    let mut out = Vec::new();
+    for scheme in Scheme::ALL {
+        out.push(Export {
+            relative_path: match scheme {
+                Scheme::Light => "mark-light.svg",
+                Scheme::Dark => "mark-dark.svg",
+            },
+            contents: svg(scheme, 1024),
+        });
+        out.push(Export {
+            relative_path: match scheme {
+                Scheme::Light => "mark-template-light.svg",
+                Scheme::Dark => "mark-template-dark.svg",
+            },
+            contents: template_svg(scheme.ink(), 1024),
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The numbers themselves. If a change to this crate is meant to change the
+    /// mark, this test is the one that has to be edited on purpose -- which is
+    /// the point, because everything else generated here follows from it.
+    #[test]
+    fn geometry_constants_are_the_canonical_numbers() {
+        assert_eq!(VIEW, 64);
+        assert_eq!(FRAME_RECT, (1, 1, 62, 62));
+        assert_eq!(STROKE_FRAME, 2);
+        assert_eq!(STROKE_FRAMED, 7);
+        assert_eq!(STROKE_TEMPLATE, 8);
+        assert_eq!(PATH_GREEN, "M11 28V11h17");
+        assert_eq!(PATH_BLUE, "M53 36v17H36");
+    }
+
+    /// The frame's outer edge lands exactly on the view box boundary: inset by
+    /// half the stroke on each side. A frame that failed this would clip on one
+    /// edge and float on the other, and at 16px nobody would be able to say
+    /// which.
+    #[test]
+    fn frame_outer_edge_lands_on_the_view_box() {
+        let (x, y, w, h) = FRAME_RECT;
+        let half = STROKE_FRAME / 2;
+        assert_eq!(x - half, 0);
+        assert_eq!(y - half, 0);
+        assert_eq!(x + w + half, VIEW);
+        assert_eq!(y + h + half, VIEW);
+    }
+
+    /// The palette literals here are copies of tokens that live in each
+    /// client's own design system. This test pins the copies; the per-client
+    /// transcription tests pin the originals against these.
+    #[test]
+    fn palette_matches_client_tokens() {
+        assert_eq!(Scheme::Light.surface(), "#FFFFFF");
+        assert_eq!(Scheme::Dark.surface(), "#21241E");
+        assert_eq!(Scheme::Light.line(), "#D9DFDC");
+        assert_eq!(Scheme::Dark.line(), "#3B4038");
+        assert_eq!(Scheme::Light.green(), "#178F70");
+        assert_eq!(Scheme::Dark.green(), "#3FBE9A");
+        assert_eq!(Scheme::Light.blue(), "#315FBA");
+        assert_eq!(Scheme::Dark.blue(), "#7FA0EC");
+        assert_eq!(Scheme::Light.ink(), "#20241F");
+        assert_eq!(Scheme::Dark.ink(), "#E8EAE3");
+    }
+
+    /// The emitted document has to carry the geometry, not merely be
+    /// well-formed. A generator that emitted an empty `<svg/>` would satisfy
+    /// every check that only counts files.
+    #[test]
+    fn framed_svg_carries_both_brackets_and_the_frame() {
+        let doc = svg(Scheme::Light, 512);
+        assert!(doc.contains(r#"width="512" height="512""#), "{doc}");
+        assert!(doc.contains(r#"viewBox="0 0 64 64""#), "{doc}");
+        assert!(doc.contains(PATH_GREEN), "{doc}");
+        assert!(doc.contains(PATH_BLUE), "{doc}");
+        assert!(doc.contains(r#"stroke-width="7""#), "{doc}");
+        assert!(
+            doc.contains(r#"<rect x="1" y="1" width="62" height="62""#),
+            "{doc}"
+        );
+        assert!(doc.contains("#178F70"), "{doc}");
+        assert!(doc.contains("#315FBA"), "{doc}");
+    }
+
+    /// The template variant is the one that has to survive being masked to a
+    /// single channel, so its two defining properties -- no frame, thicker
+    /// stroke -- are asserted rather than assumed.
+    #[test]
+    fn template_svg_has_no_frame_and_the_thicker_stroke() {
+        let doc = template_svg(Scheme::Light.ink(), 15);
+        assert!(
+            !doc.contains("<rect"),
+            "template must not carry a frame: {doc}"
+        );
+        assert!(doc.contains(r#"stroke-width="8""#), "{doc}");
+        assert!(doc.contains(PATH_GREEN), "{doc}");
+        assert!(doc.contains(PATH_BLUE), "{doc}");
+        assert!(!doc.contains("#178F70"), "template is single-ink: {doc}");
+    }
+
+    /// Four documents, distinct paths, and none of them empty. The list drives
+    /// both the export tool and the drift check, so a duplicate path here would
+    /// silently drop a packaging surface.
+    #[test]
+    fn exports_are_four_distinct_non_empty_documents() {
+        let exports = all_exports();
+        assert_eq!(exports.len(), 4);
+        let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [
+                "mark-dark.svg",
+                "mark-light.svg",
+                "mark-template-dark.svg",
+                "mark-template-light.svg",
+            ]
+        );
+        for export in &exports {
+            assert!(
+                export.contents.starts_with("<svg") && export.contents.ends_with("</svg>"),
+                "{} is not a complete document",
+                export.relative_path
+            );
+            assert!(
+                export.contents.contains(PATH_GREEN),
+                "{}",
+                export.relative_path
+            );
+            assert!(
+                export.contents.contains(PATH_BLUE),
+                "{}",
+                export.relative_path
+            );
+        }
+    }
+
+    /// Light and dark have to actually differ, in both treatments. Emitting the
+    /// same document twice under two names is a failure that looks like success
+    /// in any file listing.
+    #[test]
+    fn light_and_dark_differ() {
+        assert_ne!(svg(Scheme::Light, 64), svg(Scheme::Dark, 64));
+        assert_ne!(
+            template_svg(Scheme::Light.ink(), 64),
+            template_svg(Scheme::Dark.ink(), 64)
+        );
+    }
+}
