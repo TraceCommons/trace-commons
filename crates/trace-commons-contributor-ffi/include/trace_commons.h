@@ -129,6 +129,58 @@ typedef struct tc_preview tc_preview;
  * whatever screen collects the folders, and every other start failure to a
  * generic notice. tc_daemon_start takes no settings, so the only way out of
  * this refusal through this ABI is tc_daemon_start_with_settings below.
+ *
+ * NAMED START FAILURES. Every other way a start can fail also reports a
+ * fixed, content-free label, so a host can tell them apart without parsing
+ * prose:
+ *
+ *   "already-running"              another daemon holds this state
+ *                                  directory's lock. Not an error to repair:
+ *                                  the daemon the contributor wants is
+ *                                  already up.
+ *   "state-directory-not-writable" the lock file could not be created or
+ *                                  opened. A permissions or disk problem
+ *                                  with the state directory itself.
+ *   "settings-unreadable"          daemon-settings.json exists and this
+ *                                  version cannot parse it. Re-running
+ *                                  whatever screen writes settings repairs
+ *                                  it; hand-edited files are the usual
+ *                                  cause.
+ *   "ipc-bind-failed"              the control socket could not be bound.
+ *                                  Most often a config_dir whose socket path
+ *                                  exceeds the platform limit (see the
+ *                                  104-byte note above), or a stale socket.
+ *   "daemon-start-failed"          anything else, and deliberately opaque:
+ *                                  the errors behind it embed filesystem
+ *                                  paths that must not cross this boundary.
+ *
+ * These are the complete set; treat an unrecognized label as equivalent to
+ * "daemon-start-failed" rather than assuming it is safe to display.
+ *
+ * SESSION SOURCE KEYS. Settings carry one declaration per agent, under
+ * "claude_source" and "codex_source". Each is an object in one of exactly
+ * two shapes:
+ *
+ *   {"mode":"watch","path":"/absolute/path/to/sessions"}
+ *   {"mode":"off"}
+ *
+ * ABSENT IS NOT "off", AND CONFLATING THEM IS A FAIL-OPEN. A key that is
+ * absent means the contributor has never been asked, and an unasked source
+ * still falls back to the conventional per-user location -- the real
+ * ~/.claude/projects or ~/.codex/sessions. {"mode":"off"} means they were
+ * asked and declined, and nothing for that agent is watched or read. A host
+ * that emits nothing to mean "the contributor does not use this agent" has
+ * asked the daemon to watch that agent's real session store.
+ *
+ * "roots-not-declared" is refused on absence, never on {"mode":"off"}: a
+ * contributor who declined both agents has declared their roots as surely as
+ * one who named two folders.
+ *
+ * The legacy string spellings "claude_root" / "codex_root" still load and
+ * are folded into the shapes above, then dropped the next time settings are
+ * written, so an install that declared its roots before this schema existed
+ * is not asked again. Emit the source keys; do not emit the legacy spellings
+ * in new code.
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
@@ -346,6 +398,42 @@ int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matc
  */
 char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
                                   const char* body_digest, char** err);
+
+/* The instance an invite link names, as an owned UTF-8 string, or NULL if
+ * the argument is not a usable invite.
+ *
+ * Exists so a shell can resolve and show the instance before a contributor
+ * commits to an invite, WITHOUT being handed the invite's code. The parsed
+ * invite carries that code; only the host crosses this boundary, and a shell
+ * cannot leak what it was never given.
+ *
+ * NULL covers every rejection. A caller must not try to distinguish "not a
+ * URL" from "no code in it" -- this interface deliberately does not tell the
+ * two apart, matching the single failure sentence the invite path shows.
+ *
+ * Not a daemon method: it is a pure function of its argument, touches no
+ * daemon state, and needs no handle. Returns an OWNED string; free it with
+ * tc_string_free.
+ */
+
+
+/* The instance an invite link names, as an owned UTF-8 string, or NULL if
+ * the argument is not a usable invite.
+ *
+ * Exists so a shell can resolve and show the instance before a contributor
+ * commits to an invite, WITHOUT being handed the invite's code. The parsed
+ * invite carries that code; only the host crosses this boundary, and a shell
+ * cannot leak what it was never given.
+ *
+ * NULL covers every rejection. A caller must not try to distinguish "not a
+ * URL" from "no code in it" -- this interface deliberately does not tell the
+ * two apart, matching the single failure sentence the invite path shows.
+ *
+ * Not a daemon method: it is a pure function of its argument, touches no
+ * daemon state, and needs no handle. Returns an OWNED string; free it with
+ * tc_string_free.
+ */
+char*       tc_invite_issuer_host(const char* invite);
 
 /* Free a preview handle. Safe to call with NULL. Invalidates every
  * const char* previously returned by tc_preview_body /
