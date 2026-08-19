@@ -211,6 +211,13 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     // the first window opened -- the roots screen never shows, and neither
     // history nor settings has run. `install()` is idempotent, so the cost of
     // calling it on a path that already has the provider is a bool check.
+    // BOTH sheets, the way roots.rs does it. This window mixes the two
+    // vocabularies -- `tc-brand-*` for its frame and type, `tc-refused` and
+    // `tc-meta` for the states that have an established treatment elsewhere --
+    // and it is reachable as the first window on an install whose roots are
+    // already declared. Installing one and using names from the other is how
+    // four classes came to render as nothing at all. Both are idempotent.
+    super::style::install();
     super::community_brand::install();
 
     let window = adw::Window::builder()
@@ -236,13 +243,19 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         .wrap(true)
         .visible(false)
         .build();
-    invite_error.add_css_class("tc-error");
+    // The same class the roots screen gives its failure line: a refusal
+    // sentence reads as a refusal because of its colour, and this one shipped
+    // wearing `tc-error`, which no stylesheet defines -- so a contributor whose
+    // invite was rejected got that news in the same black as the instructions.
+    invite_error.add_css_class("tc-refused");
     let invite_instance = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .visible(false)
         .build();
-    invite_instance.add_css_class("tc-muted");
+    // A secondary annotation under a field, which is what `tc-meta` is for --
+    // the roots screen uses it for the evidence line in the same position.
+    invite_instance.add_css_class("tc-meta");
     let connect_button = gtk::Button::builder()
         .label(copy::ONBOARD_CONNECT_BUTTON)
         .sensitive(false)
@@ -338,6 +351,27 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
 /// A label with no action never reaches this, because the button is hidden
 /// for those -- but an unknown label returning early is the safe direction
 /// rather than opening a screen that answers nothing.
+/// Open onboarding directly on a named page, for the camera.
+///
+/// `--start-page` drives the MAIN window's stack; onboarding is a separate
+/// modal with its own steps, so it had no way to be photographed past its
+/// first screen. That is how four class names no stylesheet defines reached
+/// pages nobody had ever seen. Returns false for an unknown name rather than
+/// guessing a page.
+pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
+    let step = match page {
+        "welcome" => Step::Welcome,
+        "connect" => Step::Connect,
+        "consent" => Step::Consent,
+        "scan" => Step::Scan,
+        "watch" => Step::Watch,
+        "done" => Step::Done,
+        _ => return false,
+    };
+    present_at(app, Some(step));
+    true
+}
+
 pub fn present_for_health(app: &Rc<App>, label: &str) {
     let Some(step) = health_step(label) else {
         return;
@@ -449,6 +483,21 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     body.append(&onboarding.invite);
     body.append(&onboarding.invite_instance);
     body.append(&onboarding.invite_error);
+
+    // Both notices are hidden until a connect attempt resolves, so neither is
+    // on screen for a camera -- which is exactly how they shipped wearing
+    // class names no stylesheet defined. Under Xvfb, reveal them with
+    // placeholder text so `scripts/onboarding-shots.sh` can photograph the
+    // states a contributor only meets when something has gone wrong. Guarded
+    // by an environment variable rather than a flag: nothing in a real
+    // session sets it, and a contributor cannot reach it by accident.
+    if std::env::var_os("TC_FORCE_CONNECT_NOTICES").is_some() {
+        onboarding
+            .invite_instance
+            .set_label("This invite is for issuer.example.org.");
+        onboarding.invite_instance.set_visible(true);
+        onboarding.invite_error.set_visible(true);
+    }
 
     // Resolve and show the instance before committing, per the spec. The
     // host is all this asks for: `invite_issuer_host` exists so a shell
@@ -563,7 +612,12 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
             .xalign(0.0)
             .wrap(true)
             .build();
-        heading.add_css_class("tc-section-header");
+        // A heading over a group of scope rows. `tc-card-title` is the
+        // existing 14px/700 group heading; `tc-section-header` was defined by
+        // no stylesheet, so these three group headings -- including the one
+        // that is a whole sentence -- set at body weight and disappeared into
+        // the rows beneath them.
+        heading.add_css_class("tc-card-title");
         onboarding.consent_body.append(&heading);
         for scope in rows {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -776,7 +830,9 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     let row_label = label.clone();
                     move |button| {
                         button.set_sensitive(false);
-                        row_label.add_css_class("tc-muted");
+                        // Greying an ignored row is a colour change, not a
+                        // size change, so `tc-neutral` rather than `tc-meta`.
+                        row_label.add_css_class("tc-neutral");
                         app.call(
                             "set_project_mode",
                             // `project_id`, which is what the daemon accepts:
@@ -794,7 +850,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         // control whose whole purpose is
                                         // excluding a project someone did not
                                         // want watched.
-                                        row_label.remove_css_class("tc-muted");
+                                        row_label.remove_css_class("tc-neutral");
                                         app.toast(copy::PROJECT_MODE_FAILED);
                                     }
                                 }

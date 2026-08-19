@@ -42,12 +42,19 @@ xvfb-run -a -s "-screen 0 1280x900x24" bash -c '
 
     # Claude row: "Watch this folder". Codex row: the decline.
     # Root-window coordinates; see the header for why not by label.
+    #
+    # THESE MOVE WHEN THE LAYOUT DOES. Adding the 1px rule between the two
+    # source blocks pushed everything below it down by 33px and this script
+    # silently clicked empty space -- caught only by the "NOTHING WRITTEN"
+    # assertion at the bottom, which is the whole reason that assertion is
+    # there. Re-derive them from a fresh --roots-shot after any change to the
+    # roots layout rather than nudging until something passes.
     xdotool mousemove 38 318 click 1
     sleep 1
-    xdotool mousemove 38 532 click 1
+    xdotool mousemove 38 565 click 1
     sleep 1
     import -window root /work/'"$SHOT"' 2>/dev/null || true
-    xdotool mousemove 544 619 click 1
+    xdotool mousemove 544 652 click 1
     sleep 3
     kill $APP_PID 2>/dev/null || true
     wait $APP_PID 2>/dev/null || true

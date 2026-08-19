@@ -42,4 +42,5 @@ __pycache__/
 # letting it drift from the window it claims to show.
 .linux-shell-screenshot.png
 .linux-roots-screenshot.png
+.linux-onboarding-*.png
 .linux-roots-answered.png
