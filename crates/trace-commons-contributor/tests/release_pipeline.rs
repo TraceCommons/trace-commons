@@ -47,15 +47,48 @@ fn info_plist_script_injects_the_version_it_is_given() {
         !plist.contains("0.1.0"),
         "the hardcoded 0.1.0 is still present:\n{plist}"
     );
-    // Regressions here are silent and severe: without LSUIElement the menu-bar
-    // app grows a Dock icon, and without the bundle id notifications break.
+    // This assertion used to run the other way, requiring LSUIElement, because
+    // the app was a menu-bar utility and "grows a Dock icon" was the
+    // regression. That decision was reversed deliberately: on a notched Mac
+    // with a full menu bar the status item is assigned a frame in the dead
+    // band past the notch and never drawn, which makes a menu-bar-only app
+    // unreachable rather than merely discreet. The Dock icon is now the way
+    // in, so LSUIElement returning is the regression.
     assert!(
-        plist.contains("<key>LSUIElement</key><true/>"),
-        "LSUIElement lost"
+        !plist.contains("<key>LSUIElement</key>"),
+        "LSUIElement is back; the app would lose its Dock icon:\n{plist}"
+    );
+    // The .icns can sit in Contents/Resources and still not be used: without
+    // this key macOS falls back to the generic application icon, which looks
+    // exactly like a build that forgot the artwork.
+    assert!(
+        plist.contains("<key>CFBundleIconFile</key><string>AppIcon</string>"),
+        "CFBundleIconFile lost; the Dock would show the generic icon:\n{plist}"
     );
     assert!(
         plist.contains("<key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>"),
         "bundle id lost"
+    );
+    // A dead deep link is the silent, severe regression this test exists for:
+    // nothing crashes and nothing logs, the app simply stops answering invite
+    // mail. That is how the gap survived to 0.3.0, with onOpenURL wired and
+    // nothing declared.
+    //
+    // Two assertions, not one. A declaration carrying a renamed or mistyped
+    // scheme passes a presence-only check while leaving the link just as dead.
+    //
+    // The limit is worth stating: this proves the plist DECLARES the scheme.
+    // It cannot prove LaunchServices ROUTES it, which depends on the
+    // registration database and on which bundle wins when several claim the
+    // same identifier. That half is the manual gate in the release runbook,
+    // so a green test here is not proof the feature works.
+    assert!(
+        plist.contains("<key>CFBundleURLTypes</key>"),
+        "CFBundleURLTypes lost; tracecommons:// invite links would go dead:\n{plist}"
+    );
+    assert!(
+        plist.contains("<string>tracecommons</string>"),
+        "the tracecommons scheme is not declared:\n{plist}"
     );
 }
 

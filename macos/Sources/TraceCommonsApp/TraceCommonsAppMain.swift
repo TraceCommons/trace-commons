@@ -5,11 +5,17 @@ import SwiftUI
 ///
 /// One application bundle, no second binary: the app links the C ABI and
 /// hosts the watch/upload/digest loops in-process (see the macOS design
-/// spec). `LSUIElement` is set in the bundle's Info.plist, so there is a
-/// menu-bar item and no Dock icon.
+/// spec). It is a regular app: a Dock icon AND a menu-bar item. It was
+/// menu-bar-only until `LSUIElement` was removed, because a status item is
+/// not a reliable way to reach an app -- on a notched display with a full
+/// menu bar it is assigned a frame that never draws, and there was no other
+/// door.
 @main
 struct TraceCommonsShell: App {
     @StateObject private var model = AppModel()
+    /// Quit confirmation, Dock reopen and invite links all arrive outside
+    /// SwiftUI's reach. See `AppDelegate`.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
         // Earlier builds wrote the preview sheet's recent-search list to
@@ -96,7 +102,9 @@ private struct Launcher: View {
         }
 
         // Used by scripts/run-demo.sh to bring the window up for a
-        // screenshot. A menu-bar app otherwise shows nothing until asked.
+        // screenshot. Since the app became a regular one it opens its window
+        // on a normal launch anyway, so this now only matters for the paths
+        // that do not -- a login launch, and `open -g`.
         if ProcessInfo.processInfo.environment["TRACE_COMMONS_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 OpenMainWindow.request()
@@ -111,13 +119,34 @@ enum WindowID {
     static let main = "trace-commons-main"
 }
 
-/// Opening the window from outside a SwiftUI view (a notification action)
-/// needs a hook that is not `@Environment(\.openWindow)`.
+/// Opening the window from outside a SwiftUI view (a notification action, a
+/// Dock-icon click, an invite link) needs a hook that is not
+/// `@Environment(\.openWindow)`.
+///
+/// Requests that arrive before the handler exists are held rather than
+/// dropped. That is not defensive coding: the handler is installed from a
+/// `.task` on the menu-bar label, and both of the new callers can genuinely
+/// beat it. `applicationDidFinishLaunching` runs first by definition, and a
+/// `tracecommons://` link that launches the app is delivered while SwiftUI is
+/// still assembling its scenes. Dropping those would make exactly the
+/// cold-start cases fail while every warm test passed.
 enum OpenMainWindow {
-    @MainActor static var handler: (() -> Void)?
+    @MainActor static var handler: (() -> Void)? {
+        didSet {
+            guard handler != nil, pending else { return }
+            pending = false
+            handler?()
+        }
+    }
+
+    @MainActor private static var pending = false
 
     @MainActor
     static func request() {
-        handler?()
+        guard let handler else {
+            pending = true
+            return
+        }
+        handler()
     }
 }

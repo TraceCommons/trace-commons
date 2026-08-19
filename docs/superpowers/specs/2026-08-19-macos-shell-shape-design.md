@@ -652,3 +652,94 @@ Part 2, after B:
 - The deep-link gate in "### Manual verification, since there is no macOS CI"
   passes in full, including the which-bundle-handled-it check, both the
   app-running and app-not-running paths, and the no-enrolment rule.
+
+## Implementation notes, 2026-08-19
+
+What was built, what was proven, and the one thing that blocked the rest.
+
+### Two things in this spec were wrong
+
+**The login-launch detection does not work.** "### Login item" recommends
+detecting a login launch and hiding, and the obvious test -- a login item is
+started by `launchd`, so `getppid() == 1` -- was implemented and then removed,
+because it is not a test of anything. *Every* GUI launch is reparented to
+launchd. Measured: launching the built bundle with `open` gives ppid 1, exactly
+as a login start would. The first build using that test hid the app on every
+launch (`visible: false` from System Events after a plain `open`).
+
+`SMAppService.mainApp` exposes no launch-hidden flag and no "you were started
+at login" signal, so the implementation does not guess. Launch behaviour is
+uniform: come up quietly, which is what this app has always done. That is
+correct at login -- the contributor agreed to a promise to be running, not a
+request to be greeted -- and recoverable everywhere else, because there is now
+a Dock icon and clicking it opens the window. Anyone reviving the hidden-launch
+idea needs a signal that actually distinguishes the two cases; ppid is not it.
+
+**`applicationShouldTerminate` does not need `.terminateLater`.** `NSAlert`'s
+`runModal` is synchronous, so the delegate answers `.terminateNow` or
+`.terminateCancel` directly. That also removes the hazard the spec flagged,
+where a `.terminateLater` that never gets its reply leaves `model.shutdown()`
+un-run.
+
+### A pre-existing defect blocks the rest of the verification
+
+**The main window does not open while the daemon is running.** Every route to
+it fails -- the invite deep link, a Dock-icon click, and the
+`TRACE_COMMONS_SHOW_WINDOW=1` hook. The window opens normally when startup is
+`.refused`.
+
+This is not caused by this slice. The shipped `/Applications/TraceCommons.app`
+0.3.0 build, which predates all of it, fails identically: pointed at a
+throwaway state directory with a valid `daemon-settings.json`, it creates
+`daemon.lock` (so the daemon started, and `AppModel.startup` is `.running`) and
+`TRACE_COMMONS_SHOW_WINDOW=1` still yields zero windows. No crash report is
+produced and nothing is logged; the window is simply never created.
+
+`MainWindowView` renders `CenteredNotice` for `.refused` and the onboarding
+coordinator for `.running`, which is where suspicion falls, but the cause was
+not chased down -- it belongs to whoever owns that screen, not to this slice.
+
+It has an ugly consequence worth stating plainly: on this machine a
+contributor whose daemon starts correctly cannot open the app window at all.
+That is the state a newly-configured contributor is in.
+
+### What was actually verified
+
+Against a bundle built by `macos/scripts/make-app-bundle.sh` and launched by
+explicit path:
+
+- No `LSUIElement`, `CFBundleIconFile` is `AppIcon`, and
+  `CFBundleURLTypes[0].CFBundleURLSchemes[0]` is `tracecommons`, all read back
+  from the built `Contents/Info.plist` with `plutil`.
+- The app is a regular app: it has an `AXMenuBar`, and a Dock tile named
+  "TraceCommons".
+- **The Dock icon carries the mark.** `NSWorkspace.icon(forFile:)` on the
+  built bundle resolves to The Turn -- green bracket upper left, blue lower
+  right -- not the generic placeholder. Rendered at 1024 and looked at, 1516
+  unique colours.
+- LaunchServices accepts the declaration: `lsregister -dump` shows
+  `claimed schemes: tracecommons:`, claim id `ai.tracecommons.shell.invite`,
+  `roles: Viewer`.
+- **Deep-link delivery works in the state that used to drop it.** With the app
+  running and no window open, `open 'tracecommons://enroll?invite=...'` was
+  handled by the running process -- same pid, no second instance -- and the
+  window went from 0 to 1 with the app frontmost. This is the case a
+  view-level `onOpenURL` cannot serve.
+
+### What could not be verified, and why
+
+All of it downstream of the window defect above:
+
+- That the invite field shows the *decoded* value, that the issuer host is
+  displayed, and that no enrolment occurs. The Connect screen is only
+  reachable under `.running`, which is the state whose window will not open.
+  The delivery half is proven; the consumption half is not.
+- The app-not-running deep-link path, for the same reason.
+- The empty-invite negative check.
+- Every quit path (Cmd-Q, App menu, Dock menu) reaching one confirmation, and
+  the login-item presentation, which needs a real logout.
+
+These stay open. The deep-link manual gate above is written as the release
+check and should be run once the window defect is fixed -- most likely
+alongside sub-project A, which is what makes `.running` reachable for a fresh
+contributor in the first place.
