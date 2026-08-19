@@ -199,6 +199,20 @@ internal static class NativeMethods
     internal static extern IntPtr tc_discover_sources();
 
     /// <summary>
+    /// The names of the scrubber's secret detectors, as an owned JSON array of
+    /// strings; free it with <see cref="tc_string_free"/>, which
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    ///
+    /// NAMES ONLY. This deliberately does not expose the patterns: publishing
+    /// the regexes would tell someone trying to slip a secret past the scrubber
+    /// exactly what to avoid. The names exist so a shell can tell a contributor
+    /// what is caught without the list being maintained by hand and quietly
+    /// going stale.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_scrub_detector_names();
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>

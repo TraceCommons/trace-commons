@@ -43,6 +43,16 @@
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="Before anything leaves this machine it is scrubbed locally for secrets, keys, and tokens. That scrubbing is good and it is not perfect, which is why you get to look first." />
             <!--
+                Answerable where it is asked: directly under the paragraph
+                that raises the question, not in the footer beside Get
+                started, where it sat on the far side of the promise and put
+                a second element against the one beat that should be
+                uncontested. A HyperlinkButton rather than a Button, because
+                it is a quiet aside and not a second action.
+            -->
+            <HyperlinkButton Content="What gets removed?" HorizontalAlignment="Left"
+                             Padding="0" Click="OnWhatGetsRemoved" />
+            <!--
                 The promise the whole product is judged against, and the last
                 thing read before the button. The screen argues in sequence:
                 here is what this machine does mechanically, here is the limit
