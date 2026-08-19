@@ -253,6 +253,34 @@ is what happens to a contributor who reads nothing and clicks Continue.
 > for 30 minutes, it'll show up there. You'll get at most one notification
 > every 4 hours, and none at all if there's nothing waiting.
 
+## The unresolvable bucket in Settings
+
+Settings lists every project with a mode control. The unresolvable bucket
+appears in that list like any other row, and every shell got it wrong the same
+way: it rendered as the raw slug `unknown-project` with no explanation, and its
+mode control offered **Contributed without asking**.
+
+The second half is the serious one. The daemon refuses `auto_upload` for this
+bucket in two independent places, so a contributor could select that mode and
+have it silently declined -- a control offering a choice it cannot deliver.
+
+Required on all three shells, using the same words screen 5 uses, because it is
+the same fact stated on a second surface:
+
+> **Sessions with no project**
+>
+> *Trace Commons can't tell which folder these ran in, so they can never be
+> contributed automatically. You'll always be asked.*
+
+- Recognise the row by the `is_unresolved_bucket` flag on the `list_projects`
+  payload. Never by `project_label`, which is display text and is not stable.
+- Do NOT offer `auto_upload` for this row. Offering a mode the daemon will
+  refuse is worse than omitting it: it invites a contributor to believe they
+  have armed something that cannot be armed. `Ignore` and ask-first remain,
+  because the bucket can be silenced even though it cannot be armed.
+- The note is a statement of what the daemon does, not an apology. Nothing in
+  it is a contributor's to fix.
+
 ## Credit, framed honestly
 
 Shown on first run and again in History:
