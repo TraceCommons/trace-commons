@@ -9,7 +9,7 @@ pub mod sidecar;
 pub mod submitter;
 pub mod translators;
 
-use hf_dataset::{SessionFile, list_jsonl_sessions, read_session_bytes};
+use hf_dataset::{HfJsonlDataset, read_session_bytes};
 use sidecar::{Sidecar, SidecarRecord};
 use submitter::Submitter;
 use translators::{Translator, passes_word_filter, translator_by_name};
@@ -128,11 +128,12 @@ pub async fn run_pilot_bootstrap(config: PilotBootstrapConfig) -> Result<()> {
         "translator resolved"
     );
 
-    let sessions = list_jsonl_sessions(&config.source, config.cache_dir.as_deref()).await?;
+    let dataset = HfJsonlDataset::open(&config.source, config.cache_dir.as_deref())?;
+    let session_names = dataset.list_session_names().await?;
     tracing::info!(
         target: "trace_commons_pilot_bootstrap",
-        session_count = sessions.len(),
-        "jsonl sessions resolved"
+        session_count = session_names.len(),
+        "jsonl session candidates listed"
     );
 
     let submitter = Submitter::new(
@@ -145,7 +146,8 @@ pub async fn run_pilot_bootstrap(config: PilotBootstrapConfig) -> Result<()> {
     let summary = drive_loop(
         &config,
         translator.as_ref(),
-        &sessions,
+        &dataset,
+        &session_names,
         &submitter,
         &sidecar,
     )
@@ -163,15 +165,17 @@ pub async fn run_pilot_bootstrap(config: PilotBootstrapConfig) -> Result<()> {
 async fn drive_loop(
     config: &PilotBootstrapConfig,
     translator: &dyn Translator,
-    sessions: &[SessionFile],
+    dataset: &HfJsonlDataset,
+    session_names: &[String],
     submitter: &Submitter,
     sidecar: &Sidecar,
 ) -> Result<RunSummary> {
     let mut summary = RunSummary::default();
-    for session in sessions {
+    for sibling_name in session_names {
         if summary.total >= config.count {
             break;
         }
+        let session = dataset.fetch_session(sibling_name).await?;
         let bytes = match read_session_bytes(&session.local_path) {
             Ok(b) => b,
             Err(err) => {

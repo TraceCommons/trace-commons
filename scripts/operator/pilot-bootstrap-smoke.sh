@@ -5,7 +5,7 @@
 # Spins up a stdlib-only mock server on 127.0.0.1:3907 that pretends to be
 # both a HuggingFace Hub API (so the binary's `repo.info()` call resolves)
 # and a trace-commons-ingest `/v1/traces` endpoint. Pre-populates the hf-hub
-# cache with a tiny checked-in swival-schema parquet fixture so the binary
+# cache with tiny checked-in swival-schema JSONL fixtures so the binary
 # does no real HF downloads. Then runs the binary against this loopback
 # environment for a small N and asserts:
 #
@@ -86,14 +86,20 @@ refs_dir="$repo_root/refs"
 mkdir -p "$snapshot_dir" "$refs_dir"
 printf '%s' "$FIXTURE_COMMIT" > "$refs_dir/main"
 
-# Copy every .jsonl session into the snapshot dir; advertise each as a
-# sibling so the binary's hf-hub `info().siblings` enumeration sees them.
+# Copy every real fixture into the snapshot dir and advertise it. The trailing
+# decoy siblings are deliberately advertised but not cached or served: a lazy
+# `--count` run stops after the real fixtures, while the old eager loader tries
+# to resolve a decoy and fails. This keeps count-bounded fetching in the CI
+# smoke contract without contacting huggingface.co.
 sibling_args=()
 for jsonl in "$FIXTURE_DIR"/*.jsonl; do
   [ -e "$jsonl" ] || bail "fixture_dir_empty:$FIXTURE_DIR"
   name="$(basename "$jsonl")"
   cp -f "$jsonl" "$snapshot_dir/$name"
   sibling_args+=("--hf-sibling" "$name")
+done
+for suffix in {00..49}; do
+  sibling_args+=("--hf-sibling" "zz-decoy-$suffix.jsonl")
 done
 
 echo "SmokePilotBootstrap: hf-hub cache primed at $HF_CACHE"
