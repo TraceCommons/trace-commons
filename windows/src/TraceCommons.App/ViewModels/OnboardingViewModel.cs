@@ -189,6 +189,21 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// </summary>
     public bool HasNoProjects => Projects.Count == 0;
 
+    // Screen 5's words come from WatchCopy rather than being repeated as XAML
+    // literals, so the strings the tests check are the strings that render.
+    // The same idiom the roots window uses.
+    public string WatchSubtitle => WatchCopy.Subtitle;
+
+    public string WatchSection => WatchCopy.Section.ToUpperInvariant();
+
+    public string WatchEmpty => WatchCopy.Empty;
+
+    /// <summary>
+    /// The link under screen 1's scrubbing paragraph. Bound rather than
+    /// repeated so the label and the dialog it opens cannot drift apart.
+    /// </summary>
+    public string WhatGetsRemovedLabel => ScrubDetectorCopy.LinkLabel;
+
     public void GetStarted() => Step = OnboardingStep.Connect;
 
     /// <summary>

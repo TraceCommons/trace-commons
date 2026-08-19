@@ -50,7 +50,8 @@
                 uncontested. A HyperlinkButton rather than a Button, because
                 it is a quiet aside and not a second action.
             -->
-            <HyperlinkButton Content="What gets removed?" HorizontalAlignment="Left"
+            <HyperlinkButton Content="{x:Bind ViewModel.WhatGetsRemovedLabel}"
+                             HorizontalAlignment="Left"
                              Padding="0" Click="OnWhatGetsRemoved" />
             <!--
                 The promise the whole product is judged against, and the last
@@ -207,14 +208,15 @@
                 reads nothing and clicks Continue, which is most of them.
             -->
             <TextBlock Grid.Row="1" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="Every project starts at ask-first: you see each session before anything is sent. Ignore a project to leave it out entirely." />
+                       Text="{x:Bind ViewModel.WatchSubtitle}" />
             <!--
-                Uppercased in the string rather than by the style: WinUI has no
-                text transform, and TcEyebrowTextStyle does not apply one. GTK
-                passes "Projects" because its section helper uppercases for it.
-                The rendered result is what the spec pins, so it matches.
+                Uppercased by the view model rather than by the style: WinUI
+                has no text transform, and TcEyebrowTextStyle does not apply
+                one. GTK passes "Projects" because its section helper
+                uppercases for it. The rendered result is what the spec pins.
             -->
-            <TextBlock Grid.Row="2" Style="{StaticResource TcEyebrowTextStyle}" Text="PROJECTS" />
+            <TextBlock Grid.Row="2" Style="{StaticResource TcEyebrowTextStyle}"
+                       Text="{x:Bind ViewModel.WatchSection}" />
             <!--
                 Everything starts at ask first. Ignore is offered here and
                 auto upload deliberately is not: excluding the client repo
@@ -228,7 +230,7 @@
             <ScrollViewer Grid.Row="3">
                 <StackPanel Spacing="10">
                     <TextBlock Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap"
-                               Text="No projects yet. Sessions you run later will appear here, and in Settings."
+                               Text="{x:Bind ViewModel.WatchEmpty}"
                                Visibility="{x:Bind ViewModel.HasNoProjects, Mode=OneWay}" />
                     <ItemsControl ItemsSource="{x:Bind ViewModel.Projects}">
                         <ItemsControl.ItemTemplate>
