@@ -1018,6 +1018,45 @@ pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 
+// ---------------------------------------------------------------------------
+// NOT YET IN THE SHARED SPEC. The five strings below are new product copy, not
+// transcription: `### 5. What to watch` specifies the screen's BEHAVIOUR (all
+// projects at ask-first, `Ignore` offered and `auto_upload` withheld) and
+// gives it no words at all. The screen therefore shipped as a bare title over
+// an unlabelled list, which says neither what the list is nor what `Ignore`
+// does -- on the one screen that decides which of a contributor's repositories
+// are eligible to leave the machine.
+//
+// They must land in `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`
+// before macOS and Windows transcribe them, or the three shells will describe
+// the same decision differently. Flagged for approval rather than quietly
+// adopted.
+// ---------------------------------------------------------------------------
+
+/// The subtitle screen 5 never had. States the default first, because the
+/// default is what happens to a contributor who reads nothing and clicks
+/// Continue -- which is most of them.
+pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you see each session before anything is sent. Ignore a \
+     project to leave it out entirely.";
+
+/// The eyebrow over the list. `style::section` uppercases it.
+pub const ONBOARD_WATCH_SECTION: &str = "Projects";
+
+/// The per-row state, in the vocabulary `settings.rs` already uses for the
+/// same mode -- its dropdown reads "Ask me first". Two screens that set the
+/// same field must not name it two ways.
+pub const ONBOARD_WATCH_ASK_FIRST: &str = "Ask me first";
+
+/// The state after `Ignore`. Echoes the button that produced it rather than
+/// introducing a third name for the mode.
+pub const ONBOARD_WATCH_IGNORED: &str = "Ignored";
+
+/// Shown when `list_projects` returns nothing. This was the state of the
+/// screen on EVERY machine until the `local_path` deserialisation bug was
+/// fixed, and it rendered as a title above nothing at all.
+pub const ONBOARD_WATCH_EMPTY: &str =
+    "No projects yet. Sessions you run later will appear here, and in Settings.";
+
 /// The per-project control on screen 5. `Ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
 /// live thought at this moment and never returns, whereas arming automation
