@@ -549,9 +549,17 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(project);
         ProjectId = project.ProjectId;
-        ProjectLabel = string.IsNullOrWhiteSpace(project.ProjectLabel)
-            ? "Unknown project"
-            : project.ProjectLabel;
+
+        // The daemon marks this row; this shell never infers it from the label,
+        // which is display text and carries the slug "unknown-project". Note
+        // the blank-label fallback below does NOT cover the bucket: that slug is
+        // not blank, which is why this row rendered as raw slug for so long.
+        IsUnresolvedBucket = project.IsUnresolvedBucket;
+        ProjectLabel = IsUnresolvedBucket
+            ? UnresolvedBucketCopy.Label
+            : string.IsNullOrWhiteSpace(project.ProjectLabel)
+                ? "Unknown project"
+                : project.ProjectLabel;
         _mode = project.Mode;
     }
 
@@ -561,11 +569,38 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 
     public string ProjectLabel { get; }
 
+    /// <summary>
+    /// The row holding sessions whose project the daemon cannot name. It can be
+    /// silenced but never armed, and the daemon enforces that itself.
+    /// </summary>
+    public bool IsUnresolvedBucket { get; }
+
+    /// <summary>
+    /// The explanation shown beneath the name, or empty for an ordinary row.
+    ///
+    /// It sits under the name rather than in the state column: the note is a
+    /// sentence and that column holds two or three words, and Settings keeps
+    /// its state column populated for every row because a blank cell in a list
+    /// reads as a fault rather than as an absence.
+    /// </summary>
+    public string Note => IsUnresolvedBucket ? UnresolvedBucketCopy.Note : string.Empty;
+
+    public bool HasNote => IsUnresolvedBucket;
+
     public string Mode => _mode;
 
     public string StateText => _mode switch
     {
         "ignore" => "Never offered",
+
+        // Unreachable for the unresolvable bucket, and deliberately guarded
+        // rather than trusted: the daemon refuses auto_upload for it in two
+        // places, so if this row ever reported that mode the honest reading is
+        // that something is wrong, not that it was armed. Saying "Contributed
+        // without asking" there would be the one claim this row must never
+        // make.
+        "auto_upload" when !UnresolvedBucketCopy.MayOfferAutoUpload(IsUnresolvedBucket)
+            => "Asks you first",
         "auto_upload" => "Contributed without asking",
         _ => "Asks you first",
     };

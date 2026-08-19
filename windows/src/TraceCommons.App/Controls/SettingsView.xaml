@@ -192,14 +192,32 @@
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ProjectSettingViewModel">
                             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
-                                <TextBlock Grid.Column="0" Text="{x:Bind ProjectLabel}"
-                                           Style="{StaticResource TcBodyDenseTextStyle}"
-                                           TextWrapping="Wrap" />
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind ProjectLabel}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <!--
+                                        Only the unresolvable bucket carries a
+                                        note, saying why it can never be armed.
+                                        Collapsed on every other row.
+                                    -->
+                                    <TextBlock Text="{x:Bind Note}"
+                                               Visibility="{x:Bind HasNote}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <!--
+                                    Top rather than centre: a row carrying the
+                                    note is three times the height of an
+                                    ordinary one, and centred controls would
+                                    float away from the name they act on.
+                                -->
                                 <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
                                            Style="{StaticResource TcCaptionTextStyle}"
-                                           VerticalAlignment="Center" />
+                                           VerticalAlignment="Top" />
                                 <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
                                         IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
+                                        VerticalAlignment="Top"
                                         Click="OnProjectMode"
                                         Style="{StaticResource TcSecondaryButtonStyle}" />
                             </Grid>
