@@ -97,6 +97,23 @@ fn present_with<F>(
 ) where
     F: Fn() + 'static,
 {
+    // This screen uses the community brand's type scale, and it is the FIRST
+    // window the shell ever opens -- it runs before the daemon, so neither
+    // the history view nor settings has had a chance to install the provider.
+    // Without this call the brand classes below resolve to nothing and the
+    // screen renders in GTK's defaults: the 27px heading sets at body size
+    // and the whole page flattens into one undifferentiated column. Nothing
+    // errors, because `add_css_class` takes a string and never fails, which
+    // is why 126 passing tests said nothing about it.
+    // The main stylesheet, for the same reason and with a sharper edge: it is
+    // installed by `App::build`, which cannot run without a Worker, which
+    // cannot exist without a started daemon. This screen exists precisely
+    // because the daemon did not start -- so until now it drew with no
+    // stylesheet at all, and every `tc-` class on it, brand or otherwise, was
+    // inert.
+    super::style::install();
+    super::community_brand::install();
+
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .default_width(620)
@@ -121,7 +138,13 @@ fn present_with<F>(
     outer.append(&heading);
     outer.append(&body_label(copy::ROOTS_BODY));
     let consequence = body_label(copy::ROOTS_BOTH);
-    consequence.add_css_class("tc-brand-emphasis");
+    // A notice box rather than a colour on running text. This is the sentence
+    // that makes "I don't use this" mean something -- leave it as prose and it
+    // reads as the third paragraph of an intro nobody finishes. The brand
+    // sheet loads at a higher priority than style.css, so an emphasis picked
+    // from style.css would lose to `tc-brand-body`'s own size and colour and
+    // silently do nothing, which is the same failure this screen already had.
+    consequence.add_css_class("tc-brand-notice");
     outer.append(&consequence);
 
     let failure = gtk::Label::builder()
@@ -130,7 +153,7 @@ fn present_with<F>(
         .wrap(true)
         .visible(false)
         .build();
-    failure.add_css_class("tc-error");
+    failure.add_css_class("tc-refused");
 
     let continue_button = gtk::Button::with_label(copy::ROOTS_CONTINUE);
     continue_button.add_css_class("suggested-action");
@@ -235,7 +258,7 @@ fn build_choice(
         .label(source_title(&candidate.source))
         .xalign(0.0)
         .build();
-    title.add_css_class("tc-brand-emphasis");
+    title.add_css_class("tc-card-title");
     group.append(&title);
 
     let path_label = gtk::Label::builder()
@@ -251,7 +274,7 @@ fn build_choice(
         .xalign(0.0)
         .wrap(true)
         .build();
-    evidence.add_css_class("tc-muted");
+    evidence.add_css_class("tc-meta");
     group.append(&evidence);
 
     // Neither is active. GTK gives a grouped CheckButton radio behaviour,
@@ -265,6 +288,12 @@ fn build_choice(
 
     let choose = gtk::Button::with_label(copy::ROOTS_CHOOSE);
     choose.add_css_class("flat");
+    // Left-aligned and shrunk to its label. A flat button that fills the
+    // column centres its text, and centred bold text between two rows reads
+    // as a heading for the row BELOW it rather than a control belonging to
+    // the row above -- which is exactly how it looked in the first photograph
+    // of this screen.
+    choose.set_halign(gtk::Align::Start);
     group.append(&choose);
 
     outer.append(&group);

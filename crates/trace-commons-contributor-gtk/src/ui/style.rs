@@ -373,9 +373,22 @@ impl Tone {
 /// scoped to a selector -- there is no `prefers-color-scheme` in GTK CSS --
 /// so the palette has to be chosen at load time.
 pub fn install() {
+    // Idempotent because there are now two entry points: `App::build`, which
+    // runs once a daemon exists, and the roots screen, which runs when one
+    // does not. Without the guard the second caller would add a second
+    // provider and a second `dark_notify` handler for the same stylesheet.
+    thread_local! {
+        static INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    // The display is checked BEFORE the flag is set: marking the work done on
+    // a call that could not do it would leave the application permanently
+    // unstyled, which is a worse failure than installing twice.
     let Some(display) = gdk::Display::default() else {
         return;
     };
+    if INSTALLED.with(|done| done.replace(true)) {
+        return;
+    }
     let provider = gtk::CssProvider::new();
     gtk::style_context_add_provider_for_display(
         &display,

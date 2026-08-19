@@ -6,6 +6,7 @@
 //! application tells a contributor to install a shell extension.
 
 pub mod community_brand;
+mod css_contract;
 pub mod history;
 pub mod mark;
 pub mod onboarding;

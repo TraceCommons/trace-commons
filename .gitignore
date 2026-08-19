@@ -35,3 +35,11 @@ manifests/
 # next one, and stops the churn of a regenerated .pyc showing as a change.
 __pycache__/
 *.py[cod]
+
+# Window captures from the headless GTK harnesses (scripts/linux-build.sh
+# --run-headless / --roots-shot / --roots-answer). They are evidence produced
+# by a run, not sources: regenerate them rather than committing one and
+# letting it drift from the window it claims to show.
+.linux-shell-screenshot.png
+.linux-roots-screenshot.png
+.linux-roots-answered.png
