@@ -460,10 +460,38 @@ fn button_row(button: &gtk::Button) -> gtk::Box {
 
 fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_WELCOME_TITLE);
+
+    // The mark, on the one screen whose job is to introduce the product.
+    // `mark::framed` documents 84 as a size for "the larger surfaces" and
+    // nothing had ever asked for one: the two call sites are header bars
+    // taking 20. A cover is what a large mark is for, and this page had a
+    // heading, four paragraphs and then a quarter of the window left empty.
+    //
+    // Left-aligned, not centred. Every other element on this page -- heading,
+    // prose, notice -- hangs off the same left edge, and a centred mark would
+    // be the only thing on screen not doing so.
+    //
+    // Prepended rather than passed through `page()`, because the other five
+    // onboarding screens are not covers and should not grow one.
+    let mark = super::mark::framed(84);
+    mark.set_halign(gtk::Align::Start);
+    outer.prepend(&mark);
+
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_1));
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_2));
+    // The promise gets the notice box, not a heavier weight of the same
+    // prose. `roots.rs` reached this conclusion first for the sentence that
+    // makes its own screen mean anything: "leave it as prose and it reads as
+    // the third paragraph of an intro nobody finishes". That is exactly what
+    // the first photograph of this page showed -- `tc-brand-emphasis` was
+    // rendering, and a bolder paragraph in a stack of four still reads as a
+    // paragraph. The two screens a contributor sees first should state their
+    // load-bearing promise the same way.
+    //
+    // `tc-brand-emphasis` keeps its other call site in `render_scopes`, so
+    // the rule stays live.
     let decides = body_label(copy::ONBOARD_WELCOME_DECIDES);
-    decides.add_css_class("tc-brand-emphasis");
+    decides.add_css_class("tc-brand-notice");
     body.append(&decides);
     body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
 
@@ -759,10 +787,25 @@ fn scan_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
 
 fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_WATCH_TITLE);
-    let list = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::S)
-        .build();
+    // The screen had a title and then a list, and said nowhere what the list
+    // was or what `Ignore` did to a row of it -- on the screen that decides
+    // which repositories are eligible to leave this machine.
+    body.append(&body_label(copy::ONBOARD_WATCH_SUBTITLE));
+    // The eyebrow-and-hairline that every other surface in this application
+    // uses to say a different kind of thing starts here. This page was built
+    // from bare boxes and used none of it.
+    body.append(&super::style::section(copy::ONBOARD_WATCH_SECTION));
+
+    // A card, so the list is a bounded region rather than labels floating on
+    // the window. Spacing 0 because the rules between rows do the separating,
+    // which is the same construction `roots.rs` uses between its two sources.
+    let list = super::style::card(gtk::Orientation::Vertical, 0);
+    // The card hugs its rows. The scroller vexpands so `Continue` stays at
+    // the foot of the window, and without this the card inherited that
+    // stretch: one project drew as a single row at the top of a card-shaped
+    // box of white, which points at the emptiness harder than plain space
+    // does.
+    list.set_valign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -810,8 +853,38 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             let projects: Vec<Project> =
                 serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
                     .unwrap_or_default();
-            for project in projects {
+            // The state this screen was in on every machine until the
+            // `local_path` deserialisation bug was fixed, and it drew as a
+            // title above nothing. An empty screen is an invitation to act,
+            // or at minimum an explanation -- never a blank.
+            if projects.is_empty() {
+                let empty = gtk::Label::builder()
+                    .label(copy::ONBOARD_WATCH_EMPTY)
+                    .xalign(0.0)
+                    .wrap(true)
+                    .build();
+                empty.add_css_class("tc-meta");
+                list.append(&empty);
+                return;
+            }
+            for (index, project) in projects.into_iter().enumerate() {
+                // A hairline ahead of every row but the first: the same rule
+                // the history cells and the roots sources use, so a list of
+                // projects looks like every other list in the application.
+                if index > 0 {
+                    let rule = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .margin_top(space::S)
+                        .margin_bottom(space::S)
+                        .build();
+                    rule.add_css_class("tc-rule");
+                    list.append(&rule);
+                }
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+                // Name over state, in a column, so the row reads as one thing
+                // with a property rather than two peers.
+                let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+                column.set_hexpand(true);
                 // The label, never a path. `list_projects` names a project by
                 // `project_id` on the wire and `project_label` on screen, and
                 // a path appears in neither direction -- the same rule
@@ -823,16 +896,42 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     .hexpand(true)
                     .wrap(true)
                     .build();
+                // It wore no class at all and rendered at GTK's default body
+                // size, which is why a project name looked like debug output
+                // beside a button twice its weight.
+                label.add_css_class("tc-card-title");
+                column.append(&label);
+                // What will happen to this project, stated rather than left to
+                // be inferred from the absence of a control. Ask-first is the
+                // outcome for every row a contributor never touches.
+                let state = gtk::Label::builder()
+                    .label(copy::ONBOARD_WATCH_ASK_FIRST)
+                    .xalign(0.0)
+                    .wrap(true)
+                    .build();
+                state.add_css_class("tc-meta");
+                column.append(&state);
                 let ignore = gtk::Button::with_label(copy::ONBOARD_IGNORE);
+                // Flat, and centred against the two-line column. A raised
+                // button here outranked the project it acts on; the same
+                // reasoning left `roots.rs`'s folder chooser flat.
+                ignore.add_css_class("flat");
+                ignore.set_valign(gtk::Align::Center);
                 ignore.connect_clicked({
                     let app = app.clone();
                     let project_id = project.project_id.clone();
                     let row_label = label.clone();
+                    let row_state = state.clone();
                     move |button| {
                         button.set_sensitive(false);
                         // Greying an ignored row is a colour change, not a
                         // size change, so `tc-neutral` rather than `tc-meta`.
                         row_label.add_css_class("tc-neutral");
+                        // The state line says what the row now is. The button
+                        // that produced it said "Ignore", so this says
+                        // "Ignored" -- one name for the mode, through the
+                        // whole flow.
+                        row_state.set_label(copy::ONBOARD_WATCH_IGNORED);
                         app.call(
                             "set_project_mode",
                             // `project_id`, which is what the daemon accepts:
@@ -841,6 +940,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                             serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
                             {
                                 let row_label = row_label.clone();
+                                let row_state = row_state.clone();
                                 move |app, result| {
                                     if result.is_err() {
                                         // Put the row back rather than leave
@@ -851,6 +951,10 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         // excluding a project someone did not
                                         // want watched.
                                         row_label.remove_css_class("tc-neutral");
+                                        // And put the state back with it, or
+                                        // the row would claim to be ignored
+                                        // while the daemon still offers it.
+                                        row_state.set_label(copy::ONBOARD_WATCH_ASK_FIRST);
                                         app.toast(copy::PROJECT_MODE_FAILED);
                                     }
                                 }
@@ -858,7 +962,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         );
                     }
                 });
-                row.append(&label);
+                row.append(&column);
                 row.append(&ignore);
                 list.append(&row);
             }
