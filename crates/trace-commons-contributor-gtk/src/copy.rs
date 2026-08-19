@@ -1017,6 +1017,18 @@ pub const ONBOARD_SCAN_LOCAL_ONLY: &str = "Local scrubbing only";
 pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
+
+/// The per-project control on screen 5. `Ignore` is offered here and
+/// `auto_upload` is not, per the shared spec: excluding a repository is a
+/// live thought at this moment and never returns, whereas arming automation
+/// before a single preview has been seen asks for trust not yet earned.
+pub const ONBOARD_IGNORE: &str = "Ignore";
+
+/// Shown when `set_project_mode` refuses. The same sentence the settings
+/// screen uses for the same refusal, so the two places that change a
+/// project's mode cannot describe the same failure differently.
+pub const PROJECT_MODE_FAILED: &str =
+    "That couldn't be changed just now. Nothing else changed either.";
 pub const ONBOARD_CONTINUE: &str = "Continue";
 
 pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";

@@ -38,6 +38,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use crate::copy;
+use crate::model::Project;
 use crate::ui::App;
 use crate::ui::style::space;
 
@@ -739,37 +740,58 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
         let app = app.clone();
         move |_a, result| {
             let Ok(value) = result else { return };
-            let projects = value
-                .get("projects")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            // Deserialised into `Project` rather than read field by field out
+            // of raw JSON. The hand-rolled version asked for `local_path`,
+            // which `list_projects` does not send and never did: every row
+            // failed the lookup, every iteration skipped, and this screen has
+            // shown an empty list on every machine since it shipped. A typed
+            // model cannot miss a field the wire does not have.
+            let projects: Vec<Project> =
+                serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
+                    .unwrap_or_default();
             for project in projects {
-                let Some(path) = project
-                    .get("local_path")
-                    .and_then(serde_json::Value::as_str)
-                else {
-                    continue;
-                };
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+                // The label, never a path. `list_projects` names a project by
+                // `project_id` on the wire and `project_label` on screen, and
+                // a path appears in neither direction -- the same rule
+                // `settings::render_projects` states where it draws the same
+                // list.
                 let label = gtk::Label::builder()
-                    .label(path)
+                    .label(&project.project_label)
                     .xalign(0.0)
                     .hexpand(true)
                     .wrap(true)
                     .build();
-                let ignore = gtk::Button::with_label("Ignore");
+                let ignore = gtk::Button::with_label(copy::ONBOARD_IGNORE);
                 ignore.connect_clicked({
                     let app = app.clone();
-                    let path = path.to_string();
+                    let project_id = project.project_id.clone();
                     let row_label = label.clone();
                     move |button| {
                         button.set_sensitive(false);
                         row_label.add_css_class("tc-muted");
                         app.call(
                             "set_project_mode",
-                            serde_json::json!({ "local_path": path, "mode": "ignore" }),
-                            |_app, _result| {},
+                            // `project_id`, which is what the daemon accepts:
+                            // it answers `project_id-or-project_key-required`
+                            // to anything else.
+                            serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
+                            {
+                                let row_label = row_label.clone();
+                                move |app, result| {
+                                    if result.is_err() {
+                                        // Put the row back rather than leave
+                                        // it greyed. The old code discarded
+                                        // this result, so a refusal looked
+                                        // exactly like success -- on a
+                                        // control whose whole purpose is
+                                        // excluding a project someone did not
+                                        // want watched.
+                                        row_label.remove_css_class("tc-muted");
+                                        app.toast(copy::PROJECT_MODE_FAILED);
+                                    }
+                                }
+                            },
                         );
                     }
                 });
@@ -866,6 +888,44 @@ mod tests {
             assert!(copy::health_action(label).is_none());
             assert!(health_step(label).is_none());
         }
+    }
+
+    /// The watch screen reads what `list_projects` actually sends.
+    ///
+    /// It used to ask for `local_path`, a field the daemon has never sent.
+    /// Every row failed that lookup and was skipped, so the screen rendered
+    /// an empty list on every machine while looking like a project list with
+    /// nothing in it. Deserialising into `Project` is what makes that
+    /// impossible; this pins the shape so a hand-rolled reader cannot come
+    /// back.
+    #[test]
+    fn the_watch_screen_parses_a_real_list_projects_row() {
+        let wire = serde_json::json!([{
+            "project_id": "p-1",
+            "project_label": "trace-commons-server",
+            "mode": "notify_only",
+            "configured": true
+        }]);
+
+        let projects: Vec<Project> = serde_json::from_value(wire).expect("parses");
+        assert_eq!(projects.len(), 1, "a real row must survive parsing");
+        assert_eq!(projects[0].project_id, "p-1");
+        assert_eq!(projects[0].project_label, "trace-commons-server");
+    }
+
+    /// What the row sends back is the id, not a path.
+    ///
+    /// `set_project_mode` answers `project_id-or-project_key-required` to
+    /// anything else, so the old `local_path` payload could only ever be
+    /// refused -- silently, because the result was discarded.
+    #[test]
+    fn ignoring_a_project_sends_the_id() {
+        let params = serde_json::json!({ "project_id": "p-1", "mode": "ignore" });
+        assert!(params.get("project_id").is_some());
+        assert!(
+            params.get("local_path").is_none(),
+            "a path must not cross this boundary in either direction"
+        );
     }
 
     /// `logged_in` alone must never stand in for "onboarded". `enroll`
