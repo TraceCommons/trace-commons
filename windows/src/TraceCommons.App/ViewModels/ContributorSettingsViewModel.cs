@@ -292,7 +292,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
-            SetDisplayedBehavior(setting, displayedValue);
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
                 .ConfigureAwait(true);
@@ -332,6 +331,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
+            SetDisplayedBehavior(setting, displayedValue);
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
                 .ConfigureAwait(true);
