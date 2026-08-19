@@ -284,6 +284,48 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
 
+  # The contributor crate's Rust tests, on Windows. Nothing ran them there
+  # before this job existed, and the cost was not that some tests were
+  # skipped -- it was that six integration targets FAILED TO COMPILE on
+  # Windows for an unknown length of time and no signal existed anywhere.
+  #
+  # They imported UnixStream, UnixListener and ipc::bind/serve at the top
+  # level. Those are cfg(unix) in the library, so on Windows the targets did
+  # not skip, they broke the build of the whole test suite -- which is also
+  # why the failure hid: a suite that never compiles never reports.
+  #
+  # The other Windows jobs cannot catch this. windows-pipe-acl builds one
+  # binary, windows-contributor-app builds the cdylib and runs the .NET
+  # tests, and none of them invoke cargo test. The gating that fixed it
+  # rots the first time somebody adds another ungated unix import, so the
+  # gate needs an observer rather than a convention.
+  #
+  # This is also the only place the daemon's Windows behaviour is exercised
+  # in Rust at all: the transport is a named pipe rather than a unix socket,
+  # and session discovery resolves %USERPROFILE% rather than $HOME.
+  windows-contributor-tests:
+    name: windows contributor crate tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-contributor-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-contributor-tests-
+      # RUSTFLAGS=-D warnings comes from the workflow-level env, so an
+      # unused import behind a cfg gate fails here the way it would in the
+      # unix jobs.
+      - name: Test the contributor and FFI crates
+        run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
+
   windows-update-conformance:
     name: windows update conformance
     runs-on: windows-latest
