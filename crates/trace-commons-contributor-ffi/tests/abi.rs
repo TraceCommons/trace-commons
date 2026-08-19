@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_handle,
-    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
+    tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
+    tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free, tc_subscribe,
     tc_unsubscribe,
 };
@@ -1301,6 +1301,38 @@ fn tc_daemon_start_with_settings_refuses_when_the_settings_declare_only_one_root
     };
     assert!(h.is_null(), "half a declaration must refuse here too");
     assert_eq!(take_err(err), "roots-not-declared");
+}
+
+#[test]
+fn discovery_answers_without_a_handle_and_describes_both_sources() {
+    // It has to work with no daemon: the screen that consumes it is the one
+    // clearing the refusal that stops a daemon from starting.
+    let out = tc_discover_sources();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let items = parsed.as_array().expect("an array");
+    assert_eq!(items.len(), 2, "one candidate per known agent: {json}");
+
+    let sources: Vec<&str> = items
+        .iter()
+        .map(|i| i["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, vec!["claude-code", "codex"]);
+
+    for item in items {
+        // The fields a consent prompt needs to be specific rather than
+        // abstract.
+        assert!(item["path"].is_string());
+        assert!(item["exists"].is_boolean());
+        assert!(item["session_count"].is_u64());
+        assert!(item["relocated_by_env"].is_boolean());
+        assert!(item["most_recent"].is_string() || item["most_recent"].is_null());
+    }
 }
 
 #[test]

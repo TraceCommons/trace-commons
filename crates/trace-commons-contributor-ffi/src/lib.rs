@@ -1515,3 +1515,36 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
     let c = unsafe { CStr::from_ptr(ptr) };
     c.to_str().map_err(|_| anyhow::anyhow!("invalid-utf8"))
 }
+
+/// Describe the session stores on this machine, so a roots screen can ask
+/// the contributor about something specific.
+///
+/// Needs no handle: it runs BEFORE any daemon exists, which is the whole
+/// point -- the screen that uses it is the one clearing the refusal that
+/// stops a daemon from starting.
+///
+/// Returns an owned JSON array; free it with [`tc_string_free`]. Each
+/// element carries `source`, `path`, `exists`, `session_count`,
+/// `most_recent` (RFC 3339 or null) and `relocated_by_env`.
+///
+/// This is the one place in this ABI that deliberately returns a filesystem
+/// path. Everywhere else a path is withheld, because elsewhere the caller is
+/// being told about a trace. Here the caller is the contributor's own
+/// machine asking the contributor which of their own folders to watch, and a
+/// consent prompt that will not name what it is asking about is not a
+/// consent prompt. It reads directory entries and metadata only, and never
+/// opens a session file.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_discover_sources() -> *mut c_char {
+    guard(|| {
+        let found = trace_commons_contributor::source::discovery::probe_this_machine();
+        let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}

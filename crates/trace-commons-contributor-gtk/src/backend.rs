@@ -320,9 +320,12 @@ mod roots_tests {
             std::fs::create_dir_all(&p).unwrap();
             p
         };
+        use trace_commons_contributor::daemon::settings::SourceDeclaration;
         DaemonSettings {
-            claude_root: claude.map(make),
-            codex_root: codex.map(make),
+            claude_source: claude
+                .map(make)
+                .map(|path| SourceDeclaration::Watch { path }),
+            codex_source: codex.map(make).map(|path| SourceDeclaration::Watch { path }),
             ..Default::default()
         }
         .save(&store)
@@ -391,7 +394,10 @@ mod roots_tests {
 
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let settings = DaemonSettings::load(&store).unwrap();
-        assert_eq!(settings.claude_root.as_deref(), Some(claude.as_path()));
+        assert_eq!(
+            settings.claude_source.as_ref().and_then(|d| d.path()),
+            Some(claude.as_path())
+        );
     }
 
     #[test]

@@ -177,6 +177,32 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
 
+/* Describe the session stores on this machine, so a roots screen can ask the
+ * contributor about something specific rather than showing an empty field.
+ *
+ * Takes no handle: it runs BEFORE any daemon exists, which is the point --
+ * the screen that uses it is the one clearing the refusal that stops a
+ * daemon from starting.
+ *
+ * Returns an owned JSON array; free it with tc_string_free. Each element:
+ *   source            "claude-code" | "codex"
+ *   path              where this store would be watched
+ *   exists            whether that directory is there right now
+ *   session_count     how many session files, counted recursively
+ *   most_recent       RFC 3339 timestamp, or null
+ *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *
+ * This is the ONE place in this ABI that deliberately returns a filesystem
+ * path. Everywhere else a path is withheld because the caller is being told
+ * about a trace; here the caller is the contributor's own machine asking
+ * which of their own folders to watch, and a consent prompt that will not
+ * name what it is asking about is not a consent prompt.
+ *
+ * Reads directory entries and metadata only; never opens a session file.
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_discover_sources(void);
+
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other
