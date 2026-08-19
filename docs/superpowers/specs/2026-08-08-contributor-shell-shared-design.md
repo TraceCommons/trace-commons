@@ -98,8 +98,18 @@ on scrubbing; photographed, it read as the fourth sentence of a stack nobody
 finishes. It is now a separate terminal block, given the same standing
 treatment the roots screen gives its caveat, and the page reads as an argument
 in sequence: here is what this machine does mechanically, here is the limit of
-it, therefore you are the one who decides. All three shells end this screen on
-the promise -- do not restore the inline form in one client alone.
+it, therefore you are the one who decides.
+
+The RULE IS THE INTENT, not the position: **the promise must be the dominant
+beat of this screen.** Ending on it is how a shell achieves that when the page
+is a column of prose, which is the GTK case that prompted this. A shell whose
+design makes the promise the hero -- largest element, read first, as macOS
+does -- satisfies the intent maximally, and demoting it to a terminal position
+would make it worse. What no shell may do is what GTK did before this revision:
+run the promise inline mid-paragraph so it reads as one sentence among four.
+Whichever form a shell takes, `What gets removed?` sits under the scrubbing
+paragraph that raises the question, not in the footer beside the primary
+action.
 
 ### 2. Connect
 
