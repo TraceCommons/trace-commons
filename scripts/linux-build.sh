@@ -74,6 +74,14 @@ case "${1:---build}" in
     # `add_css_class` accepts any string without complaint.
     run "bash /work/$CRATE_DIR/scripts/onboarding-shots.sh"
     ;;
+  --settings-shot)
+    # Photographs the Settings projects list with a mode selector open.
+    # Collapsed, the bucket's selector and an ordinary project's look the
+    # same; only an open one shows that "Contribute automatically" is absent
+    # from the row the daemon would refuse it on. ROW=ordinary takes the
+    # comparison shot.
+    run "ROW=${ROW:-bucket} bash /work/$CRATE_DIR/scripts/settings-shot.sh"
+    ;;
   --removed-dialog-shot)
     # Photographs the "What gets removed?" dialog, whose list is generated
     # from the protocol's detector table. Needs a click, so onboarding-shots

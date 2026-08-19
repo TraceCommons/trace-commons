@@ -35,13 +35,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adw::prelude::*;
-use trace_commons_contributor::daemon::policy;
-
 use crate::copy;
 use crate::model::Project;
 use crate::ui::App;
 use crate::ui::style::space;
+use adw::prelude::*;
 
 /// Where a run of onboarding has got to.
 ///
@@ -161,6 +159,18 @@ fn completion_file() -> Option<std::path::PathBuf> {
 /// the daemon has to give first.
 pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>) {
     if logged_in && is_complete(tenant_id) {
+        return;
+    }
+    // Camera only, in the same family as TC_FORCE_CONNECT_NOTICES below.
+    //
+    // The headless fixture is deliberately not enrolled, so onboarding is
+    // correct to open over every other screen -- which makes the main
+    // window's own surfaces unphotographable. Satisfying the real condition
+    // would mean the fixture minting a config and an Ed25519 device key, a
+    // pile of machinery that can drift from the schema it imitates and would
+    // then lie about what a real install looks like. Suppressing the modal
+    // for a screenshot changes nothing about what is underneath it.
+    if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
         return;
     }
     // `refresh` runs on every daemon event, and this is called from its
@@ -956,11 +966,11 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     list.append(&rule);
                 }
                 // The bucket for sessions whose working directory the daemon
-                // could not name. Recognised by id rather than by label:
-                // `project_id_for` is a digest of the key and is what the row
-                // IS, where `project_label` is what it currently displays.
-                let unresolvable =
-                    project.project_id == policy::project_id_for(policy::UNKNOWN_PROJECT_KEY);
+                // could not name. The daemon marks it, which is cheaper and
+                // more honest than the id comparison this used to do: that
+                // re-derived `project_id_for`'s hash to learn something the
+                // wire already states.
+                let unresolvable = project.is_unresolved_bucket;
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
                 // Name over state, in a column, so the row reads as one thing
                 // with a property rather than two peers.
