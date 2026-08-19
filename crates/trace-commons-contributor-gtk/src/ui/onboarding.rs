@@ -206,6 +206,13 @@ pub fn present(app: &Rc<App>) {
 
 /// Build and show the window, optionally opening on a specific screen.
 fn present_at(app: &Rc<App>, start: Option<Step>) {
+    // Same reason the roots screen does it: this window wears `tc-brand-*`
+    // classes, and on an install whose roots are already declared it can be
+    // the first window opened -- the roots screen never shows, and neither
+    // history nor settings has run. `install()` is idempotent, so the cost of
+    // calling it on a path that already has the provider is a bool check.
+    super::community_brand::install();
+
     let window = adw::Window::builder()
         .transient_for(&app.window)
         .modal(true)
