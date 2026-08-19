@@ -94,7 +94,12 @@ struct MenuBarContent: View {
             } label: {
                 Label("Open Trace Commons", systemImage: "macwindow")
             }
-            Button("Quit…") { confirmQuit() }
+            // Straight to terminate, not to the alert. The confirmation now
+            // lives in AppDelegate.applicationShouldTerminate, because Cmd-Q,
+            // the App menu and the Dock icon's context menu all terminate
+            // without passing through here. Asking in both places would
+            // confirm twice on this path and once everywhere else.
+            Button("Quit…") { NSApp.terminate(nil) }
         }
         .onAppear { model.refreshAll() }
     }
@@ -178,36 +183,11 @@ struct MenuBarContent: View {
         }
     }
 
-    // MARK: - Quit
+    // MARK: - Opening the window
 
     private func openMain() {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: WindowID.main)
-    }
-
-    /// The quit confirmation says what actually happens.
-    ///
-    /// The shared spec's copy ("The background watcher keeps running") is
-    /// written for a shell with a separate daemon process. On macOS the app
-    /// IS the daemon -- that is the entire point of the in-process shape --
-    /// so the watcher stops when the app does, and this says so rather than
-    /// repeating a sentence that would be false here.
-    private func confirmQuit() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Quit Trace Commons?"
-        alert.informativeText = """
-        The watcher runs inside this app, so quitting stops it. Nothing will be \
-        noticed or sent while it is closed.
-
-        Sessions already waiting stay on this machine and will be here when you \
-        come back. Nothing is sent while nobody's approving.
-        """
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Keep running")
-        if alert.runModal() == .alertFirstButtonReturn {
-            NSApp.terminate(nil)
-        }
     }
 }
 
