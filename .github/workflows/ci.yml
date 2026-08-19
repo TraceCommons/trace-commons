@@ -59,13 +59,25 @@ jobs:
     # hand-committed artwork nobody could regenerate is how three solid squares
     # of #315FBA shipped as the Windows tiles.
     #
-    # Only the vector sources are checked here. The platform rasters cannot be:
-    # .icns needs macOS and the MSIX tiles need Windows, so those regenerate and
-    # compare inside their own release jobs.
+    # The MSIX tiles are checked here too, and that is the point of rendering
+    # them in Rust. They used to be produced by CoreGraphics on a Mac, which
+    # meant this ubuntu job could not regenerate them and so could not compare
+    # them to anything -- the same hole the flat squares lived in. The .icns
+    # still needs macOS and still regenerates inside the release job.
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: ./scripts/mark/check-drift.sh
+      # The renderer writes its own PNGs, including a hand-rolled deflate.
+      # Checking that with the encoder's own assumptions proves very little, so
+      # this decodes the output with the standard library's zlib -- a different
+      # implementation by different people -- and compares it to the raw pixel
+      # buffer. It is what caught a maximal-run length code being emitted at the
+      # wrong bit width, which small tiles hide completely.
+      - name: Verify the PNGs against an independent decoder
+        run: |
+          cargo run -q -p trace-commons-mark --example emit-verify -- "${RUNNER_TEMP}/mark-verify"
+          python3 scripts/mark/verify-png.py "${RUNNER_TEMP}/mark-verify"
 
   cargo-clippy:
     name: cargo clippy

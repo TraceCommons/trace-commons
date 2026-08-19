@@ -45,6 +45,8 @@
 //! client's own token, the client's token is right and
 //! [`tests::palette_matches_client_tokens`] is what should have caught it.
 
+pub mod raster;
+
 /// The mark's coordinate space. Every number in this module is in these units
 /// and is scaled to the requested pixel size at render time.
 pub const VIEW: u32 = 64;
@@ -202,11 +204,18 @@ pub fn template_svg(ink: &str, size: u32) -> String {
 /// The geometry and palette as JSON, for renderers that cannot read SVG.
 ///
 /// macOS builds its `.icns` with CoreGraphics rather than by rasterizing the
-/// SVG, because the rasterizers available on a stock macOS runner get it
-/// wrong: `sips` zeroes the blue channel in the bottom-right corner at 16 and
-/// 32 pixels, which is both invisible in a build log and exactly the size the
-/// Finder and the menu bar use. A renderer that draws the geometry itself has
-/// no such failure mode.
+/// SVG, because `sips`' SVG support is not a documented interface and the build
+/// should not depend on it. It is NOT because `sips` renders the mark wrongly.
+///
+/// An earlier version of this comment said `sips` zeroed the blue channel at 16
+/// and 32 pixels. That was a misreading: the corruption came from
+/// `iconutil --convert iconset`, which mis-decodes its own `ic04`/`ic05`
+/// chunks -- those are raw ARGB RLE rather than PNG. Read through
+/// `CGImageSource`, which is what macOS itself uses, every representation is
+/// clean, and so is direct `sips` output. The trap is worth knowing about
+/// because it presents as corruption of exactly the two sizes the Finder and
+/// the menu bar use, which is precisely what somebody verifying an `.icns`
+/// would expect a real bug to look like.
 ///
 /// This is emitted rather than hand-written on the Swift side so the numbers
 /// still come from here. Written by hand rather than with serde: this crate is
@@ -267,6 +276,110 @@ pub fn geometry_json() -> String {
 pub struct Export {
     pub relative_path: &'static str,
     pub contents: String,
+}
+
+/// One generated binary file: a path relative to the repository root, and its
+/// bytes.
+///
+/// Unlike [`Export`], the path is relative to the repository rather than to an
+/// export directory, because these files have to land where a packaging
+/// manifest already names them. `Package.appxmanifest` references
+/// `Assets\StoreLogo.png`, and MSIX resolves that against the package layout --
+/// so the tile cannot live under `assets/mark` with the SVGs and be copied
+/// later without something doing the copying, which is one more step nothing
+/// would verify.
+pub struct BinaryExport {
+    pub repo_path: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Every raster asset a packaging manifest names, in a stable order.
+///
+/// # Why these are generated in Rust rather than by a platform toolchain
+///
+/// These three files were solid `#315FBA` squares for months. They were the
+/// right dimensions with the right names in the right brand colour, so the only
+/// checks that looked at them passed. The first fix generated them with
+/// CoreGraphics, which put the mark on them but left them regenerable only on a
+/// Mac -- and the drift check runs on `ubuntu-latest`, so they stayed outside
+/// it. An asset nothing can regenerate is an asset nothing can verify.
+///
+/// [`raster`] renders them with no dependencies and no platform toolchain, so
+/// the drift check can regenerate them on any runner and compare bytes.
+///
+/// The sizes come from the filenames, which are what `Package.appxmanifest`
+/// names and what MSIX resolves against; see the manifest's `Logo` and
+/// `uap:VisualElements` elements.
+/// The three assets `Package.appxmanifest` names, and the scale-qualified
+/// variants alongside them.
+///
+/// # The scale ladder
+///
+/// The manifest names exactly three files. MSIX resolves a request for
+/// `Assets\Square44x44Logo.png` through the resource system, which prefers a
+/// `.scale-N` variant matching the display and falls back to the unqualified
+/// file otherwise -- so the unqualified files stay, and the variants are added
+/// beside them. `TraceCommons.App.csproj` globs `Assets/*.png`, so a new
+/// filename here needs no project change.
+///
+/// The percentages are the set named in
+/// `docs/superpowers/specs/2026-08-19-icon-pipeline-design.md`. `scale-100` is
+/// deliberately absent: it would be a byte-for-byte duplicate of the
+/// unqualified file, which already serves that scale.
+///
+/// Pixel sizes are the base size scaled by the percentage and rounded half up.
+/// That is arithmetic rather than a table, which matters because a table would
+/// be a second description of the ladder.
+///
+/// # What is NOT here
+///
+/// The `targetsize-*` variants the taskbar and Start use are not generated. The
+/// spec gestures at them without enumerating them, and its own open questions
+/// record that the qualifier set was never checked against Microsoft's
+/// requirements. Enumerating it from memory is how a plausible, unexercised
+/// asset set gets committed, which is the failure this whole slice exists to
+/// undo. Adding them is a line in `LADDER` once somebody who can run the
+/// Windows packaging confirms the list.
+pub fn windows_tiles() -> Vec<BinaryExport> {
+    const TILES: [(&str, u32); 3] = [
+        ("windows/packaging/Assets/StoreLogo", 50),
+        ("windows/packaging/Assets/Square150x150Logo", 150),
+        ("windows/packaging/Assets/Square44x44Logo", 44),
+    ];
+    /// Scale percentages, excluding 100.
+    const LADDER: [u32; 4] = [125, 150, 200, 400];
+
+    let mut out = Vec::new();
+    for (stem, base) in TILES {
+        // Light only. A Start tile is composited on a background the app does
+        // not choose, and the manifest sets `BackgroundColor` to transparent,
+        // so the tile carries its own light surface rather than following a
+        // system appearance it cannot observe.
+        out.push(BinaryExport {
+            repo_path: leak_path(format!("{stem}.png")),
+            bytes: raster::png(Scheme::Light, base),
+        });
+        for percent in LADDER {
+            // Round half up, which is not `div_ceil`: they agree on the .5
+            // cases these three bases produce and disagree on everything else,
+            // so using ceil here would make the comment above false the moment
+            // a fourth tile size appears.
+            let size = (base * percent + 50) / 100;
+            out.push(BinaryExport {
+                repo_path: leak_path(format!("{stem}.scale-{percent}.png")),
+                bytes: raster::png(Scheme::Light, size),
+            });
+        }
+    }
+    out
+}
+
+/// `BinaryExport::repo_path` is `&'static str` because every other path in this
+/// crate is a literal, and the scale ladder is the one place a path is
+/// computed. The set is fixed and tiny and is built once per process, so
+/// leaking it is cheaper than making every caller own a `String`.
+fn leak_path(path: String) -> &'static str {
+    Box::leak(path.into_boxed_str())
 }
 
 /// Every SVG the packaging surfaces consume, in a stable order.
@@ -393,6 +506,96 @@ mod tests {
         assert_eq!(Scheme::Dark.blue(), "#7FA0EC");
         assert_eq!(Scheme::Light.ink(), "#20241F");
         assert_eq!(Scheme::Dark.ink(), "#E8EAE3");
+    }
+
+    /// The tiles are named by the manifest, at the sizes their filenames
+    /// promise. A tile generated at the wrong size still installs; it is just
+    /// resampled, which looks like a slightly soft icon rather than a failure.
+    #[test]
+    fn windows_tiles_are_the_sizes_their_names_promise() {
+        // The three the manifest names, each with four scale variants.
+        let expected: &[(&str, u32)] = &[
+            ("StoreLogo.png", 50),
+            ("StoreLogo.scale-125.png", 63),
+            ("StoreLogo.scale-150.png", 75),
+            ("StoreLogo.scale-200.png", 100),
+            ("StoreLogo.scale-400.png", 200),
+            ("Square150x150Logo.png", 150),
+            ("Square150x150Logo.scale-125.png", 188),
+            ("Square150x150Logo.scale-150.png", 225),
+            ("Square150x150Logo.scale-200.png", 300),
+            ("Square150x150Logo.scale-400.png", 600),
+            ("Square44x44Logo.png", 44),
+            ("Square44x44Logo.scale-125.png", 55),
+            ("Square44x44Logo.scale-150.png", 66),
+            ("Square44x44Logo.scale-200.png", 88),
+            ("Square44x44Logo.scale-400.png", 176),
+        ];
+
+        let tiles = windows_tiles();
+        assert_eq!(tiles.len(), expected.len());
+        for (tile, (name, want)) in tiles.iter().zip(expected) {
+            assert!(
+                tile.repo_path.ends_with(name),
+                "expected {name}, got {}",
+                tile.repo_path
+            );
+            // IHDR width and height are bytes 16..24 of a PNG.
+            let w = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
+            let h = u32::from_be_bytes(tile.bytes[20..24].try_into().unwrap());
+            assert_eq!((w, h), (*want, *want), "{}", tile.repo_path);
+        }
+    }
+
+    /// Every generated path is distinct. A duplicate would mean one asset
+    /// silently overwriting another during export, and the drift check would
+    /// then compare the survivor against itself and pass.
+    #[test]
+    fn windows_tile_paths_are_distinct() {
+        let tiles = windows_tiles();
+        let mut paths: Vec<&str> = tiles.iter().map(|t| t.repo_path).collect();
+        paths.sort_unstable();
+        let before = paths.len();
+        paths.dedup();
+        assert_eq!(before, paths.len(), "duplicate tile path");
+    }
+
+    /// The teeth, at the level the packaging actually consumes. Not "the file
+    /// exists", not "it is the right size", not "it has more than one colour" --
+    /// the two bracket inks have to be present in the decoded pixels, because a
+    /// flat square satisfies all three of the others and that is precisely what
+    /// shipped.
+    #[test]
+    fn windows_tiles_carry_both_brackets() {
+        for tile in windows_tiles() {
+            let size = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
+            let pixels = raster::render_framed(Scheme::Light, size);
+            let ink = |hex: &str| {
+                let b = hex.as_bytes();
+                let n = |c: u8| match c {
+                    b'0'..=b'9' => c - b'0',
+                    b'A'..=b'F' => c - b'A' + 10,
+                    _ => 0,
+                };
+                [
+                    n(b[1]) * 16 + n(b[2]),
+                    n(b[3]) * 16 + n(b[4]),
+                    n(b[5]) * 16 + n(b[6]),
+                    255,
+                ]
+            };
+            for (name, hex) in [
+                ("green", Scheme::Light.green()),
+                ("blue", Scheme::Light.blue()),
+            ] {
+                let want = ink(hex);
+                assert!(
+                    pixels.chunks(4).any(|p| p == want),
+                    "{} has no {name} bracket",
+                    tile.repo_path
+                );
+            }
+        }
     }
 
     /// The emitted document has to carry the geometry, not merely be

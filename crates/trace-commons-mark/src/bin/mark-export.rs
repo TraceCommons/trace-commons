@@ -6,23 +6,41 @@
 //! non-authoritative: they are there so a checkout is buildable without
 //! running Rust first, not because anyone may edit them.
 //!
-//! SVG only. Nothing here rasterizes -- each platform's packaging turns these
-//! into `.icns`, MSIX tiles or a `hicolor` entry with that platform's own
-//! toolchain, on that platform's runner.
+//! Most of what this writes is SVG, which each platform's packaging turns into
+//! an `.icns` or a `hicolor` entry with its own toolchain.
+//!
+//! The Windows tiles are the exception and are written here as PNG. They have
+//! to be raster, they have to live where `Package.appxmanifest` names them, and
+//! the toolchain that would otherwise produce them only exists on a machine the
+//! drift check does not run on. Rendering them here is what brings them inside
+//! the check. Pass `--repo-root` to write them; without it only the SVGs under
+//! the output directory are written, which is what a caller exporting the
+//! documents for something else wants.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let out_dir = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("assets/mark"));
-    if args.next().is_some() {
-        eprintln!("usage: mark-export [output-dir]");
-        return ExitCode::FAILURE;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut repo_root: Option<PathBuf> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--repo-root" => match args.next() {
+                Some(value) => repo_root = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("--repo-root needs a directory");
+                    return ExitCode::FAILURE;
+                }
+            },
+            _ if out_dir.is_none() => out_dir = Some(PathBuf::from(arg)),
+            _ => {
+                eprintln!("usage: mark-export [output-dir] [--repo-root <dir>]");
+                return ExitCode::FAILURE;
+            }
+        }
     }
+    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("assets/mark"));
 
     if let Err(err) = std::fs::create_dir_all(&out_dir) {
         eprintln!("creating {}: {err}", out_dir.display());
@@ -42,6 +60,23 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("wrote {}", path.display());
+    }
+
+    if let Some(root) = repo_root {
+        for tile in trace_commons_mark::windows_tiles() {
+            let path = root.join(tile.repo_path);
+            if let Some(parent) = path.parent() {
+                if let Err(err) = std::fs::create_dir_all(parent) {
+                    eprintln!("creating {}: {err}", parent.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            if let Err(err) = std::fs::write(&path, &tile.bytes) {
+                eprintln!("writing {}: {err}", path.display());
+                return ExitCode::FAILURE;
+            }
+            println!("wrote {}", path.display());
+        }
     }
 
     ExitCode::SUCCESS

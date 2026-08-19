@@ -78,14 +78,25 @@ silently, so both are handled explicitly.
    is a restricted capability that a Store submission would have to justify.
    The zip remains the artifact with the wider reach.
 
-## The logo assets are placeholders
+## The logo assets are generated, not edited
 
-`Assets/*.png` are flat `#315FBA` squares generated to satisfy the manifest's
-required image references. They are the app's accent colour and nothing more.
-The repository has no Windows app icon of any kind today -- the unpackaged
-build ships without one either -- so this is not a regression, but an MSIX
-carrying a solid blue square as its Start-menu tile should not be published to
-contributors. Replace these before the MSIX becomes a shipping artifact.
+`Assets/*.png` carry the mark. They are rendered by
+`crates/trace-commons-mark` and written by
+`cargo run -p trace-commons-mark --bin mark-export -- assets/mark --repo-root .`;
+`scripts/mark/check-drift.sh` regenerates them in CI and fails if the committed
+bytes differ, so editing one by hand is a build failure rather than a surprise
+in the Start menu.
+
+They were flat `#315FBA` squares -- one unique pixel each -- for as long as they
+were, because they had the right filenames at the right dimensions in the right
+brand colour, and nothing that looked at them looked at the pixels. If you are
+adding an asset here, add it to `windows_tiles()` in that crate rather than
+committing a file; a file nothing can regenerate is a file nothing can verify.
+
+The renderer is deliberately dependency-free and platform-independent so the
+drift check can run on `ubuntu-latest`. An earlier fix put the mark on these
+tiles using CoreGraphics, which meant only a Mac could regenerate them and the
+check had to skip them entirely.
 
 ## What is unverified
 
