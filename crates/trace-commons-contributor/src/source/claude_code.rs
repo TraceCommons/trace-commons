@@ -1071,6 +1071,119 @@ mod tests {
         );
     }
 
+    /// Claude Code's private auto-memory must never be collected.
+    ///
+    /// `~/.claude/projects/<encoded-cwd>/` holds more than transcripts: it
+    /// also carries a `memory/` directory of `.md` files that are the
+    /// assistant's own notes about its user -- who they are, what they have
+    /// been told to do differently, what they are working on. That is some of
+    /// the most personal material on the machine, and this daemon watches the
+    /// directory it lives in.
+    ///
+    /// Nothing collects it today, and this test exists because that was an
+    /// accident rather than a decision. TWO independent mechanisms exclude
+    /// it, and it matters which does what -- the obvious answer is wrong:
+    ///
+    /// - `memory/` is a DIRECTORY, so the top-level `.jsonl` extension filter
+    ///   never sees the files inside it at all. What keeps them out is that
+    ///   descent is restricted to the known `<uuid>/subagents/` layout and is
+    ///   deliberately not a general recursive walk. Widening the extension
+    ///   filter alone does not expose them; widening descent does.
+    /// - The extension filter is what excludes a `.md` sitting directly in
+    ///   the project directory, such as a `CLAUDE.md`.
+    ///
+    /// Both are asserted below, each with a fixture that fails if its own
+    /// mechanism is removed. The `.jsonl` planted inside `memory/` is the one
+    /// that pins the descent rule: it cannot be excluded by extension, so if
+    /// it is ever collected, discovery has started walking directories it
+    /// should not.
+    ///
+    /// This asserts the INTENT: private auto-memory is out of scope for
+    /// collection, deliberately. Anyone widening what discovery sweeps --
+    /// collecting `.md`, walking subdirectories generally, following a
+    /// "richer context" instinct -- should have to delete a test that says
+    /// why not, rather than silently start uploading a user's memory.
+    #[test]
+    fn private_auto_memory_is_never_collected() {
+        let session = "33333333-3333-3333-3333-333333333333";
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+
+        // The real layout, per Claude Code's own directory documentation.
+        let memory_dir = project_dir.join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(
+            memory_dir.join("MEMORY.md"),
+            "- [A note](note.md) - something the assistant recorded\n",
+        )
+        .unwrap();
+        std::fs::write(
+            memory_dir.join("some_note.md"),
+            "---\nname: some-note\n---\n\nA private fact about the user.\n",
+        )
+        .unwrap();
+        // Pins the descent rule specifically: no extension filter can save
+        // this one, so collecting it would mean discovery walked into a
+        // directory outside the known layout.
+        std::fs::write(
+            memory_dir.join("not-a-transcript.jsonl"),
+            record(session, "must never be collected from memory/"),
+        )
+        .unwrap();
+
+        // Pins the extension filter: a markdown file directly in the project
+        // directory, which the top-level walk does see.
+        std::fs::write(
+            project_dir.join("CLAUDE.md"),
+            "# Project instructions\n\nPrivate project notes.\n",
+        )
+        .unwrap();
+
+        // A real transcript beside it, so a test that passes by discovering
+        // nothing at all cannot masquerade as this property holding.
+        std::fs::write(
+            project_dir.join(format!("{session}.jsonl")),
+            record(session, "a real transcript"),
+        )
+        .unwrap();
+
+        let found = ClaudeCodeSource::new(root.path().to_path_buf())
+            .discover()
+            .unwrap();
+
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly the transcript to be discovered, got: {found:?}"
+        );
+        assert!(
+            found[0].path.extension().and_then(|e| e.to_str()) == Some("jsonl"),
+            "the discovered session must be the transcript, got: {:?}",
+            found[0].path
+        );
+        for session_ref in &found {
+            let path = session_ref.path.to_string_lossy();
+            assert!(
+                !path.contains("memory"),
+                "a file under the project's memory/ directory was discovered: {path}"
+            );
+            assert!(
+                !path.ends_with(".md"),
+                "a markdown file was discovered: {path}"
+            );
+        }
+
+        // Group membership is checked too, not just the discovered refs. A
+        // memory file swept in as a *member* would upload with the session
+        // and never appear as a ref of its own, so the assertions above
+        // would not see it. This project directory has no `subagents/`
+        // layout at all, so the only correct answer is zero.
+        assert_eq!(
+            found[0].group_member_count, 0,
+            "memory files were attached to the session as group members"
+        );
+    }
+
     /// A minimal top-level session record. `session` is the uuid that names
     /// both the file and the `subagents/` directory beside it.
     fn record(session: &str, text: &str) -> String {
