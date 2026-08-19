@@ -11,6 +11,10 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 trace-commons-contributor = { path = "../trace-commons-contributor" }
+# For `secret_leak_pattern_names`, so `tc_scrub_detector_names` reports what
+# the scrubber actually looks for rather than a list a shell transcribed.
+# Already in the tree via trace-commons-contributor; adds no new packages.
+trace-commons-protocol = { path = "../trace-commons-protocol" }
 anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }

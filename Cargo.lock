@@ -7302,6 +7302,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "trace-commons-contributor",
+ "trace-commons-protocol",
 ]
 
 [[package]]

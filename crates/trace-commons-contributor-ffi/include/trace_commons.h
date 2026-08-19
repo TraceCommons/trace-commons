@@ -255,6 +255,45 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  */
 char*       tc_discover_sources(void);
 
+/* The names of the secret detectors the scrubber runs, so a shell can tell a
+ * contributor what is removed without transcribing the list.
+ *
+ * Takes no handle: it describes the build, not a running daemon, and the
+ * screen that asks is the first one a contributor sees.
+ *
+ * Returns an owned JSON array of strings; free it with tc_string_free.
+ *
+ * NAMES ONLY. The patterns are deliberately absent and must not be added: a
+ * contributor deciding whether to trust the scrubbing needs to know what it
+ * looks for, but publishing the regexes would tell someone trying to slip a
+ * secret past it exactly what to avoid. The list being generated is the
+ * point -- a hand-written copy in a shell is a privacy claim that silently
+ * stops being true the day a detector is added.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_scrub_detector_names(void);
+
+/* The opaque project id of the unresolvable-session bucket, so a shell can
+ * recognise that row in list_projects and say what it is.
+ *
+ * Recognition is by ID, not by label. The id is what the row IS -- a digest
+ * of the project key -- where the label is only what it displays, and a
+ * shell matching on the displayed string would break the day that string is
+ * reworded, which is exactly what every client now does to it.
+ *
+ * The bucket exists because a cwd with no usable final segment has no label
+ * but itself, and a project label reaches daemon-audit.jsonl, notification
+ * text and HistoryRecord -- so naming it would write a full local path into
+ * all three. Sessions in it can never be armed for automatic upload, and the
+ * daemon refuses that independently of any client: a shell showing this row
+ * is reporting enforcement, not performing it.
+ *
+ * Returns an owned string; free it with tc_string_free. Returns NULL only on
+ * a caught panic.
+ */
+char*       tc_unknown_project_id(void);
+
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
  * concurrently with tc_call / tc_preview_open / tc_subscribe on other

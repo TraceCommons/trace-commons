@@ -1578,3 +1578,64 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
         std::ptr::null_mut()
     })
 }
+
+/// The names of the secret detectors the scrubber runs, so a shell can tell
+/// a contributor what is removed without transcribing the list.
+///
+/// Needs no handle: it describes the build, not a running daemon, and the
+/// screen that asks is the first one a contributor sees.
+///
+/// Returns an owned JSON array of strings; free it with [`tc_string_free`].
+///
+/// NAMES ONLY. The patterns are deliberately not exposed here and must not
+/// be added: a contributor deciding whether to trust the scrubbing needs to
+/// know what it looks for, but publishing the regexes would tell someone
+/// trying to slip a secret past it exactly what to avoid. The generated list
+/// is the point -- a hand-written copy in a shell is a privacy claim that
+/// silently stops being true the day a detector is added.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_scrub_detector_names() -> *mut c_char {
+    guard(|| {
+        let names = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+        let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The opaque project id of the unresolvable-session bucket, so a shell can
+/// recognise that row in `list_projects` and say what it is.
+///
+/// Recognition is by ID and not by label on purpose. The id is what the row
+/// IS -- a digest of the project key -- where the label is only what it
+/// displays, and a shell matching on the displayed string would break the
+/// day that string is reworded for being unreadable, which is exactly what
+/// every client now does to it.
+///
+/// The bucket exists because a cwd with no usable final segment has no label
+/// but itself, and a project label reaches `daemon-audit.jsonl`, notification
+/// text and `HistoryRecord` -- so naming it would write a full local path
+/// into all three. Sessions in it can never be armed for automatic upload;
+/// the daemon refuses that independently of any client, so a shell showing
+/// this row is reporting enforcement rather than performing it.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. Returns NULL
+/// only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_unknown_project_id() -> *mut c_char {
+    guard(|| {
+        let id = trace_commons_contributor::daemon::policy::project_id_for(
+            trace_commons_contributor::daemon::policy::UNKNOWN_PROJECT_KEY,
+        );
+        Ok(to_owned_cstring(&id))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}

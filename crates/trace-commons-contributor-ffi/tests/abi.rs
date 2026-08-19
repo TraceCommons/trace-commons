@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
-    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free, tc_subscribe,
-    tc_unsubscribe,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_scrub_detector_names,
+    tc_string_free, tc_subscribe, tc_unknown_project_id, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -1455,5 +1455,84 @@ fn a_roots_refusal_never_echoes_a_path_back_across_the_boundary() {
     assert!(
         !msg.contains("acme-unreleased-product") && !msg.contains(dir.path().to_str().unwrap()),
         "a refusal must not echo settings_json back: {msg}"
+    );
+}
+
+#[test]
+fn scrub_detector_names_are_generated_from_the_real_table() {
+    // The point of the export: a shell showing this list must be showing what
+    // the scrubber actually looks for, not a transcription that stops being
+    // true the day a detector is added.
+    let out = tc_scrub_detector_names();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let names: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|n| n.as_str().expect("a string"))
+        .collect();
+
+    // Compared against the table itself rather than a list written here --
+    // pinning the names in this test would be the same transcription bug one
+    // layer down.
+    let expected = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+    assert_eq!(names, expected, "the export must mirror the detector table");
+    assert!(
+        !names.is_empty(),
+        "an empty list would claim nothing is scrubbed"
+    );
+}
+
+#[test]
+fn the_detector_export_never_carries_a_pattern() {
+    // Names only. Publishing the regexes would tell someone trying to slip a
+    // secret past the scrubber exactly what to avoid, so this asserts on what
+    // actually crosses the boundary rather than trusting the implementation to
+    // stay as written.
+    let out = tc_scrub_detector_names();
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    // Each NAME, not the raw envelope: `[` and `{` are JSON's own delimiters
+    // and are always present in a valid array.
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    for name in parsed.as_array().expect("an array") {
+        let name = name.as_str().expect("a string");
+        for meta in ['\\', '^', '$', '[', '(', '{', '+', '?', '|', '*'] {
+            assert!(
+                !name.contains(meta),
+                "a regex metacharacter {meta:?} reached the boundary in {name:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_unknown_project_id_matches_what_the_daemon_mints() {
+    // A shell recognises the unresolvable row by this id. Derived here from
+    // the same function the daemon uses, so the two cannot drift; a digest
+    // hardcoded in a client is the failure this export exists to prevent.
+    let out = tc_unknown_project_id();
+    assert!(!out.is_null());
+    let id = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let expected = trace_commons_contributor::daemon::policy::project_id_for(
+        trace_commons_contributor::daemon::policy::UNKNOWN_PROJECT_KEY,
+    );
+    assert_eq!(id, expected);
+    assert!(
+        !id.contains('/') && !id.contains("unknown-project"),
+        "the id is a digest and must not leak the key or a path: {id}"
     );
 }
