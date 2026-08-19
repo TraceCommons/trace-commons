@@ -110,6 +110,19 @@ typedef struct tc_preview tc_preview;
  * one worker, an in-flight tc_subscribe callback and tc_daemon_stop's join
  * on the supervisor are mutually exclusive demands on the only worker, and
  * tc_daemon_stop is documented as callable from inside a callback.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS. If the persisted settings do
+ * not declare BOTH claude_root and codex_root, this returns NULL with the
+ * fixed label "roots-not-declared" and nothing is scanned. An unset root
+ * does not mean "no source for that agent" -- it means the conventional
+ * per-user location, i.e. the contributor's real ~/.claude or ~/.codex --
+ * so half a declaration is a fail-open and is refused exactly like none.
+ *
+ * That label is deliberately distinct from the opaque
+ * "daemon-start-failed": a host must be able to route a roots refusal to
+ * whatever screen collects the folders, and every other start failure to a
+ * generic notice. tc_daemon_start takes no settings, so the only way out of
+ * this refusal through this ABI is tc_daemon_start_with_settings below.
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
@@ -144,6 +157,14 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * The returned handle is exactly a tc_daemon_start handle: same lifetime,
  * same teardown, freed by tc_handle_free after tc_daemon_stop.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS, on the same rule and with the
+ * same "roots-not-declared" label as tc_daemon_start -- but evaluated AFTER
+ * settings_json has been applied and persisted. That ordering is the point:
+ * a settings_json declaring both roots clears a refusal the persisted file
+ * alone would have earned, which is what makes this the one call a host can
+ * use to turn "the contributor just named two folders" into a running
+ * daemon. Declaring only one root here is refused exactly as it is above.
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir,
                                           const char* settings_json,

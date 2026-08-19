@@ -171,6 +171,28 @@ pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// `claude_root`/`codex_root`, a JSON type other than string/null).
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
 
+/// Whether the contributor has said which session folders to watch.
+///
+/// BOTH, not either. `claude_root: None` does not mean "no Claude source" --
+/// `DaemonSettings` documents it as meaning the conventional per-user
+/// location, so an undeclared root is the real `~/.claude` or `~/.codex`.
+/// Half a declaration therefore buys none of the protection while reading as
+/// though it had, which is why an `||` here would be a fail-open.
+///
+/// This is the ONLY place the rule is written. The application shells consult
+/// it -- macOS and Windows through the C ABI's start functions, the GTK shell
+/// by calling it directly -- rather than each transcribing the predicate into
+/// its own language, because three copies of a rule that decides whether a
+/// developer's source tree gets scanned is three chances for one of them to
+/// drift. Compare `tc_daemon_start_with_settings`, which shares
+/// `set_settings`' validator for exactly this reason.
+///
+/// The daemon core does not consult it: `trace-commons-contributor daemon` is
+/// someone typing a command on purpose, and the CLI keeps its defaults.
+pub fn roots_declared(settings: &DaemonSettings) -> bool {
+    settings.claude_root.is_some() && settings.codex_root.is_some()
+}
+
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
 /// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
@@ -311,6 +333,31 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.approval_hold_secs, 30, "a rejected value changes nothing");
+    }
+
+    #[test]
+    fn roots_are_declared_only_when_both_are_set() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            !roots_declared(&s),
+            "a fresh settings object declares neither root"
+        );
+
+        s.claude_root = Some(PathBuf::from("/somewhere/claude"));
+        assert!(
+            !roots_declared(&s),
+            "half a declaration is the fail-open case: an unset codex_root \
+             means the daemon watches the real ~/.codex"
+        );
+
+        s.codex_root = Some(PathBuf::from("/somewhere/codex"));
+        assert!(
+            roots_declared(&s),
+            "both roots set is the only declared state"
+        );
+
+        s.claude_root = None;
+        assert!(!roots_declared(&s), "the rule is symmetric");
     }
 
     #[test]

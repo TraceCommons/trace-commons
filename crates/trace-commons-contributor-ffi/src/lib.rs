@@ -99,7 +99,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::EmbeddedDaemon;
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
-use trace_commons_contributor::daemon::settings::{DaemonSettings, apply_settings_object};
+use trace_commons_contributor::daemon::settings::{
+    DaemonSettings, apply_settings_object, roots_declared,
+};
 
 /// Catches a panic; on an ordinary `Err`, returns a fixed, content-free
 /// label rather than forwarding the underlying `anyhow::Error`'s `Display`
@@ -270,6 +272,37 @@ fn registry_is(ptr: usize, kind: AllocKind) -> bool {
 /// See the module doc's "What never crosses this boundary" section.
 const ERR_DAEMON_START_FAILED: &str = "daemon-start-failed";
 
+/// The contributor has not said which session folders to watch, so the
+/// daemon will not start and has scanned nothing.
+///
+/// Distinct from `ERR_DAEMON_START_FAILED` on purpose. That label is
+/// deliberately opaque because the failures behind it may embed a path;
+/// this one is a fixed, content-free fact about configuration, and the
+/// application shells have to tell the two apart -- a roots refusal routes
+/// the contributor to the roots screen, every other start failure to the
+/// generic notice. Flattening this into `daemon-start-failed` would leave
+/// the shells guessing, and the only screen that can clear the refusal
+/// unreachable.
+const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
+
+/// Whether this store's persisted settings declare both session roots, as
+/// `daemon::settings::roots_declared` defines it -- the single definition of
+/// the rule, deliberately not restated here.
+///
+/// A settings file that cannot be read is NOT reported as a roots refusal:
+/// the contributor's answer to "which folders?" is unknown rather than
+/// absent, and pointing them at the roots screen would be a guess. It falls
+/// through to the opaque start failure instead, which is also what
+/// `start_embedded` would have produced from the same unreadable file.
+fn roots_refusal(store: &ConfigStore) -> Option<&'static str> {
+    let settings = DaemonSettings::load(store).ok()?;
+    if roots_declared(&settings) {
+        None
+    } else {
+        Some(ERR_ROOTS_NOT_DECLARED)
+    }
+}
+
 /// The daemon that is actually running: the pieces `daemon::start_embedded`
 /// returns, plus the `JoinHandle` for the supervise-loop task this crate
 /// spawns itself (see `daemon::run_supervisor`'s doc for why `tc_handle`,
@@ -412,11 +445,27 @@ pub unsafe extern "C" fn tc_daemon_start(
     err: *mut *mut c_char,
 ) -> *mut tc_handle {
     let outcome = guard(|| {
-        let result: anyhow::Result<tc_handle> = (|| {
+        let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
-            let store = ConfigStore::open(std::path::PathBuf::from(dir))?;
-            start_daemon_handle(store)
+            ConfigStore::open(std::path::PathBuf::from(dir))
         })();
+        let store = match store_result {
+            Ok(store) => store,
+            Err(e) => return Ok(finish_daemon_start(Err(e), err)),
+        };
+
+        // Fail closed before anything can scan. `tc_daemon_start` takes no
+        // settings, so undeclared roots here can only mean the persisted
+        // file never declared them -- there is no argument that could have.
+        if let Some(label) = roots_refusal(&store) {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            return Ok(std::ptr::null_mut());
+        }
+
+        let result = start_daemon_handle(store);
         // Everything from here on, including turning a failure into the
         // out-param the caller sees, stays inside `guard`'s catch_unwind:
         // `set_last_error` and `to_owned_cstring` are audited not to panic
@@ -569,6 +618,18 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
         // in memory only, or after `start_embedded`, would still beat that
         // first tick.
         if let Err(label) = unsafe { apply_pre_start_settings(&store, settings_json) } {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            return Ok(std::ptr::null_mut());
+        }
+
+        // After the pre-start settings, not before: the roots screen's whole
+        // purpose is to supply the declaration in this same call, so a
+        // settings object that declares both roots must be allowed to clear
+        // a refusal the persisted file alone would have earned.
+        if let Some(label) = roots_refusal(&store) {
             set_last_error(label);
             if !err.is_null() {
                 unsafe { *err = to_owned_cstring(label) };
