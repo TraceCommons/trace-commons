@@ -33,6 +33,21 @@ cat >"$SESSION_DIR/11111111-1111-1111-1111-111111111111.jsonl" <<'EOF'
 {"type":"assistant","timestamp":"2026-08-08T09:00:30Z","message":{"model":"claude-opus-4","content":[{"type":"text","text":"Added exponential backoff with a cap of 30 seconds."}]}}
 EOF
 
+# A second session whose working directory has no usable final segment, so
+# `policy::project_key_for` buckets it into UNKNOWN_PROJECT_KEY rather than
+# minting a key that would carry a path. `Path::new("/").file_name()` is
+# `None`, which is one of the three real cwds that reach that branch.
+#
+# Without this the watch screen only ever renders resolvable projects, and the
+# permanently-notify-only row -- the one the shared spec requires a note on --
+# could not be photographed at all.
+UNKNOWN_SESSION_DIR="$CLAUDE_ROOT/projects/-"
+mkdir -p "$UNKNOWN_SESSION_DIR"
+cat >"$UNKNOWN_SESSION_DIR/22222222-2222-2222-2222-222222222222.jsonl" <<'EOF'
+{"type":"user","cwd":"/","version":"1.0.0","timestamp":"2026-08-08T10:00:00Z","message":{"role":"user","content":"Check whether the disk is filling up on this host."}}
+{"type":"assistant","timestamp":"2026-08-08T10:00:06Z","message":{"model":"claude-opus-4","content":[{"type":"text","text":"Checking the mounted filesystems."}]}}
+EOF
+
 # poll_interval_secs and quiescence_secs are not settable over the socket;
 # writing the settings file before the daemon starts is the supported way to
 # prime the next start, and is what the CLI itself does when nothing is

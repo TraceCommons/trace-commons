@@ -36,6 +36,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use trace_commons_contributor::daemon::policy;
 
 use crate::copy;
 use crate::model::Project;
@@ -448,6 +449,59 @@ fn body_label(text: &str) -> gtk::Label {
     label
 }
 
+/// The "What gets removed?" disclosure.
+///
+/// The list is GENERATED from the protocol's detector table, never
+/// transcribed. A hand-written list of what this product scrubs is a privacy
+/// claim that stops being true the day a detector is added, and nobody would
+/// notice: the sentence would still read correctly.
+///
+/// A dialog rather than a page or an inline expander. The flow is six screens
+/// and this is reference material read once, not a decision; an expander would
+/// also have to push the promise and `Get started` down a page that does not
+/// scroll.
+fn present_what_gets_removed(parent: &adw::Window) {
+    let dialog = adw::MessageDialog::new(
+        Some(parent),
+        Some(copy::ONBOARD_WHAT_REMOVED_HEADING),
+        Some(copy::ONBOARD_WHAT_REMOVED_INTRO),
+    );
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::M)
+        .build();
+    let list = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::XXS)
+        .build();
+    for slug in trace_commons_protocol::trace_contribution::secret_leak_pattern_names() {
+        let item = gtk::Label::builder()
+            .label(copy::scrub_detector_label(slug))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        item.add_css_class("tc-body");
+        list.append(&item);
+    }
+    content.append(&list);
+
+    // The list and its limit travel together. A list on its own reads as a
+    // guarantee, and this one is not: the same concession the preview sheet
+    // makes before every decision.
+    let concession = gtk::Label::builder()
+        .label(copy::RESIDUAL_RISK)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    concession.add_css_class("tc-meta");
+    content.append(&concession);
+
+    dialog.set_extra_child(Some(&content));
+    dialog.add_response("close", copy::CLOSE);
+    dialog.present();
+}
+
 fn button_row(button: &gtk::Button) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -480,6 +534,19 @@ fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_1));
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_2));
     body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
+    // Directly under the sentence that raises the question, not beside
+    // `Get started` where the shared spec puts it. See the note on the
+    // notice box below: the promise is the terminal beat on this page, and a
+    // second button in the footer competes with it from the one position that
+    // should be uncontested. Here it is answerable where it is asked.
+    let removed = gtk::Button::with_label(copy::ONBOARD_WHAT_REMOVED);
+    removed.add_css_class("tc-brand-link");
+    removed.set_halign(gtk::Align::Start);
+    removed.connect_clicked({
+        let onboarding = onboarding.clone();
+        move |_| present_what_gets_removed(&onboarding.window)
+    });
+    body.append(&removed);
     // The promise gets the notice box, not a heavier weight of the same
     // prose. `roots.rs` reached this conclusion first for the sentence that
     // makes its own screen mean anything: "leave it as prose and it reads as
@@ -888,6 +955,12 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                     rule.add_css_class("tc-rule");
                     list.append(&rule);
                 }
+                // The bucket for sessions whose working directory the daemon
+                // could not name. Recognised by id rather than by label:
+                // `project_id_for` is a digest of the key and is what the row
+                // IS, where `project_label` is what it currently displays.
+                let unresolvable =
+                    project.project_id == policy::project_id_for(policy::UNKNOWN_PROJECT_KEY);
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
                 // Name over state, in a column, so the row reads as one thing
                 // with a property rather than two peers.
@@ -899,7 +972,14 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 // `settings::render_projects` states where it draws the same
                 // list.
                 let label = gtk::Label::builder()
-                    .label(&project.project_label)
+                    // The wire carries the slug `unknown-project` for the
+                    // bucket, which is an identifier and not a name. Every
+                    // other row's label is already a display name.
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_LABEL
+                    } else {
+                        project.project_label.as_str()
+                    })
                     .xalign(0.0)
                     .hexpand(true)
                     .wrap(true)
@@ -912,8 +992,18 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                 // What will happen to this project, stated rather than left to
                 // be inferred from the absence of a control. Ask-first is the
                 // outcome for every row a contributor never touches.
+                //
+                // The unresolvable bucket says why it can never be anything
+                // else, which is the note the shared spec asks for. It stands
+                // in place of the state line rather than adding a third: the
+                // note ends "you'll always be asked", which is what the state
+                // line would have said.
                 let state = gtk::Label::builder()
-                    .label(copy::ONBOARD_WATCH_ASK_FIRST)
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                    } else {
+                        copy::ONBOARD_WATCH_ASK_FIRST
+                    })
                     .xalign(0.0)
                     .wrap(true)
                     .build();
@@ -975,7 +1065,14 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         // And put the state back with it, or
                                         // the row would claim to be ignored
                                         // while the daemon still offers it.
-                                        row_state.set_label(copy::ONBOARD_WATCH_ASK_FIRST);
+                                        // The unresolvable bucket goes back to
+                                        // its note, not to the state line it
+                                        // never had.
+                                        row_state.set_label(if unresolvable {
+                                            copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                                        } else {
+                                            copy::ONBOARD_WATCH_ASK_FIRST
+                                        });
                                         app.toast(copy::PROJECT_MODE_FAILED);
                                     }
                                 }

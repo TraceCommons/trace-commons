@@ -3015,6 +3015,22 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
     SECRET_LEAK_PATTERNS.as_slice()
 }
 
+/// The names of every named secret detector, in table order.
+///
+/// Exists so a client can TELL a contributor what is scrubbed without
+/// transcribing the list. A hand-written copy of this in a shell is a
+/// sentence that silently stops being true the day a detector is added, and
+/// it would be making a privacy claim while doing it -- which is the one
+/// category of drift this codebase can least afford.
+///
+/// Names only. The regexes are not published: a contributor deciding whether
+/// to trust the scrubbing needs to know what it looks for, and printing the
+/// patterns would tell someone trying to slip a secret past it exactly what
+/// to avoid.
+pub fn secret_leak_pattern_names() -> Vec<&'static str> {
+    secret_leak_patterns().iter().map(|p| p.name).collect()
+}
+
 pub struct DeterministicTraceRedactor {
     leak_detector: SecretLeakDetector,
     known_path_prefixes: Vec<String>,
