@@ -207,7 +207,9 @@ final class AppModel: ObservableObject {
         case .snapshot(let pending, let status):
             self.pending = pending
             self.status = status
-            loadMissingSummaries()
+            // No eager summary fetch here any more -- `QueueRow.onAppear`
+            // drives `requestSummary(for:)` for whatever the viewport
+            // actually shows. See that method's doc comment.
         case .queueChanged:
             refreshQueue()
             // `queue_depth` lives on `status`, and the daemon does not
@@ -302,7 +304,7 @@ final class AppModel: ObservableObject {
     func refreshQueue() {
         perform("list_pending", work: { try $0.listPending() }) { entries in
             self.pending = entries
-            self.loadMissingSummaries()
+            // No eager summary fetch -- see `requestSummary(for:)`.
         }
     }
 
@@ -456,26 +458,66 @@ final class AppModel: ObservableObject {
         })
     }
 
+    /// How many `previewSummary` calls may run at once.
+    ///
+    /// A preview is not cheap -- file read, JSON parse, redaction pass -- and
+    /// the incident this exists to prevent (500 queued sessions, every one
+    /// previewed the instant the snapshot arrived, 1.7 sustained cores and a
+    /// load average of 649) came from asking for all of them at once, not
+    /// from asking for too many. Four is small enough that a contributor
+    /// scrolling fast never buries the machine the way the incident did, and
+    /// large enough that the queue still fills in as you scroll rather than
+    /// visibly queueing behind one slow file. It is a fixed constant, not
+    /// tied to core count, because the resource being protected is
+    /// contention on shared FFI + disk I/O, not CPU parallelism -- a
+    /// daemon-side scheduler is expected to own real prioritisation and
+    /// caching later; this is the seam it can sit behind.
+    private static let summaryConcurrencyLimit = 4
+
+    private let summaryLimiter = ConcurrencyLimiter(limit: AppModel.summaryConcurrencyLimit)
+
+    /// Entry ids with a `previewSummary` call currently in flight.
+    ///
+    /// Without this, a `LazyVStack` row that gets recycled during fast
+    /// scrolling would call `requestSummary(for:)` again on every
+    /// `onAppear`, and each call would queue its own task behind the
+    /// limiter -- turning a scroll gesture into its own request storm. This
+    /// makes a repeat appearance for an id already being fetched a no-op.
+    private var requestingSummaries: Set<String> = []
+
     /// Row summaries carry the redacted opening prompt, the would-send size
-    /// and the redaction receipt -- all three come from the preview pass, so
-    /// each row loads its own once.
-    private func loadMissingSummaries() {
+    /// and the redaction receipt -- all three come from the preview pass.
+    ///
+    /// Called from `QueueRow.onAppear`, not from the queue snapshot: the
+    /// queue can hold hundreds of entries and a `LazyVStack` only realizes
+    /// the rows near the viewport, so a row asking for its own summary when
+    /// it actually appears is what keeps this proportional to what's on
+    /// screen instead of to the whole queue. Skips entries that already have
+    /// a summary, a recorded error, or a request already in flight -- the
+    /// same dedupe the old whole-queue loop had, just applied per row instead
+    /// of per snapshot.
+    func requestSummary(for entry: QueueEntry) {
         guard let client else { return }
-        for entry in awaitingDecision where summaries[entry.entryID] == nil
-            && summaryErrors[entry.entryID] == nil
-        {
-            let id = entry.entryID
-            Task.detached(priority: .utility) {
-                let outcome = Result { try client.previewSummary(entryID: id) }
-                await MainActor.run {
-                    switch outcome {
-                    case .success(let summary): self.summaries[id] = summary
-                    case .failure(let error):
-                        self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
-                            ?? "preview-failed"
-                    }
+        let id = entry.entryID
+        guard summaries[id] == nil,
+              summaryErrors[id] == nil,
+              !requestingSummaries.contains(id)
+        else { return }
+        requestingSummaries.insert(id)
+        let limiter = summaryLimiter
+        Task.detached(priority: .utility) {
+            await limiter.acquire()
+            let outcome = Result { try client.previewSummary(entryID: id) }
+            await MainActor.run {
+                switch outcome {
+                case .success(let summary): self.summaries[id] = summary
+                case .failure(let error):
+                    self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
+                        ?? "preview-failed"
                 }
+                self.requestingSummaries.remove(id)
             }
+            await limiter.release()
         }
     }
 
