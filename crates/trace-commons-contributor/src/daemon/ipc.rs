@@ -1206,6 +1206,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         super::preview::input_fingerprint(c, near_ai.as_ref())
     });
     let project_id = req.params.get("project_id").and_then(|v| v.as_str());
+    // Three mutually exclusive selectors; `all` wins over `project_id` wins
+    // over `entry_id` when more than one is sent -- same precedence rule as
+    // `set_project_mode` above.
     let ids: Vec<Uuid> = {
         let queue = shared.queue.lock().expect("queue lock");
         if all {

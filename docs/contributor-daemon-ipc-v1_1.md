@@ -360,7 +360,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
-| `approve` | `entry_id` or `all: true` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; see "The approval hold" below |
+| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable); the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
