@@ -54,7 +54,7 @@ client renders that without a second call.
 One click. The row's `Submit` builds, pins, approves, and raises a toast for
 the length of `approval_hold_secs`:
 
-> Sent -- scrubbing removed 4 things, 1 flagged.  [Undo]
+> Approved -- scrubbing removed 4 things, 1 flagged.  [Undo]
 
 The signal follows the click and precedes the send. Nothing has left the
 machine while the toast is up; `Undo` is the existing revoke path, which
@@ -64,7 +64,7 @@ anyway, and the hold is already implemented and already undoable.
 
 Bulk is the same gesture at the project level:
 
-> Sent 47 sessions from frobnicator -- scrubbing removed 213 things, 3
+> Approved 47 sessions from frobnicator -- scrubbing removed 213 things, 3
 > flagged.  [Undo]
 
 **Flagged entries are included, not held back.** This was decided
