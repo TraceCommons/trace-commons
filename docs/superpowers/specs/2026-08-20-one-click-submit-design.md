@@ -125,6 +125,13 @@ noise a contributor cannot act on.
 | `envelope-too-large` | too large to send | never |
 | `session-file-vanished` | the session file is gone | no |
 | `preview-failed` | could not be read | yes |
+| *anything else* | could not be sent | unknown |
+
+The last row is forward compatibility, not a wire label. A daemon newer than a
+shell can send a reason the shell has never heard of; echoing it would put
+protocol vocabulary in front of a contributor, and dropping it silently yields
+`1 not sent: .` when it is the only skip. Degrade to **could not be sent** and
+list it last. Define it once per shell so the wording stays one edit.
 
 **Undo** is offered when `approved > 0`, and only then. It is present for
 `hold_secs` and maps to the existing `cancel` method, which now clears the pin
