@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TCBridge
 import TCShellCore
@@ -46,6 +47,14 @@ struct PreviewSheet: View {
     @State private var preview: TCPreview?
     @State private var summary: PreviewSummary?
     @State private var transcriptText: String
+    /// The transcript cut into chunks, built once when the body arrives.
+    ///
+    /// One document serves both tabs that need to walk the body: the
+    /// transcript tab pages through its chunks, and the search tab cuts its
+    /// context snippets out of its bytes. The search tab used to build
+    /// `Array(transcript.utf8)` inside a computed property -- a full copy of
+    /// the body per keystroke, 17.5 MB at a time on a real session.
+    @State private var document: TranscriptDocument?
     @State private var failure: String?
     @State private var loading: Bool
 
@@ -104,6 +113,7 @@ struct PreviewSheet: View {
         self.preloaded = preloaded
         _summary = State(initialValue: preloaded?.summary)
         _transcriptText = State(initialValue: preloaded?.transcript ?? "")
+        _document = State(initialValue: preloaded.map { TranscriptDocument($0.transcript) })
         _loading = State(initialValue: preloaded == nil)
     }
 
@@ -238,7 +248,7 @@ struct PreviewSheet: View {
                 switch tab {
                 case .search:
                     SearchTab(
-                        transcript: transcriptText,
+                        document: document,
                         preview: preview,
                         initialNeedle: preloaded?.needle ?? "",
                         initialOffsets: preloaded?.offsets
@@ -246,7 +256,23 @@ struct PreviewSheet: View {
                 case .whatsInIt:
                     WhatsInItTab(entry: entry, summary: summary)
                 case .transcript:
-                    TranscriptTab(transcript: transcriptText) { sawFirstScreen = true }
+                    // Fail closed rather than cutting a fresh document on
+                    // every layout pass: the gate's first condition is set
+                    // by the tab appearing, so a tab with no body must not
+                    // appear. Unreachable in practice -- the document is
+                    // built in the same step that decodes the summary, and
+                    // this branch only renders once the summary exists.
+                    if let document {
+                        TranscriptTab(document: document) { sawFirstScreen = true }
+                    } else {
+                        CenteredNotice(
+                            title: "The transcript isn't ready.",
+                            detail: """
+                            Nothing has been sent, and nothing will be until it can be \
+                            shown to you.
+                            """
+                        )
+                    }
                 case .permissions:
                     PermissionsTab(summary: summary, options: model.consentScopes)
                 }
@@ -455,6 +481,7 @@ struct PreviewSheet: View {
         case .opened(let opened):
             preview = opened
             transcriptText = opened.body
+            document = TranscriptDocument(opened.body)
             if let data = opened.summaryJSON.data(using: .utf8),
                let decoded = try? DaemonDecoding.decoder().decode(PreviewSummary.self, from: data)
             {
@@ -582,7 +609,9 @@ private func highlighting(_ text: String, term: String) -> AttributedString {
 /// The highest-value affordance in the product: type a client name, get
 /// `0 matches` or jump-to-context, without reading 148 turns.
 struct SearchTab: View {
-    let transcript: String
+    /// The body, already cut into chunks and holding its own bytes. Context
+    /// snippets are cut from those bytes at the offsets the ABI reports.
+    let document: TranscriptDocument?
     let preview: TCPreview?
 
     @State private var needle: String
@@ -592,12 +621,12 @@ struct SearchTab: View {
     @FocusState private var focused: Bool
 
     init(
-        transcript: String,
+        document: TranscriptDocument?,
         preview: TCPreview?,
         initialNeedle: String = "",
         initialOffsets: [Int]? = nil
     ) {
-        self.transcript = transcript
+        self.document = document
         self.preview = preview
         _needle = State(initialValue: initialNeedle)
         _offsets = State(initialValue: initialOffsets)
@@ -727,20 +756,28 @@ struct SearchTab: View {
         }
     }
 
-    /// The ABI reports UTF-8 BYTE offsets, so context is cut from the byte
-    /// array and decoded back, never from Swift's character indices.
+    /// The ABI reports UTF-8 BYTE offsets, so context is cut from the
+    /// document's bytes at those offsets, never from Swift's character
+    /// indices.
+    ///
+    /// Bounded on both sides: at most 20 snippets, each at most a match plus
+    /// 240 bytes of surroundings, so what this tab lays out does not grow
+    /// with the trace. The whole-body walk that used to be here -- a fresh
+    /// `Array(transcript.utf8)` every time this property was read, which is
+    /// every keystroke -- is gone; the copy is made once, when the sheet
+    /// builds its `TranscriptDocument`.
+    ///
+    /// The search itself is not bounded here and does not need to be: it
+    /// runs in the daemon over the raw body and returns offsets, so no part
+    /// of finding a match is text layout.
     private var contexts: [String] {
-        guard let offsets, !offsets.isEmpty else { return [] }
-        let bytes = Array(transcript.utf8)
-        let window = 120
+        guard let offsets, !offsets.isEmpty, let document else { return [] }
         return offsets.prefix(20).map { offset in
-            let start = max(0, offset - window)
-            let end = min(bytes.count, offset + needle.utf8.count + window)
-            guard start < end else { return "" }
-            let slice = Array(bytes[start..<end])
-            let text = String(decoding: slice, as: UTF8.self)
-                .replacingOccurrences(of: "\n", with: " ")
-            return (start > 0 ? "…" : "") + text + (end < bytes.count ? "…" : "")
+            let snippet = document.snippet(
+                around: offset, matchBytes: needle.utf8.count, window: 120)
+            guard !snippet.text.isEmpty else { return "" }
+            let text = snippet.text.replacingOccurrences(of: "\n", with: " ")
+            return (snippet.elidedBefore ? "…" : "") + text + (snippet.elidedAfter ? "…" : "")
         }
     }
 }
@@ -834,28 +871,47 @@ struct WhatsInItTab: View {
 /// Redactions stay visible as inline chips rather than deletions, so a
 /// contributor can see WHERE scrubbing fired -- which is the point. A hole
 /// tells you nothing; a chip tells you the pipeline was standing there.
+///
+/// **All of the body is here.** It used to be the first 64 KB with a notice
+/// saying the rest was not displayed, because one text run of a 17.5 MB
+/// session pinned the main thread inside CoreText and took 2.97 GB to do
+/// it. The body is now cut into chunks by `TranscriptDocument`; only the
+/// chunks near the viewport are typeset, and chunks that scroll away are
+/// dropped. What is bounded is glyph storage, not reach:
+/// `TranscriptPaging.retainedLimitBytes` of text is laid out at any moment
+/// whether the trace is 200 KB or 17.5 MB.
+///
+/// Two consequences a reader can see. Text selection is per block rather
+/// than across the whole body -- a chunk that is not typeset has nothing to
+/// select -- which is why "Copy everything" is here and copies all of it.
+/// And the scrollbar settles by a row or two as chunks materialise, because
+/// a chunk that is not laid out holds its place by an estimate.
 struct TranscriptTab: View {
-    let transcript: String
+    let document: TranscriptDocument
     /// Called once the redacted body is actually on screen. This is what the
     /// preview sheet's read gate is built on, and it is the honest limit of
     /// what the gate can claim: the first screenful was displayed. Nothing
     /// here reports what was read, and nothing here reports the content.
+    ///
+    /// Paging deliberately did NOT change this. Every byte being reachable
+    /// is not every byte being read, and a gate that waited for a scroll to
+    /// the end of 17.5 MB would be defeated by throwing the scrollbar at the
+    /// bottom -- verifying nothing while reading, to everyone downstream, as
+    /// though it verified reading.
     var onFirstScreenShown: () -> Void = {}
 
-    /// Built once per body rather than per layout pass, and built from the
-    /// budgeted slice rather than the whole body -- see `TranscriptBudget`.
-    /// A real session runs to 17.5 MB, and one text run that size pins the
-    /// main thread inside CoreText for minutes.
-    ///
-    /// Starts empty rather than optional-with-a-full-body-fallback. The
-    /// fallback used to be `AttributedString(transcript)`, which meant the
-    /// first layout pass typeset the entire body before the marker scan had
-    /// run -- the hang happened on that pass, before any of this state was
-    /// ever set. An empty first frame is the cost of not having that.
-    @State private var rendered = AttributedString()
-
-    /// How much of the body is on screen, and how much is not.
-    @State private var budget: TranscriptBudget.Clamped?
+    /// The chunks that are typeset right now, and the eviction that keeps
+    /// that set under the ceiling. The policy lives in `TCShellCore` so it
+    /// can be asserted against real byte counts without a running app.
+    @State private var resident = TranscriptResidentChunks<AttributedString>()
+    /// Where each chunk sits vertically, so a chunk that is not typeset
+    /// still holds its place in the scroll.
+    @State private var rows: TranscriptRowIndex?
+    /// The last chunk to come into view; the window is centred on it, so
+    /// overscan follows the reader in whichever direction they are going.
+    @State private var anchor = 0
+    @State private var columns = 0
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
@@ -865,45 +921,124 @@ struct TranscriptTab: View {
                 .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Only when the body did not fit. The tab promises "exactly what
-            // would be sent" and the button beneath approves every byte, so
-            // a slice shown without saying it is a slice would make that
-            // promise false.
-            if let budget, budget.isClamped {
-                Text(TranscriptBudget.notice(budget))
+            HStack(spacing: TC.Space.s) {
+                Text("\(Format.bytes(document.totalBytes)), all of it.")
                     .font(TC.Font_.caption)
-                    .lineSpacing(
-                        TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption)
-                    )
                     .foregroundStyle(TC.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("transcript-clamped-notice")
+                Spacer(minLength: 0)
+                Button(copied ? "Copied" : "Copy everything", action: copyAll)
+                    .buttonStyle(SheetSecondaryButtonStyle())
+                    .help(
+                        "Puts the whole redacted body on the clipboard. "
+                            + "Selection inside the transcript covers one block at a time."
+                    )
+                    .accessibilityIdentifier("transcript-copy-all")
             }
 
-            CaptureSafeScroll {
-                Text(rendered)
+            GeometryReader { geometry in
+                CaptureSafeScroll {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(laidOutIndices, id: \.self) { index in
+                            chunkRow(index)
+                        }
+                    }
+                    .padding(.horizontal, TC.Space.md)
+                    .padding(.vertical, TC.Space.m)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .tcCard()
+                .onAppear { measure(width: geometry.size.width) }
+                .onChange(of: geometry.size.width) { _, width in measure(width: width) }
+            }
+        }
+        .onAppear(perform: onFirstScreenShown)
+    }
+
+    /// Which chunks exist as views at all.
+    ///
+    /// Every chunk, normally: a `LazyVStack` builds only the rows near the
+    /// viewport, and the rest cost nothing until they are approached. Under
+    /// the screenshot hook `CaptureSafeScroll` lays its content out inline
+    /// with no viewport to be near, so there the list is cut to the resident
+    /// window -- a capture of the first screen, which is what a capture
+    /// shows anyway.
+    private var laidOutIndices: Range<Int> {
+        guard CaptureMode.isRendering else { return 0..<document.chunkCount }
+        return TranscriptResidency.window(document, visible: 0..<1)
+    }
+
+    @ViewBuilder
+    private func chunkRow(_ index: Int) -> some View {
+        Group {
+            if let text = resident.rendered[index] {
+                Text(text)
                     .font(TC.Font_.monoTranscript)
                     .lineSpacing(
                         TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
                     )
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, TC.Space.md)
-                    .padding(.vertical, TC.Space.m)
+            } else {
+                // Holds the chunk's place so the scroll extent is the whole
+                // body's, not the resident window's.
+                Color.clear
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: placeholderHeight(index))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .tcCard()
         }
-        .task(id: transcript) {
-            let clamped = TranscriptBudget.clamp(transcript)
-            budget = clamped
-            rendered = TranscriptMarkers.chipped(
-                clamped.shown.isEmpty ? "(empty)" : clamped.shown,
-                font: TC.Font_.monoTranscript
-            )
+        .onAppear {
+            anchor = index
+            refresh()
         }
-        .onAppear(perform: onFirstScreenShown)
     }
+
+    /// Moves the resident window to sit around `anchor`, typesetting what
+    /// came into it and dropping what fell out of it.
+    ///
+    /// Only chunks that are new to the window are chipped and typeset, so a
+    /// scroll of one chunk costs one chunk of layout -- measured at 6.4 ms
+    /// for 4 KB with chips, inside a 16.7 ms frame.
+    private func refresh() {
+        let index = anchor
+        resident.update(document: document, visible: index..<(index + 1)) { chunk in
+            TranscriptMarkers.chipped(document.text(of: chunk), font: TC.Font_.monoTranscript)
+        }
+    }
+
+    private func measure(width: CGFloat) {
+        let usable = max(1, width - 2 * TC.Space.md)
+        let next = max(1, Int(usable / Self.columnWidth))
+        guard next != columns else { return }
+        columns = next
+        rows = TranscriptRowIndex(document, columns: next)
+        refresh()
+    }
+
+    private func placeholderHeight(_ index: Int) -> CGFloat {
+        let count = rows?.rows(of: index) ?? max(1, document.chunks[index].lineCount)
+        return CGFloat(count) * Self.rowHeight
+    }
+
+    private func copyAll() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(document.wholeText(), forType: .string)
+        copied = true
+    }
+
+    // MARK: - Metrics
+    //
+    // Taken from the font rather than assumed, because the placeholder for a
+    // chunk that is not laid out is only honest if it is the height that
+    // chunk will have once it is.
+
+    private static let font = NSFont.monospacedSystemFont(
+        ofSize: NSFont.preferredFont(forTextStyle: .subheadline).pointSize,
+        weight: .regular
+    )
+    private static let columnWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
+    private static let rowHeight =
+        NSLayoutManager().defaultLineHeight(for: font)
+        + TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
 
     /// Spec copy, with the sample marker rendered as a live chip so the
     /// sentence demonstrates the thing it describes.
@@ -916,20 +1051,17 @@ struct TranscriptTab: View {
 /// Turns the redaction pipeline's `<PRIVATE_*>` and `[REDACTED*]` markers
 /// into chips: bold, on the measured chip pair rather than the gold ramp,
 /// so they read as objects placed in the text instead of damage done to it.
+///
+/// Runs per chunk now, never over the whole body. The scan itself is in
+/// `TranscriptMarkerScan` and is shared with the chunker, which uses it to
+/// avoid cutting through a marker -- half a marker rendered as body text in
+/// one block and the other half in the next would read as content that was
+/// never scrubbed.
 private enum TranscriptMarkers {
-    /// Matches both marker families the pipeline emits, including the
-    /// `[REDACTED:aws_secret_key]` form that carries a category label.
-    private static let pattern = try? NSRegularExpression(
-        pattern: "<PRIVATE_[A-Za-z0-9_]+>|\\[REDACTED[^\\]]*\\]"
-    )
-
     static func chipped(_ text: String, font: Font) -> AttributedString {
-        guard let pattern else { return AttributedString(text) }
-        let whole = NSRange(text.startIndex..<text.endIndex, in: text)
         var out = AttributedString()
         var cursor = text.startIndex
-        for match in pattern.matches(in: text, range: whole) {
-            guard let range = Range(match.range, in: text) else { continue }
+        for range in TranscriptMarkerScan.spans(in: text) {
             out.append(AttributedString(String(text[cursor..<range.lowerBound])))
             var chip = AttributedString(String(text[range]))
             chip.font = font.weight(.bold)
