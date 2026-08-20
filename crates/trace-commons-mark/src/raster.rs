@@ -57,7 +57,9 @@ type Rgba = [u8; 4];
 /// coverage and produce a seam exactly along a bracket's inner corner.
 pub mod shapes {
     use super::Rect;
-    use crate::{FRAME_RECT, STROKE_FRAME, STROKE_FRAMED, VERTICES_BLUE, VERTICES_GREEN};
+    use crate::{
+        FRAME_RECT, STROKE_FRAME, STROKE_FRAMED, VERTICES_BRACKET_CLOSE, VERTICES_BRACKET_OPEN,
+    };
 
     /// The surface the brackets sit on: everything inside the frame ring.
     pub fn surface_field() -> Vec<Rect> {
@@ -113,12 +115,12 @@ pub mod shapes {
 
     /// The user's bracket, top-left.
     pub fn green_bracket() -> Vec<Rect> {
-        bracket(VERTICES_GREEN, STROKE_FRAMED)
+        bracket(VERTICES_BRACKET_OPEN, STROKE_FRAMED)
     }
 
     /// The agent's bracket, bottom-right.
     pub fn blue_bracket() -> Vec<Rect> {
-        bracket(VERTICES_BLUE, STROKE_FRAMED)
+        bracket(VERTICES_BRACKET_CLOSE, STROKE_FRAMED)
     }
 }
 
@@ -193,8 +195,8 @@ pub fn render_framed(scheme: Scheme, size: u32) -> Vec<u8> {
     // blended.
     let layers: [(Rgba, Vec<Rect>); 3] = [
         (parse_hex(scheme.surface()), shapes::surface_field()),
-        (parse_hex(scheme.green()), shapes::green_bracket()),
-        (parse_hex(scheme.blue()), shapes::blue_bracket()),
+        (parse_hex(scheme.bracket_open()), shapes::green_bracket()),
+        (parse_hex(scheme.bracket_close()), shapes::blue_bracket()),
     ];
 
     let ring = parse_hex(scheme.line());
@@ -532,8 +534,8 @@ mod tests {
     fn both_brackets_are_rendered_in_their_own_ink() {
         let size = 640;
         let px = render_framed(Scheme::Light, size);
-        let green = parse_hex(Scheme::Light.green());
-        let blue = parse_hex(Scheme::Light.blue());
+        let green = parse_hex(Scheme::Light.bracket_open());
+        let blue = parse_hex(Scheme::Light.bracket_close());
         let surface = parse_hex(Scheme::Light.surface());
 
         // Ten pixels per view unit at this size. Vertical arm of the green
@@ -606,8 +608,8 @@ mod tests {
     fn no_shipped_size_renders_without_the_mark() {
         for size in [16, 24, 32, 44, 48, 50, 150, 256, 300, 600] {
             let px = render_framed(Scheme::Light, size);
-            let green = parse_hex(Scheme::Light.green());
-            let blue = parse_hex(Scheme::Light.blue());
+            let green = parse_hex(Scheme::Light.bracket_open());
+            let blue = parse_hex(Scheme::Light.bracket_close());
             let has = |want: Rgba| px.chunks(4).any(|p| p == want);
             assert!(has(green), "size {size} has no green bracket");
             assert!(has(blue), "size {size} has no blue bracket");

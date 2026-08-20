@@ -314,7 +314,11 @@ Expected: PASS
 async fn approving_a_project_with_nothing_pending_is_not_an_error() {
     // A client can race a sweep. Zero approved is an outcome, not a fault.
     let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
-    let v = call(&daemon, "approve", serde_json::json!({ "project_id": "proj_0000000000000000" })).await;
+    // NOTE 2026-08-20: superseded. The final review made an UNRECOGNISED
+    // project_id a refusal (ERR_BAD_PARAMS / ERR_PROJECT_ID_UNRECOGNIZED,
+    // ipc.rs:1241). A KNOWN project with nothing pending still succeeds with
+    // approved: 0. Those are different cases; this test now covers the latter.
+    let v = call(&daemon, "approve", serde_json::json!({ "project_id": known_but_empty })).await;
     assert_eq!(v["approved"].as_u64(), Some(0));
 }
 ```

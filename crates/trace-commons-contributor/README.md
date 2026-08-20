@@ -9,14 +9,27 @@ explicitly runs `submit`.
 
 ## Install
 
-For now, build from source:
+Signed binaries are published per release, and Homebrew, winget, and the
+shell/PowerShell installers all work; https://tracecommons.ai/install/ and the
+[root README](../../README.md#contributor-cli) carry the per-platform
+commands. To build from source instead:
 
 ```bash
 cargo build --release -p trace-commons-contributor
 ./target/release/trace-commons-contributor --help
 ```
 
-Prebuilt GitHub Releases binaries are a follow-up; not available yet.
+## Uninstall
+
+`logout` first — it stops a running daemon before wiping the credentials that
+daemon uploads with — then remove the binary the way you installed it, and the
+now-empty state directory. Withdraw anything you want withdrawn *before*
+logging out: uninstalling removes local state, not submitted traces, and
+`daemon withdraw` needs the account session that `logout` deletes. The
+[root README](../../README.md#uninstalling) has the per-platform commands,
+including the autostart registrations (systemd user unit, macOS login item,
+Windows startup task or Run key) that removing the program does not take with
+it.
 
 ## Quickstart
 
@@ -69,6 +82,12 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
     network call, naming the valid set.
   - With no `--scopes` and no terminal (e.g. CI), `login` falls back to the
     `debugging_evaluation` floor only.
+  - With `login --default`, the menu is skipped and its default answer (no)
+    is taken for every optional scope, leaving the same
+    `debugging_evaluation` floor. This is for agents and other scripted
+    callers, which usually *do* have a terminal on stdin and so would
+    otherwise sit at the prompt forever. To grant more than the floor
+    non-interactively, use `--scopes` instead; the two flags conflict.
 - The scopes actually written to `contributor.json` are only ever what the
   contributor chose; the envelopes this CLI produces carry whatever the
   server granted for that device-key claim (the intersection of the
@@ -158,11 +177,12 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
 
 ## Local state
 
-All local state lives under one directory (default:
-`$XDG_CONFIG_HOME/trace-commons`, i.e. `~/.config/trace-commons` on Linux
-and the platform config dir elsewhere; override with
-`TRACE_COMMONS_CONTRIBUTOR_DIR` or `--config-dir`). The directory is
-created mode `0700` on unix; every file in it is `0600`:
+All local state lives under one directory (override with
+`TRACE_COMMONS_CONTRIBUTOR_DIR` or `--config-dir`; otherwise
+`$XDG_CONFIG_HOME/trace-commons`, i.e. `~/.config/trace-commons`, on Linux,
+`~/Library/Application Support/trace-commons` on macOS, and
+`%LOCALAPPDATA%\trace-commons` on Windows). The directory is created mode
+`0700` on unix; every file in it is `0600`:
 
 - `contributor.json` — issuer/ingest URLs, tenant id, device key id, consent
   scopes, PII filter choice, allowed-hosts pin. No secrets.
@@ -171,8 +191,17 @@ created mode `0700` on unix; every file in it is `0600`:
 - `receipts.jsonl` — one hash-only line per submission: submission id,
   session hash, source, timestamp, status. Never a path or trace content.
 
-`logout` deletes all three files and sweeps any orphaned atomic-write temp
-files left behind by a crash mid-write.
+The daemon keeps its settings, queue, projects, history, audit log, and the
+account session beside those, in the same directory.
+
+On Windows this is LocalAppData rather than the roaming AppData
+`dirs::config_dir()` would give: roaming profiles copy that directory between
+machines, and a device key is bound to one machine. An enrollment left in the
+old roaming location by an earlier CLI is moved across on the next run.
+
+`logout` deletes all of the above and sweeps any orphaned atomic-write temp
+files left behind by a crash mid-write. It leaves the directory itself, so
+remove that too if you are uninstalling.
 
 ## Sources
 
@@ -210,7 +239,7 @@ the redactor and mapper produce from message content.
 | `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |
-| `logout` | Deletes local config, device key, and receipts, plus orphaned temp files. |
+| `logout` | Stops a running daemon, then deletes local config, device key, receipts, daemon state (settings, queue, projects, history, audit), the account session, and orphaned temp files. Leaves the state directory itself. |
 | `mint-grant --instance-key-pem <path> --instance-id <id> --user-subject <subject> --audience <aud> --issuer-url <url> [--device-key-id <id>] [--ttl-seconds <secs>]` | Operator/dogfood tool: signs an enrollment grant with an instance private key (PEM) and prints it base64 to stdout for a contributor to redeem with `login --grant`. |
 
 ## Operator flow: `mint-grant`
