@@ -2291,13 +2291,22 @@ async fn preview_request_returns_promptly_and_the_event_carries_the_real_summary
     let would_send = summary["would_send_bytes"].as_u64().expect("a real size");
     assert!(would_send > 0, "the summary is the real build, not a stub");
     assert_eq!(summary["enrolled"], true);
-    let digest = summary["envelope_digest"].as_str().expect("a digest");
-    assert_eq!(
-        digest.len(),
-        71,
-        "a `sha256:` prefix and 64 hex characters: {digest}"
+    // No digest, and that is the contract rather than an omission. A card
+    // build never produces one: the digest costs a second full
+    // serialization plus a `serde_json::Value` tree of the whole redacted
+    // envelope, and a card would discard both. Asserted as absent so a
+    // future change cannot quietly put the cost back.
+    assert!(
+        summary["envelope_digest"].is_null(),
+        "a card summary carries no digest: {summary}"
     );
-    assert!(digest.starts_with("sha256:"), "{digest}");
+    let fingerprint = summary["input_fingerprint"]
+        .as_str()
+        .expect("the configuration fingerprint still rides along");
+    assert!(
+        fingerprint.starts_with("sha256:"),
+        "the fingerprint is a hash of the config, not of the envelope: {fingerprint}"
+    );
     let redactions: u64 = summary["redactions"]
         .as_object()
         .expect("redaction counts")
@@ -2318,9 +2327,12 @@ async fn preview_request_returns_promptly_and_the_event_carries_the_real_summary
     let again = c.recv_json().await;
     assert_eq!(again["id"], 3);
     assert_eq!(again["result"]["state"], STATE_READY);
+    // The whole summary, not one field: a cache hit replays the same build,
+    // and comparing the object proves it for every field at once rather
+    // than for whichever one this test happened to name.
     assert_eq!(
-        again["result"]["summary"]["envelope_digest"], digest,
-        "a cache hit replays the same build, byte for byte"
+        &again["result"]["summary"], summary,
+        "a cache hit replays the same build"
     );
     assert_eq!(again["result"]["summary"]["would_send_bytes"], would_send);
 

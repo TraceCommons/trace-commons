@@ -573,9 +573,15 @@ pub fn spawn_workers(
         .collect()
 }
 
-/// The daemon's real runner: drives [`super::preview::build_preview`]
-/// through `ipc::build_and_pin_preview` and publishes the result as a
-/// `preview_ready` event.
+/// The daemon's real runner: drives [`super::preview::build_preview_card`]
+/// and publishes the result as a `preview_ready` event.
+///
+/// The card path deliberately, not incidentally: it skips the envelope
+/// digest, which costs a second full serialization plus a
+/// `serde_json::Value` tree of the whole redacted envelope. It also does not
+/// pin. Pinning stays on the surfaces that show a contributor an artifact --
+/// the preview sheet -- and on `handle_approve`, which builds and pins
+/// synchronously for any entry that reaches approval unpinned.
 ///
 /// It holds an `Arc<DaemonShared>`, and `DaemonShared` owns the scheduler.
 /// That is why the scheduler does not own its runner: it would close the
@@ -611,13 +617,38 @@ impl PreviewJobRunner for DaemonPreviewRunner {
                 };
             };
             let cfg = shared.store.load_config().ok().flatten();
-            match super::ipc::build_and_pin_preview(&shared, job.entry_id, &entry, cfg.as_ref())
+            // The card path, not the pinning one. A card needs a size, an
+            // opening prompt and redaction counts; the digest costs a second
+            // full serialization and a `serde_json::Value` tree of the whole
+            // redacted envelope, and this runner would only discard both.
+            // Nothing here pins: an approval that finds no pin builds and
+            // pins one synchronously (`handle_approve`), so a contributor
+            // still cannot send bytes they were never shown.
+            let (near_ai, claude_source, codex_source) = {
+                let s = shared.settings.lock().expect("settings lock");
+                (
+                    s.near_ai.clone(),
+                    s.claude_source.clone(),
+                    s.codex_source.clone(),
+                )
+            };
+            let sources = crate::source::all_sources(claude_source, codex_source, None);
+            let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
+                return PreviewOutcome::Failed {
+                    code: super::ipc::ERR_BAD_PARAMS,
+                    label: "session-file-vanished",
+                };
+            };
+            match super::preview::build_preview_card(cfg.as_ref(), near_ai, source, &session_ref)
                 .await
             {
-                Ok((summary, _body, _envelope)) => {
-                    PreviewOutcome::Ready(Arc::new(super::ipc::preview_summary_value(&summary)))
+                Ok(summary) => {
+                    PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(&summary)))
                 }
-                Err((code, label)) => PreviewOutcome::Failed { code, label },
+                Err(_) => PreviewOutcome::Failed {
+                    code: super::ipc::ERR_UNAVAILABLE,
+                    label: "preview-failed",
+                },
             }
         })
     }

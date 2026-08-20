@@ -1626,6 +1626,19 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
+/// The socket's `"preview"` handler -- the queue-card summary.
+///
+/// This is called once per row shown in the queue (the app fires it for
+/// every entry `awaitingDecision` at once), so it deliberately does the
+/// *least* work of any preview surface: [`preview::build_preview_card`]
+/// skips both the envelope digest and the pretty-printed body, neither of
+/// which a card renders. It also does not pin the entry -- see that
+/// function's doc for why skipping the digest makes that the only safe
+/// choice, and why nothing downstream relies on a card load to have
+/// happened: the preview sheet (`open_preview`, below) and an on-demand
+/// rebuild inside `handle_approve` are the two paths that actually pin, and
+/// either one runs regardless of whether a card was ever loaded for the
+/// entry.
 async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
@@ -1646,14 +1659,30 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
+    let (near_ai, claude_source, codex_source) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (
+            s.near_ai.clone(),
+            s.claude_source.clone(),
+            s.codex_source.clone(),
+        )
+    };
+    let sources = crate::source::all_sources(claude_source, codex_source, None);
+    let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
+    };
 
-    match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
-        Ok((summary, _body, _envelope)) => {
-            let mut value = preview_summary_value(&summary);
+    match super::preview::build_preview_card(cfg.as_ref(), near_ai, source, &session_ref).await {
+        Ok(summary) => {
+            // The card shape lives in `preview_card_value`, shared with the
+            // scheduler's ready event so the two cannot drift. `entry` is
+            // added only here: this response describes an entry the caller
+            // just named, while a cached summary outlives that state.
+            let mut value = preview_card_value(&summary);
             value["entry"] = entry_value(&entry);
             Response::ok(req.id, value)
         }
-        Err((code, label)) => Response::err(req.id, code, label),
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
     }
 }
 
@@ -1666,7 +1695,19 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 /// assert a stale state. `preview` adds a freshly read `entry` on top; the
 /// scheduler's callers already hold entries from `list_pending` and the
 /// `snapshot` event.
-pub(crate) fn preview_summary_value(summary: &super::preview::PreviewSummary) -> serde_json::Value {
+/// The card shape, without the entry.
+///
+/// Two surfaces render it -- the socket's `preview` response, which adds
+/// `entry` on top, and the scheduler's `preview_ready` event, which
+/// deliberately omits it because a cached summary outlives the entry state
+/// it was built beside. They share this function so the field set cannot
+/// drift between them.
+///
+/// There is no `envelope_digest` here, and that is the point: a card build
+/// never produces one. See `preview::build_preview_card`.
+pub(crate) fn preview_card_value(
+    summary: &super::preview::PreviewCardSummary,
+) -> serde_json::Value {
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
@@ -1676,16 +1717,14 @@ pub(crate) fn preview_summary_value(summary: &super::preview::PreviewSummary) ->
         "pii_labels_present": summary.pii_labels_present,
         "consent_scopes": summary.consent_scopes,
         "residual_risk": summary.residual_risk,
-        // Hashes, not content: what the contributor is being shown,
-        // and the configuration that produced it. An app can hold
-        // these to confirm the entry it later approves is the one
-        // it displayed.
-        "envelope_digest": summary.envelope_digest,
+        // The configuration fingerprint -- cheap, a hash of the config
+        // rather than of the envelope -- so it still rides along. There is
+        // no `envelope_digest`: this build never made one and never pinned
+        // the entry.
         "input_fingerprint": summary.input_fingerprint,
-        // False when this device is not enrolled: the summary
-        // describes a placeholder-identity, deterministic-only
-        // build, and neither hash above is bindable to a later
-        // approval.
+        // False when this device is not enrolled: the summary describes a
+        // placeholder-identity, deterministic-only build, and the
+        // fingerprint above is not bindable to a later approval.
         "enrolled": summary.enrolled,
     })
 }
@@ -1801,14 +1840,16 @@ fn handle_preview_cancel(shared: &DaemonShared, req: &Request) -> Response {
 /// Build the redacted envelope for one queue entry, pin the entry to it, and
 /// hand back the summary, the redacted body, and the envelope.
 ///
-/// The one place the preview pipeline is driven. `handle_preview` (the
-/// socket's summary), `open_preview` (the C ABI's in-process full preview),
-/// and `handle_preview_body` (the socket's body, when there is no stored
-/// envelope to read instead) all go through it, so the summary one surface
-/// reports and the body another returns always describe the same build.
-/// Errors are `(code, fixed label)` -- no path, no entry content -- and the
-/// callers that need a bare label discard the code.
-pub(crate) async fn build_and_pin_preview(
+/// This is the pinning path -- `open_preview` (the C ABI's in-process full
+/// preview, behind the preview sheet), `handle_preview_body` (the socket's
+/// body, when there is no stored envelope to read instead), and
+/// `handle_approve`'s on-demand rebuild for an entry no card or sheet ever
+/// pinned all go through it. `handle_preview` (the socket's card summary,
+/// above) deliberately does **not**: see its doc comment and
+/// `preview::build_preview_card` for why a card load skips both the digest
+/// and the pin. Errors are `(code, fixed label)` -- no path, no entry
+/// content -- and the callers that need a bare label discard the code.
+async fn build_and_pin_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
     entry: &super::queue::QueueEntry,
