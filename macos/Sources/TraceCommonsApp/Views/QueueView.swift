@@ -162,18 +162,42 @@ private struct ProjectQueueGroup: View {
                         """)
                 }
             }
-            VStack(spacing: TC.Space.md) {
-                ForEach(entries) { entry in
-                    QueueRow(
-                        entry: entry,
-                        summary: summaries[entry.entryID],
-                        summaryError: summaryErrors[entry.entryID],
-                        onLookInside: { onLookInside(entry) },
-                        onSubmit: { onSubmit(entry) },
-                        onDismiss: { onDismiss(entry) }
-                    )
-                }
-            }
+            rowList
+        }
+    }
+
+    /// The rows themselves, split from `body` so a real queue -- a
+    /// contributor with 500 sessions waiting is the case this exists for --
+    /// only realizes the cards near the viewport instead of building and
+    /// measuring all 500 up front.
+    ///
+    /// `LazyVStack` is the fix, but it carries the same hazard `QueueContent`
+    /// already works around: laid out with no ancestor `ScrollView`, a lazy
+    /// stack can render empty under `ImageRenderer`
+    /// (`DebugScreenshot.scheduleIfRequested` renders `QueueContent` directly
+    /// at a fixed size, without the real `ScrollView` `QueueView` normally
+    /// wraps it in). So the screenshot hook gets the eager, always-correct
+    /// `VStack` -- same spacing, same default `.center` alignment `LazyVStack`
+    /// also defaults to -- and everyone else gets the lazy one.
+    @ViewBuilder
+    private var rowList: some View {
+        if DebugScreenshot.directory != nil {
+            VStack(spacing: TC.Space.md) { rows }
+        } else {
+            LazyVStack(spacing: TC.Space.md) { rows }
+        }
+    }
+
+    private var rows: some View {
+        ForEach(entries) { entry in
+            QueueRow(
+                entry: entry,
+                summary: summaries[entry.entryID],
+                summaryError: summaryErrors[entry.entryID],
+                onLookInside: { onLookInside(entry) },
+                onSubmit: { onSubmit(entry) },
+                onDismiss: { onDismiss(entry) }
+            )
         }
     }
 }
