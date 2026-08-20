@@ -1951,3 +1951,278 @@ async fn undo_leaves_no_pin_behind_and_the_next_submit_rebuilds() {
         "{second}"
     );
 }
+
+#[tokio::test]
+async fn cancelling_a_project_undoes_that_projects_approved_entries_and_no_other() {
+    // The gap this closes: with no `project_id` selector on `cancel`, a
+    // shell offering Undo on a batch approval had to derive "the ids I saw
+    // pending, minus the ones reported skipped" and issue one `cancel` per
+    // id -- racy, and guesswork the daemon can remove outright. This is
+    // that selector's basic contract, mirroring
+    // `approving_a_project_takes_that_project_and_no_other`.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let approved = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(
+        approved["approved"].as_u64(),
+        Some(2),
+        "the fixture puts two pending entries in proj-a: {approved}"
+    );
+
+    let canceled = call(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(canceled["canceled"].as_u64(), Some(2), "{canceled}");
+
+    for e in queue_entries(&daemon).await {
+        if project_id_for(&e.project_key) == target {
+            assert_eq!(
+                e.state,
+                QueueState::Pending,
+                "every entry cancel matched must be returned to pending"
+            );
+        } else {
+            assert_eq!(
+                e.state,
+                QueueState::Pending,
+                "the fixture's other project was never approved, so its \
+                 own entry must simply remain untouched"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_project_leaves_its_still_pending_entries_alone() {
+    // There is nothing for Undo to undo about an entry that was never
+    // approved. A project-wide `cancel` must select only `Approved`
+    // entries -- selecting `Pending` ones too would be indistinguishable
+    // from this test's fixture at the "how many got canceled" level, since
+    // `Queue::cancel` itself refuses a non-`Approved` entry; what this
+    // guards is that such entries are not even attempted, and are left
+    // exactly as they were.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    // Approve only ONE of the two pending entries in this project, so the
+    // other stays `Pending` -- the case a selector that also picked up
+    // `Pending` entries would get wrong.
+    let one_id = queue_entries(&daemon)
+        .await
+        .into_iter()
+        .find(|e| e.state == QueueState::Pending && project_id_for(&e.project_key) == target)
+        .expect("fixture must have a pending entry in the target project")
+        .entry_id;
+    let approved = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "entry_id": one_id.to_string() }),
+    )
+    .await;
+    assert_eq!(approved["approved"].as_u64(), Some(1), "{approved}");
+
+    let still_pending = queue_entries(&daemon)
+        .await
+        .into_iter()
+        .find(|e| e.state == QueueState::Pending && project_id_for(&e.project_key) == target)
+        .expect("the fixture's second entry in this project must still be pending")
+        .entry_id;
+
+    let canceled = call(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert_eq!(
+        canceled["canceled"].as_u64(),
+        Some(1),
+        "only the one approved entry should be undone: {canceled}"
+    );
+
+    let entries = queue_entries(&daemon).await;
+    assert_eq!(
+        entries.iter().find(|e| e.entry_id == one_id).unwrap().state,
+        QueueState::Pending,
+        "the approved entry must be undone"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.entry_id == still_pending)
+            .unwrap()
+            .state,
+        QueueState::Pending,
+        "the never-approved entry must be left exactly as it was, not \
+         touched by a selector that should only ever see `approved` \
+         entries"
+    );
+
+    // The audit row's count is taken at selection time (see `approve`'s own
+    // audit comment), so a selector that over-picked the still-`pending`
+    // entry would claim 2 canceled here even though `Queue::cancel` itself
+    // refuses to act on it and only 1 entry actually moved. Checking this
+    // catches that over-selection even though it would be invisible in the
+    // response's own `canceled` count above.
+    use trace_commons_contributor::daemon::audit;
+    let entries = audit::load(&daemon.store()).unwrap();
+    assert_eq!(
+        entries.last().unwrap().detail.as_deref(),
+        Some("1"),
+        "the audit row must record exactly the one entry actually \
+         eligible to be canceled, not every entry in the project"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_an_unknown_project_id_is_refused() {
+    // Consistency with `approve`'s own `project_id` selector, refused on
+    // this same socket with this same fixed label: a handle the caller
+    // never received is a client bug, and answering `canceled: 0` would be
+    // indistinguishable from "that project had nothing to undo".
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let v = call_raw(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": "proj_0000000000000000" }),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], ERR_BAD_PARAMS, "{v}");
+    assert_eq!(v["error"]["message"], "project-id-unrecognized", "{v}");
+}
+
+#[tokio::test]
+async fn cancelling_a_known_project_with_nothing_approved_is_not_an_error() {
+    // A known project with nothing to undo is a success reporting zero --
+    // distinguishable from an id that names no project at all, above.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let v = call_raw(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert!(
+        v["error"].is_null(),
+        "a project the daemon knows, with nothing approved, is a success: {v}"
+    );
+    assert_eq!(v["result"]["canceled"].as_u64(), Some(0), "{v}");
+}
+
+#[tokio::test]
+async fn cancelling_a_project_clears_the_pin_on_every_entry_it_undoes() {
+    // The property `cancel_clears_the_pin_so_the_next_approval_rebuilds`
+    // guards for the single-`entry_id` form must hold for the batch form
+    // too: an undone entry left pinned would make the next Submit approve
+    // stale, already-built bytes and report empty counts either time.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let approved = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(approved["approved"].as_u64(), Some(2), "{approved}");
+    for e in queue_entries(&daemon).await {
+        if project_id_for(&e.project_key) == target {
+            assert!(
+                e.previewed_envelope_digest.is_some(),
+                "the fixture must actually pin something, or this proves \
+                 nothing"
+            );
+        }
+    }
+
+    let canceled = call(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(canceled["canceled"].as_u64(), Some(2), "{canceled}");
+
+    for e in queue_entries(&daemon).await {
+        if project_id_for(&e.project_key) == target {
+            assert_eq!(
+                e.previewed_envelope_digest, None,
+                "an undone approval must leave no pin behind"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_project_is_recorded_in_the_local_audit_log() {
+    // Undoing a batch is the same class of act as approving one -- bulk,
+    // unattended, previously terminal-only -- so it gets the same
+    // visibility `approving_a_whole_project_is_recorded_in_the_local_audit_log`
+    // documents for `approve`. An empty match writes nothing.
+    use trace_commons_contributor::daemon::audit;
+
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let approved = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(approved["approved"].as_u64(), Some(2), "{approved}");
+    assert_eq!(
+        audit::load(&daemon.store()).unwrap().len(),
+        1,
+        "the approval itself must have recorded one row"
+    );
+
+    let canceled = call(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(canceled["canceled"].as_u64(), Some(2), "{canceled}");
+
+    let entries = audit::load(&daemon.store()).unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "a project-wide cancel must append exactly one more record"
+    );
+    assert_eq!(entries[1].action, "bulk-canceled");
+    assert_eq!(entries[1].detail.as_deref(), Some("2"));
+    assert_eq!(
+        entries[1].project_label.as_deref(),
+        Some("proj-a"),
+        "the label is derived from the key the daemon holds, never from \
+         the caller's string"
+    );
+
+    // Nothing left approved in that project: a second call cancels
+    // nothing and records nothing.
+    let again = call(
+        &daemon,
+        "cancel",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert_eq!(again["canceled"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        audit::load(&daemon.store()).unwrap().len(),
+        2,
+        "a cancel that matched nothing must not append a record"
+    );
+}

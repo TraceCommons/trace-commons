@@ -177,7 +177,8 @@ What replaces the restriction is **visibility, not gatekeeping**:
   alike -- appends a local, hash-only audit entry, readable via
   `list_audit`. A project-wide approval that matched nothing appends no
   entry, because nothing was approved. So do `set_consent_scopes` and
-  `acknowledge_near_ai_notice`.
+  `acknowledge_near_ai_notice`, and so does `cancel: {"project_id": ...}`
+  -- undoing a batch approval is the same class of act as making one.
 - The action and its audit entry are **one fail-closed unit**. If the entry
   cannot be persisted -- disk full, permissions, a corrupt log -- the action
   is rolled back and the call returns `audit-write-failed`. It does not
@@ -364,7 +365,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
 | `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
-| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending` and clears its pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; error if not currently `approved` |
+| `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
@@ -865,7 +866,12 @@ Rules an application can rely on:
   session as it then stands -- reporting its own `redactions` and `flagged`
   counts, like any other approval of an entry with no preview behind it --
   and starts a fresh window. An undone approval leaves nothing on disk: the
-  stored envelope is swept once the pin naming it is gone.
+  stored envelope is swept once the pin naming it is gone. `cancel:
+  {"project_id": ...}` applies exactly this to every `approved` entry in
+  that project in one call, so an Undo offered on a batch `approve` is one
+  call with the same `project_id` argument rather than a shell deriving
+  "the ids I saw pending minus the ones reported skipped" and racing the
+  queue to cancel them individually.
 - **A standing `auto_upload` opt-in is not held.** Those entries are
   approved in advance, are separately audited, and no client is counting
   down for them; they upload on the next pass exactly as before. Only an
@@ -915,6 +921,15 @@ and, for the `project_id` form, that project's derived label in
 `project_label` -- `null` for `approve: {"all": true}`, which names no one
 project. The label is derived from the key the daemon holds, never from the
 caller's string.
+
+A `bulk-canceled` entry is `cancel: {"project_id": ...}`'s counterpart: same
+shape, `detail` carries the number of `approved` entries in that project
+that were undone, and `project_label` is that project's derived label. It is
+written before anything is canceled, under the same rollback-cannot-record
+guarantee as `bulk-approved`, and only when the selector matched at least
+one entry -- a `cancel` against a project with nothing `approved` appends
+nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
+as the single-`entry_id` form of `approve`.
 
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
