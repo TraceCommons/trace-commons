@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Globalization;
 using System.Text.Json;
@@ -56,8 +57,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private string _notice = string.Empty;
     private ApprovalHold? _undoHold;
-    private string _undoEntryId = string.Empty;
-    private string _undoProjectLabel = string.Empty;
+
+    /// <summary>
+    /// Which entries Undo would recall. One id for a row's submit or a
+    /// preview approval; the project's approved ids -- computed by
+    /// <see cref="ApprovalHold.ApprovedEntryIds"/> -- for a project-group
+    /// submit, because <c>cancel</c> only ever takes one <c>entry_id</c> at a
+    /// time and a batch approval has no batch recall.
+    /// </summary>
+    private IReadOnlyList<string> _undoEntryIds = Array.Empty<string>();
+
+    /// <summary>
+    /// The toast line behind the current undo bar, from
+    /// <see cref="ApprovalHold.Toast"/>. It says exactly what happened, so
+    /// there is nothing left for the headline to invent.
+    /// </summary>
+    private string _undoNoticeLine = string.Empty;
     private MainPane _pane = MainPane.Queue;
     private HealthCopy? _health;
     private HistoryRollup _rollup = new();
@@ -317,11 +332,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public bool HasUndo => _undoHold is not null;
 
-    /// <summary>"Approved trace-commons-server. Still on this machine."</summary>
-    public string UndoHeadline =>
-        _undoProjectLabel.Length == 0
-            ? string.Empty
-            : $"Approved {_undoProjectLabel}. Still on this machine.";
+    /// <summary>
+    /// The submit toast: what was sent, what scrubbing did, what was flagged,
+    /// what was not sent -- <see cref="ApprovalHold.Toast"/>'s line, verbatim.
+    /// </summary>
+    public string UndoHeadline => _undoNoticeLine;
 
     /// <summary>"Undo (4)" -- the spec's countdown, on the daemon's clock.</summary>
     public string UndoButtonText =>
@@ -359,8 +374,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             case PreviewOutcome.Approved when decision.Hold is { } hold
                                               && hold.IsLive(DateTimeOffset.UtcNow):
                 _undoHold = hold;
-                _undoEntryId = entry.EntryId;
-                _undoProjectLabel = entry.ProjectLabel;
+                _undoEntryIds = new[] { entry.EntryId };
+                _undoNoticeLine = hold.Toast.Line;
                 Notice = string.Empty;
                 RaiseUndo();
                 _undoTick.Start();
@@ -411,6 +426,98 @@ public sealed class MainViewModel : INotifyPropertyChanged
             : string.Empty;
 
         await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Submit" on a queue row: one click, no preview. Approves this entry
+    /// alone and renders the daemon's counts as a toast, exactly as approving
+    /// from behind a preview does -- the only difference is which surface
+    /// asked, and <see cref="ApprovalHold"/> is what both paths decode the
+    /// response through.
+    /// </summary>
+    public async Task SubmitEntryAsync(QueueEntryViewModel entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        ClearUndo();
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.Approve, SubmitParams.ForEntry(entry.EntryId))
+            .ConfigureAwait(true);
+
+        ApplySubmitOutcome(response, new[] { entry.EntryId });
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Submit" on a project group: one <c>approve</c> call for every pending
+    /// entry in <paramref name="projectId"/>.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="projectId"/> must be the id an <c>entry_value</c>
+    /// publishes as <c>project_id</c> -- never <see cref="QueueEntryViewModel.ProjectLabel"/>,
+    /// which is a display string the daemon does not treat as an identifier.
+    /// An unrecognised id is refused as <c>bad_params</c>, which
+    /// <see cref="ApplySubmitOutcome"/> reports as a refusal rather than as a
+    /// toast claiming nothing was sent -- there is no result to render one
+    /// from.
+    ///
+    /// The candidate entry ids are read from <see cref="Pending"/> BEFORE the
+    /// call, not after: <c>approve</c> can move entries out of the pending
+    /// state by the time it returns, and Undo needs to know which of today's
+    /// ids to recall, not tomorrow's.
+    /// </remarks>
+    public async Task SubmitProjectAsync(string projectId)
+    {
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return;
+        }
+
+        ClearUndo();
+
+        IReadOnlyList<string> candidateEntryIds = Pending
+            .Where(entry => entry.ProjectId == projectId)
+            .Select(entry => entry.EntryId)
+            .ToList();
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.Approve, SubmitParams.ForProject(projectId))
+            .ConfigureAwait(true);
+
+        ApplySubmitOutcome(response, candidateEntryIds);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// The shared tail of both one-click submit paths: render the toast, and
+    /// arm Undo over exactly the entries this call actually approved.
+    /// </summary>
+    private void ApplySubmitOutcome(DaemonResponse response, IReadOnlyList<string> candidateEntryIds)
+    {
+        ApprovalHold? hold = ApprovalHold.Parse(response);
+        if (hold is null)
+        {
+            // A malformed result and a bad_params refusal look identical here
+            // on purpose: neither carries counts to build a toast from, and
+            // an unrecognised entry_id or project_id must read as a refusal,
+            // never as "0 sessions sent" dressed up as success.
+            Notice = "That couldn't be sent just now. Nothing has been sent.";
+            return;
+        }
+
+        Notice = hold.Toast.Line;
+
+        if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
+        {
+            _undoHold = hold;
+            _undoEntryIds = hold.ApprovedEntryIds(candidateEntryIds);
+            _undoNoticeLine = hold.Toast.Line;
+            RaiseUndo();
+            _undoTick.Start();
+        }
     }
 
     /// <summary>
@@ -480,24 +587,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     public async Task UndoAsync()
     {
-        if (_undoHold is null || _undoEntryId.Length == 0)
+        if (_undoHold is null || _undoEntryIds.Count == 0)
         {
             return;
         }
 
-        string entryId = _undoEntryId;
+        IReadOnlyList<string> entryIds = _undoEntryIds;
         ClearUndo();
 
-        DaemonResponse response = await _host
-            .CallAsync(
-                DaemonProtocol.Methods.Cancel,
-                JsonSerializer.Serialize(
-                    new Dictionary<string, string> { ["entry_id"] = entryId }))
-            .ConfigureAwait(true);
+        // cancel takes exactly one entry_id: a project-group submit approved
+        // several entries in one approve call, but there is no batch cancel
+        // to recall them with, so each is recalled in turn. Best-effort --
+        // a sweep can claim one entry while this loop is still working
+        // through the others -- and the notice below says exactly how much
+        // of it actually worked rather than rounding to all-or-nothing.
+        int cancelled = 0;
+        foreach (string entryId in entryIds)
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.Cancel, SubmitParams.ForEntry(entryId))
+                .ConfigureAwait(true);
 
-        Notice = response.IsError
-            ? "Too late to undo: it has already gone out."
-            : "Undone. It stays on this machine.";
+            if (!response.IsError)
+            {
+                cancelled++;
+            }
+        }
+
+        Notice = cancelled switch
+        {
+            0 => "Too late to undo: it has already gone out.",
+            _ when cancelled == entryIds.Count => "Undone. It stays on this machine.",
+            _ => string.Format(
+                CultureInfo.CurrentCulture,
+                "Undone for {0} of {1}; the rest had already gone out.",
+                cancelled,
+                entryIds.Count),
+        };
 
         await RefreshAsync().ConfigureAwait(true);
     }
@@ -533,8 +659,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         _undoTick.Stop();
         _undoHold = null;
-        _undoEntryId = string.Empty;
-        _undoProjectLabel = string.Empty;
+        _undoEntryIds = Array.Empty<string>();
+        _undoNoticeLine = string.Empty;
         RaiseUndo();
     }
 

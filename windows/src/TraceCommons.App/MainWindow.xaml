@@ -628,14 +628,28 @@
                                                        Foreground="{ThemeResource TcInkSecondaryBrush}" />
 
                                             <!--
-                                                The row's two actions, and the
-                                                spec is explicit that there is
-                                                no third one: the row has NO
-                                                Contribute button, because
-                                                approving from the row is
-                                                approving without looking.
-                                                Contribute lives in the preview
-                                                sheet and nowhere else.
+                                                The row's three actions.
+                                                Contribute used to be reachable
+                                                only from behind the preview
+                                                sheet, see
+                                                docs/superpowers/specs/2026-08-20-one-click-submit-design.md,
+                                                "The problem", but the daemon
+                                                now builds and pins an envelope
+                                                for anything unpreviewed inside
+                                                `approve` itself, so a row
+                                                submit no longer sends bytes
+                                                nobody was shown. Submit is
+                                                still the one irreversible-ish
+                                                click here (an undo bar follows
+                                                it); it carries no keyboard
+                                                accelerator, the same rule the
+                                                preview sheet's Contribute
+                                                follows, and every decision
+                                                about what the response means
+                                                is made in
+                                                MainViewModel.SubmitEntryAsync
+                                                and TraceCommons.Interop, not
+                                                here.
 
                                                 "Not this one" rather than
                                                 "Dismiss", because dismiss and
@@ -664,6 +678,37 @@
                                                         Tag="{x:Bind}"
                                                         ToolTipService.ToolTip="Skips this session only. This project will keep being offered."
                                                         Click="OnNotThisOne" />
+                                                <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                                        Content="Submit"
+                                                        Tag="{x:Bind}"
+                                                        ToolTipService.ToolTip="Sends this session without opening it. Scrubbing still runs, and Undo follows for a few seconds."
+                                                        Click="OnSubmitEntry" />
+                                                <!--
+                                                    The project-group action.
+                                                    The queue is a flat list
+                                                    with no group headers today
+                                                    (nothing here groups by
+                                                    project_id yet), so this
+                                                    reaches "the project group"
+                                                    the only way this row can:
+                                                    approve every pending entry
+                                                    that shares this row's
+                                                    ProjectId, in one call. It
+                                                    is a distinct button from
+                                                    Submit rather than a second
+                                                    meaning for the same one,
+                                                    because a contributor
+                                                    clicking "Submit" on a
+                                                    session with siblings in
+                                                    the queue must not be
+                                                    surprised that it sent all
+                                                    of them.
+                                                -->
+                                                <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="Submit project"
+                                                        Tag="{x:Bind}"
+                                                        ToolTipService.ToolTip="Sends every session waiting in this project, not only this one. Scrubbing still runs, and Undo follows for a few seconds."
+                                                        Click="OnSubmitProject" />
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>

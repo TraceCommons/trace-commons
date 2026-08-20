@@ -620,10 +620,11 @@ public sealed partial class MainWindow : Window
     /// Opens the preview sheet for a row.
     /// </summary>
     /// <remarks>
-    /// This is the only route to approving anything. The row itself carries no
-    /// Contribute button and never will: approving from the row is approving
-    /// without looking, and an approval has to cover exactly the bytes the
-    /// contributor was shown.
+    /// This is the route to approving something after reading it. Submit
+    /// (<see cref="OnSubmitEntry"/>) is the other one now: the daemon builds
+    /// and pins an envelope inside <c>approve</c> itself for anything
+    /// unpreviewed, so a row submit no longer sends bytes nobody was shown.
+    /// See docs/superpowers/specs/2026-08-20-one-click-submit-design.md.
     /// </remarks>
     private void OnLookInside(object sender, RoutedEventArgs e)
     {
@@ -652,6 +653,42 @@ public sealed partial class MainWindow : Window
         if (EntryOf(sender) is QueueEntryViewModel entry)
         {
             await ViewModel.DismissAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// "Submit" from the row: one click, no preview.
+    /// </summary>
+    /// <remarks>
+    /// Every decision about what the daemon's response means -- the toast
+    /// wording, whether Undo is offered -- is made in
+    /// <see cref="MainViewModel.SubmitEntryAsync"/> and the interop assembly
+    /// it calls into; this handler only routes the click to the entry it
+    /// came from, the same pattern <see cref="OnNotThisOne"/> follows.
+    /// </remarks>
+    private async void OnSubmitEntry(object sender, RoutedEventArgs e)
+    {
+        if (EntryOf(sender) is QueueEntryViewModel entry)
+        {
+            await ViewModel.SubmitEntryAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// "Submit project" from a row: approves every pending entry sharing this
+    /// row's <see cref="QueueEntryViewModel.ProjectId"/>, not only this one.
+    /// </summary>
+    /// <remarks>
+    /// Sends the id <c>entry_value</c> publishes as <c>project_id</c>, never
+    /// <see cref="QueueEntryViewModel.ProjectLabel"/> -- <see cref="MainViewModel.SubmitProjectAsync"/>
+    /// takes the id and does everything else, including refusing to call the
+    /// daemon at all for a row with no project id.
+    /// </remarks>
+    private async void OnSubmitProject(object sender, RoutedEventArgs e)
+    {
+        if (EntryOf(sender) is QueueEntryViewModel entry)
+        {
+            await ViewModel.SubmitProjectAsync(entry.ProjectId);
         }
     }
 
